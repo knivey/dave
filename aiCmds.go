@@ -109,6 +109,11 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 		sendLoop(buffer, network, c, e)
 	}()
 	for {
+		if !getRunning(network.Name + e.Params[0]) {
+			logger.Info("Closing stream")
+			stream.Close()
+			return
+		}
 		resp, err := stream.Recv()
 		if errors.Is(err, io.EOF) {
 			logger.Info("Stream completed")

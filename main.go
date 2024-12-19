@@ -39,7 +39,7 @@ func init() {
 
 type CommandFunc func(Network, *girc.Client, girc.Event, AIConfig, ...string)
 
-var stop_re = regexp.MustCompile("^-stop$")
+var stop_re = regexp.MustCompile("stop")
 
 type Command struct {
 	Config AIConfig
@@ -47,7 +47,7 @@ type Command struct {
 }
 
 var commands = map[*regexp.Regexp]Command{
-	stop_re: {Call: stop},
+	stop_re: {Config: AIConfig{}, Call: stop},
 }
 
 func main() {
@@ -106,7 +106,7 @@ func sendLoop(out string, network Network, c *girc.Client, e girc.Event) {
 }
 
 func stop(network Network, _ *girc.Client, m girc.Event, _ AIConfig, _ ...string) {
-	//TODO better sync for this also with the streaming completions
+	logger.Info("stop requested")
 	stoppedRunning(network.Name + m.Params[0])
 }
 

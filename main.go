@@ -113,8 +113,19 @@ func stop(network Network, _ *girc.Client, m girc.Event, _ AIConfig, _ ...string
 func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 	msg := event.Params[len(event.Params)-1]
 	if !strings.HasPrefix(msg, network.Trigger) {
-		//todo handle botnick, replys here
-		return
+		botnick := client.GetNick()
+		if !strings.HasPrefix(msg, botnick+", ") && !strings.HasPrefix(msg, botnick+": ") {
+			return
+		}
+		ctx_key := network.Name + event.Params[0] + event.Source.Name
+		if !ContextExists(ctx_key) {
+			logger.Info("Ignoring message due to no existing chat context")
+			return
+		}
+		msg = msg[len(botnick+", "):]
+		ctx := GetContext(ctx_key)
+		logger.Info("Running chat completion with existing context")
+		go chat(network, client, event, ctx.Config, msg)
 	}
 	msg = strings.TrimPrefix(msg, network.Trigger)
 	for r, cmd := range commands {
@@ -129,6 +140,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 			//special case for stop command to skip rate limits
 			if r == stop_re {
 				cmd.Call(network, client, event, AIConfig{}, args...)
+				return
 			}
 
 			if !checkRate(network, event.Params[0]) {

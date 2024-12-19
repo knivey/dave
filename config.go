@@ -106,7 +106,7 @@ func loadConfigOrDie(file string) (config Config) {
 		config.Networks[name] = network
 	}
 
-	fff := func(cfg AIConfig, name string, config *Config) {
+	fff := func(cfg AIConfig, name string, config *Config) AIConfig {
 		cfg.Name = name
 		if cfg.Regex == "" {
 			cfg.Regex = name
@@ -116,15 +116,15 @@ func loadConfigOrDie(file string) (config Config) {
 		} else {
 			log.Fatalln("commands.completions."+name, "service", cfg.Service, "is undefined")
 		}
-		config.Commands.Completions[name] = cfg
+		return cfg
 	}
 
 	for name, cfg := range config.Commands.Completions {
-		fff(cfg, name, &config)
+		config.Commands.Completions[name] = fff(cfg, name, &config)
 	}
 
 	for name, cfg := range config.Commands.Chats {
-		fff(cfg, name, &config)
+		config.Commands.Chats[name] = fff(cfg, name, &config)
 	}
 
 	return

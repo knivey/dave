@@ -1,4 +1,3 @@
-
 #these default settings can be overriden in the networks sections
 #this is the default trigger for commands Ex: set to . for .chat or - for -chat
 trigger = "-"
@@ -39,7 +38,7 @@ servers = [{host = "irc.libera.chat", ssl = true}]
 service = "openai"
 model = "gpt-3.5-turbo-instruct"
 #optionally you may override the regex for the command name
-#in this case both -dave and -dav would trigges this command
+#in this case both -dave and -dav would trigger this command
 #note this regex is used to construct a larger regex so ^$ shouldn't be used
 regex = "dave?"
 

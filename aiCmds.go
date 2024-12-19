@@ -55,19 +55,23 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 	startedRunning(network.Name + e.Params[0])
 	defer stoppedRunning(network.Name + e.Params[0])
 
+	var messages []gogpt.ChatCompletionMessage
+	ctx_key := network.Name + e.Params[0] + e.Source.Name
+	if !ContextExists(ctx_key) {
+		AddContext(cfg, ctx_key, gogpt.ChatCompletionMessage{
+			Role:    gogpt.ChatMessageRoleSystem,
+			Content: cfg.System,
+		})
+	}
+	messages = AddContext(cfg, ctx_key, gogpt.ChatCompletionMessage{
+		Role:    gogpt.ChatMessageRoleUser,
+		Content: args[0],
+	})
+
 	req := gogpt.ChatCompletionRequest{
-		Model:     cfg.Model,
-		MaxTokens: cfg.MaxTokens,
-		Messages: []gogpt.ChatCompletionMessage{
-			{
-				Role:    gogpt.ChatMessageRoleSystem,
-				Content: cfg.System,
-			},
-			{
-				Role:    gogpt.ChatMessageRoleUser,
-				Content: args[0],
-			},
-		},
+		Model:       cfg.Model,
+		MaxTokens:   cfg.MaxTokens,
+		Messages:    messages,
 		Temperature: cfg.Temperature,
 	}
 

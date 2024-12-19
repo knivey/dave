@@ -39,7 +39,7 @@ func init() {
 
 type CommandFunc func(Network, *girc.Client, girc.Event, AIConfig, ...string)
 
-var stop_re = regexp.MustCompile("stop")
+var stop_re = regexp.MustCompile("^stop$")
 
 type Command struct {
 	Config AIConfig

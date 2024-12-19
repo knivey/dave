@@ -67,6 +67,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 		Role:    gogpt.ChatMessageRoleUser,
 		Content: args[0],
 	})
+	logger.Debug("running completion with messages:", "messages", messages)
 
 	req := gogpt.ChatCompletionRequest{
 		Model:       cfg.Model,
@@ -90,6 +91,10 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 			return
 		}
 
+		AddContext(cfg, ctx_key, gogpt.ChatCompletionMessage{
+			Role:    gogpt.ChatMessageRoleAssistant,
+			Content: resp.Choices[0].Message.Content,
+		})
 		logger.Info(resp.Choices[0].Message.Content)
 		sendLoop(resp.Choices[0].Message.Content, network, c, e)
 		return
@@ -106,6 +111,10 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 	bufferb := ""
 	defer func() {
 		logger.Info(bufferb)
+		AddContext(cfg, ctx_key, gogpt.ChatCompletionMessage{
+			Role:    gogpt.ChatMessageRoleAssistant,
+			Content: bufferb,
+		})
 		sendLoop(buffer, network, c, e)
 	}()
 	for {

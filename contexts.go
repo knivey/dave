@@ -44,6 +44,6 @@ func GetContext(key string) ChatContext {
 func ContextExists(key string) bool {
 	chatContextsMutex.Lock()
 	defer chatContextsMutex.Unlock()
-	_, ok := chatContexts[key]
-	return ok
+	ctx, ok := chatContexts[key]
+	return ok && len(ctx.Messages) > 0
 }

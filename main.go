@@ -111,13 +111,13 @@ func stop(network Network, _ *girc.Client, m girc.Event, _ AIConfig, _ ...string
 }
 
 func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
+	ctx_key := network.Name + event.Params[0] + event.Source.Name
 	msg := event.Params[len(event.Params)-1]
 	if !strings.HasPrefix(msg, network.Trigger) {
 		botnick := client.GetNick()
 		if !strings.HasPrefix(msg, botnick+", ") && !strings.HasPrefix(msg, botnick+": ") {
 			return
 		}
-		ctx_key := network.Name + event.Params[0] + event.Source.Name
 		if !ContextExists(ctx_key) {
 			logger.Info("Ignoring message due to no existing chat context")
 			return
@@ -151,6 +151,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 				client.Cmd.Reply(event, "WHOAOaooooooooooHORhoo HOLD on thar IM ALREADY DOING something WIat YEr Turn!!")
 				return
 			}
+			ClearContext(ctx_key)
 			go cmd.Call(network, client, event, cmd.Config, args...)
 			return
 		}

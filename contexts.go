@@ -21,6 +21,7 @@ func init() {
 func ClearContext(key string) {
 	chatContextsMutex.Lock()
 	defer chatContextsMutex.Unlock()
+	chatContexts[key] = ChatContext{}
 }
 
 // TODO check if we need to limit size and how should that be handled? maybe the api will just give an error

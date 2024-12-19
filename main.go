@@ -122,6 +122,14 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 			logger.Info("Ignoring message due to no existing chat context")
 			return
 		}
+		if !checkRate(network, event.Params[0]) {
+			client.Cmd.Reply(event, "whoa!! slow down!!!1~ AHHHHHHHHHHHHHHHH AHhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhA HHHHHHHHHHHHHhhhhhhhhhhhhhhhhhhhAAAAAAAAAAAAAAAAAAHhhhhhhhhhhhhhhhh")
+			return
+		}
+		if getRunning(network.Name + event.Params[0]) {
+			client.Cmd.Reply(event, "WHOAOaooooooooooHORhoo HOLD on thar IM ALREADY DOING something WIat YEr Turn!!")
+			return
+		}
 		msg = msg[len(botnick+", "):]
 		ctx := GetContext(ctx_key)
 		logger.Info("Running chat completion with existing context")

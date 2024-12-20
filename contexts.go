@@ -33,7 +33,7 @@ func AddContext(config AIConfig, key string, message gogpt.ChatCompletionMessage
 	if len(context.Messages) > config.MaxHistory+1 { // add one so we dont count system prompt
 		//keep the system prompt
 		newMsgs := []gogpt.ChatCompletionMessage{context.Messages[0]}
-		context.Messages = append(newMsgs, context.Messages[:config.MaxHistory]...)
+		context.Messages = append(newMsgs, context.Messages[len(context.Messages)-config.MaxHistory:]...)
 	}
 	chatContexts[key] = context
 	return chatContexts[key].Messages

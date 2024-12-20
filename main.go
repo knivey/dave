@@ -124,11 +124,11 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 			return
 		}
 		if !checkRate(network, event.Params[0]) {
-			client.Cmd.Reply(event, "whoa!! slow down!!!1~ AHHHHHHHHHHHHHHHH AHhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhA HHHHHHHHHHHHHhhhhhhhhhhhhhhhhhhhAAAAAAAAAAAAAAAAAAHhhhhhhhhhhhhhhhh")
+			client.Cmd.Reply(event, config.Ratemsg())
 			return
 		}
 		if getRunning(network.Name + event.Params[0]) {
-			client.Cmd.Reply(event, "WHOAOaooooooooooHORhoo HOLD on thar IM ALREADY DOING something WIat YEr Turn!!")
+			client.Cmd.Reply(event, config.Busymsg())
 			return
 		}
 		msg = msg[len(botnick+", "):]
@@ -153,11 +153,11 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 			}
 
 			if !checkRate(network, event.Params[0]) {
-				client.Cmd.Reply(event, "whoa!! slow down!!!1~ AHHHHHHHHHHHHHHHH AHhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhA HHHHHHHHHHHHHhhhhhhhhhhhhhhhhhhhAAAAAAAAAAAAAAAAAAHhhhhhhhhhhhhhhhh")
+				client.Cmd.Reply(event, config.Ratemsg())
 				return
 			}
 			if getRunning(network.Name + event.Params[0]) {
-				client.Cmd.Reply(event, "WHOAOaooooooooooHORhoo HOLD on thar IM ALREADY DOING something WIat YEr Turn!!")
+				client.Cmd.Reply(event, config.Busymsg())
 				return
 			}
 			ClearContext(ctx_key)

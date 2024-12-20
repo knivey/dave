@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+	"golang.org/x/exp/rand"
 )
 
 type Config struct {
@@ -15,6 +16,8 @@ type Config struct {
 	Networks map[string]Network
 	Services map[string]Service
 	Commands Commands
+	Busymsgs []string
+	Ratemsgs []string
 }
 
 type Network struct {
@@ -59,6 +62,14 @@ type Service struct {
 	Temperature float32
 }
 
+func (config *Config) Busymsg() string {
+	return config.Busymsgs[rand.Intn(len(config.Busymsgs))]
+}
+
+func (config *Config) Ratemsg() string {
+	return config.Busymsgs[rand.Intn(len(config.Busymsgs))]
+}
+
 func (cfg *AIConfig) ApplyDefaults(service Service) {
 	if cfg.MaxTokens == 0 {
 		cfg.MaxTokens = service.MaxTokens
@@ -94,6 +105,12 @@ func loadConfigOrDie(file string) (config Config) {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+	if len(config.Busymsgs) == 0 {
+		config.Busymsgs = []string{"hold on i'm already busy"}
+	}
+	if len(config.Ratemsgs) == 0 {
+		config.Ratemsgs = []string{"hold on you're going to fast"}
 	}
 	for name, network := range config.Networks {
 		network.Name = name

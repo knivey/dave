@@ -2,6 +2,13 @@
 #this is the default trigger for commands Ex: set to . for .chat or - for -chat
 trigger = "-"
 quitmsg = "unplugged"
+#one is chosen at random if the bot is already busy on a prompt
+busymsgs = [
+    "WHOAOaooooooooooHORhoo HOLD on thar IM ALREADY DOING something WIat YEr Turn!!"
+]
+ratemsgs = [
+    "whoa!! slow down!!!1~ AHHHHHHHHHHHHHHHH AHhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhA HHHHHHHHHHHHHhhhhhhhhhhhhhhhhhhhAAAAAAAAAAAAAAAAAAHhhhhhhhhhhhhhhhh"
+]
 
 [services.openai]
 key = "UR KEY HERE :P"

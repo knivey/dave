@@ -53,6 +53,7 @@ type AIConfig struct {
 	Streaming   bool
 	MaxTokens   int
 	Temperature float32
+	MaxHistory  int
 }
 
 type Service struct {
@@ -60,6 +61,7 @@ type Service struct {
 	MaxTokens   int
 	BaseURL     string
 	Temperature float32
+	MaxHistory  int
 }
 
 func (config *Config) Busymsg() string {
@@ -76,6 +78,9 @@ func (cfg *AIConfig) ApplyDefaults(service Service) {
 	}
 	if cfg.Temperature == 0 {
 		cfg.Temperature = service.Temperature
+	}
+	if cfg.MaxHistory == 0 {
+		cfg.MaxHistory = service.MaxHistory
 	}
 }
 
@@ -121,6 +126,13 @@ func loadConfigOrDie(file string) (config Config) {
 			network.Quitmsg = config.Quitmsg
 		}
 		config.Networks[name] = network
+	}
+
+	for name, service := range config.Services {
+		if service.MaxHistory == 0 {
+			service.MaxHistory = 8
+		}
+		config.Services[name] = service
 	}
 
 	fff := func(cfg AIConfig, name string, config *Config) AIConfig {

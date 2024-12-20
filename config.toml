@@ -16,8 +16,12 @@ maxtokens = 600
 baseurl = "https://api.openai.com/v1/"
 
 [services.local]
-maxtokens = 100
+maxtokens = 500
 baseurl = "http://192.168.100.69:8000/v1"
+#this is just a default that can be overriden in command configs
+#if left undefined it defaults to 8
+#its the most number of previous interactions (including ai responses) to send back for context
+maxhistory = 8
 
 [networks.birdnest]
 enabled = true

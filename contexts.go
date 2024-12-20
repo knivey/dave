@@ -24,13 +24,17 @@ func ClearContext(key string) {
 	chatContexts[key] = ChatContext{}
 }
 
-// TODO check if we need to limit size and how should that be handled? maybe the api will just give an error
 func AddContext(config AIConfig, key string, message gogpt.ChatCompletionMessage) []gogpt.ChatCompletionMessage {
 	chatContextsMutex.Lock()
 	defer chatContextsMutex.Unlock()
 	context := chatContexts[key]
 	context.Config = config
 	context.Messages = append(context.Messages, message)
+	if len(context.Messages) > config.MaxHistory+1 { // add one so we dont count system prompt
+		//keep the system prompt
+		newMsgs := []gogpt.ChatCompletionMessage{context.Messages[0]}
+		context.Messages = append(newMsgs, context.Messages[:config.MaxHistory]...)
+	}
 	chatContexts[key] = context
 	return chatContexts[key].Messages
 }

@@ -123,7 +123,8 @@ func (r *Renderer) RenderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 			}
 			var lineBuffer bytes.Buffer
 			formatter := IRC16
-			iterator, _ := lexer.Tokenise(nil, string(node.Literal))
+			text := strings.ReplaceAll(string(node.Literal), "\t", "        ")
+			iterator, _ := lexer.Tokenise(nil, text)
 			formatter.Format(&lineBuffer, style, iterator)
 
 			max := 0
@@ -143,7 +144,8 @@ func (r *Renderer) RenderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 			writes(w, node, strings.Join(outs[:len(outs)-1], "\n"))
 		} else {
 			max := 0
-			lines := strings.Split(string(node.Literal), "\n")
+			text := strings.ReplaceAll(string(node.Literal), "\t", "        ")
+			lines := strings.Split(text, "\n")
 			for _, v := range lines {
 				if max < utf8.RuneCountInString(v) {
 					max = utf8.RuneCountInString(v)

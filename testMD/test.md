@@ -78,3 +78,15 @@ and
 echo moo
 php lol.php
 ```
+
+```go
+package main
+
+import (
+	"os"
+)
+
+func main() {
+	test, err := os.ReadFile("test.md")
+}
+```

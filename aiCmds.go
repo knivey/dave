@@ -10,6 +10,7 @@ import (
 	"github.com/lrstanley/girc"
 	logxi "github.com/mgutz/logxi/v1"
 	gogpt "github.com/sashabaranov/go-openai"
+	markdowntoirc "github.come/knivey/dave/MarkdownToIRC"
 )
 
 func completion(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...string) {
@@ -96,7 +97,13 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 			Content: resp.Choices[0].Message.Content,
 		})
 		logger.Info(resp.Choices[0].Message.Content)
-		sendLoop(resp.Choices[0].Message.Content, network, c, e)
+		var text string
+		if cfg.RenderMarkdown {
+			text = markdowntoirc.MarkdownToIRC(resp.Choices[0].Message.Content)
+		} else {
+			text = resp.Choices[0].Message.Content
+		}
+		sendLoop(text, network, c, e)
 		return
 	}
 

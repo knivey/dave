@@ -45,15 +45,16 @@ type Commands struct {
 }
 
 type AIConfig struct {
-	Name        string //set to key name
-	Service     string
-	Model       string
-	Regex       string
-	System      string
-	Streaming   bool
-	MaxTokens   int
-	Temperature float32
-	MaxHistory  int
+	Name           string //set to key name
+	Service        string
+	Model          string
+	Regex          string
+	System         string
+	Streaming      bool
+	MaxTokens      int
+	Temperature    float32
+	MaxHistory     int
+	RenderMarkdown bool
 }
 
 type Service struct {
@@ -144,6 +145,9 @@ func loadConfigOrDie(file string) (config Config) {
 			cfg.ApplyDefaults(service)
 		} else {
 			log.Fatalln("commands.completions."+name, "service", cfg.Service, "is undefined")
+		}
+		if cfg.RenderMarkdown && cfg.Streaming {
+			log.Fatalln("commands.completions."+name, "cannot render markdown with streaming")
 		}
 		return cfg
 	}

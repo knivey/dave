@@ -90,3 +90,27 @@ func main() {
 	test, err := os.ReadFile("test.md")
 }
 ```
+
+```ruby
+def random_color
+  colors = (0..15).to_a.map { |n| n.to_s.rjust(2, '0') }
+  colors.sample
+end
+
+def draw_mouse
+  ears_color = random_color
+  tail_color = random_color
+  expression = [':)', ':(', ':D', ':P', 'xD'].sample
+
+  mouse_art = <<~MOUSE
+    #{ears_color}  /\\_/\ 
+   ( o.o ) 
+    > ^ < 
+    #{expression} #{tail_color}
+  MOUSE
+
+  puts mouse_art
+end
+
+draw_mouse
+```

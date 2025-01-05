@@ -94,6 +94,8 @@ func writesWithNegOffset(w io.Writer, node ast.Node, text string, negativeOffset
 	}
 }
 
+var colorCancelRE = regexp.MustCompile("\x03(?:\\D)")
+
 func (r *Renderer) RenderNode(w io.Writer, node ast.Node, entering bool) ast.WalkStatus {
 	switch node := node.(type) {
 	case *ast.Strong:
@@ -130,6 +132,7 @@ func (r *Renderer) RenderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 			max := 0
 			lines := strings.Split(lineBuffer.String(), "\n")
 			for _, v := range lines {
+				v = colorCancelRE.ReplaceAllLiteralString(v, "\x0300")
 				v = stripIRCCodes(v)
 				if max < utf8.RuneCountInString(v) {
 					max = utf8.RuneCountInString(v)
@@ -138,6 +141,8 @@ func (r *Renderer) RenderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 			var outs []string
 
 			for _, v := range lines {
+				//prevent clearing our background
+				v := colorCancelRE.ReplaceAllLiteralString(v, "\x0300")
 				rpad := strings.Repeat(" ", max-utf8.RuneCountInString(stripIRCCodes(v)))
 				outs = append(outs, fmt.Sprintf(" \x030,90%s%s\x03 ", v, rpad))
 			}
@@ -153,7 +158,7 @@ func (r *Renderer) RenderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 			}
 			var outs []string
 			for _, v := range lines {
-				outs = append(outs, fmt.Sprintf(" \x0315,90%-*s\x03 ", max, v))
+				outs = append(outs, fmt.Sprintf(" \x030,90%-*s\x03 ", max, v))
 			}
 			writes(w, node, strings.Join(outs[:len(outs)-1], "\n"))
 		}

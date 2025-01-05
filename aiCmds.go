@@ -96,7 +96,12 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 			Role:    gogpt.ChatMessageRoleAssistant,
 			Content: resp.Choices[0].Message.Content,
 		})
-		logger.Info(resp.Choices[0].Message.Content)
+		out := resp.Choices[0].Message.Content
+		out = strings.ReplaceAll(out, "\x03", "\x1b[033m[C]\x1b[0m")
+		out = strings.ReplaceAll(out, "\x02", "\x1b[034m[B]\x1b[0m")
+		out = strings.ReplaceAll(out, "\x1F", "\x1b[035m[U]\x1b[0m")
+		out = strings.ReplaceAll(out, "\x1D", "\x1b[036m[I]\x1b[0m")
+		logger.Info(out)
 		var text string
 		if cfg.RenderMarkdown {
 			text = markdowntoirc.MarkdownToIRC(resp.Choices[0].Message.Content)

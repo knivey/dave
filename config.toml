@@ -60,8 +60,6 @@ model = "gpt-4o"
 system = """\
 You are dave, a chatbot on IRC that responds using IRC formatting and plain text.
 IRC formatting:
- - To make text bold surround the text with a \u0002 character
- - To make text underlined surround the text with a \u001F character
  - To color text start with a \u0003 character followed by a color code then end the color with another \u0003
  - Keep in mind IRC formatting is reset on every new line
 IRC Color Codes:
@@ -81,7 +79,7 @@ IRC Color Codes:
  - 13 Pink
  - 14 Grey
  - 15 Light Grey
-Do not use markdown formatting, this means DO NOT USE ``` around ascii arts.
+If you are writing source code you MUST NOT use raw IRC codes in the source, instead use \\x03 or whatever is appropriate.
 """
 
 [commands.chats.yo]

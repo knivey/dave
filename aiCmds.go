@@ -104,9 +104,12 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 		logger.Info(out)
 		text := resp.Choices[0].Message.Content
 		//cut out </think>
-		cut := strings.LastIndex(text, "</think>\n") + len("</think>\n")
-		//think := text[:cut]
-		text = text[cut:]
+		cut := strings.LastIndex(text, "</think>\n")
+		if cut > -1 {
+			cut += len("</think>\n")
+			//think := text[:cut]
+			text = text[cut:]
+		}
 
 		if cfg.RenderMarkdown {
 			text = markdowntoirc.MarkdownToIRC(text)

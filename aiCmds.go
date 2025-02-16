@@ -102,11 +102,14 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 		out = strings.ReplaceAll(out, "\x1F", "\x1b[035m[U]\x1b[0m")
 		out = strings.ReplaceAll(out, "\x1D", "\x1b[036m[I]\x1b[0m")
 		logger.Info(out)
-		var text string
+		text := resp.Choices[0].Message.Content
+		//cut out </think>
+		cut := strings.LastIndex(text, "</think>\n") + len("</think>\n")
+		//think := text[:cut]
+		text = text[cut:]
+
 		if cfg.RenderMarkdown {
-			text = markdowntoirc.MarkdownToIRC(resp.Choices[0].Message.Content)
-		} else {
-			text = resp.Choices[0].Message.Content
+			text = markdowntoirc.MarkdownToIRC(text)
 		}
 		sendLoop(text, network, c, e)
 		return

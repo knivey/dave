@@ -16,6 +16,15 @@ Keep in mind only the chat endpoints support replying, the completions api doesn
 <knivey> dave_bird: that's a lame answer
 <dave> Oh, sorry about that! Let me try again: I'm feeling as bold and vibrant as a chat bot can get! How about you?
 ```
+
+## TODO
+ * option to trim last line if  it was truncated by max tokens
+ * optionally remove thinking block from chat history contexts sent back to server
+ * have a way to view current chat context history
+ * save all chat history for possible fine-tuning data in the future
+   * maybe add a way to rank the last response by users
+ * more general chatbot with context shared by entire channel would be interesting, would involve a long running history, mechanizm to look up past logs?
+
 ##
 The goal for this project is to remain a dead simple IRC bot that can interface with openai apis to allow running prompts in the chatroom
 

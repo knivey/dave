@@ -89,7 +89,7 @@ func main() {
 }
 
 func sendLoop(out string, network Network, c *girc.Client, e girc.Event) {
-	out = wrap.String(wordwrap.String(out, 400), 420)
+	out = wrap.String(wordwrap.String(out, 350), 420)
 
 	// for each new line break in response choices write to channel
 	for _, line := range strings.Split(out, "\n") {

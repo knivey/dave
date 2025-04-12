@@ -36,6 +36,10 @@ type Txt2imgResponse struct {
 func sd(network Network, c *girc.Client, e girc.Event, cfg SDConfig, args ...string) {
 	logger := logxi.New(network.Name + ".sd." + cfg.Name)
 	logger.SetLevel(logxi.LevelAll)
+
+	startedRunning(network.Name + e.Params[0])
+	defer stoppedRunning(network.Name + e.Params[0])
+
 	URL := config.Services[cfg.Service].BaseURL + "/sdapi/v1/txt2img"
 
 	params := Txt2imgParams{

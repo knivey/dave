@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"time"
 
@@ -81,7 +81,7 @@ func sd(network Network, c *girc.Client, e girc.Event, cfg SDConfig, args ...str
 	defer resp.Body.Close()
 	logger.Debug("Response status:", resp.Status)
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		c.Cmd.Reply(e, err.Error())
 		logger.Error(err.Error())

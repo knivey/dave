@@ -42,10 +42,23 @@ type Server struct {
 type Commands struct {
 	Completions map[string]AIConfig
 	Chats       map[string]AIConfig
+	SD          map[string]SDConfig
+}
+
+type SDConfig struct {
+	Name         string //gets set to key name
+	Regex        string
+	Service      string
+	Steps        int64
+	SamplerName  string
+	SamplerIndex string
+	Scheduler    string
+	Width        int64
+	Height       int64
 }
 
 type AIConfig struct {
-	Name           string //set to key name
+	Name           string //gets set to key name
 	Service        string
 	Model          string
 	Regex          string
@@ -71,6 +84,10 @@ func (config *Config) Busymsg() string {
 
 func (config *Config) Ratemsg() string {
 	return config.Busymsgs[rand.Intn(len(config.Busymsgs))]
+}
+
+func (cfg *SDConfig) ApplyDefaults(service Service) {
+
 }
 
 func (cfg *AIConfig) ApplyDefaults(service Service) {
@@ -158,6 +175,19 @@ func loadConfigOrDie(file string) (config Config) {
 
 	for name, cfg := range config.Commands.Chats {
 		config.Commands.Chats[name] = fff(cfg, name, &config)
+	}
+
+	for name, cfg := range config.Commands.SD {
+		cfg.Name = name
+		if cfg.Regex == "" {
+			cfg.Regex = name
+		}
+		if service, ok := config.Services[cfg.Service]; ok {
+			cfg.ApplyDefaults(service)
+		} else {
+			log.Fatalln("commands.SD."+name, "service", cfg.Service, "is undefined")
+		}
+		config.Commands.SD[name] = cfg
 	}
 
 	return

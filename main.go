@@ -37,17 +37,14 @@ func init() {
 	bots = make(map[string]*Bot)
 }
 
-type CommandFunc func(Network, *girc.Client, girc.Event, AIConfig, ...string)
+type CmdFunc func(Network, *girc.Client, girc.Event, ...string)
 
 var stop_re = regexp.MustCompile("^stop$")
 
-type Command struct {
-	Config AIConfig
-	Call   CommandFunc
-}
+type CmdMap map[*regexp.Regexp]CmdFunc
 
-var commands = map[*regexp.Regexp]Command{
-	stop_re: {Config: AIConfig{}, Call: stop},
+var commands = CmdMap{
+	stop_re: func(n Network, c *girc.Client, e girc.Event, s ...string) { stop(n, c, e, nil, s...) },
 }
 
 func main() {
@@ -60,10 +57,26 @@ func main() {
 	}
 	logger.Info("Config loaded", "networks", len(config.Networks))
 	for _, c := range config.Commands.Completions {
-		commands[regexp.MustCompile("^"+c.Regex+" (.+)$")] = Command{Config: c, Call: completion}
+		logger.Debug("added Completions command", c)
+		commands[regexp.MustCompile("^"+c.Regex+" (.+)$")] =
+			func(network Network, client *girc.Client, e girc.Event, args ...string) {
+				completion(network, client, e, c, args...)
+			}
+
 	}
 	for _, c := range config.Commands.Chats {
-		commands[regexp.MustCompile("^"+c.Regex+" (.+)$")] = Command{Config: c, Call: chat}
+		logger.Debug("added Chats command", c)
+		commands[regexp.MustCompile("^"+c.Regex+" (.+)$")] =
+			func(network Network, client *girc.Client, e girc.Event, args ...string) {
+				chat(network, client, e, c, args...)
+			}
+	}
+	for _, c := range config.Commands.SD {
+		logger.Debug("added SD command", c)
+		commands[regexp.MustCompile("^"+c.Regex+" (.+)$")] =
+			func(network Network, client *girc.Client, e girc.Event, args ...string) {
+				sd(network, client, e, c, args...)
+			}
 	}
 
 	for _, network := range config.Networks {
@@ -105,7 +118,7 @@ func sendLoop(out string, network Network, c *girc.Client, e girc.Event) {
 	}
 }
 
-func stop(network Network, _ *girc.Client, m girc.Event, _ AIConfig, _ ...string) {
+func stop(network Network, _ *girc.Client, m girc.Event, _ interface{}, _ ...string) {
 	logger.Info("stop requested")
 	stoppedRunning(network.Name + m.Params[0])
 }
@@ -148,7 +161,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 
 			//special case for stop command to skip rate limits
 			if r == stop_re {
-				cmd.Call(network, client, event, AIConfig{}, args...)
+				cmd(network, client, event, args...)
 				return
 			}
 
@@ -160,8 +173,9 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 				client.Cmd.Reply(event, config.Busymsg())
 				return
 			}
+			//TODO only clear if its a chat command type
 			ClearContext(ctx_key)
-			go cmd.Call(network, client, event, cmd.Config, args...)
+			go cmd(network, client, event, args...)
 			return
 		}
 	}

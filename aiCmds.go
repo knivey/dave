@@ -31,7 +31,7 @@ func completion(network Network, c *girc.Client, e girc.Event, cfg AIConfig, arg
 		Temperature: cfg.Temperature,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	resp, err := aiClient.CreateCompletion(ctx, req)
@@ -81,7 +81,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 		req.Stream = true
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	if !cfg.Streaming {

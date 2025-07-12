@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/tls"
 	"os"
 	"os/signal"
@@ -14,6 +15,7 @@ import (
 	logxi "github.com/mgutz/logxi/v1"
 	"github.com/muesli/reflow/wordwrap"
 	"github.com/muesli/reflow/wrap"
+	"github.com/vodkaslime/wildcard"
 )
 
 var config Config

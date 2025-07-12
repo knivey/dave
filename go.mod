@@ -24,5 +24,7 @@ require (
 	github.com/mgutz/ansi v0.0.0-20200706080929-d51e80ef957d // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/stretchr/testify v1.10.0 // indirect
+	github.com/vodkaslime/wildcard v0.0.0-20220926070406-71dac9214330 // indirect
+	golang.org/x/sync v0.15.0 // indirect
 	golang.org/x/sys v0.28.0 // indirect
 )

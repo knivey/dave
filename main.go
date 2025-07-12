@@ -123,12 +123,39 @@ func stop(network Network, _ *girc.Client, m girc.Event, _ interface{}, _ ...str
 	stoppedRunning(network.Name + m.Params[0])
 }
 
+func isIgnored(host string) bool {
+	file, err := os.Open("ignores.txt")
+	if err != nil {
+		logger.Info("ignores.txt failed to open", err.Error())
+		return false
+	}
+	defer file.Close()
+
+	matcher := wildcard.NewMatcher()
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		if m, _ := matcher.Match(scanner.Text(), host); m {
+			return true
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		logger.Error(err.Error())
+	}
+	return false
+}
+
 func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 	ctx_key := network.Name + event.Params[0] + event.Source.Name
+	host := event.Source.Name + "!" + event.Source.Ident + "@" + event.Source.Host
 	msg := event.Params[len(event.Params)-1]
 	if !strings.HasPrefix(msg, network.Trigger) {
 		botnick := client.GetNick()
 		if !strings.HasPrefix(msg, botnick+", ") && !strings.HasPrefix(msg, botnick+": ") {
+			return
+		}
+		if isIgnored(host) {
+			logger.Info("Ignoring host", host)
 			return
 		}
 		if !ContextExists(ctx_key) {
@@ -148,6 +175,11 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 		ctx := GetContext(ctx_key)
 		logger.Info("Running chat completion with existing context")
 		go chat(network, client, event, ctx.Config, msg)
+		return
+	}
+	if isIgnored(host) {
+		logger.Info("Ignoring host", host)
+		return
 	}
 	msg = strings.TrimPrefix(msg, network.Trigger)
 	for r, cmd := range commands {

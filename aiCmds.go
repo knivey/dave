@@ -53,8 +53,8 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 	logger := logxi.New(network.Name + ".completion." + cfg.Name)
 	logger.SetLevel(logxi.LevelAll)
 
-	//startedRunning(network.Name + e.Params[0])
-	//defer stoppedRunning(network.Name + e.Params[0])
+	startedRunning(network.Name + e.Params[0])
+	defer stoppedRunning(network.Name + e.Params[0])
 
 	var messages []gogpt.ChatCompletionMessage
 	ctx_key := network.Name + e.Params[0] + e.Source.Name
@@ -86,8 +86,6 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 	defer cancel()
 
 	if !cfg.Streaming {
-		serviceQueueWait(cfg.Service)
-		defer serviceQueuesDone(cfg.Service)
 		resp, err := aiClient.CreateChatCompletion(ctx, req)
 		if err != nil {
 			c.Cmd.Reply(e, err.Error())
@@ -121,8 +119,6 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 		return
 	}
 
-	serviceQueueWait(cfg.Service)
-	defer serviceQueuesDone(cfg.Service)
 	stream, err := aiClient.CreateChatCompletionStream(ctx, req)
 	if err != nil {
 		c.Cmd.Reply(e, err.Error())
@@ -141,11 +137,11 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 		sendLoop(buffer, network, c, e)
 	}()
 	for {
-		//	if !getRunning(network.Name + e.Params[0]) {
-		//		logger.Info("Closing stream")
-		//		stream.Close()
-		//		return
-		//	}
+		if !getRunning(network.Name + e.Params[0]) {
+			logger.Info("Closing stream")
+			stream.Close()
+			return
+		}
 		resp, err := stream.Recv()
 		if errors.Is(err, io.EOF) {
 			logger.Info("Stream completed")

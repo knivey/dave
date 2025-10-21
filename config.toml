@@ -12,7 +12,7 @@ ratemsgs = [
 
 [services.openai]
 key = "UR KEY HERE :P"
-maxtokens = 600
+maxcompletiontokens = 600
 baseurl = "https://api.openai.com/v1/"
 
 [services.local]

@@ -58,24 +58,26 @@ type SDConfig struct {
 }
 
 type AIConfig struct {
-	Name           string //gets set to key name
-	Service        string
-	Model          string
-	Regex          string
-	System         string
-	Streaming      bool
-	MaxTokens      int
-	Temperature    float32
-	MaxHistory     int
-	RenderMarkdown bool
+	Name                string //gets set to key name
+	Service             string
+	Model               string
+	Regex               string
+	System              string
+	Streaming           bool
+	MaxTokens           int
+	MaxCompletionTokens int
+	Temperature         float32
+	MaxHistory          int
+	RenderMarkdown      bool
 }
 
 type Service struct {
-	Key         string
-	MaxTokens   int
-	BaseURL     string
-	Temperature float32
-	MaxHistory  int
+	Key                 string
+	MaxTokens           int //best to keep both for compatibility with non-openai
+	MaxCompletionTokens int //use this one now with openai
+	BaseURL             string
+	Temperature         float32
+	MaxHistory          int
 }
 
 func (config *Config) Busymsg() string {
@@ -93,6 +95,9 @@ func (cfg *SDConfig) ApplyDefaults(service Service) {
 func (cfg *AIConfig) ApplyDefaults(service Service) {
 	if cfg.MaxTokens == 0 {
 		cfg.MaxTokens = service.MaxTokens
+	}
+	if cfg.MaxTokens == 0 {
+		cfg.MaxCompletionTokens = service.MaxCompletionTokens
 	}
 	if cfg.Temperature == 0 {
 		cfg.Temperature = service.Temperature

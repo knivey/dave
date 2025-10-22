@@ -23,7 +23,7 @@ type Txt2imgParams struct {
 	Scheduler    string        `json:"scheduler,omitempty"`
 	SamplerName  string        `json:"sampler_name,omitempty"`
 	SendImages   bool          `json:"send_images"`
-	CfgScale     int64         `json:"cfg_scale",omitempty`
+	CfgScale     int64         `json:"cfg_scale,omitempty"`
 	ScriptArgs   []interface{} `json:"script_args"`
 }
 

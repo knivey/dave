@@ -11,13 +11,14 @@ import (
 )
 
 type Config struct {
-	Trigger  string
-	Quitmsg  string
-	Networks map[string]Network
-	Services map[string]Service
-	Commands Commands
-	Busymsgs []string
-	Ratemsgs []string
+	Trigger   string
+	Quitmsg   string
+	Networks  map[string]Network
+	Services  map[string]Service
+	Commands  Commands
+	Busymsgs  []string
+	Ratemsgs  []string
+	UploadURL string `toml:"uploadurl"`
 }
 
 type Network struct {
@@ -43,6 +44,7 @@ type Commands struct {
 	Completions map[string]AIConfig
 	Chats       map[string]AIConfig
 	SD          map[string]SDConfig
+	Comfy       map[string]ComfyConfig
 }
 
 type SDConfig struct {
@@ -50,11 +52,23 @@ type SDConfig struct {
 	Regex        string
 	Service      string
 	Steps        int64
-	SamplerName  string
-	SamplerIndex string
+	SamplerName  string `toml:"samplername"`
+	SamplerIndex string `toml:"samplerindex"`
 	Scheduler    string
 	Width        int64
 	Height       int64
+}
+
+type ComfyConfig struct {
+	Name         string //gets set to key name
+	Regex        string
+	Service      string
+	WorkflowPath string   `toml:"workflow_path"`
+	ClientID     string   `toml:"clientid"`
+	OutputNode   string   `toml:"output_node"`
+	PromptNode   string   `toml:"prompt_node"`
+	SeedNodes    []string `toml:"seed_nodes"`
+	Timeout      int
 }
 
 type AIConfig struct {
@@ -64,20 +78,21 @@ type AIConfig struct {
 	Regex               string
 	System              string
 	Streaming           bool
-	MaxTokens           int
-	MaxCompletionTokens int
+	MaxTokens           int `toml:"maxtokens"`
+	MaxCompletionTokens int `toml:"maxcompletiontokens"`
 	Temperature         float32
-	MaxHistory          int
-	RenderMarkdown      bool
+	MaxHistory          int  `toml:"maxhistory"`
+	RenderMarkdown      bool `toml:"rendermarkdown"`
 }
 
 type Service struct {
 	Key                 string
-	MaxTokens           int //best to keep both for compatibility with non-openai
-	MaxCompletionTokens int //use this one now with openai
+	MaxTokens           int `toml:"maxtokens"`           //best to keep both for compatibility with non-openai
+	MaxCompletionTokens int `toml:"maxcompletiontokens"` //use this one now with openai
 	BaseURL             string
 	Temperature         float32
-	MaxHistory          int
+	MaxHistory          int `toml:"maxhistory"`
+	ComfyTimeout        int `toml:"comfy_timeout"` // WebSocket timeout in seconds
 }
 
 func (config *Config) Busymsg() string {
@@ -90,6 +105,15 @@ func (config *Config) Ratemsg() string {
 
 func (cfg *SDConfig) ApplyDefaults(service Service) {
 
+}
+
+func (cfg *ComfyConfig) ApplyDefaults(service Service) {
+	if cfg.Timeout == 0 {
+		cfg.Timeout = service.ComfyTimeout
+	}
+	if cfg.Timeout == 0 {
+		cfg.Timeout = 300
+	}
 }
 
 func (cfg *AIConfig) ApplyDefaults(service Service) {
@@ -193,6 +217,31 @@ func loadConfigOrDie(file string) (config Config) {
 			log.Fatalln("commands.SD."+name, "service", cfg.Service, "is undefined")
 		}
 		config.Commands.SD[name] = cfg
+	}
+
+	for name, cfg := range config.Commands.Comfy {
+		cfg.Name = name
+		if cfg.Regex == "" {
+			cfg.Regex = name
+		}
+		if service, ok := config.Services[cfg.Service]; ok {
+			cfg.ApplyDefaults(service)
+		} else {
+			log.Fatalln("commands.comfy."+name, "service", cfg.Service, "is undefined")
+		}
+		if cfg.WorkflowPath == "" {
+			log.Fatalln("commands.comfy." + name + " workflow path is required")
+		}
+		if cfg.ClientID == "" {
+			log.Fatalln("commands.comfy." + name + " clientid is required")
+		}
+		if cfg.OutputNode == "" {
+			log.Fatalln("commands.comfy." + name + " output_node is required")
+		}
+		if cfg.PromptNode == "" {
+			log.Fatalln("commands.comfy." + name + " prompt_node is required")
+		}
+		config.Commands.Comfy[name] = cfg
 	}
 
 	return

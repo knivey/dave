@@ -2,6 +2,7 @@
 #this is the default trigger for commands Ex: set to . for .chat or - for -chat
 trigger = "-"
 quitmsg = "unplugged"
+uploadurl = "https://upload.beer"
 #one is chosen at random if the bot is already busy on a prompt
 busymsgs = [
     "WHOAOaooooooooooHORhoo HOLD on thar IM ALREADY DOING something WIat YEr Turn!!"
@@ -25,6 +26,10 @@ maxhistory = 8
 
 [services.sd]
 baseurl = "http://192.168.100.45:7860"
+
+[services.comfy]
+baseurl = "http://192.168.100.45:8188"
+comfy_timeout = 300
 
 [networks.birdnest]
 enabled = true
@@ -130,3 +135,12 @@ IRC Color Codes:
  - 15 Light Grey
 Do not use markdown formatting
 """
+
+[commands.comfy.test_workflow]
+service = "comfy"
+workflow_path = "workflows/test.json"
+clientid = "dave-irc-bot"
+output_node = "249"
+prompt_node = "270"
+seed_nodes = ["264"]
+#timeout = 600

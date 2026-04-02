@@ -24,7 +24,7 @@ func uploadDotBeer(data []byte, filename string) (string, error) {
 
 	wr.Close()
 
-	if resp, err := http.Post("https://upload.beer", wr.FormDataContentType(), bytes.NewReader(x.Bytes())); err != nil {
+	if resp, err := http.Post(config.UploadURL, wr.FormDataContentType(), bytes.NewReader(x.Bytes())); err != nil {
 		return "", err
 	} else {
 		log.Println("fileholed", resp.Status)

@@ -80,6 +80,13 @@ func main() {
 				sd(network, client, e, c, args...)
 			}
 	}
+	for _, c := range config.Commands.Comfy {
+		logger.Debug("added Comfy command", c)
+		commands[regexp.MustCompile("^"+c.Regex+" (.+)$")] =
+			func(network Network, client *girc.Client, e girc.Event, args ...string) {
+				comfy(network, client, e, c, args...)
+			}
+	}
 
 	for _, network := range config.Networks {
 		if network.Enabled {

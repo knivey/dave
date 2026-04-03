@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,11 +10,13 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/lrstanley/girc"
 	logxi "github.com/mgutz/logxi/v1"
+	gogpt "github.com/sashabaranov/go-openai"
 )
 
 type ComfyWorkflow map[string]ComfyNode
@@ -53,6 +56,45 @@ type ComfyImage struct {
 	Type      string `json:"type"`
 }
 
+func enhancePrompt(rawPrompt string, cfg ComfyConfig, network Network, logger logxi.Logger) string {
+	enhCfg := config.PromptEnhancements[cfg.EnhancePrompt]
+	svc := config.Services[enhCfg.Service]
+
+	aiConfig := gogpt.DefaultConfig(svc.Key)
+	aiConfig.BaseURL = svc.BaseURL
+	aiClient := gogpt.NewClientWithConfig(aiConfig)
+
+	messages := []gogpt.ChatCompletionMessage{
+		{
+			Role:    gogpt.ChatMessageRoleSystem,
+			Content: enhCfg.SystemPrompt,
+		},
+		{
+			Role:    gogpt.ChatMessageRoleUser,
+			Content: rawPrompt,
+		},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	resp, err := aiClient.CreateChatCompletion(ctx, gogpt.ChatCompletionRequest{
+		Model:    enhCfg.Model,
+		Messages: messages,
+	})
+	if err != nil {
+		logger.Warn("Prompt enhancement failed, using original", "error", err.Error())
+		return rawPrompt
+	}
+
+	enhanced := strings.TrimSpace(resp.Choices[0].Message.Content)
+	if enhanced == "" {
+		return rawPrompt
+	}
+	logger.Debug("Enhanced prompt", "prompt", enhanced)
+	return enhanced
+}
+
 func comfy(network Network, c *girc.Client, e girc.Event, cfg ComfyConfig, args ...string) {
 	logger := logxi.New(network.Name + ".comfy." + cfg.Name)
 	logger.SetLevel(logxi.LevelAll)
@@ -72,7 +114,13 @@ func comfy(network Network, c *girc.Client, e girc.Event, cfg ComfyConfig, args 
 		return
 	}
 
-	workflow[cfg.PromptNode].Inputs["text"] = args[0]
+	prompt := args[0]
+	if cfg.EnhancePrompt != "" {
+		c.Cmd.Reply(e, "enhancing prompt...")
+		prompt = enhancePrompt(args[0], cfg, network, logger)
+	}
+
+	workflow[cfg.PromptNode].Inputs["text"] = prompt
 
 	for _, nodeID := range cfg.SeedNodes {
 		if node, ok := workflow[nodeID]; ok {

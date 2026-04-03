@@ -31,6 +31,11 @@ baseurl = "http://192.168.100.45:7860"
 baseurl = "http://192.168.100.45:8188"
 comfy_timeout = 300
 
+[promptenhancements.default]
+service = "openai"
+model = "gpt-4o"
+systemprompt = "You are an expert at writing prompts for AI image generation. Expand the user's short prompt into a detailed, descriptive prompt that will produce high-quality images. Include details about style, lighting, composition, and quality modifiers. Return ONLY the enhanced prompt, nothing else."
+
 [networks.birdnest]
 enabled = true
 nick = "dave"
@@ -144,3 +149,20 @@ output_node = "249"
 prompt_node = "270"
 seed_nodes = ["264"]
 #timeout = 600
+
+[commands.comfy.qwen]
+service = "comfy"
+workflow_path = "workflows/qwen2512.json"
+clientid = "dave-irc-bot"
+output_node = "249"
+prompt_node = "270"
+seed_nodes = ["264"]
+
+[commands.comfy.qwene]
+service = "comfy"
+workflow_path = "workflows/qwen2512.json"
+clientid = "dave-irc-bot"
+output_node = "249"
+prompt_node = "270"
+seed_nodes = ["264"]
+enhanceprompt = "default"

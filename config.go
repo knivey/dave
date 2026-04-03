@@ -11,14 +11,15 @@ import (
 )
 
 type Config struct {
-	Trigger   string
-	Quitmsg   string
-	Networks  map[string]Network
-	Services  map[string]Service
-	Commands  Commands
-	Busymsgs  []string
-	Ratemsgs  []string
-	UploadURL string `toml:"uploadurl"`
+	Trigger            string
+	Quitmsg            string
+	Networks           map[string]Network
+	Services           map[string]Service
+	Commands           Commands
+	PromptEnhancements map[string]PromptEnhancementConfig `toml:"promptenhancements"`
+	Busymsgs           []string
+	Ratemsgs           []string
+	UploadURL          string `toml:"uploadurl"`
 }
 
 type Network struct {
@@ -59,16 +60,23 @@ type SDConfig struct {
 	Height       int64
 }
 
+type PromptEnhancementConfig struct {
+	Service      string `toml:"service"`
+	Model        string `toml:"model"`
+	SystemPrompt string `toml:"systemprompt"`
+}
+
 type ComfyConfig struct {
-	Name         string //gets set to key name
-	Regex        string
-	Service      string
-	WorkflowPath string   `toml:"workflow_path"`
-	ClientID     string   `toml:"clientid"`
-	OutputNode   string   `toml:"output_node"`
-	PromptNode   string   `toml:"prompt_node"`
-	SeedNodes    []string `toml:"seed_nodes"`
-	Timeout      int
+	Name          string //gets set to key name
+	Regex         string
+	Service       string
+	WorkflowPath  string   `toml:"workflow_path"`
+	ClientID      string   `toml:"clientid"`
+	OutputNode    string   `toml:"output_node"`
+	PromptNode    string   `toml:"prompt_node"`
+	SeedNodes     []string `toml:"seed_nodes"`
+	Timeout       int
+	EnhancePrompt string `toml:"enhanceprompt"`
 }
 
 type AIConfig struct {
@@ -230,7 +238,7 @@ func loadConfigOrDie(file string) (config Config) {
 			log.Fatalln("commands.comfy."+name, "service", cfg.Service, "is undefined")
 		}
 		if cfg.WorkflowPath == "" {
-			log.Fatalln("commands.comfy." + name + " workflow path is required")
+			log.Fatalln("commands.comfy." + name + " workflow_path is required")
 		}
 		if cfg.ClientID == "" {
 			log.Fatalln("commands.comfy." + name + " clientid is required")
@@ -240,6 +248,24 @@ func loadConfigOrDie(file string) (config Config) {
 		}
 		if cfg.PromptNode == "" {
 			log.Fatalln("commands.comfy." + name + " prompt_node is required")
+		}
+		if cfg.EnhancePrompt != "" {
+			if _, ok := config.PromptEnhancements[cfg.EnhancePrompt]; !ok {
+				log.Fatalln("commands.comfy."+name, "enhanceprompt", cfg.EnhancePrompt, "is not defined in [promptenhancements]")
+			}
+			enhCfg := config.PromptEnhancements[cfg.EnhancePrompt]
+			if enhCfg.Service == "" {
+				log.Fatalln("promptenhancements."+cfg.EnhancePrompt, "service is required")
+			}
+			if _, ok := config.Services[enhCfg.Service]; !ok {
+				log.Fatalln("promptenhancements."+cfg.EnhancePrompt, "service", enhCfg.Service, "is undefined")
+			}
+			if enhCfg.Model == "" {
+				log.Fatalln("promptenhancements."+cfg.EnhancePrompt, "model is required")
+			}
+			if enhCfg.SystemPrompt == "" {
+				log.Fatalln("promptenhancements."+cfg.EnhancePrompt, "systemprompt is required")
+			}
 		}
 		config.Commands.Comfy[name] = cfg
 	}

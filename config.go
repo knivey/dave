@@ -91,6 +91,9 @@ type AIConfig struct {
 	Temperature         float32
 	MaxHistory          int  `toml:"maxhistory"`
 	RenderMarkdown      bool `toml:"rendermarkdown"`
+	DetectImages        bool `toml:"detectimages"`
+	MaxImages           int  `toml:"maximages"`
+	MaxContextImages    int  `toml:"maxcontextimages"`
 }
 
 type Service struct {
@@ -136,6 +139,12 @@ func (cfg *AIConfig) ApplyDefaults(service Service) {
 	}
 	if cfg.MaxHistory == 0 {
 		cfg.MaxHistory = service.MaxHistory
+	}
+	if cfg.MaxImages == 0 {
+		cfg.MaxImages = 5
+	}
+	if cfg.MaxContextImages == 0 {
+		cfg.MaxContextImages = 5
 	}
 }
 

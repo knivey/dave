@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"time"
@@ -64,11 +65,47 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 			Content: cfg.System,
 		})
 	}
-	messages = AddContext(cfg, ctx_key, gogpt.ChatCompletionMessage{
-		Role:    gogpt.ChatMessageRoleUser,
-		Content: args[0],
-	})
-	logger.Debug("running completion with messages:", "messages", messages)
+	messages = GetContext(ctx_key).Messages
+
+	var userMsg gogpt.ChatCompletionMessage
+	if cfg.DetectImages {
+		cleanText, imageUrls := detectImageURLs(args[0])
+
+		if len(imageUrls) > 0 {
+			existingImages := countContextImages(messages)
+			remaining := cfg.MaxContextImages - existingImages
+
+			if remaining <= 0 {
+				c.Cmd.Reply(e, fmt.Sprintf("image limit reached (%d max in context), send text only", cfg.MaxContextImages))
+				return
+			}
+
+			if len(imageUrls) > remaining {
+				c.Cmd.Reply(e, fmt.Sprintf("only %d more image(s) allowed in this context (%d/%d used)", remaining, existingImages, cfg.MaxContextImages))
+				return
+			}
+
+			var err error
+			userMsg, err = buildImageMessage(cleanText, imageUrls, cfg.MaxImages)
+			if err != nil {
+				c.Cmd.Reply(e, "failed to process images: "+err.Error())
+				return
+			}
+		} else {
+			userMsg = gogpt.ChatCompletionMessage{
+				Role:    gogpt.ChatMessageRoleUser,
+				Content: cleanText,
+			}
+		}
+	} else {
+		userMsg = gogpt.ChatCompletionMessage{
+			Role:    gogpt.ChatMessageRoleUser,
+			Content: args[0],
+		}
+	}
+
+	messages = AddContext(cfg, ctx_key, userMsg)
+	logger.Debug("running completion with messages:", "messages", sanitizeMessages(messages))
 
 	req := gogpt.ChatCompletionRequest{
 		Model:               cfg.Model,
@@ -80,6 +117,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 
 	if cfg.Streaming {
 		req.Stream = true
+		req.StreamOptions = &gogpt.StreamOptions{IncludeUsage: true}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -111,6 +149,8 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 			//think := text[:cut]
 			text = text[cut:]
 		}
+
+		logger.Info("token usage", "prompt", resp.Usage.PromptTokens, "completion", resp.Usage.CompletionTokens, "total", resp.Usage.TotalTokens)
 
 		if cfg.RenderMarkdown {
 			text = markdowntoirc.MarkdownToIRC(text)
@@ -151,6 +191,12 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 			c.Cmd.Reply(e, err.Error())
 			logger.Error(err.Error())
 			return
+		}
+		if resp.Usage != nil {
+			logger.Info("token usage", "prompt", resp.Usage.PromptTokens, "completion", resp.Usage.CompletionTokens, "total", resp.Usage.TotalTokens)
+		}
+		if len(resp.Choices) == 0 {
+			continue
 		}
 		buffer += resp.Choices[0].Delta.Content
 		bufferb += resp.Choices[0].Delta.Content

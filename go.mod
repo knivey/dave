@@ -1,10 +1,11 @@
 module github.come/knivey/dave
 
-go 1.24.0
+go 1.25.0
 
 require (
 	github.com/BurntSushi/toml v1.5.0
 	github.com/alecthomas/chroma/v2 v2.20.0
+	github.com/chai2010/webp v1.4.0
 	github.com/gomarkdown/markdown v0.0.0-20250810172220-2e2c11897d1a
 	github.com/gorilla/websocket v1.5.3
 	github.com/lrstanley/girc v1.1.1
@@ -13,6 +14,7 @@ require (
 	github.com/sashabaranov/go-openai v1.41.2
 	github.com/vodkaslime/wildcard v0.0.0-20220926070406-71dac9214330
 	golang.org/x/exp v0.0.0-20251017212417-90e834f514db
+	golang.org/x/image v0.38.0
 	golang.org/x/time v0.14.0
 )
 

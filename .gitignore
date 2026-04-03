@@ -3,3 +3,4 @@ prod.toml
 test.toml
 .idea
 testMD/testMD
+ignores.txt

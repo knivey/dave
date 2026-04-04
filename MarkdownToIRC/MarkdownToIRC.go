@@ -16,8 +16,7 @@ import (
 )
 
 type Renderer struct {
-	listIdx     []int
-	lastCounter int
+	listIdx []int
 }
 
 var colorRE = regexp.MustCompile("\x03(\\d\\d)?(,\\d\\d)?")
@@ -164,15 +163,8 @@ func (r *Renderer) RenderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 		}
 	case *ast.List:
 		if entering {
-			start := node.Start
-			if node.ListFlags&ast.ListTypeOrdered != 0 && start == 0 {
-				start = r.lastCounter
-			}
-			r.listIdx = append(r.listIdx, start)
+			r.listIdx = append(r.listIdx, node.Start)
 		} else {
-			if len(r.listIdx) > 0 {
-				r.lastCounter = r.listIdx[len(r.listIdx)-1]
-			}
 			r.listIdx = r.listIdx[:len(r.listIdx)-1]
 		}
 	case *ast.ListItem:

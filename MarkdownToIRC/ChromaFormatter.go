@@ -102,17 +102,16 @@ type IRCFormatter struct {
 }
 
 func (*IRCFormatter) Format(w io.Writer, style *chroma.Style, it chroma.Iterator) (err error) {
-	var lastSytle IRCStyle
+	var lastStyle IRCStyle
 	for token := it(); token != chroma.EOF; token = it() {
 		entry := style.Get(token.Type)
 		newStyle := IRCStyleFromEntry(entry)
 
-		if lastSytle != newStyle {
-			fmt.Fprint(w, newStyle.DeltaFormat(lastSytle))
+		if lastStyle != newStyle {
+			fmt.Fprint(w, newStyle.DeltaFormat(lastStyle))
 		}
-		//fmt.Fprint(w, "\x1b[032m("+token.Type.String()+")\x1b[0m")
 		writeToken(w, newStyle, token.Value)
-		lastSytle = newStyle
+		lastStyle = newStyle
 	}
 	return nil
 }

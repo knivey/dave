@@ -114,3 +114,28 @@ end
 
 draw_mouse
 ```
+
+### Linux:
+1. **Modify VPN Configuration:**
+   - Depending on your VPN setup, you may need to modify the configuration file to exclude x.com from the VPN.
+
+2. **Add Routes:**
+   - Open Terminal.
+   - Use the `ip route add` command to exclude specific IPs. Example:
+     ```
+     sudo ip route add <IP Address> via <Gateway IP>
+     ```
+
+**German raves (esp. Berlin techno scene):**
+- Club-focused (Berghain, Tresor).
+- Minimal/hard techno, 10h+ DJ sets.
+- Strict doors, dark/industrial vibe, top sound systems.
+- Legal-ish, pricey, queue hell.
+
+**French raves (tekno/free parties):**
+- Outdoor teknivals, illegal fields.
+- Hardtek, tribe, frenchcore, massive rigs.
+- Chaotic, communal, cheap/free, all-weekend binges.
+- Police raids, DIY spirit.
+
+Germans = precision machine. French = wild free party anarchy. Pick your poison! 🎧

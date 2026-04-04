@@ -19,14 +19,6 @@ type Renderer struct {
 	listIdx []int
 }
 
-// why isnt this a built in?
-func Sum(numbers ...int) (total int) {
-	for _, v := range numbers {
-		total += v
-	}
-	return
-}
-
 var colorRE = regexp.MustCompile("\x03(\\d\\d)?(,\\d\\d)?")
 
 // only expected to be good for our syntax formatter as we know it outputs nothing too crazy
@@ -58,12 +50,7 @@ func makeIndents(node ast.Node) (out string) {
 	}
 }
 
-var writeDebug = false
-
 func writes(w io.Writer, node ast.Node, text string) {
-	if writeDebug {
-		fmt.Fprintf(w, "[%T]", node)
-	}
 	for _, v := range text {
 		if v == '\n' {
 			fmt.Fprint(w, "\n"+makeIndents(node))
@@ -71,26 +58,18 @@ func writes(w io.Writer, node ast.Node, text string) {
 			fmt.Fprint(w, string(v))
 		}
 	}
-	if writeDebug {
-		fmt.Fprintf(w, "[/%T]", node)
-	}
 }
 
 func writesWithNegOffset(w io.Writer, node ast.Node, text string, negativeOffset int) {
-	if writeDebug {
-		fmt.Fprintf(w, "[[%T]]", node)
-	}
 	for _, v := range text {
 		if v == '\n' {
 			indent := makeIndents(node)
-			off := max(len(indent)-negativeOffset, 0)
-			fmt.Fprint(w, "\n"+indent[:off])
+			off := max(utf8.RuneCountInString(indent)-negativeOffset, 0)
+			trimmed := string([]rune(indent)[:off])
+			fmt.Fprint(w, "\n"+trimmed)
 		} else {
 			fmt.Fprint(w, string(v))
 		}
-	}
-	if writeDebug {
-		fmt.Fprintf(w, "[[/%T]]", node)
 	}
 }
 
@@ -104,8 +83,12 @@ func (r *Renderer) RenderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 		writes(w, node, "\x1D")
 	case *ast.Hardbreak:
 		writes(w, node, "\n")
+	case *ast.Softbreak:
+		writes(w, node, " ")
 	case *ast.Heading:
-		writes(w, node, "\n\x02")
+		if entering {
+			writes(w, node, "\n\x02")
+		}
 	case *ast.Paragraph:
 		if _, ok := node.GetParent().(*ast.ListItem); ok {
 			return ast.GoToNext
@@ -131,6 +114,12 @@ func (r *Renderer) RenderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 
 			max := 0
 			lines := strings.Split(lineBuffer.String(), "\n")
+			for len(lines) > 0 && stripIRCCodes(lines[0]) == "" {
+				lines = lines[1:]
+			}
+			for len(lines) > 0 && stripIRCCodes(lines[len(lines)-1]) == "" {
+				lines = lines[:len(lines)-1]
+			}
 			for _, v := range lines {
 				v = colorCancelRE.ReplaceAllLiteralString(v, "\x0300")
 				v = stripIRCCodes(v)
@@ -146,11 +135,19 @@ func (r *Renderer) RenderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 				rpad := strings.Repeat(" ", max-utf8.RuneCountInString(stripIRCCodes(v)))
 				outs = append(outs, fmt.Sprintf(" \x030,90%s%s\x03 ", v, rpad))
 			}
-			writes(w, node, strings.Join(outs[:len(outs)-1], "\n"))
+			if len(outs) > 0 {
+				writes(w, node, strings.Join(outs, "\n"))
+			}
 		} else {
 			max := 0
 			text := strings.ReplaceAll(string(node.Literal), "\t", "        ")
 			lines := strings.Split(text, "\n")
+			for len(lines) > 0 && lines[0] == "" {
+				lines = lines[1:]
+			}
+			for len(lines) > 0 && lines[len(lines)-1] == "" {
+				lines = lines[:len(lines)-1]
+			}
 			for _, v := range lines {
 				if max < utf8.RuneCountInString(v) {
 					max = utf8.RuneCountInString(v)
@@ -160,7 +157,9 @@ func (r *Renderer) RenderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 			for _, v := range lines {
 				outs = append(outs, fmt.Sprintf(" \x030,90%-*s\x03 ", max, v))
 			}
-			writes(w, node, strings.Join(outs[:len(outs)-1], "\n"))
+			if len(outs) > 0 {
+				writes(w, node, strings.Join(outs, "\n"))
+			}
 		}
 	case *ast.List:
 		if entering {
@@ -178,16 +177,10 @@ func (r *Renderer) RenderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 				lead = " \u2022 " //"•"
 			}
 			writesWithNegOffset(w, node, "\n"+lead, utf8.RuneCountInString(lead))
-		} else {
-			// For IRC lets keep them all tight to minimize wasted lines
-			//seems ListItem.Tight doesnt get set but parent does
-			//if n, ok := node.GetParent().(*ast.List); ok && !n.Tight {
-			//writes(w, node, "\n")
-			//}
 		}
 	default:
 		if leaf := node.AsLeaf(); leaf != nil {
-			writes(w, node, string(leaf.Literal))
+			writes(w, node, strings.TrimRight(string(leaf.Literal), "\n"))
 		}
 	}
 	return ast.GoToNext

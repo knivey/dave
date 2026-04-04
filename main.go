@@ -122,6 +122,7 @@ func sendLoop(out string, network Network, c *girc.Client, e girc.Event) {
 		if len(line) <= 0 {
 			continue
 		}
+		// We prepend lines with a \x02\x02 here to try and prevent our bot from triggering commands on other IRC bots by accident
 		c.Cmd.Reply(e, "\x02\x02"+line)
 		time.Sleep(time.Millisecond * network.Throttle)
 	}

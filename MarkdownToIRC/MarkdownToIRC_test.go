@@ -164,6 +164,11 @@ func TestLists(t *testing.T) {
 			contain: []string{"1. first", "2. second"},
 		},
 		{
+			name:    "OrderedListSplitByCodeBlock",
+			input:   "1. Simple echo example\n```bash\necho hello\n```\n\n2. Echo with variable\n```bash\necho bye\n```",
+			contain: []string{"1. Simple echo example", "2. Echo with variable"},
+		},
+		{
 			name:    "NestedUnorderedList",
 			input:   "- outer\n  - inner",
 			contain: []string{"\u2022 outer", "   \u2022 inner"},

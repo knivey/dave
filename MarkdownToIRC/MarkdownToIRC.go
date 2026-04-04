@@ -16,7 +16,9 @@ import (
 )
 
 type Renderer struct {
-	listIdx []int
+	listIdx     []int
+	lastCounter int
+	lastWasCode bool
 }
 
 var colorRE = regexp.MustCompile("\x03(\\d\\d)?(,\\d\\d)?")
@@ -99,6 +101,9 @@ func (r *Renderer) RenderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 	case *ast.Code:
 		writes(w, node, fmt.Sprintf("\x030,90%s\x03", string(node.Literal)))
 	case *ast.CodeBlock:
+		if _, ok := node.GetParent().(*ast.ListItem); !ok {
+			r.lastWasCode = true
+		}
 		writes(w, node, "\n")
 		lexer := lexers.Get(string(node.Info))
 		if lexer != nil {
@@ -163,9 +168,19 @@ func (r *Renderer) RenderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 		}
 	case *ast.List:
 		if entering {
-			r.listIdx = append(r.listIdx, node.Start)
+			start := node.Start
+			if node.ListFlags&ast.ListTypeOrdered != 0 && start == 0 {
+				if r.lastWasCode {
+					start = r.lastCounter
+				}
+			}
+			r.listIdx = append(r.listIdx, start)
 		} else {
+			if len(r.listIdx) > 0 {
+				r.lastCounter = r.listIdx[len(r.listIdx)-1]
+			}
 			r.listIdx = r.listIdx[:len(r.listIdx)-1]
+			r.lastWasCode = false
 		}
 	case *ast.ListItem:
 		if entering {

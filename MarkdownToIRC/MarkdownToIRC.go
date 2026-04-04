@@ -19,6 +19,13 @@ type Renderer struct {
 	listIdx     []int
 	lastCounter int
 	lastWasCode bool
+	// lastCounter and lastWasCode work around two gomarkdown bugs:
+	// 1. gomarkdown always sets List.Start=0 regardless of the markdown number (e.g. "2." becomes start=0)
+	// 2. gomarkdown splits a single logical list into multiple List nodes when a code block appears
+	//    between list items, even without a blank line. The code block is parsed as a Document-level
+	//    sibling, not as part of the list item.
+	// We track the last counter value and whether a top-level code block was just rendered, so we
+	// can continue numbering when a new List node with start=0 appears after a code block.
 }
 
 var colorRE = regexp.MustCompile("\x03(\\d\\d)?(,\\d\\d)?")
@@ -101,6 +108,8 @@ func (r *Renderer) RenderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 	case *ast.Code:
 		writes(w, node, fmt.Sprintf("\x030,90%s\x03", string(node.Literal)))
 	case *ast.CodeBlock:
+		// Track top-level code blocks to detect when gomarkdown has split a list
+		// into multiple List nodes (see Renderer struct comment for details)
 		if _, ok := node.GetParent().(*ast.ListItem); !ok {
 			r.lastWasCode = true
 		}

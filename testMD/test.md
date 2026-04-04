@@ -33,7 +33,8 @@ turtle.done()
 
 1. **Importing Modules**:  
    We import `turtle` for drawing and `random` for selecting random colors.
-
+   1. lol
+   2. ok
 2. **Screen Setup**:  
    `screen = turtle.Screen()` sets up the drawing window, and `screen.bgcolor("black")` changes its background color to black.
 
@@ -139,3 +140,51 @@ draw_mouse
 - Police raids, DIY spirit.
 
 Germans = precision machine. French = wild free party anarchy. Pick your poison! 🎧
+
+
+1. Simple echo example
+```bash
+#!/bin/bash
+# Simple echo example
+echo "Hello, world!"
+```
+
+2. Echo with variable
+```bash
+#!/bin/bash
+# Echo with variable
+name="Dave"
+echo "Hello, $name!"
+```
+
+
+1. Simple echo example
+```bash
+#!/bin/bash
+# Simple echo example
+echo "Hello, world!"
+```
+2. Echo with variable
+```bash
+#!/bin/bash
+# Echo with variable
+name="Dave"
+echo "Hello, $name!"
+```
+
+
+
+2. Simple echo example
+```bash
+#!/bin/bash
+# Simple echo example
+echo "Hello, world!"
+```
+
+3. Echo with variable
+```bash
+#!/bin/bash
+# Echo with variable
+name="Dave"
+echo "Hello, $name!"
+```

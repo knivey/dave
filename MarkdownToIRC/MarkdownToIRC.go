@@ -191,6 +191,8 @@ func (r *Renderer) RenderFooter(w io.Writer, ast ast.Node) {
 
 }
 
+const maxCodeBlockPadWidth = 80
+
 func writeHighlightedCodeBlock(w io.Writer, node ast.Node, highlighted string) {
 	lines := strings.Split(highlighted, "\n")
 	for len(lines) > 0 && stripIRCCodes(lines[0]) == "" {
@@ -207,10 +209,11 @@ func writeHighlightedCodeBlock(w io.Writer, node ast.Node, highlighted string) {
 			maxWidth = utf8.RuneCountInString(v)
 		}
 	}
+	padWidth := min(maxWidth, maxCodeBlockPadWidth)
 	var outs []string
 	for _, v := range lines {
 		v := colorCancelRE.ReplaceAllLiteralString(v, "\x0300")
-		rpad := strings.Repeat(" ", maxWidth-utf8.RuneCountInString(stripIRCCodes(v)))
+		rpad := strings.Repeat(" ", max(padWidth-utf8.RuneCountInString(stripIRCCodes(v)), 0))
 		outs = append(outs, fmt.Sprintf(" \x030,90%s%s\x03 ", v, rpad))
 	}
 	if len(outs) > 0 {
@@ -232,9 +235,10 @@ func writePlainCodeBlock(w io.Writer, node ast.Node, text string) {
 			maxWidth = utf8.RuneCountInString(v)
 		}
 	}
+	padWidth := min(maxWidth, maxCodeBlockPadWidth)
 	var outs []string
 	for _, v := range lines {
-		outs = append(outs, fmt.Sprintf(" \x030,90%-*s\x03 ", maxWidth, v))
+		outs = append(outs, fmt.Sprintf(" \x030,90%-*s\x03 ", padWidth, v))
 	}
 	if len(outs) > 0 {
 		writes(w, node, strings.Join(outs, "\n"))

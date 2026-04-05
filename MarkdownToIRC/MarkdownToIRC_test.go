@@ -781,3 +781,81 @@ func TestCodeBlockWidthCapping(t *testing.T) {
 		}
 	})
 }
+
+func TestHighlightedCodeBlockWidthCapping(t *testing.T) {
+	longLine := strings.Repeat("x", 120)
+	shortLine := "x"
+
+	codeRE := regexp.MustCompile(`\x03\d{1,2}(,\d{1,2})?|\x03|\x02|\x1D|\x1F`)
+	stripAll := func(s string) string {
+		return codeRE.ReplaceAllLiteralString(s, "")
+	}
+
+	t.Run("MixedLengthsWithLanguage", func(t *testing.T) {
+		input := "```go\n" + shortLine + "\n" + longLine + "\n```"
+		got := MarkdownToIRC(input)
+		lines := strings.Split(got, "\n")
+		var codeLines []string
+		for _, l := range lines {
+			if strings.Contains(l, "\x030,90") {
+				codeLines = append(codeLines, l)
+			}
+		}
+		if len(codeLines) != 2 {
+			t.Fatalf("expected 2 code lines, got %d", len(codeLines))
+		}
+		shortClean := stripAll(codeLines[0])
+		longClean := stripAll(codeLines[1])
+		shortLen := utf8.RuneCountInString(shortClean)
+		longLen := utf8.RuneCountInString(longClean)
+		expectedPad := maxCodeBlockPadWidth + 2
+		if shortLen != expectedPad {
+			t.Errorf("short line padded to %d chars, want %d (80 + borders), got: %q", shortLen, expectedPad, shortClean)
+		}
+		if longLen <= shortLen {
+			t.Errorf("long line should exceed padded width, got length %d vs short %d", longLen, shortLen)
+		}
+	})
+
+	t.Run("AllLinesOver80WithLanguage", func(t *testing.T) {
+		line1 := strings.Repeat("a", 90)
+		line2 := strings.Repeat("b", 100)
+		input := "```python\n" + line1 + "\n" + line2 + "\n```"
+		got := MarkdownToIRC(input)
+		lines := strings.Split(got, "\n")
+		var codeLines []string
+		for _, l := range lines {
+			if strings.Contains(l, "\x030,90") {
+				codeLines = append(codeLines, stripAll(l))
+			}
+		}
+		if len(codeLines) != 2 {
+			t.Fatalf("expected 2 code lines, got %d", len(codeLines))
+		}
+		len1 := utf8.RuneCountInString(codeLines[0])
+		len2 := utf8.RuneCountInString(codeLines[1])
+		if len1 == len2 {
+			t.Errorf("expected different lengths when all lines exceed 80, got both %d", len1)
+		}
+	})
+
+	t.Run("AllLinesUnder80WithLanguage", func(t *testing.T) {
+		input := "```go\nfoo\nbar\n```"
+		got := MarkdownToIRC(input)
+		lines := strings.Split(got, "\n")
+		var codeLines []string
+		for _, l := range lines {
+			if strings.Contains(l, "\x030,90") {
+				codeLines = append(codeLines, stripAll(l))
+			}
+		}
+		if len(codeLines) < 2 {
+			t.Fatalf("expected multiple code lines, got %d", len(codeLines))
+		}
+		firstLen := utf8.RuneCountInString(codeLines[0])
+		secondLen := utf8.RuneCountInString(codeLines[1])
+		if firstLen != secondLen {
+			t.Errorf("expected all lines padded to same length, got %d vs %d", firstLen, secondLen)
+		}
+	})
+}

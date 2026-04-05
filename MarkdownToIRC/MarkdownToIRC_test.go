@@ -91,6 +91,12 @@ func TestHeadings(t *testing.T) {
 			input:   "# One\n\n## Two",
 			contain: []string{"\n\x02One", "\n\x02Two"},
 		},
+		{
+			name:       "HeadingBoldClosed",
+			input:      "# Title\n\nBody text",
+			contain:    []string{"\x02Title\x02"},
+			notContain: []string{"\x02Body"},
+		},
 	})
 }
 
@@ -522,6 +528,177 @@ func TestComplexNesting(t *testing.T) {
 			contain: []string{
 				"\x0309>  \u2022 item\x030,90code\x03",
 			},
+		},
+	})
+}
+
+func TestCodeBlockFallback(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name:  "PlainCodeBlockNoLang",
+			input: "```\nplain code\n```",
+		},
+		{
+			name:  "PlainCodeBlockWithTabs",
+			input: "```\n\tindented\n```",
+		},
+		{
+			name:  "PlainCodeBlockMultiLine",
+			input: "```\nline1\nline2\nline3\n```",
+		},
+		{
+			name:  "PlainCodeBlockUnevenLines",
+			input: "```\nshort\nthis is a much longer line\n```",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MarkdownToIRC(tt.input)
+			if strings.Contains(got, "\n\n") {
+				t.Errorf("output contains consecutive newlines\ngot: %s", humanize(got))
+			}
+			if !strings.Contains(got, "\x030,90") {
+				t.Errorf("output missing code colour code, got: %s", humanize(got))
+			}
+		})
+	}
+}
+
+func TestHorizontalRule(t *testing.T) {
+	runTests(t, []mdTest{
+		{
+			name:    "SimpleHR",
+			input:   "---",
+			contain: []string{strings.Repeat("-", 40)},
+		},
+		{
+			name:    "HRAsterisks",
+			input:   "***",
+			contain: []string{strings.Repeat("-", 40)},
+		},
+		{
+			name:    "HRUnderscores",
+			input:   "___",
+			contain: []string{strings.Repeat("-", 40)},
+		},
+		{
+			name:    "HRBetweenParagraphs",
+			input:   "before\n\n---\n\nafter",
+			contain: []string{"before", "after", strings.Repeat("-", 40)},
+		},
+		{
+			name:       "HRNoConsecutiveNewlines",
+			input:      "text\n\n---\n\nmore text",
+			notContain: []string{"\n\n"},
+		},
+	})
+}
+
+func TestLinks(t *testing.T) {
+	runTests(t, []mdTest{
+		{
+			name:    "SimpleLink",
+			input:   "[click here](https://example.com)",
+			contain: []string{"click here", "(https://example.com)"},
+		},
+		{
+			name:    "LinkWithBoldText",
+			input:   "[**bold link**](https://example.com)",
+			contain: []string{"\x02bold link\x02", "(https://example.com)"},
+		},
+		{
+			name:    "LinkWithItalicText",
+			input:   "[*italic link*](https://example.com)",
+			contain: []string{"\x1Ditalic link\x1D", "(https://example.com)"},
+		},
+		{
+			name:    "LinkWithCodeText",
+			input:   "[`code link`](https://example.com)",
+			contain: []string{"\x030,90code link\x03", "(https://example.com)"},
+		},
+		{
+			name:    "MultipleLinks",
+			input:   "[one](https://one.com) and [two](https://two.com)",
+			contain: []string{"one", "(https://one.com)", "two", "(https://two.com)"},
+		},
+	})
+}
+
+func TestImages(t *testing.T) {
+	runTests(t, []mdTest{
+		{
+			name:    "SimpleImage",
+			input:   "![alt text](https://example.com/img.png)",
+			contain: []string{"[image: alt text](https://example.com/img.png)"},
+		},
+		{
+			name:    "ImageWithBoldAlt",
+			input:   "![**bold alt**](https://example.com/img.png)",
+			contain: []string{"[image: **bold alt**](https://example.com/img.png)"},
+		},
+		{
+			name:    "MultipleImages",
+			input:   "![first](a.png) and ![second](b.png)",
+			contain: []string{"[image: first](a.png)", "[image: second](b.png)"},
+		},
+	})
+}
+
+func TestMixedNewFeatures(t *testing.T) {
+	runTests(t, []mdTest{
+		{
+			name:  "LinkAndHR",
+			input: "[docs](https://docs.example.com)\n\n---\n\nSee above",
+			contain: []string{
+				"docs",
+				"(https://docs.example.com)",
+				strings.Repeat("-", 40),
+				"See above",
+			},
+			notContain: []string{"\n\n"},
+		},
+		{
+			name:  "ImageAndHR",
+			input: "![screenshot](shot.png)\n\n---\n\ncaption",
+			contain: []string{
+				"[image: screenshot](shot.png)",
+				strings.Repeat("-", 40),
+				"caption",
+			},
+			notContain: []string{"\n\n"},
+		},
+		{
+			name:  "LinkInList",
+			input: "- [read more](https://example.com)\n- [docs](https://docs.example.com)",
+			contain: []string{
+				"\u2022",
+				"read more",
+				"(https://example.com)",
+				"docs",
+				"(https://docs.example.com)",
+			},
+		},
+		{
+			name:  "LinkInQuote",
+			input: "> check [this](https://example.com)",
+			contain: []string{
+				"\x0309>",
+				"this",
+				"(https://example.com)",
+			},
+		},
+		{
+			name:  "HRAfterHeading",
+			input: "# Title\n\n---\n\nbody",
+			contain: []string{
+				"\x02Title\x02",
+				strings.Repeat("-", 40),
+				"body",
+			},
+			notContain: []string{"\n\n"},
 		},
 	})
 }

@@ -12,9 +12,9 @@ import (
 
 var c = chroma.MustParseColour
 
-type IrcColorTable map[chroma.Colour]string
+type ircColorTable map[chroma.Colour]string
 
-var IrcTable = IrcColorTable{
+var ircTable = ircColorTable{
 	c("#FFFFFF"): "00",
 	c("#000000"): "01",
 	c("#00007F"): "02",
@@ -33,7 +33,7 @@ var IrcTable = IrcColorTable{
 	c("#D2D2D2"): "15",
 }
 
-func (table IrcColorTable) findClosest(seeking chroma.Colour) chroma.Colour {
+func (table ircColorTable) findClosest(seeking chroma.Colour) chroma.Colour {
 	closestColour := chroma.Colour(0)
 	closest := float64(math.MaxFloat64)
 	for colour := range table {
@@ -55,14 +55,15 @@ type IRCStyle struct {
 
 func IRCStyleFromEntry(entry chroma.StyleEntry) IRCStyle {
 	return IRCStyle{
-		Colour:    IrcTable[IrcTable.findClosest(entry.Colour)],
+		Colour:    ircTable[ircTable.findClosest(entry.Colour)],
 		Bold:      entry.Bold == chroma.Yes,
 		Italic:    entry.Italic == chroma.Yes,
 		Underline: entry.Underline == chroma.Yes,
 	}
 }
 
-func (i IRCStyle) Format() (out string) {
+func (i IRCStyle) Format() string {
+	out := ""
 	if i.Bold {
 		out += "\x02"
 	}
@@ -75,10 +76,11 @@ func (i IRCStyle) Format() (out string) {
 	if i.Colour != "" {
 		out += "\x03" + i.Colour
 	}
-	return
+	return out
 }
 
-func (i IRCStyle) DeltaFormat(old IRCStyle) (out string) {
+func (i IRCStyle) DeltaFormat(old IRCStyle) string {
+	out := ""
 	if i.Bold != old.Bold {
 		out += "\x02"
 	}
@@ -95,13 +97,12 @@ func (i IRCStyle) DeltaFormat(old IRCStyle) (out string) {
 			out += "\x03" + i.Colour
 		}
 	}
-	return
+	return out
 }
 
-type IRCFormatter struct {
-}
+type IRCFormatter struct{}
 
-func (*IRCFormatter) Format(w io.Writer, style *chroma.Style, it chroma.Iterator) (err error) {
+func (*IRCFormatter) Format(w io.Writer, style *chroma.Style, it chroma.Iterator) error {
 	var lastStyle IRCStyle
 	for token := it(); token != chroma.EOF; token = it() {
 		entry := style.Get(token.Type)

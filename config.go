@@ -58,6 +58,7 @@ type SDConfig struct {
 	Scheduler    string
 	Width        int64
 	Height       int64
+	Description  string
 }
 
 type PromptEnhancementConfig struct {
@@ -77,6 +78,7 @@ type ComfyConfig struct {
 	SeedNodes     []string `toml:"seed_nodes"`
 	Timeout       int
 	EnhancePrompt string `toml:"enhanceprompt"`
+	Description   string
 }
 
 type AIConfig struct {
@@ -94,6 +96,7 @@ type AIConfig struct {
 	DetectImages        bool `toml:"detectimages"`
 	MaxImages           int  `toml:"maximages"`
 	MaxContextImages    int  `toml:"maxcontextimages"`
+	Description         string
 }
 
 type Service struct {

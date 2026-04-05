@@ -42,11 +42,13 @@ func init() {
 type CmdFunc func(Network, *girc.Client, girc.Event, ...string)
 
 var stop_re = regexp.MustCompile("^stop$")
+var help_re = regexp.MustCompile("^(help|commands)$")
 
 type CmdMap map[*regexp.Regexp]CmdFunc
 
 var commands = CmdMap{
 	stop_re: func(n Network, c *girc.Client, e girc.Event, s ...string) { stop(n, c, e, nil, s...) },
+	help_re: func(n Network, c *girc.Client, e girc.Event, s ...string) { help(n, c, e, s...) },
 }
 
 func main() {

@@ -1,4 +1,4 @@
-module github.come/knivey/dave
+module github.com/knivey/dave
 
 go 1.25.0
 

@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	markdowntoirc "github.come/knivey/dave/MarkdownToIRC"
+	markdowntoirc "github.com/knivey/dave/MarkdownToIRC"
 )
 
 func main() {

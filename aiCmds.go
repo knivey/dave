@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
+	markdowntoirc "github.com/knivey/dave/MarkdownToIRC"
 	"github.com/lrstanley/girc"
 	logxi "github.com/mgutz/logxi/v1"
 	gogpt "github.com/sashabaranov/go-openai"
-	markdowntoirc "github.come/knivey/dave/MarkdownToIRC"
 )
 
 func completion(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...string) {

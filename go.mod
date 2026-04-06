@@ -13,6 +13,7 @@ require (
 	github.com/muesli/reflow v0.3.0
 	github.com/sashabaranov/go-openai v1.41.2
 	github.com/vodkaslime/wildcard v0.0.0-20220926070406-71dac9214330
+	github.com/yuin/goldmark v1.8.2
 	golang.org/x/exp v0.0.0-20260312153236-7ab1446f8b90
 	golang.org/x/image v0.38.0
 	golang.org/x/time v0.15.0

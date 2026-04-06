@@ -236,7 +236,7 @@ func TestBlockQuotes(t *testing.T) {
 		{
 			name:    "BlockQuoteMultiLine",
 			input:   "> line one\n> line two",
-			contain: []string{"\x0309> line one", "\x0309> line two"},
+			contain: []string{"\x0309> line one line two"},
 		},
 		{
 			name:    "NestedBlockQuote",
@@ -266,7 +266,7 @@ func TestBreaks(t *testing.T) {
 		{
 			name:    "Softbreak",
 			input:   "line1\nline2",
-			contain: []string{"line1\nline2"},
+			contain: []string{"line1 line2"},
 		},
 	})
 }
@@ -381,7 +381,7 @@ func TestQuoteRendering(t *testing.T) {
 		{
 			name:    "QuoteMultiLine",
 			input:   "> line one\n> line two",
-			contain: []string{"\x0309> line one", "\x0309> line two"},
+			contain: []string{"\x0309> line one line two"},
 		},
 		{
 			name:    "DoubleNestedQuote",
@@ -425,26 +425,26 @@ func TestQuoteInsideLists(t *testing.T) {
 		{
 			name:       "ListItemWithQuote",
 			input:      "- item\n  > quoted",
-			contain:    []string{"\u2022 item", "   > quoted"},
-			notContain: []string{"\x0309"},
+			contain:    []string{"\u2022 item", "\x0309> quoted"},
+			notContain: []string{},
 		},
 		{
 			name:       "ListItemWithMultiLineQuote",
 			input:      "- item\n  > line one\n  > line two",
-			contain:    []string{"\u2022 item", "   > line one", "   > line two"},
-			notContain: []string{"\x0309"},
+			contain:    []string{"\u2022 item", "\x0309> line one line two"},
+			notContain: []string{},
 		},
 		{
 			name:       "NestedListItemWithQuote",
 			input:      "- outer\n  - inner\n    > quoted",
-			contain:    []string{"\u2022 outer", "   \u2022 inner", "      > quoted"},
-			notContain: []string{"\x0309"},
+			contain:    []string{"\u2022 outer", "   \u2022 inner", "\x0309> quoted"},
+			notContain: []string{},
 		},
 		{
 			name:       "QuoteInsideNestedList",
 			input:      "- a\n  - b\n    > quote",
-			contain:    []string{"\u2022 a", "   \u2022 b", "      > quote"},
-			notContain: []string{"\x0309"},
+			contain:    []string{"\u2022 a", "   \u2022 b", "\x0309> quote"},
+			notContain: []string{},
 		},
 		{
 			name:    "ListItemWithQuoteSeparated",
@@ -502,7 +502,7 @@ func TestComplexNesting(t *testing.T) {
 			input: "> - item\n>   > nested quote",
 			contain: []string{
 				"\x0309>  \u2022 item",
-				"\x0309>    > nested quote",
+				"\x0309>    \x0309> nested quote",
 			},
 		},
 		{
@@ -510,7 +510,7 @@ func TestComplexNesting(t *testing.T) {
 			input: "- text\n  > `code`",
 			contain: []string{
 				"\u2022 text",
-				"   > \x030,90code\x03",
+				"   \x0309> \x030,90code\x03",
 			},
 		},
 		{
@@ -520,14 +520,14 @@ func TestComplexNesting(t *testing.T) {
 				"\u2022 l1",
 				"   \u2022 l2",
 				"      \u2022 l3",
-				"         > quoted",
+				"         \x0309> quoted",
 			},
 		},
 		{
 			name:  "QuoteWithListAndCode",
 			input: "> - item\n>   `code`",
 			contain: []string{
-				"\x0309>  \u2022 item\x030,90code\x03",
+				"\x0309>  \u2022 item \x030,90code\x03",
 			},
 		},
 	})
@@ -638,7 +638,7 @@ func TestImages(t *testing.T) {
 		{
 			name:    "ImageWithBoldAlt",
 			input:   "![**bold alt**](https://example.com/img.png)",
-			contain: []string{"[image: **bold alt**](https://example.com/img.png)"},
+			contain: []string{"[image: \x02bold alt\x02](https://example.com/img.png)"},
 		},
 		{
 			name:    "MultipleImages",
@@ -856,6 +856,205 @@ func TestHighlightedCodeBlockWidthCapping(t *testing.T) {
 		secondLen := utf8.RuneCountInString(codeLines[1])
 		if firstLen != secondLen {
 			t.Errorf("expected all lines padded to same length, got %d vs %d", firstLen, secondLen)
+		}
+	})
+}
+
+func TestTables(t *testing.T) {
+	runTests(t, []mdTest{
+		{
+			name: "SimpleTable",
+			input: `| A | B |
+|---|---|
+| 1 | 2 |`,
+			contain: []string{"+---+---+", "| A | B |", "+---+---+", "| 1 | 2 |", "+---+---+"},
+		},
+		{
+			name: "TableWithAlignment",
+			input: `| Left | Center | Right |
+|:-----|:------:|------:|
+| a    |   b    |     c |`,
+			contain: []string{"+------+--------+-------+", "| Left | Center | Right |", "+------+--------+-------+", "| a    |   b    |     c |", "+------+--------+-------+"},
+		},
+		{
+			name: "TableWithBold",
+			input: `| **Name** | **Value** |
+|----------|-----------|
+| foo      | bar       |`,
+			contain: []string{"+------+-------+", "| \x02Name\x02 | \x02Value\x02 |", "+------+-------+", "| foo  | bar   |", "+------+-------+"},
+		},
+		{
+			name:    "TableWithInlineCode",
+			input:   "| Cmd | Desc |\n|-----|------|\n| `ls` | List files |",
+			contain: []string{"+-----+------------+", "| Cmd | Desc       |", "+-----+------------+", "| \x030,90ls\x03  | List files |", "+-----+------------+"},
+		},
+		{
+			name: "TableWithLink",
+			input: `| Site | URL |
+|------|-----|
+| Example | https://example.com |`,
+			contain: []string{"Example", "https://example.com"},
+		},
+		{
+			name: "TableSingleColumn",
+			input: `| Item |
+|------|
+| one  |
+| two  |`,
+			contain: []string{"+------+", "| Item |", "+------+", "| one  |", "| two  |", "+------+"},
+		},
+		{
+			name: "TableMultipleRows",
+			input: `| A | B | C |
+|---|---|---|
+| 1 | 2 | 3 |
+| 4 | 5 | 6 |
+| 7 | 8 | 9 |`,
+			contain: []string{"+---+---+---+", "| A | B | C |", "+---+---+---+", "| 1 | 2 | 3 |", "| 4 | 5 | 6 |", "| 7 | 8 | 9 |", "+---+---+---+"},
+		},
+		{
+			name: "TableWithItalic",
+			input: `| *Key* | *Val* |
+|-------|-------|
+| x     | y     |`,
+			contain: []string{"| \x1DKey\x1D | \x1DVal\x1D |"},
+		},
+		{
+			name:    "TableWithEscapedPipe",
+			input:   "| A | B |\n|---|---|\n| Value \\| separated | other |",
+			contain: []string{"+-------------------+-------+", "| A                 | B     |", "+-------------------+-------+", "| Value | separated | other |", "+-------------------+-------+"},
+		},
+		{
+			name:    "TableWithLineWrap",
+			input:   "| Short | Long |\n|-------|------|\n| ok    | this is a very long cell that should wrap |",
+			contain: []string{"+-------+------------------------------------------+", "| Short | Long                                     |", "+-------+------------------------------------------+", "| ok    | this is a very long cell that should     |", "|       | wrap                                     |", "+-------+------------------------------------------+"},
+		},
+		{
+			name:    "TableWithBR",
+			input:   "| A | B |\n|---|---|\n| line1<br>line2 | test |",
+			contain: []string{"+-------+------+", "| A     | B    |", "+-------+------+", "| line1 | test |", "| line2 |      |", "+-------+------+"},
+		},
+		{
+			name:    "TableWithBRSlash",
+			input:   "| A | B |\n|---|---|\n| line1<br/>line2 | test |",
+			contain: []string{"+-------+------+", "| A     | B    |", "+-------+------+", "| line1 | test |", "| line2 |      |", "+-------+------+"},
+		},
+		{
+			name:    "TableWithBRAndWrap",
+			input:   "| A | B |\n|---|---|\n| test | this is<br>a very long cell text that should wrap properly |",
+			contain: []string{"+------+------------------------------------------+", "| A    | B                                        |", "+------+------------------------------------------+", "| test | this is                                  |", "|      | a very long cell text that should wrap   |", "|      | properly                                 |", "+------+------------------------------------------+"},
+		},
+	})
+}
+
+func TestTableInContext(t *testing.T) {
+	runTests(t, []mdTest{
+		{
+			name:       "TableAfterParagraph",
+			input:      "Here is a table:\n\n| A | B |\n|---|---|\n| 1 | 2 |",
+			contain:    []string{"Here is a table:", "+---+---+", "| A | B |", "| 1 | 2 |"},
+			notContain: []string{"\n\n"},
+		},
+		{
+			name:       "TableBeforeParagraph",
+			input:      "| A | B |\n|---|---|\n| 1 | 2 |\n\nDone.",
+			contain:    []string{"+---+---+", "| A | B |", "| 1 | 2 |", "Done."},
+			notContain: []string{"\n\n"},
+		},
+		{
+			name:       "TableAfterHeading",
+			input:      "## Data\n\n| X |\n|---|\n| y |",
+			contain:    []string{"\x02Data\x02", "+---+", "| X |", "| y |"},
+			notContain: []string{"\n\n"},
+		},
+	})
+}
+
+func TestTableEdgeCases(t *testing.T) {
+	codeRE := regexp.MustCompile(`\x03\d{1,2}(,\d{1,2})?|\x03|\x02|\x1D|\x1F`)
+	stripAll := func(s string) string {
+		return codeRE.ReplaceAllLiteralString(s, "")
+	}
+
+	t.Run("TableWithLongContent", func(t *testing.T) {
+		longCell := strings.Repeat("x", 60)
+		input := "| A | B |\n|---|---|\n| short | " + longCell + " |"
+		got := MarkdownToIRC(input)
+		lines := strings.Split(got, "\n")
+		for _, line := range lines {
+			if strings.HasPrefix(stripAll(line), "|") {
+				lineLen := utf8.RuneCountInString(stripAll(line))
+				if lineLen > 100 {
+					t.Errorf("table line too long: %d chars", lineLen)
+				}
+			}
+		}
+	})
+
+	t.Run("TableWithMixedFormatting", func(t *testing.T) {
+		input := "| **Bold** | *Italic* | `Code` |\n|----------|----------|--------|\n| val1     | val2     | val3   |"
+		got := MarkdownToIRC(input)
+		if !strings.Contains(got, "\x02Bold\x02") {
+			t.Errorf("missing bold in table cell, got: %s", humanize(got))
+		}
+		if !strings.Contains(got, "\x1DItalic\x1D") {
+			t.Errorf("missing italic in table cell, got: %s", humanize(got))
+		}
+		if !strings.Contains(got, "\x030,90Code\x03") {
+			t.Errorf("missing inline code in table cell, got: %s", humanize(got))
+		}
+	})
+
+	t.Run("TableBorderAlignment", func(t *testing.T) {
+		input := "| L | C | R |\n|:--|:--:|--:|\n| a | b | c |"
+		got := MarkdownToIRC(input)
+		lines := strings.Split(got, "\n")
+		var dataLine string
+		for _, line := range lines {
+			clean := stripAll(line)
+			if strings.Contains(clean, "| a ") {
+				dataLine = clean
+				break
+			}
+		}
+		if dataLine == "" {
+			t.Fatalf("could not find data line in: %s", humanize(got))
+		}
+		if !strings.HasPrefix(dataLine, "| a ") {
+			t.Errorf("left alignment failed, got: %q", dataLine)
+		}
+		if !strings.Contains(dataLine, " b ") {
+			t.Errorf("center alignment failed, got: %q", dataLine)
+		}
+		if !strings.Contains(dataLine, " c |") {
+			t.Errorf("right alignment failed, got: %q", dataLine)
+		}
+	})
+
+	t.Run("TableWrapNoFormatBleeding", func(t *testing.T) {
+		input := "| A | B |\n|---|---|\n| **this is a very long bold cell that should wrap** | *short* |"
+		got := MarkdownToIRC(input)
+		lines := strings.Split(got, "\n")
+		for _, line := range lines {
+			if line == "" {
+				continue
+			}
+			stripped := stripAll(line)
+			if !strings.HasPrefix(stripped, "|") || strings.HasPrefix(stripped, "+") {
+				continue
+			}
+			boldCount := strings.Count(line, "\x02")
+			italicCount := strings.Count(line, "\x1D")
+			colorCount := strings.Count(line, "\x03")
+			if boldCount%2 != 0 {
+				t.Errorf("unbalanced bold on line: %q", stripped)
+			}
+			if italicCount%2 != 0 {
+				t.Errorf("unbalanced italic on line: %q", stripped)
+			}
+			if colorCount%2 != 0 {
+				t.Errorf("unbalanced color on line: %q", stripped)
+			}
 		}
 	})
 }

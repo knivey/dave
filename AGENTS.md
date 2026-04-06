@@ -36,7 +36,7 @@ go test -v ./...
 go mod tidy
 ```
 
-**No lint/typecheck/formatter config exists** - no golangci-lint, no Makefile. Follow `go fmt` and `go vet` defaults.
+**No lint/typecheck/formatter config exists** - no golangci-lint, no Makefile. Use `go fmt` and `go vet` for verification.
 
 ## Architecture
 

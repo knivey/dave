@@ -52,6 +52,9 @@ var commands = CmdMap{
 }
 
 func main() {
+	if os.Getenv("LOGXI_FORMAT") == "" {
+		logxi.ProcessLogxiFormatEnv("maxcol=9999")
+	}
 	logger = logxi.New("main")
 	logger.SetLevel(logxi.LevelAll)
 	if len(os.Args) > 1 {

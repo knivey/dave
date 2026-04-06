@@ -2,7 +2,6 @@ package main
 
 import (
 	"sync"
-	"time"
 
 	"golang.org/x/time/rate"
 )
@@ -15,12 +14,5 @@ func init() {
 }
 
 func checkRate(network Network, key string) bool {
-	rateMutex.Lock()
-	defer rateMutex.Unlock()
-
-	if val, ok := rateLimits[network.Name+key]; ok {
-		return val.Allow()
-	}
-	rateLimits[network.Name+key] = rate.NewLimiter(rate.Every(time.Second), 2)
-	return rateLimits[network.Name+key].Allow()
+	return rateLimiter.Allow(network.Name, key)
 }

@@ -107,18 +107,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 	messages = AddContext(cfg, ctx_key, userMsg)
 	logger.Debug("running completion with messages:", "messages", sanitizeMessages(messages))
 
-	req := gogpt.ChatCompletionRequest{
-		Model:               cfg.Model,
-		MaxTokens:           cfg.MaxTokens,
-		MaxCompletionTokens: cfg.MaxCompletionTokens,
-		Messages:            messages,
-		Temperature:         cfg.Temperature,
-	}
-
-	if cfg.Streaming {
-		req.Stream = true
-		req.StreamOptions = &gogpt.StreamOptions{IncludeUsage: true}
-	}
+	req := BuildChatRequest(cfg, messages)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -135,20 +124,9 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 			Role:    gogpt.ChatMessageRoleAssistant,
 			Content: resp.Choices[0].Message.Content,
 		})
-		out := resp.Choices[0].Message.Content
-		out = strings.ReplaceAll(out, "\x03", "\x1b[033m[C]\x1b[0m")
-		out = strings.ReplaceAll(out, "\x02", "\x1b[034m[B]\x1b[0m")
-		out = strings.ReplaceAll(out, "\x1F", "\x1b[035m[U]\x1b[0m")
-		out = strings.ReplaceAll(out, "\x1D", "\x1b[036m[I]\x1b[0m")
+		out := FormatOutput(resp.Choices[0].Message.Content)
 		logger.Info(out)
-		text := resp.Choices[0].Message.Content
-		//cut out </think>
-		cut := strings.LastIndex(text, "</think>\n")
-		if cut > -1 {
-			cut += len("</think>\n")
-			//think := text[:cut]
-			text = text[cut:]
-		}
+		text := ExtractFinalText(resp.Choices[0].Message.Content)
 
 		logger.Info("token usage", "prompt", resp.Usage.PromptTokens, "completion", resp.Usage.CompletionTokens, "total", resp.Usage.TotalTokens)
 
@@ -205,4 +183,37 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 			buffer = after
 		}
 	}
+}
+
+func FormatOutput(text string) string {
+	out := text
+	out = strings.ReplaceAll(out, "\x03", "\x1b[033m[C]\x1b[0m")
+	out = strings.ReplaceAll(out, "\x02", "\x1b[034m[B]\x1b[0m")
+	out = strings.ReplaceAll(out, "\x1F", "\x1b[035m[U]\x1b[0m")
+	out = strings.ReplaceAll(out, "\x1D", "\x1b[036m[I]\x1b[0m")
+	return out
+}
+
+func ExtractFinalText(text string) string {
+	cut := strings.LastIndex(text, "</think>\n")
+	if cut > -1 {
+		cut += len("</think>\n")
+		return text[cut:]
+	}
+	return text
+}
+
+func BuildChatRequest(cfg AIConfig, messages []gogpt.ChatCompletionMessage) gogpt.ChatCompletionRequest {
+	req := gogpt.ChatCompletionRequest{
+		Model:               cfg.Model,
+		MaxTokens:           cfg.MaxTokens,
+		MaxCompletionTokens: cfg.MaxCompletionTokens,
+		Messages:            messages,
+		Temperature:         cfg.Temperature,
+	}
+	if cfg.Streaming {
+		req.Stream = true
+		req.StreamOptions = &gogpt.StreamOptions{IncludeUsage: true}
+	}
+	return req
 }

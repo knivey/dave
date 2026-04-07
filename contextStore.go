@@ -51,6 +51,7 @@ func GetFileStore() FileStore {
 type PersistedContext struct {
 	Messages   []gogpt.ChatCompletionMessage `json:"messages"`
 	LastActive int64                         `json:"last_active"`
+	Config     AIConfig                      `json:"config"`
 }
 
 type ContextStore struct {
@@ -89,6 +90,7 @@ func SaveContextStore() {
 			store.Contexts[key] = PersistedContext{
 				Messages:   ctx.Messages,
 				LastActive: contextLastActive[key],
+				Config:     ctx.Config,
 			}
 		}
 	}
@@ -142,6 +144,7 @@ func LoadContextStore() {
 	for key, pctx := range store.Contexts {
 		chatContextsMap[key] = ChatContext{
 			Messages: pctx.Messages,
+			Config:   pctx.Config,
 		}
 		contextLastActive[key] = pctx.LastActive
 	}

@@ -886,7 +886,7 @@ func TestTables(t *testing.T) {
 		{
 			name:    "TableWithInlineCode",
 			input:   "| Cmd | Desc |\n|-----|------|\n| `ls` | List files |",
-			contain: []string{"┌─────┬───────────┐", "│ Cmd │ Desc       │", "├─────┼───────────┤", "│ \x030,90ls\x03  │ List files │", "└─────┴───────────┘"},
+			contain: []string{"┌─────┬────────────┐", "│ Cmd │ Desc       │", "├─────┼────────────┤", "│ \x030,90ls\x03  │ List files │", "└─────┴────────────┘"},
 		},
 		{
 			name: "TableWithLink",
@@ -927,7 +927,7 @@ func TestTables(t *testing.T) {
 		{
 			name:    "TableWithLineWrap",
 			input:   "| Short | Long |\n|-------|------|\n| ok    | this is a very long cell that should wrap |",
-			contain: []string{"┌───────┬──────────────────────────────────────────────┐", "│ Short │ Long                                     │", "├───────┼──────────────────────────────────────────────┤", "│ ok    │ this is a very long cell that should     │", "│       │ wrap                                     │", "└───────┴──────────────────────────────────────────────┘"},
+			contain: []string{"┌───────┬──────────────────────────────────────────┐", "│ Short │ Long                                     │", "├───────┼──────────────────────────────────────────┤", "│ ok    │ this is a very long cell that should     │", "│       │ wrap                                     │", "└───────┴──────────────────────────────────────────┘"},
 		},
 		{
 			name:    "TableWithBR",
@@ -942,7 +942,7 @@ func TestTables(t *testing.T) {
 		{
 			name:    "TableWithBRAndWrap",
 			input:   "| A | B |\n|---|---|\n| test | this is<br>a very long cell text that should wrap properly |",
-			contain: []string{"┌──────┬──────────────────────────────────────────────┐", "│ A    │ B                                        │", "├──────┼──────────────────────────────────────────────┤", "│ test │ this is                                  │", "│      │ a very long cell text that should wrap   │", "│      │ properly                                 │", "└──────┴──────────────────────────────────────────────┘"},
+			contain: []string{"┌──────┬──────────────────────────────────────────┐", "│ A    │ B                                        │", "├──────┼──────────────────────────────────────────┤", "│ test │ this is                                  │", "│      │ a very long cell text that should wrap   │", "│      │ properly                                 │", "└──────┴──────────────────────────────────────────┘"},
 		},
 	})
 }

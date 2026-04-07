@@ -5,3 +5,5 @@ test.toml
 testMD/testMD
 ignores.txt
 workflows/*
+contexts.json
+contexts.json.tmp

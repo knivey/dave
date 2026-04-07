@@ -20,6 +20,7 @@ type Config struct {
 	Busymsgs           []string
 	Ratemsgs           []string
 	UploadURL          string `toml:"uploadurl"`
+	Persist            PersistConfig
 }
 
 type Network struct {
@@ -281,6 +282,7 @@ func loadConfigOrDie(file string) (config Config) {
 		}
 		config.Commands.Comfy[name] = cfg
 	}
+	config.Persist.SetDefaults()
 
 	return
 }

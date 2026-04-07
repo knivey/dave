@@ -46,6 +46,14 @@ var help_re = regexp.MustCompile("^(help|commands)$")
 
 type CmdMap map[*regexp.Regexp]CmdFunc
 
+func errorMsg(msg string) string {
+	return "\x0304❗ " + msg
+}
+
+func warnMsg(msg string) string {
+	return "\x0308⚠️ " + msg
+}
+
 var commands = CmdMap{
 	stop_re: func(n Network, c *girc.Client, e girc.Event, s ...string) { stop(n, c, e, nil, s...) },
 	help_re: func(n Network, c *girc.Client, e girc.Event, s ...string) { help(n, c, e, s...) },
@@ -181,15 +189,15 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 		}
 		if !ContextExists(ctx_key) {
 			logger.Info("Ignoring message due to no existing chat context")
-			client.Cmd.Reply(event, "you dont have a chat context, start one with one of my many fabulous chat commands")
+			client.Cmd.Reply(event, warnMsg("you dont have a chat context, start one with one of my many fabulous chat commands"))
 			return
 		}
 		if !checkRate(network, event.Params[0]) {
-			client.Cmd.Reply(event, config.Ratemsg())
+			client.Cmd.Reply(event, warnMsg(config.Ratemsg()))
 			return
 		}
 		if getRunning(network.Name + event.Params[0]) {
-			client.Cmd.Reply(event, config.Busymsg())
+			client.Cmd.Reply(event, warnMsg(config.Busymsg()))
 			return
 		}
 		msg = msg[len(botnick+", "):]
@@ -219,11 +227,11 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 			}
 
 			if !checkRate(network, event.Params[0]) {
-				client.Cmd.Reply(event, config.Ratemsg())
+				client.Cmd.Reply(event, warnMsg(config.Ratemsg()))
 				return
 			}
 			if getRunning(network.Name + event.Params[0]) {
-				client.Cmd.Reply(event, config.Busymsg())
+				client.Cmd.Reply(event, warnMsg(config.Busymsg()))
 				return
 			}
 			//TODO only clear if its a chat command type

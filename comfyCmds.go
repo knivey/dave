@@ -109,7 +109,7 @@ func comfy(network Network, c *girc.Client, e girc.Event, cfg ComfyConfig, args 
 
 	workflow, err := loadComfyWorkflow(cfg.WorkflowPath)
 	if err != nil {
-		c.Cmd.Reply(e, "Failed to load workflow: "+err.Error())
+		c.Cmd.Reply(e, errorMsg("Failed to load workflow: "+err.Error()))
 		logger.Error("Failed to load workflow", "error", err.Error())
 		return
 	}
@@ -135,7 +135,7 @@ func comfy(network Network, c *girc.Client, e girc.Event, cfg ComfyConfig, args 
 	wsURL := "ws://" + comfySchemeRegex.ReplaceAllString(baseURL, "") + "/ws?clientId=" + cfg.ClientID
 	wsConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
-		c.Cmd.Reply(e, "Failed to connect to ComfyUI websocket: "+err.Error())
+		c.Cmd.Reply(e, errorMsg("Failed to connect to ComfyUI websocket: "+err.Error()))
 		logger.Error("WebSocket connection failed", "error", err.Error())
 		return
 	}
@@ -147,14 +147,14 @@ func comfy(network Network, c *girc.Client, e girc.Event, cfg ComfyConfig, args 
 	}
 	jsonData, err := json.Marshal(promptReq)
 	if err != nil {
-		c.Cmd.Reply(e, "Failed to marshal prompt: "+err.Error())
+		c.Cmd.Reply(e, errorMsg("Failed to marshal prompt: "+err.Error()))
 		logger.Error("Failed to marshal prompt", "error", err.Error())
 		return
 	}
 
 	resp, err := http.Post(baseURL+"/prompt", "application/json", bytes.NewBuffer(jsonData))
 	if err != nil {
-		c.Cmd.Reply(e, "Failed to submit prompt: "+err.Error())
+		c.Cmd.Reply(e, errorMsg("Failed to submit prompt: "+err.Error()))
 		logger.Error("Failed to submit prompt", "error", err.Error())
 		return
 	}
@@ -162,7 +162,7 @@ func comfy(network Network, c *girc.Client, e girc.Event, cfg ComfyConfig, args 
 
 	var promptResp ComfyPromptResponse
 	if err := json.NewDecoder(resp.Body).Decode(&promptResp); err != nil {
-		c.Cmd.Reply(e, "Failed to read prompt response: "+err.Error())
+		c.Cmd.Reply(e, errorMsg("Failed to read prompt response: "+err.Error()))
 		logger.Error("Failed to decode prompt response", "error", err.Error())
 		return
 	}
@@ -171,7 +171,7 @@ func comfy(network Network, c *girc.Client, e girc.Event, cfg ComfyConfig, args 
 	wsConn.SetReadDeadline(time.Now().Add(time.Duration(cfg.Timeout) * time.Second))
 	for {
 		if _, _, err := wsConn.ReadMessage(); err != nil {
-			c.Cmd.Reply(e, "WebSocket read error: "+err.Error())
+			c.Cmd.Reply(e, errorMsg("WebSocket read error: "+err.Error()))
 			logger.Error("WebSocket read error", "error", err.Error())
 			return
 		}
@@ -187,13 +187,13 @@ func comfy(network Network, c *girc.Client, e girc.Event, cfg ComfyConfig, args 
 				for _, img := range output.Images {
 					imgData, err := downloadComfyImage(baseURL, img)
 					if err != nil {
-						c.Cmd.Reply(e, "Failed to download image: "+err.Error())
+						c.Cmd.Reply(e, errorMsg("Failed to download image: "+err.Error()))
 						logger.Error("Failed to download image", "error", err.Error())
 						continue
 					}
 					url, err := uploadDotBeer(imgData, img.Filename)
 					if err != nil {
-						c.Cmd.Reply(e, "Failed to upload image: "+err.Error())
+						c.Cmd.Reply(e, errorMsg("Failed to upload image: "+err.Error()))
 						logger.Error("Failed to upload image", "error", err.Error())
 						continue
 					}

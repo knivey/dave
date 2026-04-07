@@ -57,12 +57,12 @@ func sd(network Network, c *girc.Client, e girc.Event, cfg SDConfig, args ...str
 	logger.Debug("starting sd run with params", params)
 	jsonData, err := json.Marshal(params)
 	if err != nil {
-		c.Cmd.Reply(e, err.Error())
+		c.Cmd.Reply(e, errorMsg(err.Error()))
 		logger.Error(err.Error())
 	}
 	req, err := http.NewRequest("POST", URL, bytes.NewBuffer(jsonData))
 	if err != nil {
-		c.Cmd.Reply(e, err.Error())
+		c.Cmd.Reply(e, errorMsg(err.Error()))
 		logger.Error(err.Error())
 	}
 
@@ -73,7 +73,7 @@ func sd(network Network, c *girc.Client, e girc.Event, cfg SDConfig, args ...str
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		c.Cmd.Reply(e, err.Error())
+		c.Cmd.Reply(e, errorMsg(err.Error()))
 		logger.Error(err.Error())
 		return
 	}
@@ -83,7 +83,7 @@ func sd(network Network, c *girc.Client, e girc.Event, cfg SDConfig, args ...str
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		c.Cmd.Reply(e, err.Error())
+		c.Cmd.Reply(e, errorMsg(err.Error()))
 		logger.Error(err.Error())
 		return
 	}
@@ -96,13 +96,13 @@ func sd(network Network, c *girc.Client, e girc.Event, cfg SDConfig, args ...str
 	for i, s := range respData.Images {
 		b, err := base64.StdEncoding.DecodeString(s)
 		if err != nil {
-			c.Cmd.Reply(e, err.Error())
+			c.Cmd.Reply(e, errorMsg(err.Error()))
 			logger.Error(err.Error())
 			return
 		}
 		url, err := uploadDotBeer(b, fmt.Sprintf("%d.webp", i))
 		if err != nil {
-			c.Cmd.Reply(e, err.Error())
+			c.Cmd.Reply(e, errorMsg(err.Error()))
 			logger.Error(err.Error())
 			return
 		}

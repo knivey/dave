@@ -37,7 +37,7 @@ func completion(network Network, c *girc.Client, e girc.Event, cfg AIConfig, arg
 
 	resp, err := aiClient.CreateCompletion(ctx, req)
 	if err != nil {
-		c.Cmd.Reply(e, err.Error())
+		c.Cmd.Reply(e, errorMsg(err.Error()))
 		logger.Error(err.Error())
 		return
 	}
@@ -76,19 +76,19 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 			remaining := cfg.MaxContextImages - existingImages
 
 			if remaining <= 0 {
-				c.Cmd.Reply(e, fmt.Sprintf("image limit reached (%d max in context), send text only", cfg.MaxContextImages))
+				c.Cmd.Reply(e, warnMsg(fmt.Sprintf("image limit reached (%d max in context), send text only", cfg.MaxContextImages)))
 				return
 			}
 
 			if len(imageUrls) > remaining {
-				c.Cmd.Reply(e, fmt.Sprintf("only %d more image(s) allowed in this context (%d/%d used)", remaining, existingImages, cfg.MaxContextImages))
+				c.Cmd.Reply(e, warnMsg(fmt.Sprintf("only %d more image(s) allowed in this context (%d/%d used)", remaining, existingImages, cfg.MaxContextImages)))
 				return
 			}
 
 			var err error
 			userMsg, err = buildImageMessage(cleanText, imageUrls, cfg.MaxImages)
 			if err != nil {
-				c.Cmd.Reply(e, "failed to process images: "+err.Error())
+				c.Cmd.Reply(e, errorMsg("failed to process images: "+err.Error()))
 				return
 			}
 		} else {
@@ -115,7 +115,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 	if !cfg.Streaming {
 		resp, err := aiClient.CreateChatCompletion(ctx, req)
 		if err != nil {
-			c.Cmd.Reply(e, err.Error())
+			c.Cmd.Reply(e, errorMsg(err.Error()))
 			logger.Error(err.Error())
 			return
 		}
@@ -139,7 +139,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 
 	stream, err := aiClient.CreateChatCompletionStream(ctx, req)
 	if err != nil {
-		c.Cmd.Reply(e, err.Error())
+		c.Cmd.Reply(e, errorMsg(err.Error()))
 		logger.Error(err.Error())
 		return
 	}
@@ -166,7 +166,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 			return
 		}
 		if err != nil {
-			c.Cmd.Reply(e, err.Error())
+			c.Cmd.Reply(e, errorMsg(err.Error()))
 			logger.Error(err.Error())
 			return
 		}

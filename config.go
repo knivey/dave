@@ -115,7 +115,7 @@ func (config *Config) Busymsg() string {
 }
 
 func (config *Config) Ratemsg() string {
-	return config.Busymsgs[rand.Intn(len(config.Busymsgs))]
+	return config.Ratemsgs[rand.Intn(len(config.Ratemsgs))]
 }
 
 func (cfg *SDConfig) ApplyDefaults(service Service) {

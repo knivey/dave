@@ -18,6 +18,21 @@ import (
 	"github.com/yuin/goldmark/text"
 )
 
+const (
+	// Box drawing characters for tables
+	boxTL = "┌" // Top-left corner
+	boxTR = "┐" // Top-right corner
+	boxBL = "└" // Bottom-left corner
+	boxBR = "┘" // Bottom-right corner
+	boxV  = "│" // Vertical line
+	boxH  = "─" // Horizontal line
+	boxT  = "┬" // T-junction (top)
+	boxC  = "├" // T-junction (left)
+	boxR  = "┤" // T-junction (right)
+	boxX  = "┼" // Cross (center)
+	boxB  = "┴" // T-junction (bottom)
+)
+
 type Renderer struct {
 	listCounter []int
 	source      []byte
@@ -483,20 +498,24 @@ func renderTable(w io.Writer, table ast.Node, r *Renderer) {
 		}
 	}
 
-	var border strings.Builder
-	border.WriteString("+")
+	// Build border components for each column
+	var colSegments []string
 	for _, cw := range colWidths {
-		border.WriteString(strings.Repeat("-", cw+2))
-		border.WriteString("+")
+		colSegments = append(colSegments, strings.Repeat(boxH, cw+2))
 	}
-	borderStr := border.String()
+	// Top: ┌───┬───┐
+	topBorder := boxTL + strings.Join(colSegments, boxT) + boxTR
+	// Middle: ├────┼────┤
+	middleBorder := boxC + strings.Join(colSegments, boxX) + boxR
+	// Bottom: └────┴────┘
+	bottomBorder := boxBL + strings.Join(colSegments, boxB) + boxBR
 
 	var lines []string
-	lines = append(lines, borderStr)
+	lines = append(lines, topBorder)
 
 	for ri, row := range rows {
 		if ri > 0 && ri == headerRowIdx+1 {
-			lines = append(lines, borderStr)
+			lines = append(lines, middleBorder)
 		}
 
 		var cellLines [][]string
@@ -517,7 +536,7 @@ func renderTable(w io.Writer, table ast.Node, r *Renderer) {
 
 		for li := 0; li < maxCellLines; li++ {
 			var rowLine strings.Builder
-			rowLine.WriteString("|")
+			rowLine.WriteString(boxV)
 			for ci := 0; ci < numCols; ci++ {
 				var line string
 				var align extast.Alignment
@@ -542,13 +561,13 @@ func renderTable(w io.Writer, table ast.Node, r *Renderer) {
 					padded = line + strings.Repeat(" ", cw-plainW)
 				}
 
-				rowLine.WriteString(" " + padded + " |")
+				rowLine.WriteString(" " + padded + " " + boxV)
 			}
 			lines = append(lines, rowLine.String())
 		}
 	}
 
-	lines = append(lines, borderStr)
+	lines = append(lines, bottomBorder)
 
 	writes(w, table, "\n"+strings.Join(lines, "\n"))
 }

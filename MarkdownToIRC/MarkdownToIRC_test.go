@@ -867,26 +867,26 @@ func TestTables(t *testing.T) {
 			input: `| A | B |
 |---|---|
 | 1 | 2 |`,
-			contain: []string{"+---+---+", "| A | B |", "+---+---+", "| 1 | 2 |", "+---+---+"},
+			contain: []string{"┌───┬───┐", "│ A │ B │", "├───┼───┤", "│ 1 │ 2 │", "└───┴───┘"},
 		},
 		{
 			name: "TableWithAlignment",
 			input: `| Left | Center | Right |
 |:-----|:------:|------:|
 | a    |   b    |     c |`,
-			contain: []string{"+------+--------+-------+", "| Left | Center | Right |", "+------+--------+-------+", "| a    |   b    |     c |", "+------+--------+-------+"},
+			contain: []string{"┌──────┬────────┬───────┐", "│ Left │ Center │ Right │", "├──────┼────────┼───────┤", "│ a    │   b    │     c │", "└──────┴────────┴───────┘"},
 		},
 		{
 			name: "TableWithBold",
 			input: `| **Name** | **Value** |
 |----------|-----------|
 | foo      | bar       |`,
-			contain: []string{"+------+-------+", "| \x02Name\x02 | \x02Value\x02 |", "+------+-------+", "| foo  | bar   |", "+------+-------+"},
+			contain: []string{"┌──────┬───────┐", "│ \x02Name\x02 │ \x02Value\x02 │", "├──────┼───────┤", "│ foo  │ bar   │", "└──────┴───────┘"},
 		},
 		{
 			name:    "TableWithInlineCode",
 			input:   "| Cmd | Desc |\n|-----|------|\n| `ls` | List files |",
-			contain: []string{"+-----+------------+", "| Cmd | Desc       |", "+-----+------------+", "| \x030,90ls\x03  | List files |", "+-----+------------+"},
+			contain: []string{"┌─────┬───────────┐", "│ Cmd │ Desc       │", "├─────┼───────────┤", "│ \x030,90ls\x03  │ List files │", "└─────┴───────────┘"},
 		},
 		{
 			name: "TableWithLink",
@@ -901,7 +901,7 @@ func TestTables(t *testing.T) {
 |------|
 | one  |
 | two  |`,
-			contain: []string{"+------+", "| Item |", "+------+", "| one  |", "| two  |", "+------+"},
+			contain: []string{"┌──────┐", "│ Item │", "├──────┤", "│ one  │", "│ two  │", "└──────┘"},
 		},
 		{
 			name: "TableMultipleRows",
@@ -910,39 +910,39 @@ func TestTables(t *testing.T) {
 | 1 | 2 | 3 |
 | 4 | 5 | 6 |
 | 7 | 8 | 9 |`,
-			contain: []string{"+---+---+---+", "| A | B | C |", "+---+---+---+", "| 1 | 2 | 3 |", "| 4 | 5 | 6 |", "| 7 | 8 | 9 |", "+---+---+---+"},
+			contain: []string{"┌───┬───┬───┐", "│ A │ B │ C │", "├───┼───┼───┤", "│ 1 │ 2 │ 3 │", "│ 4 │ 5 │ 6 │", "│ 7 │ 8 │ 9 │", "└───┴───┴───┘"},
 		},
 		{
 			name: "TableWithItalic",
 			input: `| *Key* | *Val* |
 |-------|-------|
 | x     | y     |`,
-			contain: []string{"| \x1DKey\x1D | \x1DVal\x1D |"},
+			contain: []string{"│ \x1DKey\x1D │ \x1DVal\x1D │"},
 		},
 		{
 			name:    "TableWithEscapedPipe",
 			input:   "| A | B |\n|---|---|\n| Value \\| separated | other |",
-			contain: []string{"+-------------------+-------+", "| A                 | B     |", "+-------------------+-------+", "| Value | separated | other |", "+-------------------+-------+"},
+			contain: []string{"┌───────────────────┬───────┐", "│ A                 │ B     │", "├───────────────────┼───────┤", "│ Value | separated │ other │", "└───────────────────┴───────┘"},
 		},
 		{
 			name:    "TableWithLineWrap",
 			input:   "| Short | Long |\n|-------|------|\n| ok    | this is a very long cell that should wrap |",
-			contain: []string{"+-------+------------------------------------------+", "| Short | Long                                     |", "+-------+------------------------------------------+", "| ok    | this is a very long cell that should     |", "|       | wrap                                     |", "+-------+------------------------------------------+"},
+			contain: []string{"┌───────┬──────────────────────────────────────────────┐", "│ Short │ Long                                     │", "├───────┼──────────────────────────────────────────────┤", "│ ok    │ this is a very long cell that should     │", "│       │ wrap                                     │", "└───────┴──────────────────────────────────────────────┘"},
 		},
 		{
 			name:    "TableWithBR",
 			input:   "| A | B |\n|---|---|\n| line1<br>line2 | test |",
-			contain: []string{"+-------+------+", "| A     | B    |", "+-------+------+", "| line1 | test |", "| line2 |      |", "+-------+------+"},
+			contain: []string{"┌───────┬──────┐", "│ A     │ B    │", "├───────┼──────┤", "│ line1 │ test │", "│ line2 │      │", "└───────┴──────┘"},
 		},
 		{
 			name:    "TableWithBRSlash",
 			input:   "| A | B |\n|---|---|\n| line1<br/>line2 | test |",
-			contain: []string{"+-------+------+", "| A     | B    |", "+-------+------+", "| line1 | test |", "| line2 |      |", "+-------+------+"},
+			contain: []string{"┌───────┬──────┐", "│ A     │ B    │", "├───────┼──────┤", "│ line1 │ test │", "│ line2 │      │", "└───────┴──────┘"},
 		},
 		{
 			name:    "TableWithBRAndWrap",
 			input:   "| A | B |\n|---|---|\n| test | this is<br>a very long cell text that should wrap properly |",
-			contain: []string{"+------+------------------------------------------+", "| A    | B                                        |", "+------+------------------------------------------+", "| test | this is                                  |", "|      | a very long cell text that should wrap   |", "|      | properly                                 |", "+------+------------------------------------------+"},
+			contain: []string{"┌──────┬──────────────────────────────────────────────┐", "│ A    │ B                                        │", "├──────┼──────────────────────────────────────────────┤", "│ test │ this is                                  │", "│      │ a very long cell text that should wrap   │", "│      │ properly                                 │", "└──────┴──────────────────────────────────────────────┘"},
 		},
 	})
 }
@@ -952,19 +952,19 @@ func TestTableInContext(t *testing.T) {
 		{
 			name:       "TableAfterParagraph",
 			input:      "Here is a table:\n\n| A | B |\n|---|---|\n| 1 | 2 |",
-			contain:    []string{"Here is a table:", "+---+---+", "| A | B |", "| 1 | 2 |"},
+			contain:    []string{"Here is a table:", "┌───┬───┐", "│ A │ B │", "│ 1 │ 2 │"},
 			notContain: []string{"\n\n"},
 		},
 		{
 			name:       "TableBeforeParagraph",
 			input:      "| A | B |\n|---|---|\n| 1 | 2 |\n\nDone.",
-			contain:    []string{"+---+---+", "| A | B |", "| 1 | 2 |", "Done."},
+			contain:    []string{"┌───┬───┐", "│ A │ B │", "│ 1 │ 2 │", "Done."},
 			notContain: []string{"\n\n"},
 		},
 		{
 			name:       "TableAfterHeading",
 			input:      "## Data\n\n| X |\n|---|\n| y |",
-			contain:    []string{"\x02Data\x02", "+---+", "| X |", "| y |"},
+			contain:    []string{"\x02Data\x02", "┌───┐", "│ X │", "│ y │"},
 			notContain: []string{"\n\n"},
 		},
 	})
@@ -982,7 +982,7 @@ func TestTableEdgeCases(t *testing.T) {
 		got := MarkdownToIRC(input)
 		lines := strings.Split(got, "\n")
 		for _, line := range lines {
-			if strings.HasPrefix(stripAll(line), "|") {
+			if strings.HasPrefix(stripAll(line), "│") {
 				lineLen := utf8.RuneCountInString(stripAll(line))
 				if lineLen > 100 {
 					t.Errorf("table line too long: %d chars", lineLen)
@@ -1012,7 +1012,7 @@ func TestTableEdgeCases(t *testing.T) {
 		var dataLine string
 		for _, line := range lines {
 			clean := stripAll(line)
-			if strings.Contains(clean, "| a ") {
+			if strings.Contains(clean, "│ a ") {
 				dataLine = clean
 				break
 			}
@@ -1020,13 +1020,13 @@ func TestTableEdgeCases(t *testing.T) {
 		if dataLine == "" {
 			t.Fatalf("could not find data line in: %s", humanize(got))
 		}
-		if !strings.HasPrefix(dataLine, "| a ") {
+		if !strings.HasPrefix(dataLine, "│ a ") {
 			t.Errorf("left alignment failed, got: %q", dataLine)
 		}
 		if !strings.Contains(dataLine, " b ") {
 			t.Errorf("center alignment failed, got: %q", dataLine)
 		}
-		if !strings.Contains(dataLine, " c |") {
+		if !strings.Contains(dataLine, " c │") {
 			t.Errorf("right alignment failed, got: %q", dataLine)
 		}
 	})
@@ -1040,7 +1040,7 @@ func TestTableEdgeCases(t *testing.T) {
 				continue
 			}
 			stripped := stripAll(line)
-			if !strings.HasPrefix(stripped, "|") || strings.HasPrefix(stripped, "+") {
+			if !strings.HasPrefix(stripped, "│") || strings.HasPrefix(stripped, "┌") || strings.HasPrefix(stripped, "├") || strings.HasPrefix(stripped, "└") {
 				continue
 			}
 			boldCount := strings.Count(line, "\x02")

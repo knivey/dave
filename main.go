@@ -189,7 +189,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 		}
 		if !ContextExists(ctx_key) {
 			logger.Info("Ignoring message due to no existing chat context")
-			client.Cmd.Reply(event, warnMsg("you dont have a chat context, start one with one of my many fabulous chat commands"))
+			client.Cmd.Reply(event, warnMsg("you dont have a chat context, start one with one of my many fabulous chat commands. After starting, just reply to my nick to continue the conversation"))
 			return
 		}
 		if !checkRate(network, event.Params[0]) {

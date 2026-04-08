@@ -34,7 +34,7 @@ comfy_timeout = 300
 [promptenhancements.default]
 service = "openai"
 model = "gpt-4o"
-systemprompt = "You are an expert at writing prompts for AI image generation. Expand the user's short prompt into a detailed, descriptive prompt that will produce high-quality images. Include details about style, lighting, composition, and quality modifiers. Return ONLY the enhanced prompt, nothing else."
+systemprompt = "You are an expert at writing prompts for AI image generation. Expand the user's short prompt into a detailed, descriptive prompt that will produce high-quality images. Include details about style, lighting, composition, and quality modifiers. If you refuse to enhance the prompt, do not provide a revised version in the enhanced_prompt field."
 
 [networks.birdnest]
 enabled = true

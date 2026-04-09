@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
@@ -63,11 +64,23 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 		var systemContent string
 		if cfg.SystemTmpl != nil {
 			data := SystemPromptData{
-				Nick:    e.Source.Name,
-				BotNick: c.GetNick(),
-				Channel: e.Params[0],
-				Network: network.Name,
+				Nick:      e.Source.Name,
+				BotNick:   c.GetNick(),
+				Channel:   e.Params[0],
+				Network:   network.Name,
+				ChanNicks: "",
 			}
+
+			ch := c.LookupChannel(data.Channel)
+			var nicks []string
+			if ch != nil {
+				for _, u := range ch.Users(c) {
+					nicks = append(nicks, u.Nick)
+				}
+				sort.Strings(nicks)
+			}
+			data.ChanNicks = `["` + strings.Join(nicks, `","`) + `"]`
+
 			var buf strings.Builder
 			err := cfg.SystemTmpl.Execute(&buf, data)
 			if err != nil {

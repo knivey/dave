@@ -114,14 +114,15 @@ type Service struct {
 }
 
 type SystemPromptData struct {
-	Nick    string
-	BotNick string
-	Channel string
-	Network string
+	Nick      string
+	BotNick   string
+	Channel   string
+	Network   string
+	ChanNicks string // JSON array of channel nicks
 }
 
 func validateSystemPromptTemplate(tmpl *template.Template) error {
-	dummy := SystemPromptData{Nick: "dummy", BotNick: "dummy", Channel: "dummy", Network: "dummy"}
+	dummy := SystemPromptData{Nick: "dummy", BotNick: "dummy", Channel: "dummy", Network: "dummy", ChanNicks: `["dummy1","dummy2"]`}
 	var buf strings.Builder
 	return tmpl.Execute(&buf, dummy)
 }

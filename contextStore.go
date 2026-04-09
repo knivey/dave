@@ -80,6 +80,9 @@ func init() {
 }
 
 func SaveContextStore() {
+	if persistCfg.FilePath == "" {
+		return
+	}
 	store := ContextStore{
 		Contexts: make(map[string]PersistedContext),
 	}
@@ -118,6 +121,9 @@ func SaveContextStore() {
 }
 
 func LoadContextStore() {
+	if persistCfg.FilePath == "" {
+		return
+	}
 	_, err := fileStore.Stat(persistCfg.FilePath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -258,9 +264,6 @@ func (p *PersistConfig) SetDefaults() {
 	if p.SaveDelay == 0 {
 		p.SaveDelay = 30 * time.Second
 	}
-	if p.FilePath == "" {
-		p.FilePath = "contexts.json"
-	}
 }
 
 func DefaultPersistConfig() PersistConfig {
@@ -268,6 +271,6 @@ func DefaultPersistConfig() PersistConfig {
 		MaxAgeDays:  7,
 		MaxContexts: 100,
 		SaveDelay:   30 * time.Second,
-		FilePath:    "contexts.json",
+		FilePath:    "",
 	}
 }

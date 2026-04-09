@@ -514,7 +514,7 @@ func TestPersistConfigSaveDelay(t *testing.T) {
 		t.Errorf("expected SaveDelay 30s, got %v", cfg.SaveDelay)
 	}
 
-	if cfg.FilePath != "contexts.json" {
-		t.Errorf("expected FilePath 'contexts.json', got %s", cfg.FilePath)
+	if cfg.FilePath != "" {
+		t.Errorf("expected FilePath '', got %s", cfg.FilePath)
 	}
 }

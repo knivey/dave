@@ -6,7 +6,6 @@ require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/alecthomas/chroma/v2 v2.23.1
 	github.com/chai2010/webp v1.4.0
-	github.com/gomarkdown/markdown v0.0.0-20260217112301-37c66b85d6ab
 	github.com/gorilla/websocket v1.5.3
 	github.com/lrstanley/girc v1.1.1
 	github.com/mgutz/logxi v0.0.0-20161027140823-aebf8a7d67ab

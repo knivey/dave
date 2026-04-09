@@ -1,89 +1,52 @@
 # AGENTS.md - dave IRC Bot
 
 ## Project Overview
-Go IRC chatbot interfacing with OpenAI-compatible APIs, Stable Diffusion, and ComfyUI for image generation. Single binary, config-driven via TOML.
+Go IRC chatbot for OpenAI-compatible APIs, Stable Diffusion, ComfyUI image gen. Single binary, TOML-driven.
 
 **Module**: `github.com/knivey/dave`
-**Go version**: 1.25.0
+**Go**: 1.25.0
 
 ## Commands
-
 ```bash
-# Build
 go build -o dave .
 
-# Run (default config)
-./dave
-# Run with custom config
+./dave              # config.toml
 ./dave prod.toml
+./dave test.toml
 
-# Run all tests
-go test ./...
+go test ./...                    # all tests
+go test ./MarkdownToIRC/...      # markdown tests only
+go test -run TestContextStoreRoundtrip  # one test
+go test -v -run TestCodeBlocks   # subtest
 
-# Run tests for specific package
-go test ./MarkdownToIRC/
-
-# Run a single test
-go test ./MarkdownToIRC/ -run TestInlineFormatting
-
-# Run a single subtest
-go test ./MarkdownToIRC/ -run "TestCodeBlocks/CodeBlockWithLang"
-
-# Run with verbose output
-go test -v ./...
-
-# Install dependencies
+go fmt ./...
+go vet ./...
 go mod tidy
 ```
-
-**No lint/typecheck/formatter config exists** - no golangci-lint, no Makefile. Use `go fmt` and `go vet` for verification.
+No Makefile, no linter config. Use `go fmt` + `go vet`.
 
 ## Architecture
+- All root `.go` files = `package main` (globals: `config`, `commands` *CmdMap*, `bots`, `wg`, context maps, `logger`).
+- `MarkdownToIRC/` (with `irc/`, `tables/`) converts markdown to IRC codes (`\x02`, `\x03`, `\x1D`).
+- `main.go`: loads config, registers regex commands, starts girc clients per network.
+- Config in TOML: networks, services, commands (completions/chats/sd/comfy), promptenhancements.
+  - Copy `config.toml` to `prod.toml`/`test.toml`.
+  - `ignores.txt` (see `.example`) for host ignores (wildcard).
+  - `contexts.json` (gitignored) for persistent chat history.
 
-- **Root package**: `package main` - all `.go` files in root
-- **Subpackage**: `MarkdownToIRC/` - converts markdown to IRC formatting codes
-- **Entry point**: `main.go` - loads TOML config, registers commands, starts IRC clients
-- **Config**: TOML files define networks, services, commands, and prompt enhancements
-  - Copy `config.toml` to `prod.toml` or `test.toml` and edit
-  - `ignores.txt` for host-based user ignoring (see `ignores.txt.example`)
-
-### Key files
-| File | Purpose |
-|------|---------|
-| `main.go` | Entry, IRC client lifecycle, message routing |
-| `config.go` | TOML config structs and validation |
-| `contexts.go` | Chat context/history management |
-| `aiCmds.go` | OpenAI completion/chat commands |
-| `sdCmds.go` | Stable Diffusion image generation |
-| `comfyCmds.go` | ComfyUI workflow execution |
-| `running.go` | Concurrency control (busy tracking) |
-| `checkRate.go` | Rate limiting per channel |
-| `image_detect.go` | Image URL detection in messages |
-| `uploadr.go` | Image upload functionality |
+## High-Signal Gotchas
+- Config validation: `log.Fatalln` on any error (undefined services, missing Comfy fields, renderMarkdown+streaming both true, bad templates).
+- Command regex: empty = key name; registered as `^<regex> (.+)$` in main.go.
+- Networks inherit root `trigger`/`quitmsg`; cycle multiple servers on reconnect.
+- Service `maxhistory` defaults to 8.
+- ComfyConfig requires `workflow_path`, `clientid`, `output_node`, `prompt_node`.
+- Context store: dirty flag, atomic (`.tmp`+rename), timer, age+count cleanup. Tests mock via `persistCfg.FilePath`.
+- Tests: table-driven + `t.Run()`, substring `contain`/`notContain` (no testify). MarkdownToIRC uses shared `runTests()` helper. Root has context/config/ai tests.
 
 ## Code Style
+- Imports: stdlib, blank, third-party.
+- Globals heavily used. Concurrency via `go cmd(...)` + `sync.WaitGroup`.
+- Struct fields use TOML snake_case tags.
+- Error: `log.Fatalln` at startup only.
 
-- **Imports**: Standard library first, blank line, then third-party (grouped)
-- **Naming**: `camelCase` for local vars, `PascalCase` for exported. Struct fields use TOML tags for snake_case config keys
-- **Error handling**: `log.Fatalln` for fatal config errors at startup; return errors otherwise
-- **Globals**: `config`, `wg`, `logger`, `bots`, `commands` are package-level
-- **Concurrency**: Goroutines for command handlers (`go cmd(...)`), `sync.WaitGroup` for lifecycle
-- **Regex**: Commands use compiled `*regexp.Regexp` keys in `CmdMap`
-- **Logging**: `logxi` with per-network named loggers
-
-## Testing
-
-- Tests only exist in `MarkdownToIRC/` subpackage
-- Uses table-driven tests with `t.Run()` and a shared `runTests()` helper
-- Test assertions check `contain` / `notContain` substrings (no testify assertions in tests despite dependency)
-- IRC control codes (`\x02` bold, `\x03` color, `\x1D` italic) are common in test expectations
-
-## Config Quirks
-
-- Command `regex` field is used to build larger pattern (don't use `^$` anchors)
-- If command `regex` is empty, defaults to the key name
-- Service `maxhistory` defaults to 8 if unset
-- `renderMarkdown` and `streaming` are mutually exclusive (fatal error if both true)
-- ComfyUI commands require: `workflow_path`, `clientid`, `output_node`, `prompt_node`
-- Networks inherit `trigger` and `quitmsg` from root config if not specified
-- Multiple servers per network: cycles through on reconnect
+Preserve this file. Update only verified facts.

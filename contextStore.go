@@ -49,9 +49,10 @@ func GetFileStore() FileStore {
 }
 
 type PersistedContext struct {
-	Messages   []gogpt.ChatCompletionMessage `json:"messages"`
-	LastActive int64                         `json:"last_active"`
-	Config     AIConfig                      `json:"config"`
+	Messages    []gogpt.ChatCompletionMessage `json:"messages"`
+	LastActive  int64                         `json:"last_active"`
+	Config      AIConfig                      `json:"-"`
+	ChatCommand string                        `json:"chat_command"`
 }
 
 type ContextStore struct {
@@ -91,9 +92,10 @@ func SaveContextStore() {
 	for key, ctx := range chatContextsMap {
 		if len(ctx.Messages) > 0 {
 			store.Contexts[key] = PersistedContext{
-				Messages:   ctx.Messages,
-				LastActive: contextLastActive[key],
-				Config:     ctx.Config,
+				Messages:    ctx.Messages,
+				LastActive:  contextLastActive[key],
+				Config:      ctx.Config,
+				ChatCommand: ctx.Config.Name,
 			}
 		}
 	}
@@ -148,11 +150,17 @@ func LoadContextStore() {
 
 	chatContextsMutex.Lock()
 	for key, pctx := range store.Contexts {
-		chatContextsMap[key] = ChatContext{
-			Messages: pctx.Messages,
-			Config:   pctx.Config,
+		if currentCfg, ok := config.Commands.Chats[pctx.ChatCommand]; ok {
+			chatContextsMap[key] = ChatContext{
+				Messages: pctx.Messages,
+				Config:   currentCfg,
+			}
+			contextLastActive[key] = pctx.LastActive
+		} else {
+			loggerCS.Warn("dropping context for unknown chat command", "key", key, "command", pctx.ChatCommand)
+			delete(chatContextsMap, key)
+			delete(contextLastActive, key)
 		}
-		contextLastActive[key] = pctx.LastActive
 	}
 	chatContextsMutex.Unlock()
 

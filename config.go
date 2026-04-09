@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -90,7 +91,7 @@ type AIConfig struct {
 	Model               string
 	Regex               string
 	System              string
-	SystemTmpl          *template.Template
+	SystemTmpl          *template.Template `json:"-"`
 	Streaming           bool
 	MaxTokens           int `toml:"maxtokens"`
 	MaxCompletionTokens int `toml:"maxcompletiontokens"`
@@ -167,6 +168,25 @@ func (cfg *AIConfig) ApplyDefaults(service Service) {
 	if cfg.MaxContextImages == 0 {
 		cfg.MaxContextImages = 5
 	}
+}
+
+func (cfg AIConfig) MarshalJSON() ([]byte, error) {
+	type Alias AIConfig
+	return json.Marshal(Alias(cfg))
+}
+
+func (cfg *AIConfig) UnmarshalJSON(data []byte) error {
+	type Alias AIConfig
+	aux := &struct {
+		*Alias
+	}{
+		Alias: (*Alias)(cfg),
+	}
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+	cfg.SystemTmpl = nil
+	return nil
 }
 
 func (n *Network) getNextServer() Server {

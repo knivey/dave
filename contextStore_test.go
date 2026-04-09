@@ -33,9 +33,16 @@ func TestContextStoreRoundtrip(t *testing.T) {
 			{Role: "user", Content: "Hello"},
 			{Role: "assistant", Content: "Hi there!"},
 		},
-		Config: AIConfig{MaxHistory: 5, Temperature: 0.7},
+		Config: AIConfig{Name: "testcmd", MaxHistory: 5, Temperature: 0.7},
 	}
 	chatContextsMutex.Unlock()
+
+	// setup config for lookup in LoadContextStore
+	oldChats := config.Commands.Chats
+	config.Commands.Chats = map[string]AIConfig{
+		"testcmd": {Name: "testcmd", MaxHistory: 5, Temperature: 0.7},
+	}
+	defer func() { config.Commands.Chats = oldChats }()
 	contextLastActive["testkey1"] = time.Now().Unix()
 
 	SaveContextStore()

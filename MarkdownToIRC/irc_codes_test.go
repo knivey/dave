@@ -204,6 +204,41 @@ func TestStripCodes(t *testing.T) {
 			input:    "\x03hello",
 			expected: "hello",
 		},
+		{
+			name:     "ColorThenCommaText",
+			input:    "\x0315,hello",
+			expected: ",hello",
+		},
+		{
+			name:     "ColorBeforeNumber",
+			input:    "\x030495",
+			expected: "95",
+		},
+		{
+			name:     "ColorBeforeTwoDigitNumber",
+			input:    "\x031599",
+			expected: "99",
+		},
+		{
+			name:     "ExtendedColor",
+			input:    "\x0399hello",
+			expected: "hello",
+		},
+		{
+			name:     "FullColorWithBG",
+			input:    "\x0304,90text",
+			expected: "text",
+		},
+		{
+			name:     "BareReset",
+			input:    "\x03text",
+			expected: "text",
+		},
+		{
+			name:     "MixedWithToggles",
+			input:    "\x02\x0304boldcolor\x1Ditalic\x03plain",
+			expected: "boldcoloritalicplain",
+		},
 	}
 
 	for _, tt := range tests {

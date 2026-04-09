@@ -107,42 +107,47 @@ func ParseIRC(text string) []IRCSegment {
 }
 
 func parseColor(runes []rune, pos int, style IRCFormat) (IRCFormat, int) {
-	i := pos + 1
+	end, col := parseColorCode(runes, pos)
+	style.Color = col
+	return style, end - 1
+}
 
-	if i >= len(runes) || !isDigit(runes[i]) {
-		style.Color = nil
-		return style, i - 1
+func isDigit(r rune) bool {
+	return r >= '0' && r <= '9'
+}
+
+func parseColorCode(runes []rune, pos int) (int, *IRCColor) {
+	i := pos
+	if i >= len(runes) || runes[i] != ircColor {
+		return i, nil
 	}
-
+	i++
+	if i >= len(runes) || !isDigit(runes[i]) {
+		return i, nil
+	}
 	fg := byte(runes[i] - '0')
 	i++
 	if i < len(runes) && isDigit(runes[i]) {
 		fg = fg*10 + byte(runes[i]-'0')
 		i++
 	}
-
+	bg := defaultColor
 	if i < len(runes) && runes[i] == ',' {
+		commaI := i
 		i++
 		if i < len(runes) && isDigit(runes[i]) {
-			bg := byte(runes[i] - '0')
+			bg = byte(runes[i] - '0')
 			i++
 			if i < len(runes) && isDigit(runes[i]) {
 				bg = bg*10 + byte(runes[i]-'0')
 				i++
 			}
-			style.Color = &IRCColor{FG: fg, BG: bg}
-			return style, i - 1
+		} else {
+			i = commaI
+			bg = defaultColor
 		}
-		style.Color = &IRCColor{FG: fg, BG: defaultColor}
-		return style, i - 2
 	}
-
-	style.Color = &IRCColor{FG: fg, BG: defaultColor}
-	return style, i - 1
-}
-
-func isDigit(r rune) bool {
-	return r >= '0' && r <= '9'
+	return i, &IRCColor{FG: fg, BG: bg}
 }
 
 func CloseCodes(style IRCFormat) string {
@@ -205,17 +210,7 @@ func StripCodes(text string) string {
 		switch r {
 		case ircBold, ircItalic, ircUnderline, ircReset:
 		case ircColor:
-			i++
-			start := i
-			for i < len(runes) && isDigit(runes[i]) {
-				i++
-			}
-			if i > start && i < len(runes) && runes[i] == ',' {
-				i++
-				for i < len(runes) && isDigit(runes[i]) {
-					i++
-				}
-			}
+			i, _ = parseColorCode(runes, i)
 			continue
 		default:
 			b.WriteRune(r)
@@ -271,34 +266,8 @@ func SplitAt(text string, plainPos int) (string, string) {
 			i++
 		case ircColor:
 			colorStart := i
-			i++
 			var newColor *IRCColor
-			if i < len(runes) && isDigit(runes[i]) {
-				fg := byte(runes[i] - '0')
-				i++
-				if i < len(runes) && isDigit(runes[i]) {
-					fg = fg*10 + byte(runes[i]-'0')
-					i++
-				}
-				if i < len(runes) && runes[i] == ',' {
-					i++
-					if i < len(runes) && isDigit(runes[i]) {
-						bg := byte(runes[i] - '0')
-						i++
-						if i < len(runes) && isDigit(runes[i]) {
-							bg = bg*10 + byte(runes[i]-'0')
-							i++
-						}
-						newColor = &IRCColor{FG: fg, BG: bg}
-					} else {
-						newColor = &IRCColor{FG: fg, BG: defaultColor}
-					}
-				} else {
-					newColor = &IRCColor{FG: fg, BG: defaultColor}
-				}
-			} else {
-				newColor = nil
-			}
+			i, newColor = parseColorCode(runes, i)
 			activeStyle.Color = newColor
 
 			codeStr := string(runes[colorStart:i])

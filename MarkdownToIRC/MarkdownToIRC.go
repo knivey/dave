@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -119,8 +118,6 @@ func writesWithNegOffset(w io.Writer, node ast.Node, text string, negativeOffset
 		fmt.Fprint(w, part)
 	}
 }
-
-var colorCancelRE = regexp.MustCompile("\x03(?:\\D)")
 
 func (r *Renderer) Render(w io.Writer, source []byte, n ast.Node) error {
 	r.source = source
@@ -295,27 +292,28 @@ func (r *Renderer) renderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 
 const maxCodeBlockPadWidth = 80
 
+func plainLength(s string) int {
+	return utf8.RuneCountInString(StripCodes(s))
+}
+
 func writeHighlightedCodeBlock(w io.Writer, node ast.Node, highlighted string) {
 	lines := strings.Split(highlighted, "\n")
-	for len(lines) > 0 && StripCodes(lines[0]) == "" {
+	for len(lines) > 0 && plainLength(lines[0]) == 0 {
 		lines = lines[1:]
 	}
-	for len(lines) > 0 && StripCodes(lines[len(lines)-1]) == "" {
+	for len(lines) > 0 && plainLength(lines[len(lines)-1]) == 0 {
 		lines = lines[:len(lines)-1]
 	}
 	maxWidth := 0
 	for _, v := range lines {
-		v = colorCancelRE.ReplaceAllLiteralString(v, "\x0300")
-		v = StripCodes(v)
-		if maxWidth < utf8.RuneCountInString(v) {
-			maxWidth = utf8.RuneCountInString(v)
+		if l := plainLength(v); maxWidth < l {
+			maxWidth = l
 		}
 	}
 	padWidth := min(maxWidth, maxCodeBlockPadWidth)
 	var outs []string
 	for _, v := range lines {
-		v := colorCancelRE.ReplaceAllLiteralString(v, "\x0300")
-		rpad := strings.Repeat(" ", max(padWidth-utf8.RuneCountInString(StripCodes(v)), 0))
+		rpad := strings.Repeat(" ", max(padWidth-plainLength(v), 0))
 		outs = append(outs, fmt.Sprintf(" \x030,90%s%s\x03 ", v, rpad))
 	}
 	if len(outs) > 0 {
@@ -490,7 +488,7 @@ func renderTable(w io.Writer, table ast.Node, r *Renderer) {
 		for i, cell := range row {
 			lines := strings.Split(cell.text, "\n")
 			for _, line := range lines {
-				w := utf8.RuneCountInString(StripCodes(line))
+				w := plainLength(line)
 				if w > colWidths[i] {
 					colWidths[i] = min(w, maxTableCellWidth)
 				}
@@ -547,7 +545,7 @@ func renderTable(w io.Writer, table ast.Node, r *Renderer) {
 					line = cellLines[ci][li]
 				}
 				cw := colWidths[ci]
-				plainW := utf8.RuneCountInString(StripCodes(line))
+				plainW := plainLength(line)
 
 				var padded string
 				switch align {

@@ -4,13 +4,6 @@ trigger = "-"
 quitmsg = "unplugged"
 uploadurl = "https://upload.beer"
 
-[persist]
-# Persistent chat contexts (gitignored JSON)
-file_path = "contexts.json"
-max_age_days = 7     # delete old contexts
-max_contexts = 100   # max stored
-save_delay = "30s"   # auto-save interval
-
 #one is chosen at random if the bot is already busy on a prompt
 busymsgs = [
     "WHOAOaooooooooooHORhoo HOLD on thar IM ALREADY DOING something WIat YEr Turn!!"
@@ -18,6 +11,13 @@ busymsgs = [
 ratemsgs = [
     "whoa!! slow down!!!1~ AHHHHHHHHHHHHHHHH AHhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhA HHHHHHHHHHHHHhhhhhhhhhhhhhhhhhhhAAAAAAAAAAAAAAAAAAHhhhhhhhhhhhhhhhh"
 ]
+
+[persist]
+# Persistent chat contexts (gitignored JSON)
+file_path = "contexts.json"
+max_age_days = 7     # delete old contexts
+max_contexts = 100   # max stored
+save_delay = "30s"   # auto-save interval
 
 [services.openai]
 key = "UR KEY HERE :P"

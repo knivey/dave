@@ -9,6 +9,8 @@ import (
 
 	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/alecthomas/chroma/v2/styles"
+	"github.com/knivey/dave/MarkdownToIRC/irc"
+	"github.com/knivey/dave/MarkdownToIRC/tables"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
@@ -17,24 +19,50 @@ import (
 	"github.com/yuin/goldmark/text"
 )
 
-const (
-	// Box drawing characters for tables
-	boxTL = "┌" // Top-left corner
-	boxTR = "┐" // Top-right corner
-	boxBL = "└" // Bottom-left corner
-	boxBR = "┘" // Bottom-right corner
-	boxV  = "│" // Vertical line
-	boxH  = "─" // Horizontal line
-	boxT  = "┬" // T-junction (top)
-	boxC  = "├" // T-junction (left)
-	boxR  = "┤" // T-junction (right)
-	boxX  = "┼" // Cross (center)
-	boxB  = "┴" // T-junction (bottom)
-)
-
 type Renderer struct {
 	listCounter []int
 	source      []byte
+}
+
+func plainLength(s string) int {
+	return utf8.RuneCountInString(irc.StripCodes(s))
+}
+
+func extractTableData(table ast.Node, r *Renderer) tables.TableData {
+	var rows []tables.TableRow
+	headerCount := 0
+
+	for section := table.FirstChild(); section != nil; section = section.NextSibling() {
+		isHeader := section.Kind() == extast.KindTableHeader
+		var row tables.TableRow
+		for cellNode := section.FirstChild(); cellNode != nil; cellNode = cellNode.NextSibling() {
+			if cellNode.Kind() != extast.KindTableCell {
+				continue
+			}
+			cell := cellNode.(*extast.TableCell)
+			var buf bytes.Buffer
+			for c := cell.FirstChild(); c != nil; c = c.NextSibling() {
+				r.renderNodeTo(&buf, c)
+			}
+			text := strings.TrimSpace(strings.ReplaceAll(buf.String(), "\\|", "|"))
+			align := tables.AlignLeft
+			switch cell.Alignment {
+			case extast.AlignRight:
+				align = tables.AlignRight
+			case extast.AlignCenter:
+				align = tables.AlignCenter
+			}
+			row = append(row, tables.TableCell{Text: text, Align: align})
+		}
+		if len(row) > 0 {
+			rows = append(rows, row)
+			if isHeader {
+				headerCount++
+			}
+		}
+	}
+
+	return tables.TableData{Rows: rows, HeaderRowCount: headerCount}
 }
 
 func (r *Renderer) segmentText(seg text.Segment) string {
@@ -255,7 +283,9 @@ func (r *Renderer) renderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 		}
 	case extast.KindTable:
 		if entering {
-			renderTable(w, node, r)
+			data := extractTableData(node, r)
+			formatted := tables.RenderTable(data)
+			writes(w, node, formatted)
 			return ast.WalkSkipChildren
 		}
 	case extast.KindTableHeader, extast.KindTableRow:
@@ -291,10 +321,6 @@ func (r *Renderer) renderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 }
 
 const maxCodeBlockPadWidth = 80
-
-func plainLength(s string) int {
-	return utf8.RuneCountInString(StripCodes(s))
-}
 
 func writeHighlightedCodeBlock(w io.Writer, node ast.Node, highlighted string) {
 	lines := strings.Split(highlighted, "\n")
@@ -343,14 +369,6 @@ func writePlainCodeBlock(w io.Writer, node ast.Node, text string) {
 	if len(outs) > 0 {
 		writes(w, node, strings.Join(outs, "\n"))
 	}
-}
-
-func renderTableCellContent(r *Renderer, cell *extast.TableCell) string {
-	var buf bytes.Buffer
-	for c := cell.FirstChild(); c != nil; c = c.NextSibling() {
-		r.renderNodeTo(&buf, c)
-	}
-	return strings.TrimSpace(strings.ReplaceAll(buf.String(), "\\|", "|"))
 }
 
 func (r *Renderer) renderNodeTo(w io.Writer, node ast.Node) {
@@ -413,182 +431,6 @@ func (r *Renderer) renderNodeTo(w io.Writer, node ast.Node) {
 			}
 		}
 	}
-}
-
-const maxTableCellWidth = 40
-
-func renderTable(w io.Writer, table ast.Node, r *Renderer) {
-	type cellData struct {
-		text  string
-		align extast.Alignment
-		isHdr bool
-	}
-
-	var rows [][]cellData
-	var headerRowIdx = -1
-
-	for section := table.FirstChild(); section != nil; section = section.NextSibling() {
-		isHeader := section.Kind() == extast.KindTableHeader
-		if isHeader && headerRowIdx == -1 {
-			headerRowIdx = len(rows)
-		}
-		if isHeader {
-			var rowData []cellData
-			for cellNode := section.FirstChild(); cellNode != nil; cellNode = cellNode.NextSibling() {
-				if cellNode.Kind() != extast.KindTableCell {
-					continue
-				}
-				cell := cellNode.(*extast.TableCell)
-				text := renderTableCellContent(r, cell)
-				rowData = append(rowData, cellData{
-					text:  text,
-					align: cell.Alignment,
-					isHdr: true,
-				})
-			}
-			if len(rowData) > 0 {
-				rows = append(rows, rowData)
-			}
-		} else if section.Kind() == extast.KindTableRow {
-			var rowData []cellData
-			for cellNode := section.FirstChild(); cellNode != nil; cellNode = cellNode.NextSibling() {
-				if cellNode.Kind() != extast.KindTableCell {
-					continue
-				}
-				cell := cellNode.(*extast.TableCell)
-				text := renderTableCellContent(r, cell)
-				rowData = append(rowData, cellData{
-					text:  text,
-					align: cell.Alignment,
-					isHdr: false,
-				})
-			}
-			if len(rowData) > 0 {
-				rows = append(rows, rowData)
-			}
-		}
-	}
-
-	if len(rows) == 0 {
-		return
-	}
-
-	numCols := 0
-	for _, row := range rows {
-		if len(row) > numCols {
-			numCols = len(row)
-		}
-	}
-	if numCols == 0 {
-		return
-	}
-
-	colWidths := make([]int, numCols)
-	for _, row := range rows {
-		for i, cell := range row {
-			lines := strings.Split(cell.text, "\n")
-			for _, line := range lines {
-				w := plainLength(line)
-				if w > colWidths[i] {
-					colWidths[i] = min(w, maxTableCellWidth)
-				}
-			}
-		}
-	}
-
-	// Build border components for each column
-	var colSegments []string
-	for _, cw := range colWidths {
-		colSegments = append(colSegments, strings.Repeat(boxH, cw+2))
-	}
-	// Top: ┌───┬───┐
-	topBorder := boxTL + strings.Join(colSegments, boxT) + boxTR
-	// Middle: ├────┼────┤
-	middleBorder := boxC + strings.Join(colSegments, boxX) + boxR
-	// Bottom: └────┴────┘
-	bottomBorder := boxBL + strings.Join(colSegments, boxB) + boxBR
-
-	var lines []string
-	lines = append(lines, topBorder)
-
-	for ri, row := range rows {
-		if ri > 0 && ri == headerRowIdx+1 {
-			lines = append(lines, middleBorder)
-		}
-
-		var cellLines [][]string
-		maxCellLines := 1
-
-		for ci := 0; ci < numCols; ci++ {
-			var text string
-			if ci < len(row) {
-				text = row[ci].text
-			}
-			cw := colWidths[ci]
-			wrapped := wrapCellText(text, cw)
-			cellLines = append(cellLines, wrapped)
-			if len(wrapped) > maxCellLines {
-				maxCellLines = len(wrapped)
-			}
-		}
-
-		for li := 0; li < maxCellLines; li++ {
-			var rowLine strings.Builder
-			rowLine.WriteString(boxV)
-			for ci := 0; ci < numCols; ci++ {
-				var line string
-				var align extast.Alignment
-				if ci < len(row) {
-					align = row[ci].align
-				}
-				if li < len(cellLines[ci]) {
-					line = cellLines[ci][li]
-				}
-				cw := colWidths[ci]
-				plainW := plainLength(line)
-
-				var padded string
-				switch align {
-				case extast.AlignRight:
-					padded = strings.Repeat(" ", cw-plainW) + line
-				case extast.AlignCenter:
-					left := (cw - plainW) / 2
-					right := cw - plainW - left
-					padded = strings.Repeat(" ", left) + line + strings.Repeat(" ", right)
-				default:
-					padded = line + strings.Repeat(" ", cw-plainW)
-				}
-
-				rowLine.WriteString(" " + padded + " " + boxV)
-			}
-			lines = append(lines, rowLine.String())
-		}
-	}
-
-	lines = append(lines, bottomBorder)
-
-	writes(w, table, "\n"+strings.Join(lines, "\n"))
-}
-
-func wrapCellText(text string, maxWidth int) []string {
-	if text == "" {
-		return []string{""}
-	}
-
-	var allLines []string
-	for _, segment := range strings.Split(text, "\n") {
-		if segment == "" {
-			allLines = append(allLines, "")
-			continue
-		}
-		wrapped := WordWrap(segment, maxWidth)
-		allLines = append(allLines, wrapped...)
-	}
-
-	if len(allLines) == 0 {
-		allLines = []string{""}
-	}
-	return allLines
 }
 
 func MarkdownToIRC(response string) string {

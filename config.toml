@@ -3,6 +3,14 @@
 trigger = "-"
 quitmsg = "unplugged"
 uploadurl = "https://upload.beer"
+
+[persist]
+# Persistent chat contexts (gitignored JSON)
+file_path = "contexts.json"
+max_age_days = 7     # delete old contexts
+max_contexts = 100   # max stored
+save_delay = "30s"   # auto-save interval
+
 #one is chosen at random if the bot is already busy on a prompt
 busymsgs = [
     "WHOAOaooooooooooHORhoo HOLD on thar IM ALREADY DOING something WIat YEr Turn!!"
@@ -15,14 +23,22 @@ ratemsgs = [
 key = "UR KEY HERE :P"
 maxcompletiontokens = 600
 baseurl = "https://api.openai.com/v1/"
+temperature = 0.7  # optional
 
 [services.local]
 maxtokens = 500
 baseurl = "http://192.168.100.45:8000/v1"
+temperature = 0.7  # optional
 #this is just a default that can be overriden in command configs
 #if left undefined it defaults to 8
 #its the most number of previous interactions (including ai responses) to send back for context
 maxhistory = 8
+
+[services.grok]
+key = "xai-YOUR-KEY-HERE"  # Grok/x.ai API key
+maxtokens = 6000
+baseurl = "https://api.x.ai/v1/"
+temperature = 0.7  # optional creativity (0=deterministic)
 
 [services.sd]
 baseurl = "http://192.168.100.45:7860"
@@ -30,6 +46,7 @@ baseurl = "http://192.168.100.45:7860"
 [services.comfy]
 baseurl = "http://192.168.100.45:8188"
 comfy_timeout = 300
+temperature = 0.7  # optional
 
 [promptenhancements.default]
 service = "openai"
@@ -46,6 +63,7 @@ quitmsg = "Went for a smoke break"
 host = "irc.birdnest.live"
 ssl = true
 port = 6697
+pass = "your-sasl-or-server-password"  # optional SASL/server pass
 [[networks.birdnest.servers]]
 host = "example.com"
 ssl = true
@@ -59,9 +77,11 @@ channels = ["##"]
 servers = [{host = "irc.libera.chat", ssl = true}]
 
 [commands.sd.flux]
+description = "Flux SD image generation"
 service = "sd"
 steps = 12
 samplername = "Euler"
+samplerindex = "0"  # optional
 scheduler = "Simple"
 width = 1024
 height = 1024
@@ -80,6 +100,7 @@ regex = "dave?"
 # Example: system = "You are {{.BotNick}} chatting with {{.Nick}} in {{.Channel}} on {{.Network}}."
 
 [commands.chats.chat]
+description = "General IRC-aware chat"
 renderMarkdown = true
 service = "openai"
 model = "gpt-4o"
@@ -144,6 +165,19 @@ IRC Color Codes:
  - 14 Grey
  - 15 Light Grey
 Do not use markdown formatting
+"""
+
+[commands.chats.view]
+description = "Chat with image detection"
+renderMarkdown = true
+service = "openai"
+model = "gpt-4o"
+detectimages = true
+maximages = 2
+maxcontextimages = 2
+system = """You are dave, chatting with {{.Nick}}={{.BotNick}} in {{.Channel}} on {{.Network}}.
+Chan users: {{.ChanNicks}}
+Use IRC formatting/colors as needed.
 """
 
 [commands.comfy.test_workflow]

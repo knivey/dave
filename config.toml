@@ -74,6 +74,11 @@ model = "gpt-3.5-turbo-instruct"
 #note this regex is used to construct a larger regex so ^$ shouldn't be used
 regex = "dave?"
 
+# Chat commands support templating in the system prompt.
+# Available variables: {{.Nick}} (caller's nickname), {{.BotNick}} (bot's nickname), {{.Channel}} (channel name), {{.Network}} (network name)
+# Templates are processed when starting a new chat context. Invalid templates will cause the bot to fail at startup.
+# Example: system = "You are {{.BotNick}} chatting with {{.Nick}} in {{.Channel}} on {{.Network}}."
+
 [commands.chats.chat]
 renderMarkdown = true
 service = "openai"

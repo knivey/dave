@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"testing"
+	"text/template"
+)
 
 func TestAIConfigApplyDefaults(t *testing.T) {
 	tests := []struct {
@@ -259,4 +263,119 @@ func TestNetworkGetNextServer(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestChatCommandNameSetting(t *testing.T) {
+	// Create a temporary TOML config file
+	tomlContent := `
+[services.test]
+maxtokens = 100
+maxhistory = 10
+
+[commands.chats.chat1]
+service = "test"
+
+[commands.chats.chat2]
+service = "test"
+regex = "custom"
+
+[commands.chats.chat3]
+service = "test"
+system = "Hello {{.Nick}}"
+
+[commands.chats.chat4]
+service = "test"
+system = "Static message"
+`
+	tempFile, err := os.CreateTemp("", "test_config_*.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tempFile.Name())
+
+	if _, err := tempFile.WriteString(tomlContent); err != nil {
+		t.Fatal(err)
+	}
+	tempFile.Close()
+
+	// Load config using the actual loadConfigOrDie
+	config := loadConfigOrDie(tempFile.Name())
+
+	// Verify Name and Regex are set correctly
+	tests := []struct {
+		name      string
+		wantName  string
+		wantRegex string
+		hasTmpl   bool
+	}{
+		{"chat1", "chat1", "chat1", false},
+		{"chat2", "chat2", "custom", false},
+		{"chat3", "chat3", "chat3", true},
+		{"chat4", "chat4", "chat4", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, ok := config.Commands.Chats[tt.name]
+			if !ok {
+				t.Fatalf("command %s not found", tt.name)
+			}
+			if cfg.Name != tt.wantName {
+				t.Errorf("Name = %q, want %q", cfg.Name, tt.wantName)
+			}
+			if cfg.Regex != tt.wantRegex {
+				t.Errorf("Regex = %q, want %q", cfg.Regex, tt.wantRegex)
+			}
+			if (cfg.SystemTmpl != nil) != tt.hasTmpl {
+				t.Errorf("SystemTmpl presence = %v, want %v", cfg.SystemTmpl != nil, tt.hasTmpl)
+			}
+		})
+	}
+}
+
+func TestSystemPromptTemplateValidation(t *testing.T) {
+	tests := []struct {
+		name        string
+		templateStr string
+		wantErr     bool
+	}{
+		{
+			name:        "valid template with all variables",
+			templateStr: "Hello {{.Nick}} from {{.BotNick}} in {{.Channel}} on {{.Network}}",
+			wantErr:     false,
+		},
+		{
+			name:        "valid template with some variables",
+			templateStr: "Welcome {{.Nick}}!",
+			wantErr:     false,
+		},
+		{
+			name:        "valid template no variables",
+			templateStr: "Static system prompt",
+			wantErr:     false,
+		},
+		{
+			name:        "invalid template undefined variable",
+			templateStr: "Hello {{.Undefined}}",
+			wantErr:     true,
+		},
+		{
+			name:        "invalid template extra variables",
+			templateStr: "Hello {{.Nick}} {{.Extra}}",
+			wantErr:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpl, err := template.New("test").Parse(tt.templateStr)
+			if err != nil {
+				t.Fatalf("failed to parse template: %v", err)
+			}
+			err = validateSystemPromptTemplate(tmpl)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateSystemPromptTemplate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
 }

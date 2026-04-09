@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
+	"text/template"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -88,6 +90,7 @@ type AIConfig struct {
 	Model               string
 	Regex               string
 	System              string
+	SystemTmpl          *template.Template
 	Streaming           bool
 	MaxTokens           int `toml:"maxtokens"`
 	MaxCompletionTokens int `toml:"maxcompletiontokens"`
@@ -108,6 +111,19 @@ type Service struct {
 	Temperature         float32
 	MaxHistory          int `toml:"maxhistory"`
 	ComfyTimeout        int `toml:"comfy_timeout"` // WebSocket timeout in seconds
+}
+
+type SystemPromptData struct {
+	Nick    string
+	BotNick string
+	Channel string
+	Network string
+}
+
+func validateSystemPromptTemplate(tmpl *template.Template) error {
+	dummy := SystemPromptData{Nick: "dummy", BotNick: "dummy", Channel: "dummy", Network: "dummy"}
+	var buf strings.Builder
+	return tmpl.Execute(&buf, dummy)
 }
 
 func (config *Config) Busymsg() string {
@@ -203,7 +219,7 @@ func loadConfigOrDie(file string) (config Config) {
 		config.Services[name] = service
 	}
 
-	fff := func(cfg AIConfig, name string, config *Config) AIConfig {
+	fff := func(cfg AIConfig, name string, config *Config) (AIConfig, error) {
 		cfg.Name = name
 		if cfg.Regex == "" {
 			cfg.Regex = name
@@ -211,20 +227,38 @@ func loadConfigOrDie(file string) (config Config) {
 		if service, ok := config.Services[cfg.Service]; ok {
 			cfg.ApplyDefaults(service)
 		} else {
-			log.Fatalln("commands.completions."+name, "service", cfg.Service, "is undefined")
+			return cfg, fmt.Errorf("commands.completions.%s service %s is undefined", name, cfg.Service)
 		}
 		if cfg.RenderMarkdown && cfg.Streaming {
-			log.Fatalln("commands.completions."+name, "cannot render markdown with streaming")
+			return cfg, fmt.Errorf("commands.completions.%s cannot render markdown with streaming", name)
 		}
-		return cfg
+		return cfg, nil
 	}
 
 	for name, cfg := range config.Commands.Completions {
-		config.Commands.Completions[name] = fff(cfg, name, &config)
+		cfg, err := fff(cfg, name, &config)
+		if err != nil {
+			log.Fatalln("commands.completions."+name, err)
+		}
+		config.Commands.Completions[name] = cfg
 	}
 
 	for name, cfg := range config.Commands.Chats {
-		config.Commands.Chats[name] = fff(cfg, name, &config)
+		cfg, err := fff(cfg, name, &config)
+		if err != nil {
+			log.Fatalln("commands.chats."+name, err)
+		}
+		if cfg.System != "" {
+			tmpl, err := template.New(name + "_system").Parse(cfg.System)
+			if err != nil {
+				log.Fatalln("commands.chats."+name, "system prompt template parse error:", err)
+			}
+			cfg.SystemTmpl = tmpl
+			if err := validateSystemPromptTemplate(cfg.SystemTmpl); err != nil {
+				log.Fatalln("commands.chats."+name, "system prompt template validation error:", err)
+			}
+		}
+		config.Commands.Chats[name] = cfg
 	}
 
 	for name, cfg := range config.Commands.SD {

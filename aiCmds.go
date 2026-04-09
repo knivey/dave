@@ -60,9 +60,28 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 	var messages []gogpt.ChatCompletionMessage
 	ctx_key := network.Name + e.Params[0] + e.Source.Name
 	if !ContextExists(ctx_key) {
+		var systemContent string
+		if cfg.SystemTmpl != nil {
+			data := SystemPromptData{
+				Nick:    e.Source.Name,
+				BotNick: c.GetNick(),
+				Channel: e.Params[0],
+				Network: network.Name,
+			}
+			var buf strings.Builder
+			err := cfg.SystemTmpl.Execute(&buf, data)
+			if err != nil {
+				logger.Error("system prompt template execution error:", err)
+				systemContent = cfg.System
+			} else {
+				systemContent = buf.String()
+			}
+		} else {
+			systemContent = cfg.System
+		}
 		AddContext(cfg, ctx_key, gogpt.ChatCompletionMessage{
 			Role:    gogpt.ChatMessageRoleSystem,
-			Content: cfg.System,
+			Content: systemContent,
 		})
 	}
 	messages = GetContext(ctx_key).Messages

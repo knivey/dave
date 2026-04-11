@@ -59,18 +59,19 @@ type ComfyImage struct {
 
 type EnhancementResponse struct {
 	EnhancedPrompt string `json:"enhanced_prompt"`
+	NegativePrompt string `json:"negative_prompt"`
 	Refused        bool   `json:"refused"`
 	Reason         string `json:"reason"`
 }
 
-func enhancePrompt(rawPrompt string, cfg ComfyConfig, network Network, logger logxi.Logger) (string, error) {
+func enhancePrompt(rawPrompt string, cfg ComfyConfig, network Network, logger logxi.Logger) (positive string, negative string, err error) {
 	enhCfg := config.PromptEnhancements[cfg.EnhancePrompt]
 	svc := config.Services[enhCfg.Service]
 
 	schema, err := jsonschema.GenerateSchemaForType(EnhancementResponse{})
 	if err != nil {
 		logger.Warn("Failed to generate schema for structured output", "error", err.Error())
-		return "", fmt.Errorf("failed to generate enhancement schema: %w", err)
+		return "", "", fmt.Errorf("failed to generate enhancement schema: %w", err)
 	}
 
 	aiConfig := gogpt.DefaultConfig(svc.Key)
@@ -105,7 +106,7 @@ func enhancePrompt(rawPrompt string, cfg ComfyConfig, network Network, logger lo
 	})
 	if err != nil {
 		logger.Warn("Prompt enhancement API call failed", "error", err.Error())
-		return "", fmt.Errorf("enhancement API call failed: %w", err)
+		return "", "", fmt.Errorf("enhancement API call failed: %w", err)
 	}
 
 	enhanced := strings.TrimSpace(resp.Choices[0].Message.Content)
@@ -113,21 +114,21 @@ func enhancePrompt(rawPrompt string, cfg ComfyConfig, network Network, logger lo
 	err = schema.Unmarshal(enhanced, &result)
 	if err != nil {
 		logger.Warn("Failed to unmarshal structured response", "error", err.Error(), "content", enhanced)
-		return "", fmt.Errorf("failed to parse enhancement response: %w", err)
+		return "", "", fmt.Errorf("failed to parse enhancement response: %w", err)
 	}
 
 	if result.Refused {
 		logger.Info("Prompt enhancement refused", "reason", result.Reason)
-		return "", fmt.Errorf("enhancement refused: %s", result.Reason)
+		return "", "", fmt.Errorf("enhancement refused: %s", result.Reason)
 	}
 
 	if result.EnhancedPrompt == "" {
 		logger.Warn("Empty enhanced prompt returned")
-		return "", fmt.Errorf("enhancement returned empty prompt")
+		return "", "", fmt.Errorf("enhancement returned empty prompt")
 	}
 
-	logger.Debug("Enhanced prompt", "prompt", result.EnhancedPrompt)
-	return strings.TrimSpace(result.EnhancedPrompt), nil
+	logger.Debug("Enhanced prompt", "prompt", result.EnhancedPrompt, "negative", result.NegativePrompt)
+	return strings.TrimSpace(result.EnhancedPrompt), strings.TrimSpace(result.NegativePrompt), nil
 }
 
 func comfy(network Network, c *girc.Client, e girc.Event, cfg ComfyConfig, args ...string) {
@@ -150,17 +151,26 @@ func comfy(network Network, c *girc.Client, e girc.Event, cfg ComfyConfig, args 
 	}
 
 	prompt := args[0]
+	var negative string
 	if cfg.EnhancePrompt != "" {
 		c.Cmd.Reply(e, "enhancing prompt...")
-		enhanced, err := enhancePrompt(args[0], cfg, network, logger)
+		var err error
+		prompt, negative, err = enhancePrompt(args[0], cfg, network, logger)
 		if err != nil {
 			c.Cmd.Reply(e, errorMsg("Prompt enhancement failed: "+err.Error()))
 			return
 		}
-		prompt = enhanced
 	}
 
 	workflow[cfg.PromptNode].Inputs["text"] = prompt
+
+	if cfg.NegativePromptNode != "" && negative != "" {
+		workflow[cfg.NegativePromptNode].Inputs["text"] = negative
+	}
+
+	if cfg.NegativePromptNode != "" && negative != "" {
+		workflow[cfg.NegativePromptNode].Inputs["text"] = negative
+	}
 
 	for _, nodeID := range cfg.SeedNodes {
 		if node, ok := workflow[nodeID]; ok {

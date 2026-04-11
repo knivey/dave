@@ -72,17 +72,18 @@ type PromptEnhancementConfig struct {
 }
 
 type ComfyConfig struct {
-	Name          string //gets set to key name
-	Regex         string
-	Service       string
-	WorkflowPath  string   `toml:"workflow_path"`
-	ClientID      string   `toml:"clientid"`
-	OutputNode    string   `toml:"output_node"`
-	PromptNode    string   `toml:"prompt_node"`
-	SeedNodes     []string `toml:"seed_nodes"`
-	Timeout       int
-	EnhancePrompt string `toml:"enhanceprompt"`
-	Description   string
+	Name               string //gets set to key name
+	Regex              string
+	Service            string
+	WorkflowPath       string   `toml:"workflow_path"`
+	ClientID           string   `toml:"clientid"`
+	OutputNode         string   `toml:"output_node"`
+	PromptNode         string   `toml:"prompt_node"`
+	NegativePromptNode string   `toml:"negative_prompt_node"`
+	SeedNodes          []string `toml:"seed_nodes"`
+	Timeout            int
+	EnhancePrompt      string `toml:"enhanceprompt"`
+	Description        string
 }
 
 type AIConfig struct {

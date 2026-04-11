@@ -60,7 +60,7 @@ temperature = 0.7  # optional
 [promptenhancements.default]
 service = "openai"
 model = "gpt-4o"
-systemprompt = "You are an expert at writing prompts for AI image generation. Expand the user's short prompt into a detailed, descriptive prompt that will produce high-quality images. Include details about style, lighting, composition, and quality modifiers. If you refuse to enhance the prompt, do not provide a revised version in the enhanced_prompt field."
+systemprompt = "You are an expert at writing prompts for AI image generation. Expand the user's short prompt into a detailed, descriptive prompt that will produce high-quality images. Include details about style, lighting, composition, and quality modifiers. Also provide a negative prompt listing things to avoid (blurry, low quality, distorted, ugly, etc). If you refuse to enhance the prompt, do not provide a revised version in the enhanced_prompt field."
 
 [networks.birdnest]
 enabled = true
@@ -215,5 +215,6 @@ workflow_path = "workflows/qwen2512.json"
 clientid = "dave-irc-bot"
 output_node = "249"
 prompt_node = "270"
+negative_prompt_node = "263"
 seed_nodes = ["264"]
 enhanceprompt = "default"

@@ -35,7 +35,7 @@ No Makefile, no linter config. Use `go fmt` + `go vet`.
   - `contexts.json` (gitignored) for persistent chat history.
 
 ## High-Signal Gotchas
-- Config validation: `log.Fatalln` on any error (undefined services, missing Comfy fields, renderMarkdown+streaming both true, bad templates).
+- Config validation: `log.Fatalln` on any error (undefined services, missing Comfy fields, bad templates). `renderMarkdown+streaming` now supported (tables omitted, code blocks are plain-text with fixed 80-char padding).
 - Command regex: empty = key name; registered as `^<regex> (.+)$` in main.go.
 - Networks inherit root `trigger`/`quitmsg`; cycle multiple servers on reconnect.
 - Service `maxhistory` defaults to 8.

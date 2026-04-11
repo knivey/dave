@@ -22,6 +22,7 @@ import (
 type Renderer struct {
 	listCounter []int
 	source      []byte
+	streaming   bool
 }
 
 func plainLength(s string) int {
@@ -149,9 +150,20 @@ func writesWithNegOffset(w io.Writer, node ast.Node, text string, negativeOffset
 
 func (r *Renderer) Render(w io.Writer, source []byte, n ast.Node) error {
 	r.source = source
-	return ast.Walk(n, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
-		return r.renderNode(w, node, entering), nil
+	if r.streaming {
+		r.listCounter = nil
+	}
+	var buf bytes.Buffer
+	err := ast.Walk(n, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+		return r.renderNode(&buf, node, entering), nil
 	})
+	if err != nil {
+		return err
+	}
+	out := buf.String()
+	out = strings.TrimPrefix(out, "\n")
+	w.Write([]byte(out))
+	return nil
 }
 
 func (r *Renderer) AddOptions(...renderer.Option) {}
@@ -196,6 +208,10 @@ func (r *Renderer) renderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 				}
 				codeBuf.WriteString(strings.TrimRight(r.segmentText(seg), "\n"))
 			}
+			if r.streaming {
+				writePlainCodeBlockFixed(w, node, codeBuf.String())
+				return ast.WalkContinue
+			}
 			lexer := lexers.Get(lang)
 			if lexer != nil {
 				style := styles.Get("github-dark")
@@ -225,6 +241,10 @@ func (r *Renderer) renderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 					codeBuf.WriteByte('\n')
 				}
 				codeBuf.WriteString(strings.TrimRight(r.segmentText(seg), "\n"))
+			}
+			if r.streaming {
+				writePlainCodeBlockFixed(w, node, codeBuf.String())
+				return ast.WalkContinue
 			}
 			writePlainCodeBlock(w, node, codeBuf.String())
 		}
@@ -283,6 +303,11 @@ func (r *Renderer) renderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 		}
 	case extast.KindTable:
 		if entering {
+			if r.streaming {
+				// Tables not supported in streaming mode
+				writes(w, node, "[table omitted in streaming mode]\n")
+				return ast.WalkSkipChildren
+			}
 			data := extractTableData(node, r)
 			formatted := tables.RenderTable(data)
 			writes(w, node, formatted)
@@ -371,6 +396,24 @@ func writePlainCodeBlock(w io.Writer, node ast.Node, text string) {
 	}
 }
 
+func writePlainCodeBlockFixed(w io.Writer, node ast.Node, text string) {
+	lines := strings.Split(text, "\n")
+	for len(lines) > 0 && lines[0] == "" {
+		lines = lines[1:]
+	}
+	for len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	const padWidth = 80
+	var outs []string
+	for _, v := range lines {
+		outs = append(outs, fmt.Sprintf(" \x030,90%-*s\x03 ", padWidth, v))
+	}
+	if len(outs) > 0 {
+		writes(w, node, strings.Join(outs, "\n"))
+	}
+}
+
 func (r *Renderer) renderNodeTo(w io.Writer, node ast.Node) {
 	switch node.Kind() {
 	case ast.KindEmphasis:
@@ -444,4 +487,122 @@ func MarkdownToIRC(response string) string {
 	var buf bytes.Buffer
 	md.Convert([]byte(response), &buf)
 	return buf.String()
+}
+
+func normalizeForStreaming(input string) string {
+	lines := strings.Split(input, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimLeft(line, " \t")
+		if strings.HasPrefix(trimmed, "* ") || strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "+ ") ||
+			(len(trimmed) > 2 && trimmed[1] == '.' && (trimmed[0] >= '0' && trimmed[0] <= '9')) {
+			// Reduce leading whitespace for list items to prevent code block misparse
+			lines[i] = "  " + trimmed
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func MarkdownToIRCStream(response string) string {
+	r := &Renderer{streaming: true}
+	md := goldmark.New(
+		goldmark.WithExtensions(
+			extension.TaskList, // no tables in streaming
+		),
+		goldmark.WithRenderer(r),
+	)
+	var buf bytes.Buffer
+	md.Convert([]byte(response), &buf)
+	return buf.String()
+}
+
+// RenderCodeLine renders a single line inside a code block with fixed 80-char background padding (no Chroma).
+// Used by streaming to handle blank lines inside code blocks without premature cutoff.
+func RenderCodeLine(line string) string {
+	line = strings.TrimRight(line, "\r\n")
+	if line == "" {
+		line = " "
+	}
+	const padWidth = 80
+	return fmt.Sprintf(" \x030,90%-*s\x03 ", padWidth, line)
+}
+
+type StreamingRenderer struct {
+	inCodeBlock bool
+	buffer      string
+	codeLines   []string
+}
+
+func NewStreamingRenderer() *StreamingRenderer {
+	return &StreamingRenderer{}
+}
+
+// Process handles incremental streaming deltas, maintains state for code blocks, and returns rendered lines when complete.
+// Fence lines (```) are skipped. Non-code text accumulates until \n\n for correct multi-line structures (lists, quotes, paragraphs).
+func (s *StreamingRenderer) Process(delta string) []string {
+	var lines []string
+	s.buffer += delta
+	for {
+		if s.inCodeBlock {
+			before, after, found := strings.Cut(s.buffer, "\n")
+			if !found {
+				break
+			}
+			trimmed := strings.TrimSpace(before)
+			if trimmed == "```" {
+				// closing fence
+				var codeText strings.Builder
+				for _, codeLine := range s.codeLines {
+					codeText.WriteString(RenderCodeLine(codeLine))
+					codeText.WriteString("\n")
+				}
+				lines = append(lines, strings.TrimSuffix(codeText.String(), "\n"))
+				s.codeLines = nil
+				lines = append(lines, "")
+				s.inCodeBlock = false
+				s.buffer = after
+				continue
+			}
+			s.codeLines = append(s.codeLines, before)
+			s.buffer = after
+		} else {
+			// check for code start
+			before, after, found := strings.Cut(s.buffer, "\n")
+			if !found {
+				break
+			}
+			trimmed := strings.TrimSpace(before)
+			if trimmed == "```" {
+				// opening fence
+				s.inCodeBlock = true
+				s.buffer = after
+				continue
+			}
+			// put back
+			s.buffer = before + "\n" + after
+			// check for paragraph
+			before, after, found = strings.Cut(s.buffer, "\n\n")
+			if !found {
+				break
+			}
+			text := MarkdownToIRCStream(before)
+			lines = append(lines, text)
+			s.buffer = after
+		}
+	}
+	if delta == "" && s.buffer != "" {
+		if s.inCodeBlock {
+			var codeText strings.Builder
+			for _, codeLine := range s.codeLines {
+				codeText.WriteString(RenderCodeLine(codeLine))
+				codeText.WriteString("\n")
+			}
+			lines = append(lines, strings.TrimSuffix(codeText.String(), "\n"))
+			s.buffer = ""
+		} else {
+			text := MarkdownToIRCStream(s.buffer)
+			lines = append(lines, text)
+			s.buffer = ""
+		}
+	}
+	return lines
 }

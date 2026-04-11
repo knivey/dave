@@ -5,44 +5,9 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/knivey/dave/MarkdownToIRC/irc"
 )
-
-var colorRETest = regexp.MustCompile(`\x03(\d{2})?(,\d{2})?`)
-
-func humanize(s string) string {
-	s = strings.ReplaceAll(s, "\x02", "[BOLD]")
-	s = strings.ReplaceAll(s, "\x1D", "[ITALIC]")
-	s = strings.ReplaceAll(s, "\x1F", "[UNDERLINE]")
-	s = colorRETest.ReplaceAllString(s, "[COLOR${1}${2}]")
-	s = strings.ReplaceAll(s, "\u2022", "[BULLET]")
-	return s
-}
-
-type mdTest struct {
-	name       string
-	input      string
-	contain    []string
-	notContain []string
-}
-
-func runTests(t *testing.T, tests []mdTest) {
-	t.Helper()
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := MarkdownToIRC(tt.input)
-			for _, want := range tt.contain {
-				if !strings.Contains(got, want) {
-					t.Errorf("output missing %q\ngot:  %s\nwant: %s", humanize(want), humanize(got), humanize(want))
-				}
-			}
-			for _, notwant := range tt.notContain {
-				if strings.Contains(got, notwant) {
-					t.Errorf("output unexpectedly contains %q\ngot:  %s", humanize(notwant), humanize(got))
-				}
-			}
-		})
-	}
-}
 
 func TestInlineFormatting(t *testing.T) {
 	runTests(t, []mdTest{
@@ -79,18 +44,18 @@ func TestHeadings(t *testing.T) {
 		{
 			name:       "Heading",
 			input:      "# Hello",
-			contain:    []string{"\n\x02Hello"},
+			contain:    []string{"\x02Hello"},
 			notContain: []string{"\x02\n", "\x02\x02"},
 		},
 		{
 			name:    "HeadingFollowedByParagraph",
 			input:   "# Title\n\nBody text",
-			contain: []string{"\n\x02Title", "Body text"},
+			contain: []string{"\x02Title", "Body text"},
 		},
 		{
 			name:    "MultipleHeadings",
 			input:   "# One\n\n## Two",
-			contain: []string{"\n\x02One", "\n\x02Two"},
+			contain: []string{"\x02One", "\x02Two"},
 		},
 		{
 			name:       "HeadingBoldClosed",
@@ -131,11 +96,6 @@ func TestCodeBlocks(t *testing.T) {
 			notContain: []string{"\n\n"},
 		},
 		{
-			name:    "CodeBlockWithLang",
-			input:   "```python\nprint(\"hi\")\n```",
-			contain: []string{"\x030,90"},
-		},
-		{
 			name:    "CodeBlockEmptyLines",
 			input:   "```\nfoo\n\nbar\n```",
 			contain: []string{"foo", "bar"},
@@ -154,6 +114,20 @@ func TestCodeBlocks(t *testing.T) {
 			name:       "CodeBlockLeadingNewline",
 			input:      "```\n\ncode\n```",
 			notContain: []string{"\n\n"},
+		},
+	})
+
+	runTestsStripIRC(t, []struct {
+		name         string
+		input        string
+		lines        []string
+		checkBgColor bool
+	}{
+		{
+			name:         "CodeBlockWithLang",
+			input:        "```python\nprint(\"hi\")\n```",
+			lines:        []string{" print(\"hi\") "},
+			checkBgColor: true,
 		},
 	})
 }
@@ -214,7 +188,7 @@ func TestCodeBlocksInLists(t *testing.T) {
 		{
 			name:       "CodeBlockInNestedListItem",
 			input:      "- outer\n  - inner:\n    ```\n    code\n    ```",
-			contain:    []string{"\u2022 outer", "\u2022 inner:", "\x030,90code\x03"},
+			contain:    []string{"\u2022 outer", "   \u2022 inner:", "\x030,90code\x03"},
 			notContain: []string{"\n\n"},
 		},
 		{
@@ -222,6 +196,24 @@ func TestCodeBlocksInLists(t *testing.T) {
 			input:      "1. **Title:**\n   - text:\n     ```\n     sudo ip route add\n     ```",
 			contain:    []string{"1. \x02Title:\x02", "\u2022 text:", "\x030,90sudo ip route add\x03"},
 			notContain: []string{"\n\n"},
+		},
+	})
+
+	runTestsStripIRC(t, []struct {
+		name         string
+		input        string
+		lines        []string
+		checkBgColor bool
+	}{
+		{
+			name:  "CodeBlockWithBlankLine",
+			input: "```python\n\ndef hello():\n    pass\n```\n\ntext",
+			lines: []string{
+				" def hello(): ",
+				"     pass     ",
+				"text",
+			},
+			checkBgColor: true,
 		},
 	})
 }
@@ -292,7 +284,7 @@ func TestEdgeCases(t *testing.T) {
 		{
 			name:    "OnlyHeading",
 			input:   "# Title",
-			contain: []string{"\n\x02Title"},
+			contain: []string{"\x02Title"},
 		},
 		{
 			name:    "OnlyInlineCode",
@@ -487,10 +479,19 @@ func TestQuoteWithCodeBlocks(t *testing.T) {
 			contain:    []string{"\x0309>  \x030,90code\x03"},
 			notContain: []string{"\n\n"},
 		},
+	})
+
+	runTestsStripIRC(t, []struct {
+		name         string
+		input        string
+		lines        []string
+		checkBgColor bool
+	}{
 		{
-			name:    "QuoteWithCodeBlockAndLang",
-			input:   "> ```go\n> fmt.Println(\"hi\")\n> ```",
-			contain: []string{"\x0309>  \x030,90"},
+			name:         "QuoteWithCodeBlockAndLang",
+			input:        "> ```go\n> fmt.Println(\"hi\")\n> ```",
+			lines:        []string{">  fmt.Println(\"hi\") "},
+			checkBgColor: true,
 		},
 	})
 }
@@ -786,9 +787,8 @@ func TestHighlightedCodeBlockWidthCapping(t *testing.T) {
 	longLine := strings.Repeat("x", 120)
 	shortLine := "x"
 
-	codeRE := regexp.MustCompile(`\x03\d{1,2}(,\d{1,2})?|\x03|\x02|\x1D|\x1F`)
 	stripAll := func(s string) string {
-		return codeRE.ReplaceAllLiteralString(s, "")
+		return irc.StripCodes(s)
 	}
 
 	t.Run("MixedLengthsWithLanguage", func(t *testing.T) {
@@ -1068,12 +1068,12 @@ func TestTableStrictRendering(t *testing.T) {
 		{
 			name:     "MixedFormattingAndWrap",
 			input:    "| **Bold** | *Italic* | `Code` |\n|----------|----------|--------|\n| short | this is a long cell with **bold** that will wrap |",
-			expected: "\n┌───────┬──────────────────────────────────────────┬──────┐\n│ \x02Bold\x02  │ \x1DItalic\x1D                                   │ \x030,90Code\x03 │\n├───────┼──────────────────────────────────────────┼──────┤\n│ short │ this is a long cell with \x02bold\x02 that will  │      │\n│       │ wrap                                     │      │\n└───────┴──────────────────────────────────────────┴──────┘",
+			expected: "┌───────┬──────────────────────────────────────────┬──────┐\n│ \x02Bold\x02  │ \x1DItalic\x1D                                   │ \x030,90Code\x03 │\n├───────┼──────────────────────────────────────────┼──────┤\n│ short │ this is a long cell with \x02bold\x02 that will  │      │\n│       │ wrap                                     │      │\n└───────┴──────────────────────────────────────────┴──────┘",
 		},
 		{
 			name:     "AlignedWithCodes",
 			input:    "| Left | Center | Right |\n|:-----|:------:|------:|\n| **bold left** | `center` | *italic right* |",
-			expected: "\n┌───────────┬────────┬──────────────┐\n│ Left      │ Center │        Right │\n├───────────┼────────┼──────────────┤\n│ \x02bold left\x02 │ \x030,90center\x03 │ \x1Ditalic right\x1D │\n└───────────┴────────┴──────────────┘",
+			expected: "┌───────────┬────────┬──────────────┐\n│ Left      │ Center │        Right │\n├───────────┼────────┼──────────────┤\n│ \x02bold left\x02 │ \x030,90center\x03 │ \x1Ditalic right\x1D │\n└───────────┴────────┴──────────────┘",
 		},
 	}
 

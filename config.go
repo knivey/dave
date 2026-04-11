@@ -251,7 +251,9 @@ func loadConfigOrDie(file string) (config Config) {
 			return cfg, fmt.Errorf("commands.completions.%s service %s is undefined", name, cfg.Service)
 		}
 		if cfg.RenderMarkdown && cfg.Streaming {
-			return cfg, fmt.Errorf("commands.completions.%s cannot render markdown with streaming", name)
+			// Streaming markdown supported with limitations:
+			// - Tables omitted
+			// - Code blocks: plain text only (no Chroma), fixed 80-char background padding
 		}
 		return cfg, nil
 	}

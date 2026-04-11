@@ -42,7 +42,7 @@ func init() {
 type CmdFunc func(Network, *girc.Client, girc.Event, ...string)
 
 var stop_re = regexp.MustCompile("^stop$")
-var help_re = regexp.MustCompile("^(help|commands)$")
+var help_re = regexp.MustCompile("^help(?:\\s+(.+))?$")
 
 type CmdMap map[*regexp.Regexp]CmdFunc
 
@@ -215,7 +215,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 		if r.Match([]byte(msg)) {
 			var args []string
 			for i, m := range r.FindSubmatch([]byte(msg)) {
-				if i != 0 {
+				if i != 0 && len(m) > 0 {
 					args = append(args, string(m))
 				}
 			}

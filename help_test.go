@@ -88,7 +88,7 @@ func TestFormatDesc(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := formatDesc(tt.desc, tt.detectImages, false)
+			got := formatDesc(tt.desc, tt.detectImages)
 			if got != tt.want {
 				t.Errorf("formatDesc() = %q, want %q", got, tt.want)
 			}

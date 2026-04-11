@@ -2,8 +2,11 @@ package main
 
 import (
 	"fmt"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/lrstanley/girc"
 )
@@ -14,13 +17,32 @@ type helpEntry struct {
 	desc string
 }
 
-func help(network Network, client *girc.Client, event girc.Event, _ ...string) {
+func help(network Network, client *girc.Client, event girc.Event, args ...string) {
 	key := network.Name + event.Params[0]
 	startedRunning(key)
 	defer stoppedRunning(key)
 
 	botnick := client.GetNick()
 	var lines []string
+
+	if len(args) > 0 && args[0] != "" {
+		cmdName := args[0]
+		entry, found := findCommandHelp(network, cmdName)
+		if !found {
+			client.Cmd.Reply(event, fmt.Sprintf("\x0304❗ Command '%s' not found. Use %shelp to see all commands.", cmdName, network.Trigger))
+			return
+		}
+		lines = append(lines, fmt.Sprintf("Help for %s:", entry.cmd))
+		if entry.info != "" {
+			lines = append(lines, "  "+entry.info)
+		}
+		lines = append(lines, "  "+entry.desc)
+		for _, line := range lines {
+			client.Cmd.Reply(event, "\x02\x02"+line)
+			time.Sleep(time.Millisecond * network.Throttle)
+		}
+		return
+	}
 
 	lines = append(lines, fmt.Sprintf("I'm %s! Use my commands below to chat or generate images.", botnick))
 	lines = append(lines, fmt.Sprintf("Only Chat commands start a persistent context. After starting one, reply with my nick (e.g. \"%s, your message here\") to continue that context without using a command.", botnick))
@@ -29,11 +51,21 @@ func help(network Network, client *girc.Client, event girc.Event, _ ...string) {
 
 	if len(config.Commands.Completions) > 0 {
 		var entries []helpEntry
-		for _, c := range config.Commands.Completions {
+		completionKeys := make([]string, 0, len(config.Commands.Completions))
+		for k := range config.Commands.Completions {
+			completionKeys = append(completionKeys, k)
+		}
+		sort.Slice(completionKeys, func(i, j int) bool {
+			iInfo := formatModelInfo(config.Commands.Completions[completionKeys[i]].Service, config.Commands.Completions[completionKeys[i]].Model, config.Commands.Completions[completionKeys[i]].DetectImages)
+			jInfo := formatModelInfo(config.Commands.Completions[completionKeys[j]].Service, config.Commands.Completions[completionKeys[j]].Model, config.Commands.Completions[completionKeys[j]].DetectImages)
+			return iInfo < jInfo
+		})
+		for _, k := range completionKeys {
+			c := config.Commands.Completions[k]
 			entries = append(entries, helpEntry{
 				cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
-				info: fmt.Sprintf("[%s/%s]", c.Service, c.Model),
-				desc: formatDesc(c.Description, c.DetectImages, false),
+				info: formatModelInfo(c.Service, c.Model, c.DetectImages),
+				desc: formatDesc(c.Description, false),
 			})
 		}
 		lines = append(lines, "\x02Completions:\x02")
@@ -44,11 +76,21 @@ func help(network Network, client *girc.Client, event girc.Event, _ ...string) {
 
 	if len(config.Commands.Chats) > 0 {
 		var entries []helpEntry
-		for _, c := range config.Commands.Chats {
+		chatKeys := make([]string, 0, len(config.Commands.Chats))
+		for k := range config.Commands.Chats {
+			chatKeys = append(chatKeys, k)
+		}
+		sort.Slice(chatKeys, func(i, j int) bool {
+			iInfo := formatModelInfo(config.Commands.Chats[chatKeys[i]].Service, config.Commands.Chats[chatKeys[i]].Model, config.Commands.Chats[chatKeys[i]].DetectImages)
+			jInfo := formatModelInfo(config.Commands.Chats[chatKeys[j]].Service, config.Commands.Chats[chatKeys[j]].Model, config.Commands.Chats[chatKeys[j]].DetectImages)
+			return iInfo < jInfo
+		})
+		for _, k := range chatKeys {
+			c := config.Commands.Chats[k]
 			entries = append(entries, helpEntry{
 				cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
-				info: fmt.Sprintf("[%s/%s]", c.Service, c.Model),
-				desc: formatDesc(c.Description, c.DetectImages, false),
+				info: formatModelInfo(c.Service, c.Model, c.DetectImages),
+				desc: formatDesc(c.Description, false),
 			})
 		}
 		lines = append(lines, "\x02Chats:\x02")
@@ -63,14 +105,14 @@ func help(network Network, client *girc.Client, event girc.Event, _ ...string) {
 			entries = append(entries, helpEntry{
 				cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
 				info: "",
-				desc: formatDesc(c.Description, false, false),
+				desc: formatDesc(c.Description, false),
 			})
 		}
 		for _, c := range config.Commands.Comfy {
 			entries = append(entries, helpEntry{
 				cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
 				info: formatComfyInfo(c.EnhancePrompt),
-				desc: formatDesc(c.Description, false, false),
+				desc: formatDesc(c.Description, false),
 			})
 		}
 		lines = append(lines, "\x02Image commands:\x02")
@@ -93,6 +135,104 @@ func help(network Network, client *girc.Client, event girc.Event, _ ...string) {
 	}
 }
 
+func formatModelInfo(service, model string, detectImages bool) string {
+	icon := ""
+	if detectImages {
+		icon = "🖻"
+	}
+	if model == "" {
+		return fmt.Sprintf("[%s/]%s", service, icon)
+	}
+	return fmt.Sprintf("[%s/%s]%s", service, model, icon)
+}
+
+func findCommandHelp(network Network, cmdName string) (helpEntry, bool) {
+	for _, c := range config.Commands.Completions {
+		if c.Name == cmdName || c.Regex == cmdName {
+			return helpEntry{
+				cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
+				info: formatModelInfo(c.Service, c.Model, c.DetectImages),
+				desc: formatDesc(c.Description, false),
+			}, true
+		}
+		if c.Regex != c.Name {
+			re := regexp.MustCompile("^" + c.Regex + "$")
+			if re.MatchString(cmdName) {
+				return helpEntry{
+					cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
+					info: formatModelInfo(c.Service, c.Model, c.DetectImages),
+					desc: formatDesc(c.Description, false),
+				}, true
+			}
+		}
+	}
+	for _, c := range config.Commands.Chats {
+		if c.Name == cmdName || c.Regex == cmdName {
+			return helpEntry{
+				cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
+				info: formatModelInfo(c.Service, c.Model, c.DetectImages),
+				desc: formatDesc(c.Description, false),
+			}, true
+		}
+		if c.Regex != c.Name {
+			re := regexp.MustCompile("^" + c.Regex + "$")
+			if re.MatchString(cmdName) {
+				return helpEntry{
+					cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
+					info: formatModelInfo(c.Service, c.Model, c.DetectImages),
+					desc: formatDesc(c.Description, false),
+				}, true
+			}
+		}
+	}
+	for _, c := range config.Commands.SD {
+		if c.Name == cmdName || c.Regex == cmdName {
+			return helpEntry{
+				cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
+				info: "",
+				desc: formatDesc(c.Description, false),
+			}, true
+		}
+		if c.Regex != c.Name {
+			re := regexp.MustCompile("^" + c.Regex + "$")
+			if re.MatchString(cmdName) {
+				return helpEntry{
+					cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
+					info: "",
+					desc: formatDesc(c.Description, false),
+				}, true
+			}
+		}
+	}
+	for _, c := range config.Commands.Comfy {
+		if c.Name == cmdName || c.Regex == cmdName {
+			return helpEntry{
+				cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
+				info: formatComfyInfo(c.EnhancePrompt),
+				desc: formatDesc(c.Description, false),
+			}, true
+		}
+		if c.Regex != c.Name {
+			re := regexp.MustCompile("^" + c.Regex + "$")
+			if re.MatchString(cmdName) {
+				return helpEntry{
+					cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
+					info: formatComfyInfo(c.EnhancePrompt),
+					desc: formatDesc(c.Description, false),
+				}, true
+			}
+		}
+	}
+	if cmdName == "stop" {
+		return helpEntry{
+			cmd:  network.Trigger + "stop",
+			info: "",
+			desc: "Stop text generation (including this help message)",
+		}, true
+	}
+	return helpEntry{}, false
+}
+
 func formatCmd(trigger, regex, name string) string {
 	cmd := trigger + regex
 	if regex != name {
@@ -101,7 +241,7 @@ func formatCmd(trigger, regex, name string) string {
 	return cmd
 }
 
-func formatDesc(desc string, detectImages bool, _ bool) string {
+func formatDesc(desc string, detectImages bool) string {
 	if desc == "" {
 		desc = "no description"
 	}
@@ -126,19 +266,23 @@ func formatTable(entries []helpEntry) []string {
 	maxCmd := 0
 	maxInfo := 0
 	for _, e := range entries {
-		if len(e.cmd) > maxCmd {
-			maxCmd = len(e.cmd)
+		cmdLen := utf8.RuneCountInString(e.cmd)
+		infoLen := utf8.RuneCountInString(e.info)
+		if cmdLen > maxCmd {
+			maxCmd = cmdLen
 		}
-		if len(e.info) > maxInfo {
-			maxInfo = len(e.info)
+		if infoLen > maxInfo {
+			maxInfo = infoLen
 		}
 	}
 
 	var lines []string
 	for _, e := range entries {
-		line := e.cmd + strings.Repeat(" ", maxCmd-len(e.cmd)+2)
+		cmdLen := utf8.RuneCountInString(e.cmd)
+		infoLen := utf8.RuneCountInString(e.info)
+		line := e.cmd + strings.Repeat(" ", maxCmd-cmdLen+2)
 		if e.info != "" {
-			line += e.info + strings.Repeat(" ", maxInfo-len(e.info)+2)
+			line += e.info + strings.Repeat(" ", maxInfo-infoLen+2)
 		} else if maxInfo > 0 {
 			line += strings.Repeat(" ", maxInfo+2)
 		}

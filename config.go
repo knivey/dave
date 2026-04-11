@@ -96,11 +96,16 @@ type AIConfig struct {
 	MaxTokens           int `toml:"maxtokens"`
 	MaxCompletionTokens int `toml:"maxcompletiontokens"`
 	Temperature         float32
-	MaxHistory          int  `toml:"maxhistory"`
-	RenderMarkdown      bool `toml:"rendermarkdown"`
-	DetectImages        bool `toml:"detectimages"`
-	MaxImages           int  `toml:"maximages"`
-	MaxContextImages    int  `toml:"maxcontextimages"`
+	MaxHistory          int    `toml:"maxhistory"`
+	RenderMarkdown      bool   `toml:"rendermarkdown"`
+	DetectImages        bool   `toml:"detectimages"`
+	MaxImages           int    `toml:"maximages"`
+	MaxContextImages    int    `toml:"maxcontextimages"`
+	ImageFormat         string `toml:"imageformat"`
+	ImageQuality        int    `toml:"imagequality"`
+	MaxImageSize        string `toml:"maximagesize"`
+	MaxImageWidth       int    `toml:"-"`
+	MaxImageHeight      int    `toml:"-"`
 	Description         string
 }
 
@@ -110,8 +115,11 @@ type Service struct {
 	MaxCompletionTokens int `toml:"maxcompletiontokens"` //use this one now with openai
 	BaseURL             string
 	Temperature         float32
-	MaxHistory          int `toml:"maxhistory"`
-	ComfyTimeout        int `toml:"comfy_timeout"` // WebSocket timeout in seconds
+	MaxHistory          int    `toml:"maxhistory"`
+	ComfyTimeout        int    `toml:"comfy_timeout"` // WebSocket timeout in seconds
+	ImageFormat         string `toml:"imageformat"`
+	ImageQuality        int    `toml:"imagequality"`
+	MaxImageSize        string `toml:"maximagesize"`
 }
 
 type SystemPromptData struct {
@@ -167,6 +175,24 @@ func (cfg *AIConfig) ApplyDefaults(service Service) {
 	}
 	if cfg.MaxContextImages == 0 {
 		cfg.MaxContextImages = 5
+	}
+	if cfg.ImageFormat == "" {
+		cfg.ImageFormat = service.ImageFormat
+		if cfg.ImageFormat == "" {
+			cfg.ImageFormat = "jpg"
+		}
+	}
+	if cfg.ImageQuality == 0 {
+		cfg.ImageQuality = service.ImageQuality
+		if cfg.ImageQuality == 0 {
+			cfg.ImageQuality = 75
+		}
+	}
+	if cfg.MaxImageSize == "" {
+		cfg.MaxImageSize = service.MaxImageSize
+		if cfg.MaxImageSize == "" {
+			cfg.MaxImageSize = "1024x1024"
+		}
 	}
 }
 
@@ -270,6 +296,27 @@ func loadConfigOrDie(file string) (config Config) {
 		cfg, err := fff(cfg, name, &config)
 		if err != nil {
 			log.Fatalln("commands.chats."+name, err)
+		}
+		if cfg.ImageFormat != "" && cfg.ImageFormat != "webp" && cfg.ImageFormat != "jpg" && cfg.ImageFormat != "jpeg" {
+			log.Fatalln("commands.chats."+name, "imageformat must be 'webp', 'jpg', or 'jpeg'")
+		}
+		if cfg.ImageQuality < 1 || cfg.ImageQuality > 100 {
+			log.Fatalln("commands.chats."+name, "imagequality must be between 1 and 100")
+		}
+		if cfg.MaxImageSize != "" {
+			parts := strings.Split(cfg.MaxImageSize, "x")
+			if len(parts) != 2 {
+				log.Fatalln("commands.chats."+name, "maximagesize must be in format WxH (e.g., 1024x1024)")
+			}
+			var w, h int
+			if _, err := fmt.Sscanf(parts[0], "%d", &w); err != nil {
+				log.Fatalln("commands.chats."+name, "invalid maximagesize width:", err)
+			}
+			if _, err := fmt.Sscanf(parts[1], "%d", &h); err != nil {
+				log.Fatalln("commands.chats."+name, "invalid maximagesize height:", err)
+			}
+			cfg.MaxImageWidth = w
+			cfg.MaxImageHeight = h
 		}
 		if cfg.System != "" {
 			tmpl, err := template.New(name + "_system").Parse(cfg.System)

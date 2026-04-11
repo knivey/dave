@@ -17,10 +17,14 @@ import (
 	"github.com/chai2010/webp"
 	gogpt "github.com/sashabaranov/go-openai"
 	"golang.org/x/image/bmp"
+	"golang.org/x/image/draw"
 )
 
 const maxImageSize = 5 * 1024 * 1024 // 5MB
-const webpQuality = 75.0
+const defaultImageFormat = "jpg"
+const defaultImageQuality = 75
+const defaultMaxImageWidth = 1024
+const defaultMaxImageHeight = 1024
 
 func formatSize(b int) string {
 	const unit = 1024
@@ -96,15 +100,7 @@ func downloadImage(url string) ([]byte, string, error) {
 	return data, contentType, nil
 }
 
-func convertToWebP(imgData []byte, mimeType string) ([]byte, error) {
-	if mimeType == "image/webp" {
-		_, err := webp.Decode(bytes.NewReader(imgData))
-		if err == nil {
-			logger.Debug("image already webp, skipping conversion", "size", formatSize(len(imgData)))
-			return imgData, nil
-		}
-	}
-
+func convertImage(imgData []byte, mimeType, format string, quality, maxW, maxH int) ([]byte, string, error) {
 	var img image.Image
 	var err error
 
@@ -129,18 +125,74 @@ func convertToWebP(imgData []byte, mimeType string) ([]byte, error) {
 	}
 
 	if err != nil {
-		return nil, fmt.Errorf("failed to decode image: %w", err)
+		return nil, "", fmt.Errorf("failed to decode image: %w", err)
+	}
+
+	bounds := img.Bounds()
+	width := bounds.Dx()
+	height := bounds.Dy()
+
+	if maxW > 0 || maxH > 0 {
+		newW := width
+		newH := height
+		scale := 1.0
+
+		if maxW > 0 && width > maxW {
+			scale = float64(maxW) / float64(width)
+		}
+		if maxH > 0 && height > maxH {
+			hScale := float64(maxH) / float64(height)
+			if hScale < scale {
+				scale = hScale
+			}
+		}
+
+		if scale < 1.0 {
+			newW = int(float64(width) * scale)
+			newH = int(float64(height) * scale)
+			if logger != nil {
+				logger.Debug("scaling image", "original", fmt.Sprintf("%dx%d", width, height), "scaled", fmt.Sprintf("%dx%d", newW, newH))
+			}
+
+			dst := image.NewNRGBA(image.Rect(0, 0, newW, newH))
+			draw.NearestNeighbor.Scale(dst, dst.Rect, img, bounds, draw.Over, nil)
+			img = dst
+			bounds = img.Bounds()
+		}
+	}
+
+	if format == "" {
+		format = defaultImageFormat
+	}
+	if quality == 0 {
+		quality = defaultImageQuality
 	}
 
 	var buf bytes.Buffer
-	err = webp.Encode(&buf, img, &webp.Options{Quality: webpQuality})
-	if err != nil {
-		return nil, fmt.Errorf("failed to encode webp: %w", err)
+	var dataURI string
+
+	switch format {
+	case "webp":
+		err = webp.Encode(&buf, img, &webp.Options{Quality: float32(quality)})
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to encode webp: %w", err)
+		}
+		dataURI = "data:image/webp;base64,"
+	case "jpg", "jpeg":
+		err = jpeg.Encode(&buf, img, &jpeg.Options{Quality: quality})
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to encode jpeg: %w", err)
+		}
+		dataURI = "data:image/jpeg;base64,"
+	default:
+		return nil, "", fmt.Errorf("unsupported image format: %s", format)
 	}
 
-	webpData := buf.Bytes()
-	logger.Debug("image converted to webp", "original_type", mimeType, "original_size", formatSize(len(imgData)), "webp_size", formatSize(len(webpData)))
-	return webpData, nil
+	encodedData := buf.Bytes()
+	if logger != nil {
+		logger.Debug("image converted", "format", format, "original_type", mimeType, "original_size", formatSize(len(imgData)), "new_size", formatSize(len(encodedData)))
+	}
+	return encodedData, dataURI, nil
 }
 
 func decodeBMP(r io.Reader) (image.Image, error) {
@@ -190,7 +242,7 @@ func sanitizeMessages(messages []gogpt.ChatCompletionMessage) []gogpt.ChatComple
 	return out
 }
 
-func buildImageMessage(text string, imageUrls []string, maxImages int) (gogpt.ChatCompletionMessage, error) {
+func buildImageMessage(text string, imageUrls []string, maxImages int, format string, quality, maxW, maxH int) (gogpt.ChatCompletionMessage, error) {
 	if len(imageUrls) > maxImages {
 		imageUrls = imageUrls[:maxImages]
 	}
@@ -211,14 +263,14 @@ func buildImageMessage(text string, imageUrls []string, maxImages int) (gogpt.Ch
 			continue
 		}
 
-		webpData, err := convertToWebP(imgData, mimeType)
+		imgData, dataURI, err := convertImage(imgData, mimeType, format, quality, maxW, maxH)
 		if err != nil {
-			logger.Warn("failed to convert image to webp", "url", url, "error", err.Error())
+			logger.Warn("failed to convert image", "url", url, "error", err.Error())
 			continue
 		}
 
-		b64 := base64.StdEncoding.EncodeToString(webpData)
-		dataURI := "data:image/webp;base64," + b64
+		b64 := base64.StdEncoding.EncodeToString(imgData)
+		dataURI = dataURI + b64
 
 		parts = append(parts, gogpt.ChatMessagePart{
 			Type: gogpt.ChatMessagePartTypeImageURL,

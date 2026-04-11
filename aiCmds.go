@@ -118,7 +118,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 			}
 
 			var err error
-			userMsg, err = buildImageMessage(cleanText, imageUrls, cfg.MaxImages)
+			userMsg, err = buildImageMessage(cleanText, imageUrls, cfg.MaxImages, cfg.ImageFormat, cfg.ImageQuality, cfg.MaxImageWidth, cfg.MaxImageHeight)
 			if err != nil {
 				c.Cmd.Reply(e, errorMsg("failed to process images: "+err.Error()))
 				return

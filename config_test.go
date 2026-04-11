@@ -28,6 +28,9 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 				cfg.MaxHistory = 10
 				cfg.MaxImages = 5
 				cfg.MaxContextImages = 5
+				cfg.ImageFormat = "jpg"
+				cfg.ImageQuality = 75
+				cfg.MaxImageSize = "1024x1024"
 				return cfg
 			},
 		},
@@ -49,6 +52,9 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 				cfg.MaxHistory = 10
 				cfg.MaxImages = 3
 				cfg.MaxContextImages = 5
+				cfg.ImageFormat = "jpg"
+				cfg.ImageQuality = 75
+				cfg.MaxImageSize = "1024x1024"
 				return cfg
 			},
 		},
@@ -66,6 +72,9 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 				cfg.MaxCompletionTokens = 300
 				cfg.MaxImages = 5
 				cfg.MaxContextImages = 5
+				cfg.ImageFormat = "jpg"
+				cfg.ImageQuality = 75
+				cfg.MaxImageSize = "1024x1024"
 				return cfg
 			},
 		},
@@ -76,6 +85,9 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 			expect: func(cfg AIConfig) AIConfig {
 				cfg.MaxImages = 5
 				cfg.MaxContextImages = 5
+				cfg.ImageFormat = "jpg"
+				cfg.ImageQuality = 75
+				cfg.MaxImageSize = "1024x1024"
 				return cfg
 			},
 		},
@@ -88,6 +100,9 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 			expect: func(cfg AIConfig) AIConfig {
 				cfg.MaxImages = 10
 				cfg.MaxContextImages = 5
+				cfg.ImageFormat = "jpg"
+				cfg.ImageQuality = 75
+				cfg.MaxImageSize = "1024x1024"
 				return cfg
 			},
 		},
@@ -100,6 +115,9 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 			expect: func(cfg AIConfig) AIConfig {
 				cfg.MaxImages = 3
 				cfg.MaxContextImages = 5
+				cfg.ImageFormat = "jpg"
+				cfg.ImageQuality = 75
+				cfg.MaxImageSize = "1024x1024"
 				return cfg
 			},
 		},
@@ -127,6 +145,15 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 			}
 			if cfg.MaxContextImages != want.MaxContextImages {
 				t.Errorf("MaxContextImages = %d, want %d", cfg.MaxContextImages, want.MaxContextImages)
+			}
+			if cfg.ImageFormat != want.ImageFormat {
+				t.Errorf("ImageFormat = %q, want %q", cfg.ImageFormat, want.ImageFormat)
+			}
+			if cfg.ImageQuality != want.ImageQuality {
+				t.Errorf("ImageQuality = %d, want %d", cfg.ImageQuality, want.ImageQuality)
+			}
+			if cfg.MaxImageSize != want.MaxImageSize {
+				t.Errorf("MaxImageSize = %q, want %q", cfg.MaxImageSize, want.MaxImageSize)
 			}
 		})
 	}
@@ -375,6 +402,126 @@ func TestSystemPromptTemplateValidation(t *testing.T) {
 			err = validateSystemPromptTemplate(tmpl)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("validateSystemPromptTemplate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestImageConfigValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		toml    string
+		wantW   int
+		wantH   int
+		wantFmt string
+		wantQ   int
+	}{
+		{
+			name: "defaults applied",
+			toml: `[services.test]
+maxtokens = 100
+[commands.chats.chat1]
+service = "test"`,
+			wantW:   1024,
+			wantH:   1024,
+			wantFmt: "jpg",
+			wantQ:   75,
+		},
+		{
+			name: "valid jpg format",
+			toml: `[services.test]
+maxtokens = 100
+[commands.chats.chat1]
+service = "test"
+imageformat = "jpg"`,
+			wantFmt: "jpg",
+		},
+		{
+			name: "valid webp format",
+			toml: `[services.test]
+maxtokens = 100
+[commands.chats.chat1]
+service = "test"
+imageformat = "webp"`,
+			wantFmt: "webp",
+		},
+		{
+			name: "valid jpeg format",
+			toml: `[services.test]
+maxtokens = 100
+[commands.chats.chat1]
+service = "test"
+imageformat = "jpeg"`,
+			wantFmt: "jpeg",
+		},
+		{
+			name: "valid quality 50",
+			toml: `[services.test]
+maxtokens = 100
+[commands.chats.chat1]
+service = "test"
+imagequality = 50`,
+			wantQ: 50,
+		},
+		{
+			name: "valid maximagesize 1024x1024",
+			toml: `[services.test]
+maxtokens = 100
+[commands.chats.chat1]
+service = "test"
+maximagesize = "1024x1024"`,
+			wantW: 1024,
+			wantH: 1024,
+		},
+		{
+			name: "valid maximagesize 1024x768",
+			toml: `[services.test]
+maxtokens = 100
+[commands.chats.chat1]
+service = "test"
+maximagesize = "1024x768"`,
+			wantW: 1024,
+			wantH: 768,
+		},
+		{
+			name: "valid maximagesize 1920x1080",
+			toml: `[services.test]
+maxtokens = 100
+[commands.chats.chat1]
+service = "test"
+maximagesize = "1920x1080"`,
+			wantW: 1920,
+			wantH: 1080,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tempFile, err := os.CreateTemp("", "test_config_*.toml")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer os.Remove(tempFile.Name())
+
+			if _, err := tempFile.WriteString(tt.toml); err != nil {
+				t.Fatal(err)
+			}
+			tempFile.Close()
+
+			config := loadConfigOrDie(tempFile.Name())
+			cfg := config.Commands.Chats["chat1"]
+
+			if tt.wantW > 0 && cfg.MaxImageWidth != tt.wantW {
+				t.Errorf("MaxImageWidth = %d, want %d", cfg.MaxImageWidth, tt.wantW)
+			}
+			if tt.wantH > 0 && cfg.MaxImageHeight != tt.wantH {
+				t.Errorf("MaxImageHeight = %d, want %d", cfg.MaxImageHeight, tt.wantH)
+			}
+			if tt.wantFmt != "" && cfg.ImageFormat != tt.wantFmt {
+				t.Errorf("ImageFormat = %q, want %q", cfg.ImageFormat, tt.wantFmt)
+			}
+			if tt.wantQ > 0 && cfg.ImageQuality != tt.wantQ {
+				t.Errorf("ImageQuality = %d, want %d", cfg.ImageQuality, tt.wantQ)
 			}
 		})
 	}

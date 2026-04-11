@@ -24,6 +24,9 @@ key = "UR KEY HERE :P"
 maxcompletiontokens = 600
 baseurl = "https://api.openai.com/v1/"
 temperature = 0.7  # optional
+imageformat = "jpg"      # default image format for chat commands
+imagequality = 75
+maximagesize = "1024x1024"
 
 [services.local]
 maxtokens = 500
@@ -33,12 +36,18 @@ temperature = 0.7  # optional
 #if left undefined it defaults to 8
 #its the most number of previous interactions (including ai responses) to send back for context
 maxhistory = 8
+imageformat = "jpg"
+imagequality = 75
+maximagesize = "1024x1024"
 
 [services.grok]
 key = "xai-YOUR-KEY-HERE"  # Grok/x.ai API key
 maxtokens = 6000
 baseurl = "https://api.x.ai/v1/"
 temperature = 0.7  # optional creativity (0=deterministic)
+imageformat = "jpg"
+imagequality = 75
+maximagesize = "1024x1024"
 
 [services.sd]
 baseurl = "http://192.168.100.45:7860"
@@ -175,6 +184,9 @@ model = "gpt-4o"
 detectimages = true
 maximages = 2
 maxcontextimages = 2
+imageformat = "jpg"
+imagequality = 75
+maximagesize = "1024x1024"
 system = """You are dave, chatting with {{.Nick}}={{.BotNick}} in {{.Channel}} on {{.Network}}.
 Chan users: {{.ChanNicks}}
 Use IRC formatting/colors as needed.

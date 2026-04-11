@@ -1,6 +1,9 @@
 package main
 
 import (
+	"bytes"
+	"image"
+	"image/jpeg"
 	"testing"
 
 	gogpt "github.com/sashabaranov/go-openai"
@@ -472,4 +475,126 @@ func TestCountContextImages(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConvertImage(t *testing.T) {
+	createTestImage := func(width, height int) []byte {
+		img := image.NewRGBA(image.Rect(0, 0, width, height))
+		for y := 0; y < height; y++ {
+			for x := 0; x < width; x++ {
+				img.Pix[(y*width+x)*4+0] = 255
+				img.Pix[(y*width+x)*4+1] = 0
+				img.Pix[(y*width+x)*4+2] = 0
+				img.Pix[(y*width+x)*4+3] = 255
+			}
+		}
+		var buf bytes.Buffer
+		jpeg.Encode(&buf, img, &jpeg.Options{Quality: 90})
+		return buf.Bytes()
+	}
+
+	tests := []struct {
+		name        string
+		imgData     []byte
+		mimeType    string
+		format      string
+		quality     int
+		maxW        int
+		maxH        int
+		wantContain string
+	}{
+		{
+			name:        "encode jpg format",
+			imgData:     createTestImage(100, 100),
+			mimeType:    "image/jpeg",
+			format:      "jpg",
+			quality:     75,
+			wantContain: "data:image/jpeg;base64,",
+		},
+		{
+			name:        "encode webp format",
+			imgData:     createTestImage(100, 100),
+			mimeType:    "image/jpeg",
+			format:      "webp",
+			quality:     75,
+			wantContain: "data:image/webp;base64,",
+		},
+		{
+			name:     "scale down 2000x2000 to 1024x1024",
+			imgData:  createTestImage(2000, 2000),
+			mimeType: "image/jpeg",
+			format:   "jpg",
+			quality:  75,
+			maxW:     1024,
+			maxH:     1024,
+		},
+		{
+			name:     "scale 2000x1000 to 1024x512",
+			imgData:  createTestImage(2000, 1000),
+			mimeType: "image/jpeg",
+			format:   "jpg",
+			quality:  75,
+			maxW:     1024,
+			maxH:     1024,
+		},
+		{
+			name:     "no scale small image",
+			imgData:  createTestImage(500, 500),
+			mimeType: "image/jpeg",
+			format:   "jpg",
+			quality:  75,
+			maxW:     1024,
+			maxH:     1024,
+		},
+		{
+			name:     "scale to 1024x768",
+			imgData:  createTestImage(2000, 1500),
+			mimeType: "image/jpeg",
+			format:   "jpg",
+			quality:  75,
+			maxW:     1024,
+			maxH:     768,
+		},
+		{
+			name:     "quality affects output",
+			imgData:  createTestImage(100, 100),
+			mimeType: "image/jpeg",
+			format:   "jpg",
+			quality:  50,
+		},
+		{
+			name:        "jpeg format alias",
+			imgData:     createTestImage(100, 100),
+			mimeType:    "image/jpeg",
+			format:      "jpeg",
+			quality:     75,
+			wantContain: "data:image/jpeg;base64,",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, dataURI, err := convertImage(tt.imgData, tt.mimeType, tt.format, tt.quality, tt.maxW, tt.maxH)
+			if err != nil {
+				t.Fatalf("convertImage() error = %v", err)
+			}
+			if tt.wantContain != "" && !containsStr(dataURI, tt.wantContain) {
+				t.Errorf("dataURI = %q, want containing %q", dataURI, tt.wantContain)
+			}
+			if len(data) == 0 {
+				t.Error("encoded data is empty")
+			}
+		})
+	}
+}
+
+func containsStr(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || func() bool {
+		for i := 0; i <= len(s)-len(substr); i++ {
+			if s[i:i+len(substr)] == substr {
+				return true
+			}
+		}
+		return false
+	}())
 }

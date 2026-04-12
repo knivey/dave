@@ -11,10 +11,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/knivey/dave/MarkdownToIRC/irc"
 	"github.com/lrstanley/girc"
 	logxi "github.com/mgutz/logxi/v1"
-	"github.com/muesli/reflow/wordwrap"
-	"github.com/muesli/reflow/wrap"
 	"github.com/vodkaslime/wildcard"
 )
 
@@ -131,11 +130,19 @@ func main() {
 	os.Exit(0)
 }
 
-func sendLoop(out string, network Network, c *girc.Client, e girc.Event) {
-	out = wrap.String(wordwrap.String(out, 350), 420)
+const maxLineLen = 350
 
-	// for each new line break in response choices write to channel
+func wrapForIRC(out string) []string {
+	var lines []string
 	for _, line := range strings.Split(out, "\n") {
+		lines = append(lines, irc.ByteWrap(line, maxLineLen)...)
+	}
+	return lines
+}
+
+func sendLoop(out string, network Network, c *girc.Client, e girc.Event) {
+	// for each new line break in response choices write to channel
+	for _, line := range wrapForIRC(out) {
 		//TODO better sync here
 		if !getRunning(network.Name + e.Params[0]) {
 			break

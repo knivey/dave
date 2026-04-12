@@ -3,6 +3,7 @@ package irc
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -336,4 +337,164 @@ func FindWordBreak(plain string, maxLen int) int {
 		}
 	}
 	return maxLen
+}
+
+const minWordBreak = 15
+
+func byteSplitAt(text string, plainPos int) (string, string) {
+	var before strings.Builder
+	var after strings.Builder
+	currentPlain := 0
+	runes := []rune(text)
+	i := 0
+	split := false
+	activeStyle := IRCFormat{}
+
+	for i < len(runes) {
+		r := runes[i]
+		switch r {
+		case ircBold:
+			activeStyle.Bold = !activeStyle.Bold
+			if !split {
+				before.WriteRune(r)
+			} else {
+				after.WriteRune(r)
+			}
+			i++
+		case ircItalic:
+			activeStyle.Italic = !activeStyle.Italic
+			if !split {
+				before.WriteRune(r)
+			} else {
+				after.WriteRune(r)
+			}
+			i++
+		case ircUnderline:
+			activeStyle.Underline = !activeStyle.Underline
+			if !split {
+				before.WriteRune(r)
+			} else {
+				after.WriteRune(r)
+			}
+			i++
+		case ircReset:
+			activeStyle = IRCFormat{}
+			if !split {
+				before.WriteRune(r)
+			} else {
+				after.WriteRune(r)
+			}
+			i++
+		case ircColor:
+			colorStart := i
+			var newColor *IRCColor
+			i, newColor = parseColorCode(runes, i)
+			activeStyle.Color = newColor
+
+			codeStr := string(runes[colorStart:i])
+			if !split {
+				before.WriteString(codeStr)
+			} else {
+				after.WriteString(codeStr)
+			}
+		default:
+			if !split {
+				before.WriteRune(r)
+				currentPlain++
+				if currentPlain == plainPos {
+					split = true
+					after.WriteString(OpenCodes(activeStyle))
+				}
+			} else {
+				after.WriteRune(r)
+			}
+			i++
+		}
+	}
+
+	return before.String(), after.String()
+}
+
+func findByteBreakPos(text string, maxBytes int) int {
+	runes := []rune(text)
+	byteCount := 0
+	plainCount := 0
+	result := 0
+	i := 0
+
+	for i < len(runes) {
+		r := runes[i]
+		switch r {
+		case ircBold, ircItalic, ircUnderline, ircReset:
+			byteCount++
+			i++
+		case ircColor:
+			colorStart := i
+			i, _ = parseColorCode(runes, i)
+			byteCount += len(string(runes[colorStart:i]))
+		default:
+			byteCount += utf8.RuneLen(r)
+			plainCount++
+			if byteCount <= maxBytes {
+				result = plainCount
+			} else {
+				return result
+			}
+			i++
+		}
+	}
+	return result
+}
+
+func ByteWrap(text string, maxBytes int) []string {
+	if text == "" {
+		return []string{""}
+	}
+	if len(text) <= maxBytes {
+		return []string{text}
+	}
+
+	breakPos := findByteBreakPos(text, maxBytes)
+	if breakPos == 0 {
+		breakPos = 1
+	}
+
+	stripped := StripCodes(text)
+	cutPos := FindByteBreak(stripped, breakPos, minWordBreak)
+	if cutPos == 0 {
+		cutPos = breakPos
+	}
+
+	before, after := byteSplitAt(text, cutPos)
+
+	afterStripped := StripCodes(after)
+	if len(afterStripped) > 0 && afterStripped[0] == ' ' {
+		_, after = byteSplitAt(text, cutPos+1)
+	}
+
+	var lines []string
+	lines = append(lines, before)
+	lines = append(lines, ByteWrap(after, maxBytes)...)
+
+	return lines
+}
+
+func FindByteBreak(plain string, pos int, minBack int) int {
+	runes := []rune(plain)
+	if pos >= len(runes) {
+		pos = len(runes) - 1
+	}
+	if pos < 1 {
+		return 0
+	}
+	start := pos - minBack
+	if start < 0 {
+		start = 0
+	}
+	for i := pos; i > start; i-- {
+		if runes[i] == ' ' {
+			return i
+		}
+	}
+	return 0
 }

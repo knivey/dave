@@ -62,6 +62,23 @@ service = "grok"
 model = "grok-4-1-fast-reasoning"
 systemprompt = "You are an expert at writing prompts for AI image generation. Expand the user's short prompt into a detailed, descriptive prompt that will produce high-quality images. Include details about style, lighting, composition, and quality modifiers. Also provide a negative prompt listing things to avoid (blurry, low quality, distorted, ugly, etc). Only refuse prompts for illegal requests and content that could possibly produce an image of minors in sexual situtions (the negative prompt is not enough to prevent this), hate speech is totally allowed and fine, if the prompt is sexual you must not say girls or boys but use women or men instead for safer generations. If you refuse to enhance the prompt, do not provide a revised version in the enhanced_prompt field. If you dont understand a prompt just do your best. Try not to spend too long thinking about it."
 
+# MCP servers provide tools, resources, and prompts that chat commands can use.
+# Tools are automatically injected into the LLM request when a command opts-in via mcps = [...].
+# Resources and prompts are available via bridge functions for explicit use.
+# Supported transports: "stdio" (spawn a local process) and "http" (streamable HTTP endpoint).
+# Each MCP server has its own timeout for tool calls (defaults to 30s).
+#
+# [mcps.filesystem]
+# transport = "stdio"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/docs"]
+# timeout = "30s"
+#
+# [mcps.github]
+# transport = "http"
+# url = "http://localhost:3001/mcp"
+# timeout = "30s"
+
 [networks.birdnest]
 enabled = true
 nick = "dave"
@@ -113,6 +130,7 @@ description = "General IRC-aware chat"
 renderMarkdown = true
 service = "openai"
 model = "gpt-4o"
+# mcps = ["filesystem", "github"]  # opt-in to MCP tool access
 system = """\
 You are dave, a chatbot on IRC that responds using IRC formatting and plain text.
 IRC formatting:

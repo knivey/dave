@@ -75,6 +75,7 @@ func main() {
 	LoadContextStore()
 	CleanupContexts()
 	StartSaveTimer()
+	initMCPClients()
 	for _, c := range config.Commands.Completions {
 		logger.Debug("added Completions command", c)
 		commands[regexp.MustCompile("^"+c.Regex+" (.+)$")] =
@@ -119,6 +120,7 @@ func main() {
 		logger.Info("Caught signal", "signal", signal.String())
 		StopPendingSave()
 		SaveContextStore()
+		closeMCPClients()
 		for _, bot := range bots {
 			bot.Quit()
 		}

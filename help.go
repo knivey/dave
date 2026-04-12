@@ -12,9 +12,10 @@ import (
 )
 
 type helpEntry struct {
-	cmd  string
-	info string
-	desc string
+	cmd     string
+	info    string
+	desc    string
+	mcpInfo string
 }
 
 func help(network Network, client *girc.Client, event girc.Event, args ...string) {
@@ -37,6 +38,9 @@ func help(network Network, client *girc.Client, event girc.Event, args ...string
 			lines = append(lines, "  "+entry.info)
 		}
 		lines = append(lines, "  "+entry.desc)
+		if entry.mcpInfo != "" {
+			lines = append(lines, "  "+entry.mcpInfo)
+		}
 		for _, line := range lines {
 			client.Cmd.Reply(event, "\x02\x02"+line)
 			time.Sleep(time.Millisecond * network.Throttle)
@@ -150,18 +154,20 @@ func findCommandHelp(network Network, cmdName string) (helpEntry, bool) {
 	for _, c := range config.Commands.Completions {
 		if c.Name == cmdName || c.Regex == cmdName {
 			return helpEntry{
-				cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
-				info: formatModelInfo(c.Service, c.Model, c.DetectImages),
-				desc: formatDesc(c.Description, false),
+				cmd:     formatCmd(network.Trigger, c.Regex, c.Name),
+				info:    formatModelInfo(c.Service, c.Model, c.DetectImages),
+				desc:    formatDesc(c.Description, false),
+				mcpInfo: getMCPToolInfo(c.MCPs),
 			}, true
 		}
 		if c.Regex != c.Name {
 			re := regexp.MustCompile("^" + c.Regex + "$")
 			if re.MatchString(cmdName) {
 				return helpEntry{
-					cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
-					info: formatModelInfo(c.Service, c.Model, c.DetectImages),
-					desc: formatDesc(c.Description, false),
+					cmd:     formatCmd(network.Trigger, c.Regex, c.Name),
+					info:    formatModelInfo(c.Service, c.Model, c.DetectImages),
+					desc:    formatDesc(c.Description, false),
+					mcpInfo: getMCPToolInfo(c.MCPs),
 				}, true
 			}
 		}
@@ -169,18 +175,20 @@ func findCommandHelp(network Network, cmdName string) (helpEntry, bool) {
 	for _, c := range config.Commands.Chats {
 		if c.Name == cmdName || c.Regex == cmdName {
 			return helpEntry{
-				cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
-				info: formatModelInfo(c.Service, c.Model, c.DetectImages),
-				desc: formatDesc(c.Description, false),
+				cmd:     formatCmd(network.Trigger, c.Regex, c.Name),
+				info:    formatModelInfo(c.Service, c.Model, c.DetectImages),
+				desc:    formatDesc(c.Description, false),
+				mcpInfo: getMCPToolInfo(c.MCPs),
 			}, true
 		}
 		if c.Regex != c.Name {
 			re := regexp.MustCompile("^" + c.Regex + "$")
 			if re.MatchString(cmdName) {
 				return helpEntry{
-					cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
-					info: formatModelInfo(c.Service, c.Model, c.DetectImages),
-					desc: formatDesc(c.Description, false),
+					cmd:     formatCmd(network.Trigger, c.Regex, c.Name),
+					info:    formatModelInfo(c.Service, c.Model, c.DetectImages),
+					desc:    formatDesc(c.Description, false),
+					mcpInfo: getMCPToolInfo(c.MCPs),
 				}, true
 			}
 		}

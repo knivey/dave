@@ -24,6 +24,7 @@ type Config struct {
 	Ratemsgs           []string
 	UploadURL          string `toml:"uploadurl"`
 	Persist            PersistConfig
+	MCPs               map[string]MCPConfig `toml:"mcps"`
 }
 
 type Network struct {
@@ -108,6 +109,7 @@ type AIConfig struct {
 	MaxImageWidth       int    `toml:"-"`
 	MaxImageHeight      int    `toml:"-"`
 	Description         string
+	MCPs                []string `toml:"mcps"`
 }
 
 type Service struct {
@@ -121,6 +123,14 @@ type Service struct {
 	ImageFormat         string `toml:"imageformat"`
 	ImageQuality        int    `toml:"imagequality"`
 	MaxImageSize        string `toml:"maximagesize"`
+}
+
+type MCPConfig struct {
+	Transport string        `toml:"transport"` // "stdio" or "http"
+	Command   string        `toml:"command"`
+	Args      []string      `toml:"args"`
+	URL       string        `toml:"url"`
+	Timeout   time.Duration `toml:"timeout"`
 }
 
 type SystemPromptData struct {
@@ -387,6 +397,43 @@ func loadConfigOrDie(file string) (config Config) {
 		}
 		config.Commands.Comfy[name] = cfg
 	}
+
+	for name, mcpCfg := range config.MCPs {
+		if mcpCfg.Transport == "" {
+			log.Fatalln("mcps." + name + " transport is required (stdio or http)")
+		}
+		if mcpCfg.Transport != "stdio" && mcpCfg.Transport != "http" {
+			log.Fatalln("mcps." + name + " transport must be 'stdio' or 'http'")
+		}
+		if mcpCfg.Transport == "stdio" && mcpCfg.Command == "" {
+			log.Fatalln("mcps." + name + " command is required for stdio transport")
+		}
+		if mcpCfg.Transport == "http" && mcpCfg.URL == "" {
+			log.Fatalln("mcps." + name + " url is required for http transport")
+		}
+		if mcpCfg.Timeout == 0 {
+			mcpCfg.Timeout = 30 * time.Second
+		}
+		config.MCPs[name] = mcpCfg
+	}
+
+	validateMCPRefs := func(section, name string, cfg AIConfig) {
+		for _, mcpName := range cfg.MCPs {
+			if _, ok := config.MCPs[mcpName]; !ok {
+				log.Fatalln(section+"."+name, "mcps references undefined MCP:", mcpName)
+			}
+		}
+	}
+
+	for name, cfg := range config.Commands.Completions {
+		validateMCPRefs("commands.completions", name, cfg)
+		config.Commands.Completions[name] = cfg
+	}
+	for name, cfg := range config.Commands.Chats {
+		validateMCPRefs("commands.chats", name, cfg)
+		config.Commands.Chats[name] = cfg
+	}
+
 	config.Persist.SetDefaults()
 
 	return

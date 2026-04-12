@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -139,12 +140,190 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 	messages = AddContext(cfg, ctx_key, userMsg)
 	logger.Debug("running completion with messages:", "messages", sanitizeMessages(messages))
 
+	mcpTools := getMCPTools(cfg.MCPs)
+
 	req := BuildChatRequest(cfg, messages)
+	req.Tools = mcpTools
+	if len(mcpTools) > 0 {
+		req.ToolChoice = "auto"
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	if !cfg.Streaming {
+	for {
+		req.Messages = messages
+
+		if cfg.Streaming {
+			req.Stream = true
+			req.StreamOptions = &gogpt.StreamOptions{IncludeUsage: true}
+
+			stream, err := aiClient.CreateChatCompletionStream(ctx, req)
+			if err != nil {
+				c.Cmd.Reply(e, errorMsg(err.Error()))
+				logger.Error(err.Error())
+				return
+			}
+
+			bufferb := ""
+			logBuf := strings.Builder{}
+			var streamingRenderer *markdowntoirc.StreamingRenderer
+			if cfg.RenderMarkdown {
+				streamingRenderer = markdowntoirc.NewStreamingRenderer()
+			}
+
+			var accumulatedToolCalls []gogpt.ToolCall
+			var assistantRole string
+			streamDone := false
+
+			for {
+				if !getRunning(network.Name + e.Params[0]) {
+					logger.Info("Closing stream")
+					stream.Close()
+					return
+				}
+				resp, err := stream.Recv()
+				if errors.Is(err, io.EOF) {
+					logger.Info("Stream completed")
+					streamDone = true
+					stream.Close()
+					break
+				}
+				if err != nil {
+					stream.Close()
+					c.Cmd.Reply(e, errorMsg(err.Error()))
+					logger.Error(err.Error())
+					return
+				}
+				if resp.Usage != nil {
+					logger.Info("token usage", "prompt", resp.Usage.PromptTokens, "completion", resp.Usage.CompletionTokens, "total", resp.Usage.TotalTokens)
+				}
+				if len(resp.Choices) == 0 {
+					continue
+				}
+				choice := resp.Choices[0]
+				delta := choice.Delta
+
+				if delta.Role != "" {
+					assistantRole = delta.Role
+				}
+
+				for _, tc := range delta.ToolCalls {
+					if tc.Index != nil {
+						idx := *tc.Index
+						for len(accumulatedToolCalls) <= idx {
+							accumulatedToolCalls = append(accumulatedToolCalls, gogpt.ToolCall{})
+						}
+						if tc.ID != "" {
+							accumulatedToolCalls[idx].ID = tc.ID
+						}
+						if tc.Type != "" {
+							accumulatedToolCalls[idx].Type = tc.Type
+						}
+						accumulatedToolCalls[idx].Function.Name += tc.Function.Name
+						accumulatedToolCalls[idx].Function.Arguments += tc.Function.Arguments
+					}
+				}
+
+				textDelta := delta.Content
+				bufferb += textDelta
+				if streamingRenderer != nil {
+					for _, line := range streamingRenderer.Process(textDelta) {
+						logBuf.WriteString(line)
+						logBuf.WriteString("\n")
+						sendLoop(line, network, c, e)
+					}
+				} else {
+					if strings.Contains(bufferb, "\n") {
+						logBuf.WriteString(bufferb)
+						sendLoop(bufferb, network, c, e)
+						bufferb = ""
+					}
+				}
+
+				if choice.FinishReason == gogpt.FinishReasonToolCalls {
+					logger.Info("stream finished with tool calls")
+					stream.Close()
+					break
+				}
+				if choice.FinishReason == gogpt.FinishReasonStop || choice.FinishReason == gogpt.FinishReasonLength {
+					streamDone = true
+					stream.Close()
+					break
+				}
+			}
+
+			flushStreamedOutput := func() {
+				logger.Info(bufferb)
+				AddContext(cfg, ctx_key, gogpt.ChatCompletionMessage{
+					Role:    gogpt.ChatMessageRoleAssistant,
+					Content: bufferb,
+				})
+				if streamingRenderer != nil {
+					for _, line := range streamingRenderer.Process("") {
+						logBuf.WriteString(line)
+						logBuf.WriteString("\n")
+						sendLoop(line, network, c, e)
+					}
+				} else if bufferb != "" {
+					logBuf.WriteString(bufferb)
+					sendLoop(bufferb, network, c, e)
+				}
+				logger.Info("output", "text", logBuf.String())
+			}
+
+			if streamDone || len(accumulatedToolCalls) == 0 {
+				flushStreamedOutput()
+				return
+			}
+
+			logger.Info("stream made tool calls", "count", len(accumulatedToolCalls))
+
+			if assistantRole == "" {
+				assistantRole = gogpt.ChatMessageRoleAssistant
+			}
+
+			assistantMsg := gogpt.ChatCompletionMessage{
+				Role:      assistantRole,
+				Content:   bufferb,
+				ToolCalls: accumulatedToolCalls,
+			}
+			messages = append(messages, assistantMsg)
+
+			if bufferb != "" {
+				text := ExtractFinalText(bufferb)
+				if cfg.RenderMarkdown {
+					text = markdowntoirc.MarkdownToIRC(text)
+				}
+				sendLoop(text, network, c, e)
+			}
+
+			AddContext(cfg, ctx_key, assistantMsg)
+
+			for _, tc := range accumulatedToolCalls {
+				var toolArgs map[string]any
+				json.Unmarshal([]byte(tc.Function.Arguments), &toolArgs)
+				result, err := callMCPTool(tc.Function.Name, toolArgs)
+				if err != nil {
+					messages = append(messages, gogpt.ChatCompletionMessage{
+						Role:       gogpt.ChatMessageRoleTool,
+						Content:    "error: " + err.Error(),
+						ToolCallID: tc.ID,
+					})
+					continue
+				}
+				toolText := mcpToolResultToText(result)
+				logger.Info("MCP tool result", "tool", tc.Function.Name, "result", toolText)
+				messages = append(messages, gogpt.ChatCompletionMessage{
+					Role:       gogpt.ChatMessageRoleTool,
+					Content:    toolText,
+					ToolCallID: tc.ID,
+				})
+			}
+
+			continue
+		}
+
 		resp, err := aiClient.CreateChatCompletion(ctx, req)
 		if err != nil {
 			c.Cmd.Reply(e, errorMsg(err.Error()))
@@ -152,90 +331,59 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 			return
 		}
 
-		AddContext(cfg, ctx_key, gogpt.ChatCompletionMessage{
-			Role:    gogpt.ChatMessageRoleAssistant,
-			Content: resp.Choices[0].Message.Content,
-		})
-		out := FormatOutput(resp.Choices[0].Message.Content)
-		logger.Info(out)
-		text := ExtractFinalText(resp.Choices[0].Message.Content)
+		msg := resp.Choices[0].Message
+		if len(msg.ToolCalls) == 0 {
+			AddContext(cfg, ctx_key, gogpt.ChatCompletionMessage{
+				Role:    gogpt.ChatMessageRoleAssistant,
+				Content: msg.Content,
+			})
+			out := FormatOutput(msg.Content)
+			logger.Info(out)
+			text := ExtractFinalText(msg.Content)
 
-		logger.Info("token usage", "prompt", resp.Usage.PromptTokens, "completion", resp.Usage.CompletionTokens, "total", resp.Usage.TotalTokens)
-
-		if cfg.RenderMarkdown {
-			text = markdowntoirc.MarkdownToIRC(text)
-		}
-		sendLoop(text, network, c, e)
-		return
-	}
-
-	stream, err := aiClient.CreateChatCompletionStream(ctx, req)
-	if err != nil {
-		c.Cmd.Reply(e, errorMsg(err.Error()))
-		logger.Error(err.Error())
-		return
-	}
-	defer stream.Close()
-	bufferb := ""
-	logBuf := strings.Builder{}
-	var streamingRenderer *markdowntoirc.StreamingRenderer
-	if cfg.RenderMarkdown {
-		streamingRenderer = markdowntoirc.NewStreamingRenderer()
-	}
-	defer func() {
-		logger.Info(bufferb)
-		AddContext(cfg, ctx_key, gogpt.ChatCompletionMessage{
-			Role:    gogpt.ChatMessageRoleAssistant,
-			Content: bufferb,
-		})
-		if streamingRenderer != nil {
-			for _, line := range streamingRenderer.Process("") {
-				logBuf.WriteString(line)
-				logBuf.WriteString("\n")
-				sendLoop(line, network, c, e)
-			}
-		} else if bufferb != "" {
-			logBuf.WriteString(bufferb)
-			sendLoop(bufferb, network, c, e)
-		}
-		logger.Info("output", "text", logBuf.String())
-	}()
-	for {
-		if !getRunning(network.Name + e.Params[0]) {
-			logger.Info("Closing stream")
-			stream.Close()
-			return
-		}
-		resp, err := stream.Recv()
-		if errors.Is(err, io.EOF) {
-			logger.Info("Stream completed")
-			return
-		}
-		if err != nil {
-			c.Cmd.Reply(e, errorMsg(err.Error()))
-			logger.Error(err.Error())
-			return
-		}
-		if resp.Usage != nil {
 			logger.Info("token usage", "prompt", resp.Usage.PromptTokens, "completion", resp.Usage.CompletionTokens, "total", resp.Usage.TotalTokens)
-		}
-		if len(resp.Choices) == 0 {
-			continue
-		}
-		delta := resp.Choices[0].Delta.Content
-		bufferb += delta
-		if streamingRenderer != nil {
-			for _, line := range streamingRenderer.Process(delta) {
-				logBuf.WriteString(line)
-				logBuf.WriteString("\n")
-				sendLoop(line, network, c, e)
+
+			if cfg.RenderMarkdown {
+				text = markdowntoirc.MarkdownToIRC(text)
 			}
-		} else {
-			if strings.Contains(bufferb, "\n") {
-				logBuf.WriteString(bufferb)
-				sendLoop(bufferb, network, c, e)
-				bufferb = ""
+			sendLoop(text, network, c, e)
+			return
+		}
+
+		logger.Info("assistant made tool calls", "count", len(msg.ToolCalls))
+		messages = append(messages, msg)
+
+		if msg.Content != "" {
+			text := ExtractFinalText(msg.Content)
+			if cfg.RenderMarkdown {
+				text = markdowntoirc.MarkdownToIRC(text)
 			}
+			sendLoop(text, network, c, e)
+			AddContext(cfg, ctx_key, gogpt.ChatCompletionMessage{
+				Role:    gogpt.ChatMessageRoleAssistant,
+				Content: msg.Content,
+			})
+		}
+
+		for _, tc := range msg.ToolCalls {
+			var toolArgs map[string]any
+			json.Unmarshal([]byte(tc.Function.Arguments), &toolArgs)
+			result, err := callMCPTool(tc.Function.Name, toolArgs)
+			if err != nil {
+				messages = append(messages, gogpt.ChatCompletionMessage{
+					Role:       gogpt.ChatMessageRoleTool,
+					Content:    "error: " + err.Error(),
+					ToolCallID: tc.ID,
+				})
+				continue
+			}
+			toolText := mcpToolResultToText(result)
+			logger.Info("MCP tool result", "tool", tc.Function.Name, "result", toolText)
+			messages = append(messages, gogpt.ChatCompletionMessage{
+				Role:       gogpt.ChatMessageRoleTool,
+				Content:    toolText,
+				ToolCallID: tc.ID,
+			})
 		}
 	}
 }

@@ -1,0 +1,60 @@
+#these default settings can be overriden in the networks sections
+#this is the default trigger for commands Ex: set to . for .chat or - for -chat
+trigger = "-"
+quitmsg = "unplugged"
+uploadurl = "https://upload.beer"
+
+#one is chosen at random if the bot is already busy on a prompt
+busymsgs = [
+    "WHOAOaooooooooooHORhoo HOLD on thar IM ALREADY DOING something WIat YEr Turn!!"
+]
+ratemsgs = [
+    "whoa!! slow down!!!1~ AHHHHHHHHHHHHHHHH AHhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhA HHHHHHHHHHHHHhhhhhhhhhhhhhhhhhhhAAAAAAAAAAAAAAAAAAHhhhhhhhhhhhhhhhh"
+]
+
+[persist]
+# Persistent chat contexts (gitignored JSON)
+file_path = "contexts.json"
+max_age_days = 7     # delete old contexts
+max_contexts = 100   # max stored
+save_delay = "30s"   # auto-save interval
+
+# MCP servers provide tools, resources, and prompts that chat commands can use.
+# Tools are automatically injected into the LLM request when a command opts-in via mcps = [...].
+# Resources and prompts are available via bridge functions for explicit use.
+# Supported transports: "stdio" (spawn a local process) and "http" (streamable HTTP endpoint).
+# Each MCP server has its own timeout for tool calls (defaults to 30s).
+#
+# [mcps.filesystem]
+# transport = "stdio"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/docs"]
+# timeout = "30s"
+#
+# [mcps.github]
+# transport = "http"
+# url = "http://localhost:3001/mcp"
+# timeout = "30s"
+
+[networks.birdnest]
+enabled = true
+nick = "dave"
+throttle = 20
+channels = ["#knivey"]
+quitmsg = "Went for a smoke break"
+[[networks.birdnest.servers]]
+host = "irc.birdnest.live"
+ssl = true
+port = 6697
+pass = "your-sasl-or-server-password"  # optional SASL/server pass
+[[networks.birdnest.servers]]
+host = "example.com"
+ssl = true
+port = 6697
+
+[networks.libera]
+enabled = false
+nick = "daave"
+throttle = 750
+channels = ["##"]
+servers = [{host = "irc.libera.chat", ssl = true}]

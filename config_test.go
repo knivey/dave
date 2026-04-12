@@ -2,9 +2,30 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"text/template"
 )
+
+func createTestConfigDir(t *testing.T, mainTOML string, extraFiles map[string]string) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "dave_test_config_*")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(mainTOML), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, content := range extraFiles {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	return dir
+}
 
 func TestAIConfigApplyDefaults(t *testing.T) {
 	tests := []struct {
@@ -293,42 +314,36 @@ func TestNetworkGetNextServer(t *testing.T) {
 }
 
 func TestChatCommandNameSetting(t *testing.T) {
-	// Create a temporary TOML config file
-	tomlContent := `
-[services.test]
+	mainTOML := ``
+	servicesTOML := `
+[test]
 maxtokens = 100
 maxhistory = 10
-
-[commands.chats.chat1]
+`
+	chatsTOML := `
+[chat1]
 service = "test"
 
-[commands.chats.chat2]
+[chat2]
 service = "test"
 regex = "custom"
 
-[commands.chats.chat3]
+[chat3]
 service = "test"
 system = "Hello {{.Nick}}"
 
-[commands.chats.chat4]
+[chat4]
 service = "test"
 system = "Static message"
 `
-	tempFile, err := os.CreateTemp("", "test_config_*.toml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(tempFile.Name())
+	dir := createTestConfigDir(t, mainTOML, map[string]string{
+		"services.toml": servicesTOML,
+		"chats.toml":    chatsTOML,
+	})
+	defer os.RemoveAll(dir)
 
-	if _, err := tempFile.WriteString(tomlContent); err != nil {
-		t.Fatal(err)
-	}
-	tempFile.Close()
+	config := loadConfigDirOrDie(dir)
 
-	// Load config using the actual loadConfigOrDie
-	config := loadConfigOrDie(tempFile.Name())
-
-	// Verify Name and Regex are set correctly
 	tests := []struct {
 		name      string
 		wantName  string
@@ -409,18 +424,18 @@ func TestSystemPromptTemplateValidation(t *testing.T) {
 
 func TestImageConfigValidation(t *testing.T) {
 	tests := []struct {
-		name    string
-		toml    string
-		wantW   int
-		wantH   int
-		wantFmt string
-		wantQ   int
+		name      string
+		mainTOML  string
+		chatsTOML string
+		wantW     int
+		wantH     int
+		wantFmt   string
+		wantQ     int
 	}{
 		{
-			name: "defaults applied",
-			toml: `[services.test]
-maxtokens = 100
-[commands.chats.chat1]
+			name:     "defaults applied",
+			mainTOML: ``,
+			chatsTOML: `[chat1]
 service = "test"`,
 			wantW:   1024,
 			wantH:   1024,
@@ -428,66 +443,59 @@ service = "test"`,
 			wantQ:   75,
 		},
 		{
-			name: "valid jpg format",
-			toml: `[services.test]
-maxtokens = 100
-[commands.chats.chat1]
+			name:     "valid jpg format",
+			mainTOML: ``,
+			chatsTOML: `[chat1]
 service = "test"
 imageformat = "jpg"`,
 			wantFmt: "jpg",
 		},
 		{
-			name: "valid webp format",
-			toml: `[services.test]
-maxtokens = 100
-[commands.chats.chat1]
+			name:     "valid webp format",
+			mainTOML: ``,
+			chatsTOML: `[chat1]
 service = "test"
 imageformat = "webp"`,
 			wantFmt: "webp",
 		},
 		{
-			name: "valid jpeg format",
-			toml: `[services.test]
-maxtokens = 100
-[commands.chats.chat1]
+			name:     "valid jpeg format",
+			mainTOML: ``,
+			chatsTOML: `[chat1]
 service = "test"
 imageformat = "jpeg"`,
 			wantFmt: "jpeg",
 		},
 		{
-			name: "valid quality 50",
-			toml: `[services.test]
-maxtokens = 100
-[commands.chats.chat1]
+			name:     "valid quality 50",
+			mainTOML: ``,
+			chatsTOML: `[chat1]
 service = "test"
 imagequality = 50`,
 			wantQ: 50,
 		},
 		{
-			name: "valid maximagesize 1024x1024",
-			toml: `[services.test]
-maxtokens = 100
-[commands.chats.chat1]
+			name:     "valid maximagesize 1024x1024",
+			mainTOML: ``,
+			chatsTOML: `[chat1]
 service = "test"
 maximagesize = "1024x1024"`,
 			wantW: 1024,
 			wantH: 1024,
 		},
 		{
-			name: "valid maximagesize 1024x768",
-			toml: `[services.test]
-maxtokens = 100
-[commands.chats.chat1]
+			name:     "valid maximagesize 1024x768",
+			mainTOML: ``,
+			chatsTOML: `[chat1]
 service = "test"
 maximagesize = "1024x768"`,
 			wantW: 1024,
 			wantH: 768,
 		},
 		{
-			name: "valid maximagesize 1920x1080",
-			toml: `[services.test]
-maxtokens = 100
-[commands.chats.chat1]
+			name:     "valid maximagesize 1920x1080",
+			mainTOML: ``,
+			chatsTOML: `[chat1]
 service = "test"
 maximagesize = "1920x1080"`,
 			wantW: 1920,
@@ -495,20 +503,19 @@ maximagesize = "1920x1080"`,
 		},
 	}
 
+	var servicesTOML = `
+[test]
+maxtokens = 100
+`
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tempFile, err := os.CreateTemp("", "test_config_*.toml")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer os.Remove(tempFile.Name())
+			dir := createTestConfigDir(t, tt.mainTOML, map[string]string{
+				"services.toml": servicesTOML,
+				"chats.toml":    tt.chatsTOML,
+			})
+			defer os.RemoveAll(dir)
 
-			if _, err := tempFile.WriteString(tt.toml); err != nil {
-				t.Fatal(err)
-			}
-			tempFile.Close()
-
-			config := loadConfigOrDie(tempFile.Name())
+			config := loadConfigDirOrDie(dir)
 			cfg := config.Commands.Chats["chat1"]
 
 			if tt.wantW > 0 && cfg.MaxImageWidth != tt.wantW {

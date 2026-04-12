@@ -1,9 +1,10 @@
 dave
-prod.toml
-test.toml
+prod/
+test/
 .idea
 testMD/testMD
 ignores.txt
 workflows/*
 contexts.json
 contexts.json.tmp
+opencode.json

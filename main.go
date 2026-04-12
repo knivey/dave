@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"crypto/tls"
+	"fmt"
 	"os"
 	"os/signal"
 	"regexp"
@@ -18,8 +19,10 @@ import (
 )
 
 var config Config
+var configDir string
 var wg sync.WaitGroup
 var logger logxi.Logger
+var commandsMutex sync.RWMutex
 
 type Bot struct {
 	Client    *girc.Client
@@ -53,57 +56,100 @@ func warnMsg(msg string) string {
 	return "\x0308⚠️ " + msg
 }
 
-var commands = CmdMap{
+var builtInCmds = CmdMap{
 	stop_re: func(n Network, c *girc.Client, e girc.Event, s ...string) { stop(n, c, e, nil, s...) },
 	help_re: func(n Network, c *girc.Client, e girc.Event, s ...string) { help(n, c, e, s...) },
 }
 
+var configCmds CmdMap
+
+func registerCommands(cmds Commands) {
+	commandsMutex.Lock()
+	defer commandsMutex.Unlock()
+	registerCommandsLocked(cmds)
+}
+
+func registerCommandsLocked(cmds Commands) {
+	newConfigCmds := CmdMap{}
+	// Remove old config-sourced commands
+	for r := range configCmds {
+		delete(builtInCmds, r)
+	}
+
+	for _, c := range cmds.Completions {
+		logger.Debug("added Completions command", c)
+		re := regexp.MustCompile("^" + c.Regex + " (.+)$")
+		newConfigCmds[re] = func(network Network, client *girc.Client, e girc.Event, args ...string) {
+			completion(network, client, e, c, args...)
+		}
+		builtInCmds[re] = newConfigCmds[re]
+	}
+	for _, c := range cmds.Chats {
+		logger.Debug("added Chats command", c)
+		re := regexp.MustCompile("^" + c.Regex + " (.+)$")
+		newConfigCmds[re] = func(network Network, client *girc.Client, e girc.Event, args ...string) {
+			chat(network, client, e, c, args...)
+		}
+		builtInCmds[re] = newConfigCmds[re]
+	}
+	for _, c := range cmds.SD {
+		logger.Debug("added SD command", c)
+		re := regexp.MustCompile("^" + c.Regex + " (.+)$")
+		newConfigCmds[re] = func(network Network, client *girc.Client, e girc.Event, args ...string) {
+			sd(network, client, e, c, args...)
+		}
+		builtInCmds[re] = newConfigCmds[re]
+	}
+	for _, c := range cmds.Comfy {
+		logger.Debug("added Comfy command", c)
+		re := regexp.MustCompile("^" + c.Regex + " (.+)$")
+		newConfigCmds[re] = func(network Network, client *girc.Client, e girc.Event, args ...string) {
+			comfy(network, client, e, c, args...)
+		}
+		builtInCmds[re] = newConfigCmds[re]
+	}
+
+	configCmds = newConfigCmds
+}
+
+func reloadAll() error {
+	commandsMutex.Lock()
+	defer commandsMutex.Unlock()
+	if err := loadReloadableDir(configDir, &config); err != nil {
+		return err
+	}
+	registerCommandsLocked(config.Commands)
+	return nil
+}
+
 func main() {
+	// Load config first (before TUI init) so errors go to real stderr
+	if len(os.Args) > 1 {
+		configDir = os.Args[1]
+	} else {
+		configDir = "config"
+	}
+	config = loadConfigDirOrDie(configDir)
+
+	// Initialize TUI - captures all subsequent log output
+	app, err := initTUI()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to initialize TUI: %v\n", err)
+		os.Exit(1)
+	}
+
 	if os.Getenv("LOGXI_FORMAT") == "" {
 		logxi.ProcessLogxiFormatEnv("maxcol=9999")
 	}
 	logger = logxi.New("main")
 	logger.SetLevel(logxi.LevelAll)
-	if len(os.Args) > 1 {
-		config = loadConfigOrDie(os.Args[1])
-	} else {
-		config = loadConfigOrDie("config.toml")
-	}
 	logger.Info("Config loaded", "networks", len(config.Networks))
 	persistCfg = config.Persist
 	LoadContextStore()
 	CleanupContexts()
 	StartSaveTimer()
 	initMCPClients()
-	for _, c := range config.Commands.Completions {
-		logger.Debug("added Completions command", c)
-		commands[regexp.MustCompile("^"+c.Regex+" (.+)$")] =
-			func(network Network, client *girc.Client, e girc.Event, args ...string) {
-				completion(network, client, e, c, args...)
-			}
-
-	}
-	for _, c := range config.Commands.Chats {
-		logger.Debug("added Chats command", c)
-		commands[regexp.MustCompile("^"+c.Regex+" (.+)$")] =
-			func(network Network, client *girc.Client, e girc.Event, args ...string) {
-				chat(network, client, e, c, args...)
-			}
-	}
-	for _, c := range config.Commands.SD {
-		logger.Debug("added SD command", c)
-		commands[regexp.MustCompile("^"+c.Regex+" (.+)$")] =
-			func(network Network, client *girc.Client, e girc.Event, args ...string) {
-				sd(network, client, e, c, args...)
-			}
-	}
-	for _, c := range config.Commands.Comfy {
-		logger.Debug("added Comfy command", c)
-		commands[regexp.MustCompile("^"+c.Regex+" (.+)$")] =
-			func(network Network, client *girc.Client, e girc.Event, args ...string) {
-				comfy(network, client, e, c, args...)
-			}
-	}
+	registerCommands(config.Commands)
 
 	for _, network := range config.Networks {
 		if network.Enabled {
@@ -123,11 +169,20 @@ func main() {
 		for _, bot := range bots {
 			bot.Quit()
 		}
+		// Stop the TUI after bots quit
+		tuiApp.QueueUpdateDraw(func() {
+			tuiApp.Stop()
+		})
 	}()
 
-	wg.Wait()
+	// Block on TUI - when it exits, we're done
+	if err := app.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
+	}
+
+	restoreStdoutStderr()
+
 	logger.Info("Nothing left to do bye :)")
-	os.Exit(0)
 }
 
 const maxLineLen = 350
@@ -220,7 +275,10 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 		return
 	}
 	msg = strings.TrimPrefix(msg, network.Trigger)
-	for r, cmd := range commands {
+	commandsMutex.RLock()
+	cmds := builtInCmds
+	commandsMutex.RUnlock()
+	for r, cmd := range cmds {
 		if r.Match([]byte(msg)) {
 			var args []string
 			for i, m := range r.FindSubmatch([]byte(msg)) {
@@ -229,7 +287,6 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 				}
 			}
 
-			//special case for stop command to skip rate limits
 			if r == stop_re {
 				cmd(network, client, event, args...)
 				return
@@ -243,7 +300,6 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 				client.Cmd.Reply(event, warnMsg(config.Busymsg()))
 				return
 			}
-			//TODO only clear if its a chat command type
 			ClearContext(ctx_key)
 			go cmd(network, client, event, args...)
 			return

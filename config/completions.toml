@@ -1,0 +1,7 @@
+[dave]
+service = "openai"
+model = "gpt-3.5-turbo-instruct"
+#optionally you may override the regex for the command name
+#in this case both -dave and -dav would trigger this command
+#note this regex is used to construct a larger regex so ^$ shouldn't be used
+regex = "dave?"

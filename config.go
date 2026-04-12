@@ -3,8 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/template"
 	"time"
@@ -247,12 +247,23 @@ func (s *Server) GetPort() int {
 	}
 }
 
-func loadConfigOrDie(file string) (config Config) {
-	_, err := toml.DecodeFile(file, &config)
+func loadConfigDirOrDie(dir string) Config {
+	config, err := loadConfigDir(dir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	return config
+}
+
+func loadConfigDir(dir string) (Config, error) {
+	var config Config
+
+	mainFile := filepath.Join(dir, "config.toml")
+	if _, err := toml.DecodeFile(mainFile, &config); err != nil {
+		return config, fmt.Errorf("loading %s: %w", mainFile, err)
+	}
+
 	if len(config.Busymsgs) == 0 {
 		config.Busymsgs = []string{"hold on i'm already busy"}
 	}
@@ -270,146 +281,30 @@ func loadConfigOrDie(file string) (config Config) {
 		config.Networks[name] = network
 	}
 
-	for name, service := range config.Services {
-		if service.MaxHistory == 0 {
-			service.MaxHistory = 8
-		}
-		config.Services[name] = service
+	if err := loadServicesFile(dir, &config); err != nil {
+		return config, err
 	}
 
-	fff := func(cfg AIConfig, name string, config *Config) (AIConfig, error) {
-		cfg.Name = name
-		if cfg.Regex == "" {
-			cfg.Regex = name
-		}
-		if service, ok := config.Services[cfg.Service]; ok {
-			cfg.ApplyDefaults(service)
-		} else {
-			return cfg, fmt.Errorf("commands.completions.%s service %s is undefined", name, cfg.Service)
-		}
-		if cfg.RenderMarkdown && cfg.Streaming {
-			// Streaming markdown supported with limitations:
-			// - Tables omitted
-			// - Code blocks: plain text only (no Chroma), fixed 80-char background padding
-		}
-		return cfg, nil
+	if err := loadPromptEnhancementsFile(dir, &config); err != nil {
+		return config, err
 	}
 
-	for name, cfg := range config.Commands.Completions {
-		cfg, err := fff(cfg, name, &config)
-		if err != nil {
-			log.Fatalln("commands.completions."+name, err)
-		}
-		config.Commands.Completions[name] = cfg
-	}
-
-	for name, cfg := range config.Commands.Chats {
-		cfg, err := fff(cfg, name, &config)
-		if err != nil {
-			log.Fatalln("commands.chats."+name, err)
-		}
-		if cfg.ImageFormat != "" && cfg.ImageFormat != "webp" && cfg.ImageFormat != "jpg" && cfg.ImageFormat != "jpeg" {
-			log.Fatalln("commands.chats."+name, "imageformat must be 'webp', 'jpg', or 'jpeg'")
-		}
-		if cfg.ImageQuality < 1 || cfg.ImageQuality > 100 {
-			log.Fatalln("commands.chats."+name, "imagequality must be between 1 and 100")
-		}
-		if cfg.MaxImageSize != "" {
-			parts := strings.Split(cfg.MaxImageSize, "x")
-			if len(parts) != 2 {
-				log.Fatalln("commands.chats."+name, "maximagesize must be in format WxH (e.g., 1024x1024)")
-			}
-			var w, h int
-			if _, err := fmt.Sscanf(parts[0], "%d", &w); err != nil {
-				log.Fatalln("commands.chats."+name, "invalid maximagesize width:", err)
-			}
-			if _, err := fmt.Sscanf(parts[1], "%d", &h); err != nil {
-				log.Fatalln("commands.chats."+name, "invalid maximagesize height:", err)
-			}
-			cfg.MaxImageWidth = w
-			cfg.MaxImageHeight = h
-		}
-		if cfg.System != "" {
-			tmpl, err := template.New(name + "_system").Parse(cfg.System)
-			if err != nil {
-				log.Fatalln("commands.chats."+name, "system prompt template parse error:", err)
-			}
-			cfg.SystemTmpl = tmpl
-			if err := validateSystemPromptTemplate(cfg.SystemTmpl); err != nil {
-				log.Fatalln("commands.chats."+name, "system prompt template validation error:", err)
-			}
-		}
-		config.Commands.Chats[name] = cfg
-	}
-
-	for name, cfg := range config.Commands.SD {
-		cfg.Name = name
-		if cfg.Regex == "" {
-			cfg.Regex = name
-		}
-		if service, ok := config.Services[cfg.Service]; ok {
-			cfg.ApplyDefaults(service)
-		} else {
-			log.Fatalln("commands.SD."+name, "service", cfg.Service, "is undefined")
-		}
-		config.Commands.SD[name] = cfg
-	}
-
-	for name, cfg := range config.Commands.Comfy {
-		cfg.Name = name
-		if cfg.Regex == "" {
-			cfg.Regex = name
-		}
-		if service, ok := config.Services[cfg.Service]; ok {
-			cfg.ApplyDefaults(service)
-		} else {
-			log.Fatalln("commands.comfy."+name, "service", cfg.Service, "is undefined")
-		}
-		if cfg.WorkflowPath == "" {
-			log.Fatalln("commands.comfy." + name + " workflow_path is required")
-		}
-		if cfg.ClientID == "" {
-			log.Fatalln("commands.comfy." + name + " clientid is required")
-		}
-		if cfg.OutputNode == "" {
-			log.Fatalln("commands.comfy." + name + " output_node is required")
-		}
-		if cfg.PromptNode == "" {
-			log.Fatalln("commands.comfy." + name + " prompt_node is required")
-		}
-		if cfg.EnhancePrompt != "" {
-			if _, ok := config.PromptEnhancements[cfg.EnhancePrompt]; !ok {
-				log.Fatalln("commands.comfy."+name, "enhanceprompt", cfg.EnhancePrompt, "is not defined in [promptenhancements]")
-			}
-			enhCfg := config.PromptEnhancements[cfg.EnhancePrompt]
-			if enhCfg.Service == "" {
-				log.Fatalln("promptenhancements."+cfg.EnhancePrompt, "service is required")
-			}
-			if _, ok := config.Services[enhCfg.Service]; !ok {
-				log.Fatalln("promptenhancements."+cfg.EnhancePrompt, "service", enhCfg.Service, "is undefined")
-			}
-			if enhCfg.Model == "" {
-				log.Fatalln("promptenhancements."+cfg.EnhancePrompt, "model is required")
-			}
-			if enhCfg.SystemPrompt == "" {
-				log.Fatalln("promptenhancements."+cfg.EnhancePrompt, "systemprompt is required")
-			}
-		}
-		config.Commands.Comfy[name] = cfg
+	if err := loadCommandsInto(dir, &config); err != nil {
+		return config, err
 	}
 
 	for name, mcpCfg := range config.MCPs {
 		if mcpCfg.Transport == "" {
-			log.Fatalln("mcps." + name + " transport is required (stdio or http)")
+			return config, fmt.Errorf("mcps.%s transport is required (stdio or http)", name)
 		}
 		if mcpCfg.Transport != "stdio" && mcpCfg.Transport != "http" {
-			log.Fatalln("mcps." + name + " transport must be 'stdio' or 'http'")
+			return config, fmt.Errorf("mcps.%s transport must be 'stdio' or 'http'", name)
 		}
 		if mcpCfg.Transport == "stdio" && mcpCfg.Command == "" {
-			log.Fatalln("mcps." + name + " command is required for stdio transport")
+			return config, fmt.Errorf("mcps.%s command is required for stdio transport", name)
 		}
 		if mcpCfg.Transport == "http" && mcpCfg.URL == "" {
-			log.Fatalln("mcps." + name + " url is required for http transport")
+			return config, fmt.Errorf("mcps.%s url is required for http transport", name)
 		}
 		if mcpCfg.Timeout == 0 {
 			mcpCfg.Timeout = 30 * time.Second
@@ -417,24 +312,236 @@ func loadConfigOrDie(file string) (config Config) {
 		config.MCPs[name] = mcpCfg
 	}
 
-	validateMCPRefs := func(section, name string, cfg AIConfig) {
-		for _, mcpName := range cfg.MCPs {
-			if _, ok := config.MCPs[mcpName]; !ok {
-				log.Fatalln(section+"."+name, "mcps references undefined MCP:", mcpName)
-			}
-		}
-	}
-
-	for name, cfg := range config.Commands.Completions {
-		validateMCPRefs("commands.completions", name, cfg)
-		config.Commands.Completions[name] = cfg
-	}
-	for name, cfg := range config.Commands.Chats {
-		validateMCPRefs("commands.chats", name, cfg)
-		config.Commands.Chats[name] = cfg
-	}
-
 	config.Persist.SetDefaults()
 
-	return
+	return config, nil
+}
+
+func loadServicesFile(dir string, config *Config) error {
+	if err := loadCommandFile(filepath.Join(dir, "services.toml"), &config.Services); err != nil {
+		return fmt.Errorf("loading services: %w", err)
+	}
+	if config.Services == nil {
+		config.Services = make(map[string]Service)
+	}
+	for name, service := range config.Services {
+		if service.MaxHistory == 0 {
+			service.MaxHistory = 8
+		}
+		config.Services[name] = service
+	}
+	return nil
+}
+
+func loadPromptEnhancementsFile(dir string, config *Config) error {
+	if err := loadCommandFile(filepath.Join(dir, "promptenhancements.toml"), &config.PromptEnhancements); err != nil {
+		return fmt.Errorf("loading promptenhancements: %w", err)
+	}
+	if config.PromptEnhancements == nil {
+		config.PromptEnhancements = make(map[string]PromptEnhancementConfig)
+	}
+	return nil
+}
+
+func loadReloadableDir(dir string, config *Config) error {
+	var tmpConfig Config
+	tmpConfig.MCPs = config.MCPs
+
+	if err := loadServicesFile(dir, &tmpConfig); err != nil {
+		return err
+	}
+
+	if err := loadPromptEnhancementsFile(dir, &tmpConfig); err != nil {
+		return err
+	}
+
+	commands, err := loadCommandsDir(dir, &tmpConfig)
+	if err != nil {
+		return err
+	}
+
+	config.Services = tmpConfig.Services
+	config.PromptEnhancements = tmpConfig.PromptEnhancements
+	config.Commands = commands
+
+	return nil
+}
+
+func loadCommandsInto(dir string, config *Config) error {
+	commands, err := loadCommandsDir(dir, config)
+	if err != nil {
+		return err
+	}
+	config.Commands = commands
+	return nil
+}
+
+func loadCommandsDir(dir string, config *Config) (Commands, error) {
+	var commands Commands
+	commands.Completions = make(map[string]AIConfig)
+	commands.Chats = make(map[string]AIConfig)
+	commands.SD = make(map[string]SDConfig)
+	commands.Comfy = make(map[string]ComfyConfig)
+
+	if err := loadCommandFile(filepath.Join(dir, "completions.toml"), &commands.Completions); err != nil {
+		return commands, fmt.Errorf("loading completions: %w", err)
+	}
+	if err := loadCommandFile(filepath.Join(dir, "chats.toml"), &commands.Chats); err != nil {
+		return commands, fmt.Errorf("loading chats: %w", err)
+	}
+	if err := loadCommandFile(filepath.Join(dir, "sd.toml"), &commands.SD); err != nil {
+		return commands, fmt.Errorf("loading sd: %w", err)
+	}
+	if err := loadCommandFile(filepath.Join(dir, "comfy.toml"), &commands.Comfy); err != nil {
+		return commands, fmt.Errorf("loading comfy: %w", err)
+	}
+
+	if err := validateCommands(&commands, config); err != nil {
+		return commands, err
+	}
+
+	return commands, nil
+}
+
+func loadCommandFile(path string, dest interface{}) error {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return nil
+	}
+	_, err := toml.DecodeFile(path, dest)
+	return err
+}
+
+func validateCommands(commands *Commands, config *Config) error {
+	for name, cfg := range commands.Completions {
+		cfg, err := validateAIConfig(cfg, name, "completions", config)
+		if err != nil {
+			return err
+		}
+		if err := validateMCPRefsFor("completions", name, cfg.MCPs, config); err != nil {
+			return err
+		}
+		commands.Completions[name] = cfg
+	}
+
+	for name, cfg := range commands.Chats {
+		cfg, err := validateAIConfig(cfg, name, "chats", config)
+		if err != nil {
+			return err
+		}
+		if cfg.ImageFormat != "" && cfg.ImageFormat != "webp" && cfg.ImageFormat != "jpg" && cfg.ImageFormat != "jpeg" {
+			return fmt.Errorf("commands.chats.%s imageformat must be 'webp', 'jpg', or 'jpeg'", name)
+		}
+		if cfg.ImageQuality < 1 || cfg.ImageQuality > 100 {
+			return fmt.Errorf("commands.chats.%s imagequality must be between 1 and 100", name)
+		}
+		if cfg.MaxImageSize != "" {
+			parts := strings.Split(cfg.MaxImageSize, "x")
+			if len(parts) != 2 {
+				return fmt.Errorf("commands.chats.%s maximagesize must be in format WxH (e.g., 1024x1024)", name)
+			}
+			var w, h int
+			if _, err := fmt.Sscanf(parts[0], "%d", &w); err != nil {
+				return fmt.Errorf("commands.chats.%s invalid maximagesize width: %w", name, err)
+			}
+			if _, err := fmt.Sscanf(parts[1], "%d", &h); err != nil {
+				return fmt.Errorf("commands.chats.%s invalid maximagesize height: %w", name, err)
+			}
+			cfg.MaxImageWidth = w
+			cfg.MaxImageHeight = h
+		}
+		if cfg.System != "" {
+			tmpl, err := template.New(name + "_system").Parse(cfg.System)
+			if err != nil {
+				return fmt.Errorf("commands.chats.%s system prompt template parse error: %w", name, err)
+			}
+			cfg.SystemTmpl = tmpl
+			if err := validateSystemPromptTemplate(cfg.SystemTmpl); err != nil {
+				return fmt.Errorf("commands.chats.%s system prompt template validation error: %w", name, err)
+			}
+		}
+		if err := validateMCPRefsFor("chats", name, cfg.MCPs, config); err != nil {
+			return err
+		}
+		commands.Chats[name] = cfg
+	}
+
+	for name, cfg := range commands.SD {
+		cfg.Name = name
+		if cfg.Regex == "" {
+			cfg.Regex = name
+		}
+		if service, ok := config.Services[cfg.Service]; ok {
+			cfg.ApplyDefaults(service)
+		} else {
+			return fmt.Errorf("commands.sd.%s service %s is undefined", name, cfg.Service)
+		}
+		commands.SD[name] = cfg
+	}
+
+	for name, cfg := range commands.Comfy {
+		cfg.Name = name
+		if cfg.Regex == "" {
+			cfg.Regex = name
+		}
+		if service, ok := config.Services[cfg.Service]; ok {
+			cfg.ApplyDefaults(service)
+		} else {
+			return fmt.Errorf("commands.comfy.%s service %s is undefined", name, cfg.Service)
+		}
+		if cfg.WorkflowPath == "" {
+			return fmt.Errorf("commands.comfy.%s workflow_path is required", name)
+		}
+		if cfg.ClientID == "" {
+			return fmt.Errorf("commands.comfy.%s clientid is required", name)
+		}
+		if cfg.OutputNode == "" {
+			return fmt.Errorf("commands.comfy.%s output_node is required", name)
+		}
+		if cfg.PromptNode == "" {
+			return fmt.Errorf("commands.comfy.%s prompt_node is required", name)
+		}
+		if cfg.EnhancePrompt != "" {
+			if _, ok := config.PromptEnhancements[cfg.EnhancePrompt]; !ok {
+				return fmt.Errorf("commands.comfy.%s enhanceprompt %s is not defined in [promptenhancements]", name, cfg.EnhancePrompt)
+			}
+			enhCfg := config.PromptEnhancements[cfg.EnhancePrompt]
+			if enhCfg.Service == "" {
+				return fmt.Errorf("promptenhancements.%s service is required", cfg.EnhancePrompt)
+			}
+			if _, ok := config.Services[enhCfg.Service]; !ok {
+				return fmt.Errorf("promptenhancements.%s service %s is undefined", cfg.EnhancePrompt, enhCfg.Service)
+			}
+			if enhCfg.Model == "" {
+				return fmt.Errorf("promptenhancements.%s model is required", cfg.EnhancePrompt)
+			}
+			if enhCfg.SystemPrompt == "" {
+				return fmt.Errorf("promptenhancements.%s systemprompt is required", cfg.EnhancePrompt)
+			}
+		}
+		commands.Comfy[name] = cfg
+	}
+
+	return nil
+}
+
+func validateAIConfig(cfg AIConfig, name, section string, config *Config) (AIConfig, error) {
+	cfg.Name = name
+	if cfg.Regex == "" {
+		cfg.Regex = name
+	}
+	if service, ok := config.Services[cfg.Service]; ok {
+		cfg.ApplyDefaults(service)
+	} else {
+		return cfg, fmt.Errorf("commands.%s.%s service %s is undefined", section, name, cfg.Service)
+	}
+	return cfg, nil
+}
+
+func validateMCPRefsFor(section, name string, mcpRefs []string, config *Config) error {
+	for _, mcpName := range mcpRefs {
+		if _, ok := config.MCPs[mcpName]; !ok {
+			return fmt.Errorf("commands.%s.%s mcps references undefined MCP: %s", section, name, mcpName)
+		}
+	}
+	return nil
 }

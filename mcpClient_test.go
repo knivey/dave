@@ -13,107 +13,88 @@ import (
 	gogpt "github.com/sashabaranov/go-openai"
 )
 
+var mcpServicesTOML = `
+[test]
+maxtokens = 100
+`
+
 func TestMCPConfigValidation(t *testing.T) {
 	tests := []struct {
-		name    string
-		toml    string
-		wantErr string
+		name      string
+		mainTOML  string
+		chatsTOML string
+		wantErr   string
 	}{
 		{
 			name: "valid stdio MCP",
-			toml: `[services.test]
-maxtokens = 100
-[mcps.test]
+			mainTOML: `[mcps.test]
 transport = "stdio"
-command = "echo"
-[commands.chats.chat]
-service = "test"
-`,
+command = "echo"`,
+			chatsTOML: `[chat]
+service = "test"`,
 			wantErr: "",
 		},
 		{
 			name: "valid http MCP",
-			toml: `[services.test]
-maxtokens = 100
-[mcps.test]
+			mainTOML: `[mcps.test]
 transport = "http"
-url = "http://localhost:3000/mcp"
-[commands.chats.chat]
-service = "test"
-`,
+url = "http://localhost:3000/mcp"`,
+			chatsTOML: `[chat]
+service = "test"`,
 			wantErr: "",
 		},
 		{
 			name: "missing transport",
-			toml: `[services.test]
-maxtokens = 100
-[mcps.test]
-command = "echo"
-[commands.chats.chat]
-service = "test"
-`,
+			mainTOML: `[mcps.test]
+command = "echo"`,
+			chatsTOML: `[chat]
+service = "test"`,
 			wantErr: "transport is required",
 		},
 		{
 			name: "invalid transport",
-			toml: `[services.test]
-maxtokens = 100
-[mcps.test]
+			mainTOML: `[mcps.test]
 transport = "websocket"
-url = "http://localhost:3000"
-[commands.chats.chat]
-service = "test"
-`,
+url = "http://localhost:3000"`,
+			chatsTOML: `[chat]
+service = "test"`,
 			wantErr: "transport must be 'stdio' or 'http'",
 		},
 		{
 			name: "stdio missing command",
-			toml: `[services.test]
-maxtokens = 100
-[mcps.test]
-transport = "stdio"
-[commands.chats.chat]
-service = "test"
-`,
+			mainTOML: `[mcps.test]
+transport = "stdio"`,
+			chatsTOML: `[chat]
+service = "test"`,
 			wantErr: "command is required for stdio",
 		},
 		{
 			name: "http missing url",
-			toml: `[services.test]
-maxtokens = 100
-[mcps.test]
-transport = "http"
-[commands.chats.chat]
-service = "test"
-`,
+			mainTOML: `[mcps.test]
+transport = "http"`,
+			chatsTOML: `[chat]
+service = "test"`,
 			wantErr: "url is required for http",
 		},
 		{
-			name: "command references unknown MCP",
-			toml: `[services.test]
-maxtokens = 100
-[commands.chats.chat]
+			name:     "command references unknown MCP",
+			mainTOML: ``,
+			chatsTOML: `[chat]
 service = "test"
-mcps = ["nonexistent"]
-`,
+mcps = ["nonexistent"]`,
 			wantErr: "references undefined MCP",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tempFile, err := os.CreateTemp("", "test_mcp_config_*.toml")
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer os.Remove(tempFile.Name())
+			dir := createTestConfigDir(t, tt.mainTOML, map[string]string{
+				"services.toml": mcpServicesTOML,
+				"chats.toml":    tt.chatsTOML,
+			})
+			defer os.RemoveAll(dir)
 
-			if _, err := tempFile.WriteString(tt.toml); err != nil {
-				t.Fatal(err)
-			}
-			tempFile.Close()
-
-			cmd := exec.Command("go", "run", ".", tempFile.Name())
+			cmd := exec.Command("go", "run", ".", dir)
 			cmd.Env = append(os.Environ(), "LOGXI_FORMAT=maxcol=9999")
 			output, _ := cmd.CombinedOutput()
 			outStr := string(output)
@@ -370,20 +351,32 @@ func TestMCPToolInfoEmpty(t *testing.T) {
 
 func TestMCPConfigTimeoutDefault(t *testing.T) {
 	dir := t.TempDir()
-	tomlFile := filepath.Join(dir, "config.toml")
-	tomlContent := `[services.test]
-maxtokens = 100
+	mainTOML := `
 [mcps.test]
 transport = "stdio"
 command = "echo"
-[commands.chats.chat]
+`
+	chatsTOML := `[chat]
 service = "test"
 `
-	if err := os.WriteFile(tomlFile, []byte(tomlContent), 0644); err != nil {
+	servicesTOML := `
+[test]
+maxtokens = 100
+`
+	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(mainTOML), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "chats.toml"), []byte(chatsTOML), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "services.toml"), []byte(servicesTOML), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "chats.toml"), []byte(chatsTOML), 0644); err != nil {
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command("go", "run", ".", tomlFile)
+	cmd := exec.Command("go", "run", ".", dir)
 	cmd.Env = append(os.Environ(), "LOGXI_FORMAT=maxcol=9999")
 	output, _ := cmd.CombinedOutput()
 	outStr := string(output)

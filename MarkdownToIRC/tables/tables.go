@@ -8,26 +8,55 @@ import (
 )
 
 const (
-	// Box drawing characters for tables
-	boxTL             = "┌" // Top-left corner
-	boxTR             = "┐" // Top-right corner
-	boxBL             = "└" // Bottom-left corner
-	boxBR             = "┘" // Bottom-right corner
-	boxV              = "│" // Vertical line
-	boxH              = "─" // Horizontal line
-	boxT              = "┬" // T-junction (top)
-	boxC              = "├" // T-junction (left)
-	boxR              = "┤" // T-junction (right)
-	boxX              = "┼" // Cross (center)
-	boxB              = "┴" // T-junction (bottom)
-	maxTableCellWidth = 40
+	boxTL             = "┌"
+	boxTR             = "┐"
+	boxBL             = "└"
+	boxBR             = "┘"
+	boxV              = "│"
+	boxH              = "─"
+	boxT              = "┬"
+	boxC              = "├"
+	boxR              = "┤"
+	boxX              = "┼"
+	boxB              = "┴"
+	defaultTableWidth = 100
 )
 
-func min(a, b int) int {
-	if a < b {
-		return a
+func sumInts(nums []int) int {
+	total := 0
+	for _, n := range nums {
+		total += n
 	}
-	return b
+	return total
+}
+
+func fitColWidths(colWidths []int, available int) []int {
+	total := sumInts(colWidths)
+	if total <= available {
+		return colWidths
+	}
+
+	result := make([]int, len(colWidths))
+	copy(result, colWidths)
+
+	for sumInts(result) > available {
+		maxW := 0
+		for _, w := range result {
+			if w > maxW {
+				maxW = w
+			}
+		}
+		if maxW <= 1 {
+			break
+		}
+		for i := range result {
+			if result[i] == maxW {
+				result[i]--
+			}
+		}
+	}
+
+	return result
 }
 
 func plainLength(s string) int {
@@ -63,11 +92,22 @@ func RenderTable(data TableData) string {
 			for _, line := range lines {
 				w := plainLength(line)
 				if w > colWidths[i] {
-					colWidths[i] = min(w, maxTableCellWidth)
+					colWidths[i] = w
 				}
 			}
 		}
 	}
+
+	maxWidth := data.MaxWidth
+	if maxWidth == 0 {
+		maxWidth = defaultTableWidth
+	}
+	overhead := 3*numCols + 1
+	available := maxWidth - overhead
+	if available < numCols {
+		available = numCols
+	}
+	colWidths = fitColWidths(colWidths, available)
 
 	// Build border components for each column
 	var colSegments []string

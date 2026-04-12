@@ -18,4 +18,5 @@ type TableRow []TableCell
 type TableData struct {
 	Rows           []TableRow
 	HeaderRowCount int
+	MaxWidth       int
 }

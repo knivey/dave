@@ -927,7 +927,7 @@ func TestTables(t *testing.T) {
 		{
 			name:    "TableWithLineWrap",
 			input:   "| Short | Long |\n|-------|------|\n| ok    | this is a very long cell that should wrap |",
-			contain: []string{"┌───────┬──────────────────────────────────────────┐", "│ Short │ Long                                     │", "├───────┼──────────────────────────────────────────┤", "│ ok    │ this is a very long cell that should     │", "│       │ wrap                                     │", "└───────┴──────────────────────────────────────────┘"},
+			contain: []string{"┌───────┬───────────────────────────────────────────┐", "│ Short │ Long                                      │", "├───────┼───────────────────────────────────────────┤", "│ ok    │ this is a very long cell that should wrap │", "└───────┴───────────────────────────────────────────┘"},
 		},
 		{
 			name:    "TableWithBR",
@@ -942,7 +942,7 @@ func TestTables(t *testing.T) {
 		{
 			name:    "TableWithBRAndWrap",
 			input:   "| A | B |\n|---|---|\n| test | this is<br>a very long cell text that should wrap properly |",
-			contain: []string{"┌──────┬──────────────────────────────────────────┐", "│ A    │ B                                        │", "├──────┼──────────────────────────────────────────┤", "│ test │ this is                                  │", "│      │ a very long cell text that should wrap   │", "│      │ properly                                 │", "└──────┴──────────────────────────────────────────┘"},
+			contain: []string{"┌──────┬─────────────────────────────────────────────────┐", "│ A    │ B                                               │", "├──────┼─────────────────────────────────────────────────┤", "│ test │ this is                                         │", "│      │ a very long cell text that should wrap properly │", "└──────┴─────────────────────────────────────────────────┘"},
 		},
 	})
 }
@@ -1068,7 +1068,7 @@ func TestTableStrictRendering(t *testing.T) {
 		{
 			name:     "MixedFormattingAndWrap",
 			input:    "| **Bold** | *Italic* | `Code` |\n|----------|----------|--------|\n| short | this is a long cell with **bold** that will wrap |",
-			expected: "┌───────┬──────────────────────────────────────────┬──────┐\n│ \x02Bold\x02  │ \x1DItalic\x1D                                   │ \x030,90Code\x03 │\n├───────┼──────────────────────────────────────────┼──────┤\n│ short │ this is a long cell with \x02bold\x02 that will  │      │\n│       │ wrap                                     │      │\n└───────┴──────────────────────────────────────────┴──────┘",
+			expected: "┌───────┬──────────────────────────────────────────────┬──────┐\n│ \x02Bold\x02  │ \x1DItalic\x1D                                       │ \x030,90Code\x03 │\n├───────┼──────────────────────────────────────────────┼──────┤\n│ short │ this is a long cell with \x02bold\x02 that will wrap │      │\n└───────┴──────────────────────────────────────────────┴──────┘",
 		},
 		{
 			name:     "AlignedWithCodes",

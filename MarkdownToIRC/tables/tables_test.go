@@ -135,6 +135,59 @@ func TestWrapCellText(t *testing.T) {
 	}
 }
 
+func TestFitColWidths(t *testing.T) {
+	tests := []struct {
+		name      string
+		colWidths []int
+		available int
+		expected  []int
+	}{
+		{
+			name:      "NoReductionNeeded",
+			colWidths: []int{5, 10},
+			available: 20,
+			expected:  []int{5, 10},
+		},
+		{
+			name:      "GreedyReduction",
+			colWidths: []int{60, 30, 20},
+			available: 90,
+			expected:  []int{40, 30, 20},
+		},
+		{
+			name:      "AllEqualReduction",
+			colWidths: []int{30, 30, 30},
+			available: 87,
+			expected:  []int{29, 29, 29},
+		},
+		{
+			name:      "MinimumFloor",
+			colWidths: []int{50, 50},
+			available: 2,
+			expected:  []int{1, 1},
+		},
+		{
+			name:      "ExactFit",
+			colWidths: []int{10, 20, 30},
+			available: 60,
+			expected:  []int{10, 20, 30},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := fitColWidths(tt.colWidths, tt.available)
+			if len(got) != len(tt.expected) {
+				t.Fatalf("expected %d columns, got %d", len(tt.expected), len(got))
+			}
+			for i := range got {
+				if got[i] != tt.expected[i] {
+					t.Errorf("col %d: expected %d, got %d", i, tt.expected[i], got[i])
+				}
+			}
+		})
+	}
+}
+
 func TestRenderTable(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -182,7 +235,30 @@ func TestRenderTable(t *testing.T) {
 				},
 				HeaderRowCount: 1,
 			},
-			expected: "\n┌───────┬──────────────────────────────────────────┐\n│ Short │ \x02this is a very long bold cell that\x02       │\n│       │ \x02should wrap\x02                              │\n└───────┴──────────────────────────────────────────┘",
+			expected: "\n┌───────┬────────────────────────────────────────────────┐\n│ Short │ \x02this is a very long bold cell that should wrap\x02 │\n└───────┴────────────────────────────────────────────────┘",
+		},
+		{
+			name: "GreedyReduction",
+			data: TableData{
+				Rows: []TableRow{
+					{{Text: "Header1", Align: AlignLeft}, {Text: "Header2", Align: AlignLeft}, {Text: "Header3", Align: AlignLeft}},
+					{{Text: "ABCDEFGHIJKLMNOPQRST", Align: AlignLeft}, {Text: "abcdefghijklmnopqrstuvw", Align: AlignLeft}, {Text: "hello", Align: AlignLeft}},
+				},
+				HeaderRowCount: 1,
+			},
+			expected: "\n┌──────────────────────┬─────────────────────────┬─────────┐\n│ Header1              │ Header2                 │ Header3 │\n├──────────────────────┼─────────────────────────┼─────────┤\n│ ABCDEFGHIJKLMNOPQRST │ abcdefghijklmnopqrstuvw │ hello   │\n└──────────────────────┴─────────────────────────┴─────────┘",
+		},
+		{
+			name: "MaxWidthOverride",
+			data: TableData{
+				Rows: []TableRow{
+					{{Text: "Name", Align: AlignLeft}, {Text: "Description", Align: AlignLeft}},
+					{{Text: "foo", Align: AlignLeft}, {Text: "a long description that needs wrapping", Align: AlignLeft}},
+				},
+				HeaderRowCount: 1,
+				MaxWidth:       40,
+			},
+			expected: "\n┌──────┬───────────────────────────────┐\n│ Name │ Description                   │\n├──────┼───────────────────────────────┤\n│ foo  │ a long description that needs │\n│      │ wrapping                      │\n└──────┴───────────────────────────────┘",
 		},
 	}
 

@@ -177,17 +177,28 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 	}
 	defer stream.Close()
 	bufferb := ""
-	streamingRenderer := markdowntoirc.NewStreamingRenderer()
+	logBuf := strings.Builder{}
+	var streamingRenderer *markdowntoirc.StreamingRenderer
+	if cfg.RenderMarkdown {
+		streamingRenderer = markdowntoirc.NewStreamingRenderer()
+	}
 	defer func() {
 		logger.Info(bufferb)
 		AddContext(cfg, ctx_key, gogpt.ChatCompletionMessage{
 			Role:    gogpt.ChatMessageRoleAssistant,
 			Content: bufferb,
 		})
-		// Render any remaining partial line
-		for _, line := range streamingRenderer.Process("") {
-			sendLoop(line, network, c, e)
+		if streamingRenderer != nil {
+			for _, line := range streamingRenderer.Process("") {
+				logBuf.WriteString(line)
+				logBuf.WriteString("\n")
+				sendLoop(line, network, c, e)
+			}
+		} else if bufferb != "" {
+			logBuf.WriteString(bufferb)
+			sendLoop(bufferb, network, c, e)
 		}
+		logger.Info("output", "text", logBuf.String())
 	}()
 	for {
 		if !getRunning(network.Name + e.Params[0]) {
@@ -213,8 +224,18 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 		}
 		delta := resp.Choices[0].Delta.Content
 		bufferb += delta
-		for _, line := range streamingRenderer.Process(delta) {
-			sendLoop(line, network, c, e)
+		if streamingRenderer != nil {
+			for _, line := range streamingRenderer.Process(delta) {
+				logBuf.WriteString(line)
+				logBuf.WriteString("\n")
+				sendLoop(line, network, c, e)
+			}
+		} else {
+			if strings.Contains(bufferb, "\n") {
+				logBuf.WriteString(bufferb)
+				sendLoop(bufferb, network, c, e)
+				bufferb = ""
+			}
 		}
 	}
 }

@@ -19,10 +19,16 @@ var (
 	shutdownOnce int32
 	autoScroll   = true
 
+	cmdHistory []string
+	cmdHistIdx int
+	cmdDraft   string
+
 	origStdoutFd int
 	origStderrFd int
 	logPipeR     *os.File
 )
+
+const cmdHistoryMax = 100
 
 func initTUI() (*tview.Application, error) {
 	pipeR, pipeW, err := os.Pipe()
@@ -87,6 +93,14 @@ func initTUI() (*tview.Application, error) {
 		if key == tcell.KeyEnter {
 			text := inputField.GetText()
 			inputField.SetText("")
+			if text != "" {
+				cmdHistory = append(cmdHistory, text)
+				if len(cmdHistory) > cmdHistoryMax {
+					cmdHistory = cmdHistory[len(cmdHistory)-cmdHistoryMax:]
+				}
+			}
+			cmdHistIdx = len(cmdHistory)
+			cmdDraft = ""
 			handleTUICommand(text)
 		}
 	})
@@ -118,6 +132,25 @@ func initTUI() (*tview.Application, error) {
 				logView.ScrollToEnd()
 			} else {
 				logView.ScrollTo(newRow, 0)
+			}
+			return nil
+		case tcell.KeyUp:
+			if cmdHistIdx > 0 {
+				if cmdHistIdx == len(cmdHistory) {
+					cmdDraft = inputField.GetText()
+				}
+				cmdHistIdx--
+				inputField.SetText(cmdHistory[cmdHistIdx])
+			}
+			return nil
+		case tcell.KeyDown:
+			if cmdHistIdx < len(cmdHistory) {
+				cmdHistIdx++
+				if cmdHistIdx == len(cmdHistory) {
+					inputField.SetText(cmdDraft)
+				} else {
+					inputField.SetText(cmdHistory[cmdHistIdx])
+				}
 			}
 			return nil
 		}

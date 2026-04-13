@@ -184,7 +184,8 @@ func readPipeToView(reader *os.File, view *tview.TextView, app *tview.Applicatio
 	for scanner.Scan() {
 		line := scanner.Text()
 		line = strings.TrimRight(line, "\r")
-		translated := tview.TranslateANSI(line)
+		escaped := tview.Escape(line)
+		translated := tview.TranslateANSI(escaped)
 		app.QueueUpdateDraw(func() {
 			fmt.Fprintf(view, "%s\n", translated)
 		})

@@ -29,26 +29,28 @@ No Makefile, no linter config. Use `go fmt` + `go vet`.
 - All root `.go` files = `package main` (globals: `config`, `builtInCmds` *CmdMap*, `configCmds` *CmdMap*, `commandsMutex`, `bots`, `wg`, context maps, `logger`).
 - `MarkdownToIRC/` (with `irc/`, `tables/`) converts markdown to IRC codes (`\x02`, `\x03`, `\x1D`).
 - `main.go`: loads config, registers regex commands, starts girc clients per network, runs TUI.
-- `tui.go`: tview-based TUI with scrolling log view and command input (`/reload`, `/quit`).
+- `tui.go`: tview-based TUI with scrolling log view and command input (`/help`, `/reload`, `/join`, `/part`, `/nick`, `/quit`).
 - `config.go`: directory-based config loading with error-returning validation (reload-safe).
-- Config in TOML directory: `config/config.toml` (main), `config/services.toml`, `config/promptenhancements.toml`, `config/completions.toml`, `config/chats.toml`, `config/sd.toml`, `config/comfy.toml`.
-  - Missing command/service/promptenhancement files = empty maps (not fatal).
+- `mcpClient.go`: MCP client lifecycle — `initMCPClients`, `closeMCPClients`, `closeAndClearMCPClients`, `reloadMCPClients`.
+- Config in TOML directory: `config/config.toml` (main), `config/services.toml`, `config/promptenhancements.toml`, `config/mcps.toml`, `config/completions.toml`, `config/chats.toml`, `config/sd.toml`, `config/comfy.toml`.
+  - Missing command/service/promptenhancement/mcps files = empty maps (not fatal).
   - `ignores.txt` (see `.example`) for host ignores (wildcard).
   - `contexts.json` (gitignored) for persistent chat history.
 
 ## High-Signal Gotchas
 - Config validation: `loadConfigDirOrDie` calls `os.Exit(1)` on any error at startup. `loadCommandsDir` and `loadReloadableDir` return errors for hot-reload (no exit).
 - Command registration uses `builtInCmds` (stop, help) + `configCmds` (from config). `commandsMutex` (RWMutex) protects concurrent access.
-- `/reload` in TUI reloads services, prompt enhancements, and command definitions. Hot-swaps `config.Services`, `config.PromptEnhancements`, and `configCmds` entries.
+- `/reload` in TUI reloads MCPs, services, prompt enhancements, and command definitions. Hot-swaps `config.MCPs`, `config.Services`, `config.PromptEnhancements`, and `configCmds` entries. MCP clients are closed and reconnected on reload.
 - Config directory expected as CLI arg (default: `config`). Previously was a single `.toml` file.
 - TUI captures stdout/stderr via `os.Pipe()` after config loading. Log output (logxi) displayed in tview TextView with ANSI stripping.
+- `tview.TranslateANSI()` is used for log output in TUI, preceded by `tview.Escape()` to prevent IRC text with brackets from being interpreted as tview color tags.
 - Command regex: empty = key name; registered as `^<regex> (.+)$` in main.go.
-- Networks inherit root `trigger`/`quitmsg`; cycle multiple servers on reconnect.
+- Networks inherit root `trigger`/`quitmsg`; cycle multiple servers on reconnect. TUI commands (`/join`, `/part`, `/nick`) update `bot.Network` in-memory (not persisted); `bot.mu` (sync.Mutex) protects access. RPL_WELCOME and reconnect loop reference `bot.Network` (not captured `network` value) so runtime changes survive reconnect.
 - Service `maxhistory` defaults to 8.
 - ComfyConfig requires `workflow_path`, `clientid`, `output_node`, `prompt_node`.
 - Context store: dirty flag, atomic (`.tmp`+rename), timer, age+count cleanup. Tests mock via `persistCfg.FilePath`.
 - Tests: table-driven + `t.Run()`, substring `contain`/`notContain` (no testify). MarkdownToIRC uses shared `runTests()` helper. Root has context/config/ai tests. Config tests use `createTestConfigDir` helper for directory-based configs.
-- MCP tests (`TestMCPConfigValidation`, `TestMCPConfigTimeoutDefault`) run `go run . <dir>` as subprocess.
+- MCP tests (`TestMCPConfigValidation`, `TestMCPConfigTimeoutDefault`) run `go run . <dir>` as subprocess. MCP config is in `mcps.toml` (not in `config.toml`).
 
 ## Code Style
 - Imports: stdlib, blank, third-party.

@@ -19,23 +19,6 @@ max_age_days = 7     # delete old contexts
 max_contexts = 100   # max stored
 save_delay = "30s"   # auto-save interval
 
-# MCP servers provide tools, resources, and prompts that chat commands can use.
-# Tools are automatically injected into the LLM request when a command opts-in via mcps = [...].
-# Resources and prompts are available via bridge functions for explicit use.
-# Supported transports: "stdio" (spawn a local process) and "http" (streamable HTTP endpoint).
-# Each MCP server has its own timeout for tool calls (defaults to 30s).
-#
-# [mcps.filesystem]
-# transport = "stdio"
-# command = "npx"
-# args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/docs"]
-# timeout = "30s"
-#
-# [mcps.github]
-# transport = "http"
-# url = "http://localhost:3001/mcp"
-# timeout = "30s"
-
 [networks.birdnest]
 enabled = true
 nick = "dave"

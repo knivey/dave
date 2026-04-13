@@ -32,6 +32,11 @@ func init() {
 }
 
 func initMCPClients() {
+	mcpServersMu.Lock()
+	mcpServers = make(map[string]*MCPServer)
+	mcpToolToServer = make(map[string]string)
+	mcpServersMu.Unlock()
+
 	if len(config.MCPs) == 0 {
 		return
 	}
@@ -115,6 +120,25 @@ func closeMCPClients() {
 			srv.Session.Close()
 		}
 	}
+}
+
+func closeAndClearMCPClients() {
+	mcpServersMu.Lock()
+	defer mcpServersMu.Unlock()
+	for name, srv := range mcpServers {
+		logger.Info("closing MCP server", "name", name)
+		if srv.Session != nil {
+			srv.Session.Close()
+		}
+		delete(mcpServers, name)
+	}
+	mcpToolToServer = make(map[string]string)
+}
+
+func reloadMCPClients(newMCPs map[string]MCPConfig) {
+	closeAndClearMCPClients()
+	config.MCPs = newMCPs
+	initMCPClients()
 }
 
 func callMCPTool(toolName string, args map[string]any) (*mcp.CallToolResult, error) {

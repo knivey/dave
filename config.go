@@ -289,27 +289,12 @@ func loadConfigDir(dir string) (Config, error) {
 		return config, err
 	}
 
-	if err := loadCommandsInto(dir, &config); err != nil {
+	if err := loadMCPsFile(dir, &config); err != nil {
 		return config, err
 	}
 
-	for name, mcpCfg := range config.MCPs {
-		if mcpCfg.Transport == "" {
-			return config, fmt.Errorf("mcps.%s transport is required (stdio or http)", name)
-		}
-		if mcpCfg.Transport != "stdio" && mcpCfg.Transport != "http" {
-			return config, fmt.Errorf("mcps.%s transport must be 'stdio' or 'http'", name)
-		}
-		if mcpCfg.Transport == "stdio" && mcpCfg.Command == "" {
-			return config, fmt.Errorf("mcps.%s command is required for stdio transport", name)
-		}
-		if mcpCfg.Transport == "http" && mcpCfg.URL == "" {
-			return config, fmt.Errorf("mcps.%s url is required for http transport", name)
-		}
-		if mcpCfg.Timeout == 0 {
-			mcpCfg.Timeout = 30 * time.Second
-		}
-		config.MCPs[name] = mcpCfg
+	if err := loadCommandsInto(dir, &config); err != nil {
+		return config, err
 	}
 
 	config.Persist.SetDefaults()
@@ -343,9 +328,40 @@ func loadPromptEnhancementsFile(dir string, config *Config) error {
 	return nil
 }
 
+func loadMCPsFile(dir string, config *Config) error {
+	if err := loadCommandFile(filepath.Join(dir, "mcps.toml"), &config.MCPs); err != nil {
+		return fmt.Errorf("loading mcps: %w", err)
+	}
+	if config.MCPs == nil {
+		config.MCPs = make(map[string]MCPConfig)
+	}
+	for name, mcpCfg := range config.MCPs {
+		if mcpCfg.Transport == "" {
+			return fmt.Errorf("mcps.%s transport is required (stdio or http)", name)
+		}
+		if mcpCfg.Transport != "stdio" && mcpCfg.Transport != "http" {
+			return fmt.Errorf("mcps.%s transport must be 'stdio' or 'http'", name)
+		}
+		if mcpCfg.Transport == "stdio" && mcpCfg.Command == "" {
+			return fmt.Errorf("mcps.%s command is required for stdio transport", name)
+		}
+		if mcpCfg.Transport == "http" && mcpCfg.URL == "" {
+			return fmt.Errorf("mcps.%s url is required for http transport", name)
+		}
+		if mcpCfg.Timeout == 0 {
+			mcpCfg.Timeout = 30 * time.Second
+		}
+		config.MCPs[name] = mcpCfg
+	}
+	return nil
+}
+
 func loadReloadableDir(dir string, config *Config) error {
 	var tmpConfig Config
-	tmpConfig.MCPs = config.MCPs
+
+	if err := loadMCPsFile(dir, &tmpConfig); err != nil {
+		return err
+	}
 
 	if err := loadServicesFile(dir, &tmpConfig); err != nil {
 		return err
@@ -360,6 +376,7 @@ func loadReloadableDir(dir string, config *Config) error {
 		return err
 	}
 
+	config.MCPs = tmpConfig.MCPs
 	config.Services = tmpConfig.Services
 	config.PromptEnhancements = tmpConfig.PromptEnhancements
 	config.Commands = commands

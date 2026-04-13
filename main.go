@@ -119,6 +119,7 @@ func reloadAll() error {
 	if err := loadReloadableDir(configDir, &config); err != nil {
 		return err
 	}
+	reloadMCPClients(config.MCPs)
 	registerCommandsLocked(config.Commands)
 	return nil
 }

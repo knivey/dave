@@ -21,13 +21,13 @@ maxtokens = 100
 func TestMCPConfigValidation(t *testing.T) {
 	tests := []struct {
 		name      string
-		mainTOML  string
+		mcpsTOML  string
 		chatsTOML string
 		wantErr   string
 	}{
 		{
 			name: "valid stdio MCP",
-			mainTOML: `[mcps.test]
+			mcpsTOML: `[test]
 transport = "stdio"
 command = "echo"`,
 			chatsTOML: `[chat]
@@ -36,7 +36,7 @@ service = "test"`,
 		},
 		{
 			name: "valid http MCP",
-			mainTOML: `[mcps.test]
+			mcpsTOML: `[test]
 transport = "http"
 url = "http://localhost:3000/mcp"`,
 			chatsTOML: `[chat]
@@ -45,7 +45,7 @@ service = "test"`,
 		},
 		{
 			name: "missing transport",
-			mainTOML: `[mcps.test]
+			mcpsTOML: `[test]
 command = "echo"`,
 			chatsTOML: `[chat]
 service = "test"`,
@@ -53,7 +53,7 @@ service = "test"`,
 		},
 		{
 			name: "invalid transport",
-			mainTOML: `[mcps.test]
+			mcpsTOML: `[test]
 transport = "websocket"
 url = "http://localhost:3000"`,
 			chatsTOML: `[chat]
@@ -62,7 +62,7 @@ service = "test"`,
 		},
 		{
 			name: "stdio missing command",
-			mainTOML: `[mcps.test]
+			mcpsTOML: `[test]
 transport = "stdio"`,
 			chatsTOML: `[chat]
 service = "test"`,
@@ -70,7 +70,7 @@ service = "test"`,
 		},
 		{
 			name: "http missing url",
-			mainTOML: `[mcps.test]
+			mcpsTOML: `[test]
 transport = "http"`,
 			chatsTOML: `[chat]
 service = "test"`,
@@ -78,7 +78,7 @@ service = "test"`,
 		},
 		{
 			name:     "command references unknown MCP",
-			mainTOML: ``,
+			mcpsTOML: ``,
 			chatsTOML: `[chat]
 service = "test"
 mcps = ["nonexistent"]`,
@@ -88,10 +88,14 @@ mcps = ["nonexistent"]`,
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dir := createTestConfigDir(t, tt.mainTOML, map[string]string{
+			extraFiles := map[string]string{
 				"services.toml": mcpServicesTOML,
 				"chats.toml":    tt.chatsTOML,
-			})
+			}
+			if tt.mcpsTOML != "" {
+				extraFiles["mcps.toml"] = tt.mcpsTOML
+			}
+			dir := createTestConfigDir(t, "", extraFiles)
 			defer os.RemoveAll(dir)
 
 			cmd := exec.Command("go", "run", ".", dir)
@@ -351,8 +355,8 @@ func TestMCPToolInfoEmpty(t *testing.T) {
 
 func TestMCPConfigTimeoutDefault(t *testing.T) {
 	dir := t.TempDir()
-	mainTOML := `
-[mcps.test]
+	mcpsTOML := `
+[test]
 transport = "stdio"
 command = "echo"
 `
@@ -363,16 +367,16 @@ service = "test"
 [test]
 maxtokens = 100
 `
-	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(mainTOML), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "mcps.toml"), []byte(mcpsTOML), 0644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "chats.toml"), []byte(chatsTOML), 0644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "services.toml"), []byte(servicesTOML), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "chats.toml"), []byte(chatsTOML), 0644); err != nil {
 		t.Fatal(err)
 	}
 

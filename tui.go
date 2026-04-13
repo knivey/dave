@@ -204,10 +204,19 @@ func handleTUICommand(text string) {
 		return
 	}
 
-	parts := strings.SplitN(text, " ", 2)
+	parts := strings.SplitN(text, " ", 4)
 	cmd := strings.ToLower(parts[0])
 
 	switch cmd {
+	case "/help":
+		fmt.Fprintf(logView, "[white]Commands:\n")
+		fmt.Fprintf(logView, "  /help                        - Show this help\n")
+		fmt.Fprintf(logView, "  /reload                      - Reload config from disk\n")
+		fmt.Fprintf(logView, "  /quit, /exit                 - Shut down\n")
+		fmt.Fprintf(logView, "  /join <network> <channel>    - Join a channel\n")
+		fmt.Fprintf(logView, "  /part <network> <channel> [message]\n")
+		fmt.Fprintf(logView, "                               - Leave a channel\n")
+		fmt.Fprintf(logView, "  /nick <network> <nick>       - Change nickname\n")
 	case "/reload":
 		if err := reloadAll(); err != nil {
 			fmt.Fprintf(logView, "[red]Reload failed: %s[white]\n", err)
@@ -216,6 +225,82 @@ func handleTUICommand(text string) {
 		}
 	case "/quit", "/exit":
 		requestShutdown()
+	case "/join":
+		if len(parts) < 3 {
+			fmt.Fprintf(logView, "[yellow]Usage: /join <network> <channel>[white]\n")
+			break
+		}
+		network, channel := parts[1], parts[2]
+		bot, ok := bots[network]
+		if !ok {
+			fmt.Fprintf(logView, "[red]Unknown network: %s[white]\n", network)
+			break
+		}
+		bot.mu.Lock()
+		alreadyJoined := false
+		for _, ch := range bot.Network.Channels {
+			if ch == channel {
+				alreadyJoined = true
+				break
+			}
+		}
+		if alreadyJoined {
+			bot.mu.Unlock()
+			fmt.Fprintf(logView, "[yellow]Already in %s on %s[white]\n", channel, network)
+			break
+		}
+		bot.Network.Channels = append(bot.Network.Channels, channel)
+		bot.mu.Unlock()
+		bot.Client.Cmd.Join(channel)
+		fmt.Fprintf(logView, "[green]Joined %s on %s[white]\n", channel, network)
+	case "/part":
+		if len(parts) < 3 {
+			fmt.Fprintf(logView, "[yellow]Usage: /part <network> <channel> [message][white]\n")
+			break
+		}
+		network, channel := parts[1], parts[2]
+		bot, ok := bots[network]
+		if !ok {
+			fmt.Fprintf(logView, "[red]Unknown network: %s[white]\n", network)
+			break
+		}
+		bot.mu.Lock()
+		found := false
+		for i, ch := range bot.Network.Channels {
+			if ch == channel {
+				bot.Network.Channels = append(bot.Network.Channels[:i], bot.Network.Channels[i+1:]...)
+				found = true
+				break
+			}
+		}
+		bot.mu.Unlock()
+		if !found {
+			fmt.Fprintf(logView, "[yellow]Not in %s on %s[white]\n", channel, network)
+			break
+		}
+		if len(parts) >= 4 {
+			bot.Client.Cmd.PartMessage(channel, parts[3])
+		} else {
+			bot.Client.Cmd.Part(channel)
+		}
+		fmt.Fprintf(logView, "[green]Parted %s on %s[white]\n", channel, network)
+	case "/nick":
+		if len(parts) < 3 {
+			fmt.Fprintf(logView, "[yellow]Usage: /nick <network> <nick>[white]\n")
+			break
+		}
+		network, nick := parts[1], parts[2]
+		bot, ok := bots[network]
+		if !ok {
+			fmt.Fprintf(logView, "[red]Unknown network: %s[white]\n", network)
+			break
+		}
+		bot.mu.Lock()
+		bot.Network.Nick = nick
+		bot.mu.Unlock()
+		bot.Client.Config.Nick = nick
+		bot.Client.Cmd.Nick(nick)
+		fmt.Fprintf(logView, "[green]Nick change to %s on %s[white]\n", nick, network)
 	default:
 		fmt.Fprintf(logView, "[yellow]Unknown command: %s[white]\n", text)
 	}

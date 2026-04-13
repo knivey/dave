@@ -28,6 +28,7 @@ type Bot struct {
 	Client    *girc.Client
 	Reconnect bool
 	Network   Network
+	mu        sync.Mutex
 }
 
 func (bot *Bot) Quit() {
@@ -355,8 +356,13 @@ func ircClient(network Network) {
 	})
 
 	client.Handlers.Add(girc.RPL_WELCOME, func(client *girc.Client, event girc.Event) {
-		time.Sleep(time.Microsecond * network.Throttle)
-		client.Cmd.Join(strings.Join(network.Channels, ","))
+		bot.mu.Lock()
+		throttle := bot.Network.Throttle
+		channels := make([]string, len(bot.Network.Channels))
+		copy(channels, bot.Network.Channels)
+		bot.mu.Unlock()
+		time.Sleep(time.Microsecond * throttle)
+		client.Cmd.Join(strings.Join(channels, ","))
 	})
 
 	client.Handlers.AddBg(girc.PRIVMSG, func(client *girc.Client, event girc.Event) {
@@ -376,7 +382,7 @@ func ircClient(network Network) {
 		}
 		log.Info("Reconnecting in 60s")
 		time.Sleep(60 * time.Second)
-		ircServer := network.getNextServer()
+		ircServer := bot.Network.getNextServer()
 		client.Config.Server = ircServer.Host
 		client.Config.Port = ircServer.GetPort()
 		client.Config.ServerPass = ircServer.Pass

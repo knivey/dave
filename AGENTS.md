@@ -31,7 +31,7 @@ No Makefile, no linter config. Use `go fmt` + `go vet`.
 - `main.go`: loads config, registers regex commands, starts girc clients per network, runs TUI.
 - `tui.go`: tview-based TUI with scrolling log view and command input (`/help`, `/reload`, `/join`, `/part`, `/nick`, `/quit`).
 - `config.go`: directory-based config loading with error-returning validation (reload-safe).
-- `mcpClient.go`: MCP client lifecycle — `initMCPClients`, `closeMCPClients`, `closeAndClearMCPClients`, `reloadMCPClients`.
+- `mcpClient.go`: MCP client lifecycle — `initMCPClients`, `closeMCPClients`, `closeAndClearMCPClients`, `reloadMCPClients`. Automatic reconnection with exponential backoff on tool/resource/prompt call failure. `connectMCPServer` creates a single server connection; `reconnectMCPServer` handles reconnect with per-server mutex and backoff state. `connectMCPServerImpl` is a package-level var (overridable in tests).
 - Config in TOML directory: `config/config.toml` (main), `config/services.toml`, `config/promptenhancements.toml`, `config/mcps.toml`, `config/completions.toml`, `config/chats.toml`, `config/sd.toml`, `config/comfy.toml`.
   - Missing command/service/promptenhancement/mcps files = empty maps (not fatal).
   - `ignores.txt` (see `.example`) for host ignores (wildcard).
@@ -51,6 +51,7 @@ No Makefile, no linter config. Use `go fmt` + `go vet`.
 - Context store: dirty flag, atomic (`.tmp`+rename), timer, age+count cleanup. Tests mock via `persistCfg.FilePath`.
 - Tests: table-driven + `t.Run()`, substring `contain`/`notContain` (no testify). MarkdownToIRC uses shared `runTests()` helper. Root has context/config/ai tests. Config tests use `createTestConfigDir` helper for directory-based configs.
 - MCP tests (`TestMCPConfigValidation`, `TestMCPConfigTimeoutDefault`) run `go run . <dir>` as subprocess. MCP config is in `mcps.toml` (not in `config.toml`).
+- MCP reconnection: `callMCPTool`, `readMCPResource`, `getMCPPrompt` all retry once after reconnect on failure. Backoff: `2^count * 1s` with jitter, capped at 60s. SDK `KeepAlive` (default 30s for HTTP) proactively detects dead sessions. `MCPServer.reconnectMu` serializes reconnect attempts per server. `reconnectCount` resets to 0 on success. `MCPConfig.KeepAlive` field in `mcps.toml`.
 
 ## Code Style
 - Imports: stdlib, blank, third-party.

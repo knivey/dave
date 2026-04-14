@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -98,8 +100,10 @@ mcps = ["nonexistent"]`,
 			dir := createTestConfigDir(t, "", extraFiles)
 			defer os.RemoveAll(dir)
 
-			cmd := exec.Command("go", "run", ".", dir)
-			cmd.Env = append(os.Environ(), "LOGXI_FORMAT=maxcol=9999")
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "go", "run", ".", dir)
+			cmd.Env = append(os.Environ(), "LOGXI_FORMAT=maxcol=9999", "DAVE_NO_TUI=1")
 			output, _ := cmd.CombinedOutput()
 			outStr := string(output)
 
@@ -380,8 +384,10 @@ maxtokens = 100
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command("go", "run", ".", dir)
-	cmd.Env = append(os.Environ(), "LOGXI_FORMAT=maxcol=9999")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "go", "run", ".", dir)
+	cmd.Env = append(os.Environ(), "LOGXI_FORMAT=maxcol=9999", "DAVE_NO_TUI=1")
 	output, _ := cmd.CombinedOutput()
 	outStr := string(output)
 
@@ -686,5 +692,218 @@ func TestStreamingToolCallAccumulationInterleavedTextAndTools(t *testing.T) {
 	}
 	if accumulatedToolCalls[0].Function.Arguments != `{"city":"NYC"}` {
 		t.Errorf("tool args = %q, want {\"city\":\"NYC\"}", accumulatedToolCalls[0].Function.Arguments)
+	}
+}
+
+func TestReconnectBackoff(t *testing.T) {
+	tests := []struct {
+		count int
+		min   time.Duration
+		max   time.Duration
+	}{
+		{0, 0, 0},
+		{1, 1 * time.Second, 2 * time.Second},
+		{2, 2 * time.Second, 4 * time.Second},
+		{3, 4 * time.Second, 8 * time.Second},
+		{6, 32 * time.Second, 60 * time.Second},
+		{10, 60 * time.Second, 60*time.Second + 30*time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("count_%d", tt.count), func(t *testing.T) {
+			got := reconnectBackoff(tt.count)
+			if got < tt.min {
+				t.Errorf("reconnectBackoff(%d) = %v, want >= %v", tt.count, got, tt.min)
+			}
+			if got > tt.max {
+				t.Errorf("reconnectBackoff(%d) = %v, want <= %v", tt.count, got, tt.max)
+			}
+		})
+	}
+}
+
+func TestCallMCPToolAutoReconnect(t *testing.T) {
+	ctx := context.Background()
+
+	type Input struct {
+		Name string `json:"name" jsonschema:"the name to greet"`
+	}
+	type Output struct {
+		Greeting string `json:"greeting" jsonschema:"the greeting"`
+	}
+
+	mcpServers = make(map[string]*MCPServer)
+	mcpToolToServer = make(map[string]string)
+
+	mcpCfg := MCPConfig{Transport: "http", Timeout: 10 * time.Second}
+
+	srv := &MCPServer{
+		Config:  mcpCfg,
+		Client:  nil,
+		Session: nil,
+		Tools:   []*mcp.Tool{{Name: "greet"}},
+	}
+	mcpServers["test"] = srv
+	mcpToolToServer["greet"] = "test"
+
+	createSession := func() (*mcp.Client, *mcp.ClientSession) {
+		server := mcp.NewServer(&mcp.Implementation{Name: "test-server", Version: "1.0.0"}, nil)
+		mcp.AddTool(server, &mcp.Tool{Name: "greet", Description: "say hi"}, func(ctx context.Context, req *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, Output, error) {
+			return nil, Output{Greeting: "Hello, " + input.Name + "!"}, nil
+		})
+
+		t1, t2 := mcp.NewInMemoryTransports()
+		_, err := server.Connect(ctx, t1, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
+		session, err := client.Connect(ctx, t2, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return client, session
+	}
+
+	client, session := createSession()
+	srv.Client = client
+	srv.Session = session
+
+	result, err := callMCPTool("greet", map[string]any{"name": "before_disconnect"})
+	if err != nil {
+		t.Fatalf("callMCPTool before disconnect failed: %v", err)
+	}
+	text := mcpToolResultToText(result)
+	if !strings.Contains(text, "Hello, before_disconnect!") {
+		t.Errorf("expected greeting before disconnect, got: %s", text)
+	}
+
+	session.Close()
+
+	createAndSwapSession := func() {
+		newClient, newSession := createSession()
+
+		mcpServersMu.Lock()
+		srv.Client = newClient
+		srv.Session = newSession
+		srv.Tools = []*mcp.Tool{{Name: "greet"}}
+		for _, tool := range srv.Tools {
+			mcpToolToServer[tool.Name] = "test"
+		}
+		mcpServersMu.Unlock()
+	}
+
+	origConnectMCPServer := connectMCPServerImpl
+	connectMCPServerImpl = func(name string, cfg MCPConfig) (*MCPServer, error) {
+		newClient, newSession := createSession()
+		return &MCPServer{
+			Config:  cfg,
+			Client:  newClient,
+			Session: newSession,
+			Tools:   []*mcp.Tool{{Name: "greet"}},
+		}, nil
+	}
+	defer func() { connectMCPServerImpl = origConnectMCPServer }()
+
+	_ = createAndSwapSession
+
+	mcpServersMu.Lock()
+	srv.Session = nil
+	mcpServersMu.Unlock()
+
+	_, err = callMCPTool("greet", map[string]any{"name": "after_disconnect"})
+	if err != nil {
+		t.Fatalf("callMCPTool after disconnect should have reconnected: %v", err)
+	}
+
+	mcpServersMu.Lock()
+	newSrv := mcpServers["test"]
+	mcpServersMu.Unlock()
+	if newSrv.Session == nil {
+		t.Error("expected session to be re-established after reconnect")
+	}
+	if newSrv.reconnectCount != 0 {
+		t.Errorf("expected reconnectCount to be reset to 0, got %d", newSrv.reconnectCount)
+	}
+}
+
+func TestConcurrentReconnect(t *testing.T) {
+	ctx := context.Background()
+
+	type Input struct {
+		Name string `json:"name" jsonschema:"the name to greet"`
+	}
+	type Output struct {
+		Greeting string `json:"greeting" jsonschema:"the greeting"`
+	}
+
+	mcpServers = make(map[string]*MCPServer)
+	mcpToolToServer = make(map[string]string)
+
+	mcpCfg := MCPConfig{Transport: "http", Timeout: 10 * time.Second}
+
+	srv := &MCPServer{
+		Config:  mcpCfg,
+		Client:  nil,
+		Session: nil,
+		Tools:   []*mcp.Tool{{Name: "greet"}},
+	}
+	mcpServers["test"] = srv
+	mcpToolToServer["greet"] = "test"
+
+	origConnectMCPServer := connectMCPServerImpl
+	defer func() { connectMCPServerImpl = origConnectMCPServer }()
+
+	connectMCPServerImpl = func(name string, cfg MCPConfig) (*MCPServer, error) {
+		server := mcp.NewServer(&mcp.Implementation{Name: "test-server", Version: "1.0.0"}, nil)
+		mcp.AddTool(server, &mcp.Tool{Name: "greet", Description: "say hi"}, func(ctx context.Context, req *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, Output, error) {
+			return nil, Output{Greeting: "Hello, " + input.Name + "!"}, nil
+		})
+
+		t1, t2 := mcp.NewInMemoryTransports()
+		_, err := server.Connect(ctx, t1, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
+		session, err := client.Connect(ctx, t2, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		return &MCPServer{
+			Config:  cfg,
+			Client:  client,
+			Session: session,
+			Tools:   []*mcp.Tool{{Name: "greet"}},
+		}, nil
+	}
+
+	var wg sync.WaitGroup
+	errors := make([]error, 3)
+
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			_, err := callMCPTool("greet", map[string]any{"name": "concurrent"})
+			errors[idx] = err
+		}(i)
+	}
+	wg.Wait()
+
+	successCount := 0
+	for i, err := range errors {
+		if err == nil {
+			successCount++
+		} else {
+			t.Logf("goroutine %d error: %v", i, err)
+		}
+	}
+
+	if successCount == 0 {
+		t.Error("expected at least one successful tool call after concurrent reconnect")
 	}
 }

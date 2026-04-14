@@ -133,11 +133,16 @@ func main() {
 	}
 	config = loadConfigDirOrDie(configDir)
 
-	// Initialize TUI - captures all subsequent log output
-	app, err := initTUI()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to initialize TUI: %v\n", err)
-		os.Exit(1)
+	noTUI := os.Getenv("DAVE_NO_TUI") != ""
+
+	if !noTUI {
+		// Initialize TUI - captures all subsequent log output
+		app, err := initTUI()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to initialize TUI: %v\n", err)
+			os.Exit(1)
+		}
+		tuiApp = app
 	}
 
 	if os.Getenv("LOGXI_FORMAT") == "" {
@@ -153,10 +158,12 @@ func main() {
 	initMCPClients()
 	registerCommands(config.Commands)
 
-	for _, network := range config.Networks {
-		if network.Enabled {
-			logger.Info("Starting network", "network", network.Name)
-			startClient(network)
+	if !noTUI {
+		for _, network := range config.Networks {
+			if network.Enabled {
+				logger.Info("Starting network", "network", network.Name)
+				startClient(network)
+			}
 		}
 	}
 
@@ -171,14 +178,20 @@ func main() {
 		for _, bot := range bots {
 			bot.Quit()
 		}
-		// Stop the TUI after bots quit
 		tuiApp.QueueUpdateDraw(func() {
 			tuiApp.Stop()
 		})
 	}()
 
-	// Block on TUI - when it exits, we're done
-	if err := app.Run(); err != nil {
+	if noTUI {
+		// Give MCP clients a moment to log connection attempts, then exit
+		time.Sleep(500 * time.Millisecond)
+		closeMCPClients()
+		logger.Info("Nothing left to do bye :)")
+		return
+	}
+
+	if err := tuiApp.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
 	}
 

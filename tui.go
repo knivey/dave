@@ -321,9 +321,11 @@ func requestShutdown() {
 		for _, bot := range bots {
 			bot.Quit()
 		}
-		tuiApp.QueueUpdateDraw(func() {
-			tuiApp.Stop()
-		})
+		if tuiApp != nil {
+			tuiApp.QueueUpdateDraw(func() {
+				tuiApp.Stop()
+			})
+		}
 	}()
 }
 

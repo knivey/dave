@@ -131,6 +131,7 @@ type MCPConfig struct {
 	Args      []string      `toml:"args"`
 	URL       string        `toml:"url"`
 	Timeout   time.Duration `toml:"timeout"`
+	KeepAlive time.Duration `toml:"keepalive"` // ping interval for liveness; default 30s for http, 0 for stdio
 }
 
 type SystemPromptData struct {
@@ -350,6 +351,9 @@ func loadMCPsFile(dir string, config *Config) error {
 		}
 		if mcpCfg.Timeout == 0 {
 			mcpCfg.Timeout = 30 * time.Second
+		}
+		if mcpCfg.KeepAlive == 0 && mcpCfg.Transport == "http" {
+			mcpCfg.KeepAlive = 30 * time.Second
 		}
 		config.MCPs[name] = mcpCfg
 	}

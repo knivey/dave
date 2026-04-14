@@ -166,6 +166,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 			}
 
 			bufferb := ""
+			reasoningBuffer := ""
 			logBuf := strings.Builder{}
 			var streamingRenderer *markdowntoirc.StreamingRenderer
 			if cfg.RenderMarkdown {
@@ -227,6 +228,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 
 				textDelta := delta.Content
 				bufferb += textDelta
+				reasoningBuffer += delta.ReasoningContent
 				if streamingRenderer != nil {
 					for _, line := range streamingRenderer.Process(textDelta) {
 						logBuf.WriteString(line)
@@ -256,8 +258,9 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 			flushStreamedOutput := func() {
 				logger.Info(bufferb)
 				AddContext(cfg, ctx_key, gogpt.ChatCompletionMessage{
-					Role:    gogpt.ChatMessageRoleAssistant,
-					Content: bufferb,
+					Role:             gogpt.ChatMessageRoleAssistant,
+					Content:          bufferb,
+					ReasoningContent: reasoningBuffer,
 				})
 				if streamingRenderer != nil {
 					for _, line := range streamingRenderer.Process("") {
@@ -270,6 +273,9 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 					sendLoop(bufferb, network, c, e)
 				}
 				logger.Info("output", "text", logBuf.String())
+				if reasoningBuffer != "" {
+					logger.Info("reasoning", "content", reasoningBuffer)
+				}
 			}
 
 			if streamDone || len(accumulatedToolCalls) == 0 {
@@ -284,9 +290,10 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 			}
 
 			assistantMsg := gogpt.ChatCompletionMessage{
-				Role:      assistantRole,
-				Content:   bufferb,
-				ToolCalls: accumulatedToolCalls,
+				Role:             assistantRole,
+				Content:          bufferb,
+				ReasoningContent: reasoningBuffer,
+				ToolCalls:        accumulatedToolCalls,
 			}
 			messages = append(messages, assistantMsg)
 
@@ -334,14 +341,18 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 		msg := resp.Choices[0].Message
 		if len(msg.ToolCalls) == 0 {
 			AddContext(cfg, ctx_key, gogpt.ChatCompletionMessage{
-				Role:    gogpt.ChatMessageRoleAssistant,
-				Content: msg.Content,
+				Role:             gogpt.ChatMessageRoleAssistant,
+				Content:          msg.Content,
+				ReasoningContent: msg.ReasoningContent,
 			})
 			out := FormatOutput(msg.Content)
 			logger.Info(out)
 			text := ExtractFinalText(msg.Content)
 
 			logger.Info("token usage", "prompt", resp.Usage.PromptTokens, "completion", resp.Usage.CompletionTokens, "total", resp.Usage.TotalTokens)
+			if msg.ReasoningContent != "" {
+				logger.Info("reasoning", "content", msg.ReasoningContent)
+			}
 
 			if cfg.RenderMarkdown {
 				text = markdowntoirc.MarkdownToIRC(text)
@@ -360,9 +371,13 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 			}
 			sendLoop(text, network, c, e)
 			AddContext(cfg, ctx_key, gogpt.ChatCompletionMessage{
-				Role:    gogpt.ChatMessageRoleAssistant,
-				Content: msg.Content,
+				Role:             gogpt.ChatMessageRoleAssistant,
+				Content:          msg.Content,
+				ReasoningContent: msg.ReasoningContent,
 			})
+		}
+		if msg.ReasoningContent != "" {
+			logger.Info("reasoning", "content", msg.ReasoningContent)
 		}
 
 		for _, tc := range msg.ToolCalls {

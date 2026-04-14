@@ -260,3 +260,59 @@ func TestBuildChatRequest(t *testing.T) {
 		})
 	}
 }
+
+func TestReasoningContent(t *testing.T) {
+	tests := []struct {
+		name             string
+		content          string
+		reasoningContent string
+		wantContent      string
+		wantReasoning    string
+	}{
+		{
+			name:             "content only",
+			content:          "Here is the answer",
+			reasoningContent: "",
+			wantContent:      "Here is the answer",
+			wantReasoning:    "",
+		},
+		{
+			name:             "content with reasoning",
+			content:          "Here is the answer",
+			reasoningContent: "Let me think about this...",
+			wantContent:      "Here is the answer",
+			wantReasoning:    "Let me think about this...",
+		},
+		{
+			name:             "reasoning only",
+			content:          "",
+			reasoningContent: "Analyzing the problem...",
+			wantContent:      "",
+			wantReasoning:    "Analyzing the problem...",
+		},
+		{
+			name:             "multi-line reasoning",
+			content:          "Final answer",
+			reasoningContent: "Step 1\nStep 2\nStep 3",
+			wantContent:      "Final answer",
+			wantReasoning:    "Step 1\nStep 2\nStep 3",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := gogpt.ChatCompletionMessage{
+				Role:             gogpt.ChatMessageRoleAssistant,
+				Content:          tt.content,
+				ReasoningContent: tt.reasoningContent,
+			}
+
+			if msg.Content != tt.wantContent {
+				t.Errorf("Content = %q, want %q", msg.Content, tt.wantContent)
+			}
+			if msg.ReasoningContent != tt.wantReasoning {
+				t.Errorf("ReasoningContent = %q, want %q", msg.ReasoningContent, tt.wantReasoning)
+			}
+		})
+	}
+}

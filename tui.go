@@ -83,7 +83,7 @@ func initTUI() (*tview.Application, error) {
 				logView.ScrollToEnd()
 			}
 		})
-	logView.SetBorder(true).SetTitle("dave").SetTitleAlign(tview.AlignLeft)
+	logView.SetBorder(false)
 
 	inputField = tview.NewInputField().
 		SetLabel("> ").

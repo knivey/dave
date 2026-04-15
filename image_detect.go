@@ -39,10 +39,10 @@ func formatSize(b int) string {
 	return fmt.Sprintf("%.1f %ciB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
-var imageURLRegex = regexp.MustCompile(`(?i)https?://\S+\.(?:jpe?g|png|gif|webp|bmp)(?:\?\S*)?`)
+var urlRegex = regexp.MustCompile(`(?i)https?://\S+`)
 
 func detectImageURLs(text string) (cleanText string, urls []string) {
-	matches := imageURLRegex.FindAllString(text, -1)
+	matches := urlRegex.FindAllString(text, -1)
 	seen := make(map[string]bool)
 	for _, u := range matches {
 		u = strings.TrimRight(u, ".,;:)")
@@ -51,7 +51,10 @@ func detectImageURLs(text string) (cleanText string, urls []string) {
 			urls = append(urls, u)
 		}
 	}
-	cleanText = imageURLRegex.ReplaceAllString(text, "")
+	cleanText = text
+	for _, u := range matches {
+		cleanText = strings.ReplaceAll(cleanText, u, "")
+	}
 	cleanText = strings.Join(strings.Fields(cleanText), " ")
 	return cleanText, urls
 }

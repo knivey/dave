@@ -8,3 +8,4 @@ workflows/*
 contexts.json
 contexts.json.tmp
 opencode.json
+mcp-prod/

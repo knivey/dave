@@ -119,6 +119,7 @@ type AIConfig struct {
 	ServiceTier         string         `toml:"servicetier"`
 	Verbosity           string         `toml:"verbosity"`
 	ChatTemplateKwargs  map[string]any `toml:"chat_template_kwargs"`
+	ExtraBody           map[string]any `toml:"extra_body"`
 }
 
 type Service struct {

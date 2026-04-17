@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -48,9 +49,29 @@ func completion(network Network, c *girc.Client, e girc.Event, cfg AIConfig, arg
 	sendLoop(resp.Choices[0].Text, network, c, e)
 }
 
+func logUsage(logger logxi.Logger, usage *gogpt.Usage) {
+	if usage == nil {
+		return
+	}
+	fields := []interface{}{
+		"prompt", usage.PromptTokens,
+		"completion", usage.CompletionTokens,
+		"total", usage.TotalTokens,
+	}
+	if usage.CompletionTokensDetails != nil && usage.CompletionTokensDetails.ReasoningTokens > 0 {
+		fields = append(fields, "reasoning", usage.CompletionTokensDetails.ReasoningTokens)
+	}
+	if usage.PromptTokensDetails != nil && usage.PromptTokensDetails.CachedTokens > 0 {
+		fields = append(fields, "cached", usage.PromptTokensDetails.CachedTokens)
+	}
+	logger.Info("token usage", fields...)
+}
+
 func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...string) {
 	aiConfig := gogpt.DefaultConfig(config.Services[cfg.Service].Key)
 	aiConfig.BaseURL = config.Services[cfg.Service].BaseURL
+	transport := newDaveTransport(cfg.ExtraBody)
+	aiConfig.HTTPClient = &http.Client{Transport: transport}
 	aiClient := gogpt.NewClientWithConfig(aiConfig)
 
 	logger := logxi.New(network.Name + ".completion." + cfg.Name)
@@ -183,7 +204,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 					stream.Close()
 					return
 				}
-				resp, err := stream.Recv()
+				rawBytes, err := stream.RecvRaw()
 				if errors.Is(err, io.EOF) {
 					logger.Info("Stream completed")
 					streamDone = true
@@ -196,8 +217,24 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 					logger.Error(err.Error())
 					return
 				}
+
+				var resp gogpt.ChatCompletionStreamResponse
+				if err := json.Unmarshal(rawBytes, &resp); err != nil {
+					logger.Error("failed to unmarshal stream chunk", "error", err)
+					continue
+				}
+
+				chunkReasoning := resp.Choices[0].Delta.ReasoningContent
+				if chunkReasoning == "" {
+					chunkReasoning = extractStreamReasoning(rawBytes)
+				}
+				if chunkReasoning == "" {
+					chunkReasoning = extractReasoningFromField(rawBytes)
+				}
+				reasoningBuffer += chunkReasoning
+
 				if resp.Usage != nil {
-					logger.Info("token usage", "prompt", resp.Usage.PromptTokens, "completion", resp.Usage.CompletionTokens, "total", resp.Usage.TotalTokens)
+					logUsage(logger, resp.Usage)
 				}
 				if len(resp.Choices) == 0 {
 					continue
@@ -228,7 +265,6 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 
 				textDelta := delta.Content
 				bufferb += textDelta
-				reasoningBuffer += delta.ReasoningContent
 				if streamingRenderer != nil {
 					for _, line := range streamingRenderer.Process(textDelta) {
 						logBuf.WriteString(line)
@@ -312,26 +348,32 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 				json.Unmarshal([]byte(tc.Function.Arguments), &toolArgs)
 				result, err := callMCPTool(tc.Function.Name, toolArgs)
 				if err != nil {
-					messages = append(messages, gogpt.ChatCompletionMessage{
+					toolMsg := gogpt.ChatCompletionMessage{
 						Role:       gogpt.ChatMessageRoleTool,
 						Content:    "error: " + err.Error(),
 						ToolCallID: tc.ID,
-					})
+					}
+					messages = append(messages, toolMsg)
+					AddContext(cfg, ctx_key, toolMsg)
 					continue
 				}
 				toolText := mcpToolResultToText(result)
 				logger.Info("MCP tool result", "tool", tc.Function.Name, "result", toolText)
-				messages = append(messages, gogpt.ChatCompletionMessage{
+				toolMsg := gogpt.ChatCompletionMessage{
 					Role:       gogpt.ChatMessageRoleTool,
 					Content:    toolText,
 					ToolCallID: tc.ID,
-				})
+				}
+				messages = append(messages, toolMsg)
+				AddContext(cfg, ctx_key, toolMsg)
 			}
 
 			continue
 		}
 
+		transport.setCaptureBody(true)
 		resp, err := aiClient.CreateChatCompletion(ctx, req)
+		transport.setCaptureBody(false)
 		if err != nil {
 			c.Cmd.Reply(e, errorMsg(err.Error()))
 			logger.Error(err.Error())
@@ -339,19 +381,29 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 		}
 
 		msg := resp.Choices[0].Message
+
+		reasoning := msg.ReasoningContent
+		rawReasoning, rawDetails := extractResponseReasoning(transport.getCapturedBody())
+		if reasoning == "" && rawReasoning != "" {
+			reasoning = rawReasoning
+		}
+		if reasoning == "" && len(rawDetails) > 0 {
+			reasoning = extractReasoningText(rawDetails)
+		}
+
 		if len(msg.ToolCalls) == 0 {
 			AddContext(cfg, ctx_key, gogpt.ChatCompletionMessage{
 				Role:             gogpt.ChatMessageRoleAssistant,
 				Content:          msg.Content,
-				ReasoningContent: msg.ReasoningContent,
+				ReasoningContent: reasoning,
 			})
 			out := FormatOutput(msg.Content)
 			logger.Info(out)
 			text := ExtractFinalText(msg.Content)
 
-			logger.Info("token usage", "prompt", resp.Usage.PromptTokens, "completion", resp.Usage.CompletionTokens, "total", resp.Usage.TotalTokens)
-			if msg.ReasoningContent != "" {
-				logger.Info("reasoning", "content", msg.ReasoningContent)
+			logUsage(logger, &resp.Usage)
+			if reasoning != "" {
+				logger.Info("reasoning", "content", reasoning)
 			}
 
 			if cfg.RenderMarkdown {
@@ -364,20 +416,21 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 		logger.Info("assistant made tool calls", "count", len(msg.ToolCalls))
 		messages = append(messages, msg)
 
+		AddContext(cfg, ctx_key, gogpt.ChatCompletionMessage{
+			Role:             gogpt.ChatMessageRoleAssistant,
+			Content:          msg.Content,
+			ReasoningContent: reasoning,
+			ToolCalls:        msg.ToolCalls,
+		})
 		if msg.Content != "" {
 			text := ExtractFinalText(msg.Content)
 			if cfg.RenderMarkdown {
 				text = markdowntoirc.MarkdownToIRC(text)
 			}
 			sendLoop(text, network, c, e)
-			AddContext(cfg, ctx_key, gogpt.ChatCompletionMessage{
-				Role:             gogpt.ChatMessageRoleAssistant,
-				Content:          msg.Content,
-				ReasoningContent: msg.ReasoningContent,
-			})
 		}
-		if msg.ReasoningContent != "" {
-			logger.Info("reasoning", "content", msg.ReasoningContent)
+		if reasoning != "" {
+			logger.Info("reasoning", "content", reasoning)
 		}
 
 		for _, tc := range msg.ToolCalls {
@@ -385,20 +438,24 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 			json.Unmarshal([]byte(tc.Function.Arguments), &toolArgs)
 			result, err := callMCPTool(tc.Function.Name, toolArgs)
 			if err != nil {
-				messages = append(messages, gogpt.ChatCompletionMessage{
+				toolMsg := gogpt.ChatCompletionMessage{
 					Role:       gogpt.ChatMessageRoleTool,
 					Content:    "error: " + err.Error(),
 					ToolCallID: tc.ID,
-				})
+				}
+				messages = append(messages, toolMsg)
+				AddContext(cfg, ctx_key, toolMsg)
 				continue
 			}
 			toolText := mcpToolResultToText(result)
 			logger.Info("MCP tool result", "tool", tc.Function.Name, "result", toolText)
-			messages = append(messages, gogpt.ChatCompletionMessage{
+			toolMsg := gogpt.ChatCompletionMessage{
 				Role:       gogpt.ChatMessageRoleTool,
 				Content:    toolText,
 				ToolCallID: tc.ID,
-			})
+			}
+			messages = append(messages, toolMsg)
+			AddContext(cfg, ctx_key, toolMsg)
 		}
 	}
 }

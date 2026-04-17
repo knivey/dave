@@ -110,15 +110,29 @@ presencepenalty = 0.6
 frequencypenalty = 0.3
 system = "You are a creative and imaginative assistant."
 
-# OpenRouter reasoning-enabled chat:
+# Provider-specific parameters (sent at top level of request JSON):
+# extra_body = {}              # See examples below
+#
+# chat_template_kwargs is also available for providers like vLLM/Qwen3 that
+# nest parameters under "chat_template_kwargs" in the request body.
+
+# OpenRouter reasoning-enabled chat (uses extra_body for top-level reasoning config):
 # [reasoning]
 # description = "OpenRouter reasoning-enabled chat"
 # service = "openrouter"
-# model = "z-ai/glm-4.7-flash"
-# chat_template_kwargs = {reasoning = {enabled = true}}
+# model = "anthropic/claude-sonnet-4.5"
+# extra_body = {reasoning = {effort = "high"}}
 # system = "You are a helpful assistant that shows your reasoning."
 
-# Qwen3 without thinking mode:
+# OpenRouter reasoning with max_tokens budget (Anthropic-style):
+# [reasoning-budget]
+# description = "OpenRouter with reasoning token budget"
+# service = "openrouter"
+# model = "anthropic/claude-sonnet-4.5"
+# extra_body = {reasoning = {max_tokens = 2000}}
+# system = "You are a helpful assistant."
+
+# Qwen3 without thinking mode (uses chat_template_kwargs, nested):
 # [no-thinking]
 # description = "Qwen3 without thinking mode"
 # service = "vllm"

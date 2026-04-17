@@ -428,6 +428,17 @@ func BuildChatRequest(cfg AIConfig, messages []gogpt.ChatCompletionMessage) gogp
 		MaxCompletionTokens: cfg.MaxCompletionTokens,
 		Messages:            messages,
 		Temperature:         cfg.Temperature,
+		TopP:                cfg.TopP,
+		Stop:                cfg.Stop,
+		PresencePenalty:     cfg.PresencePenalty,
+		FrequencyPenalty:    cfg.FrequencyPenalty,
+		ParallelToolCalls:   cfg.ParallelToolCalls,
+		ReasoningEffort:     cfg.ReasoningEffort,
+		ServiceTier:         gogpt.ServiceTier(cfg.ServiceTier),
+		Verbosity:           cfg.Verbosity,
+	}
+	if cfg.ChatTemplateKwargs != nil {
+		req.ChatTemplateKwargs = cfg.ChatTemplateKwargs
 	}
 	if cfg.Streaming {
 		req.Stream = true

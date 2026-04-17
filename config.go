@@ -109,7 +109,16 @@ type AIConfig struct {
 	MaxImageWidth       int    `toml:"-"`
 	MaxImageHeight      int    `toml:"-"`
 	Description         string
-	MCPs                []string `toml:"mcps"`
+	MCPs                []string       `toml:"mcps"`
+	TopP                float32        `toml:"topp"`
+	Stop                []string       `toml:"stop"`
+	PresencePenalty     float32        `toml:"presencepenalty"`
+	FrequencyPenalty    float32        `toml:"frequencypenalty"`
+	ParallelToolCalls   bool           `toml:"paralleltoolcalls"`
+	ReasoningEffort     string         `toml:"reasoningeffort"`
+	ServiceTier         string         `toml:"servicetier"`
+	Verbosity           string         `toml:"verbosity"`
+	ChatTemplateKwargs  map[string]any `toml:"chat_template_kwargs"`
 }
 
 type Service struct {

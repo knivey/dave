@@ -72,10 +72,6 @@ func registerCommands(cmds Commands) {
 
 func registerCommandsLocked(cmds Commands) {
 	newConfigCmds := CmdMap{}
-	// Remove old config-sourced commands
-	for r := range configCmds {
-		delete(builtInCmds, r)
-	}
 
 	for _, c := range cmds.Completions {
 		logger.Debug("added Completions command", c)
@@ -83,7 +79,6 @@ func registerCommandsLocked(cmds Commands) {
 		newConfigCmds[re] = func(network Network, client *girc.Client, e girc.Event, args ...string) {
 			completion(network, client, e, c, args...)
 		}
-		builtInCmds[re] = newConfigCmds[re]
 	}
 	for _, c := range cmds.Chats {
 		logger.Debug("added Chats command", c)
@@ -91,7 +86,6 @@ func registerCommandsLocked(cmds Commands) {
 		newConfigCmds[re] = func(network Network, client *girc.Client, e girc.Event, args ...string) {
 			chat(network, client, e, c, args...)
 		}
-		builtInCmds[re] = newConfigCmds[re]
 	}
 	for _, c := range cmds.SD {
 		logger.Debug("added SD command", c)
@@ -99,7 +93,6 @@ func registerCommandsLocked(cmds Commands) {
 		newConfigCmds[re] = func(network Network, client *girc.Client, e girc.Event, args ...string) {
 			sd(network, client, e, c, args...)
 		}
-		builtInCmds[re] = newConfigCmds[re]
 	}
 	for _, c := range cmds.Comfy {
 		logger.Debug("added Comfy command", c)
@@ -107,7 +100,6 @@ func registerCommandsLocked(cmds Commands) {
 		newConfigCmds[re] = func(network Network, client *girc.Client, e girc.Event, args ...string) {
 			comfy(network, client, e, c, args...)
 		}
-		builtInCmds[re] = newConfigCmds[re]
 	}
 
 	configCmds = newConfigCmds
@@ -291,9 +283,8 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 	}
 	msg = strings.TrimPrefix(msg, network.Trigger)
 	commandsMutex.RLock()
-	cmds := builtInCmds
-	commandsMutex.RUnlock()
-	for r, cmd := range cmds {
+
+	for r, cmd := range builtInCmds {
 		if r.Match([]byte(msg)) {
 			var args []string
 			for i, m := range r.FindSubmatch([]byte(msg)) {
@@ -301,8 +292,13 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 					args = append(args, string(m))
 				}
 			}
+			commandsMutex.RUnlock()
 
 			if r == stop_re {
+				cmd(network, client, event, args...)
+				return
+			}
+			if r == help_re {
 				cmd(network, client, event, args...)
 				return
 			}
@@ -320,6 +316,32 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 			return
 		}
 	}
+
+	for r, cmd := range configCmds {
+		if r.Match([]byte(msg)) {
+			var args []string
+			for i, m := range r.FindSubmatch([]byte(msg)) {
+				if i != 0 && len(m) > 0 {
+					args = append(args, string(m))
+				}
+			}
+			commandsMutex.RUnlock()
+
+			if !checkRate(network, event.Params[0]) {
+				client.Cmd.Reply(event, warnMsg(config.Ratemsg()))
+				return
+			}
+			if getRunning(network.Name + event.Params[0]) {
+				client.Cmd.Reply(event, warnMsg(config.Busymsg()))
+				return
+			}
+			ClearContext(ctx_key)
+			go cmd(network, client, event, args...)
+			return
+		}
+	}
+
+	commandsMutex.RUnlock()
 }
 
 func startClient(network Network) {

@@ -39,8 +39,8 @@ No Makefile, no linter config. Use `go fmt` + `go vet`.
 
 ## High-Signal Gotchas
 - Config validation: `loadConfigDirOrDie` calls `os.Exit(1)` on any error at startup. `loadCommandsDir` and `loadReloadableDir` return errors for hot-reload (no exit).
-- Command registration uses `builtInCmds` (stop, help) + `configCmds` (from config). `commandsMutex` (RWMutex) protects concurrent access.
-- `/reload` in TUI reloads MCPs, services, prompt enhancements, and command definitions. Hot-swaps `config.MCPs`, `config.Services`, `config.PromptEnhancements`, and `configCmds` entries. MCP clients are closed and reconnected on reload.
+- Command registration: `builtInCmds` contains static built-in commands (stop, help), never modified. `configCmds` is atomically replaced on reload. Dispatch merges both maps (built-ins first for priority). `commandsMutex` (RWMutex) protects concurrent access.
+- `/reload` in TUI reloads MCPs, services, prompt enhancements, and command definitions. Hot-swaps `config.MCPs`, `config.Services`, `config.PromptEnhancements`, and atomically replaces `configCmds` (no in-place mutation). MCP clients are closed and reconnected on reload.
 - Config directory expected as CLI arg (default: `config`). Previously was a single `.toml` file.
 - TUI captures stdout/stderr via `os.Pipe()` after config loading. Log output (logxi) displayed in tview TextView with ANSI stripping.
 - `tview.TranslateANSI()` is used for log output in TUI, preceded by `tview.Escape()` to prevent IRC text with brackets from being interpreted as tview color tags.

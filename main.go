@@ -111,6 +111,10 @@ func reloadAll() error {
 	if err := loadReloadableDir(configDir, &config); err != nil {
 		return err
 	}
+	if apiLogger != nil {
+		apiLogger.CloseAll()
+	}
+	initAPILogger(config, configDir)
 	reloadMCPClients(config.MCPs)
 	registerCommandsLocked(config.Commands)
 	return nil
@@ -143,6 +147,7 @@ func main() {
 	logger = logxi.New("main")
 	logger.SetLevel(logxi.LevelAll)
 	logger.Info("Config loaded", "networks", len(config.Networks))
+	initAPILogger(config, configDir)
 	persistCfg = config.Persist
 	LoadContextStore()
 	CleanupContexts()
@@ -166,6 +171,9 @@ func main() {
 		logger.Info("Caught signal", "signal", signal.String())
 		StopPendingSave()
 		SaveContextStore()
+		if apiLogger != nil {
+			apiLogger.CloseAll()
+		}
 		closeMCPClients()
 		for _, bot := range bots {
 			bot.Quit()

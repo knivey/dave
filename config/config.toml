@@ -19,6 +19,11 @@ max_age_days = 7     # delete old contexts
 max_contexts = 100   # max stored
 save_delay = "30s"   # auto-save interval
 
+[api_log]
+enabled = true
+dir = "api_logs"
+# log_raw_stream = false  # set true to also log individual SSE chunks
+
 [networks.birdnest]
 enabled = true
 nick = "dave"

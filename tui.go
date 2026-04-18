@@ -382,6 +382,9 @@ func requestShutdown() {
 
 		StopPendingSave()
 		SaveContextStore()
+		if apiLogger != nil {
+			apiLogger.CloseAll()
+		}
 		closeMCPClients()
 		for _, bot := range bots {
 			bot.Quit()

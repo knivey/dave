@@ -15,6 +15,10 @@ type daveTransport struct {
 	mu           sync.Mutex
 	captureBody  bool
 	capturedBody []byte
+
+	apiLogger *APILogger
+	ctxKey    string
+	isStream  bool
 }
 
 func newDaveTransport(extraBody map[string]any) *daveTransport {
@@ -27,8 +31,15 @@ func newDaveTransport(extraBody map[string]any) *daveTransport {
 	}
 }
 
+func (t *daveTransport) setAPILogger(logger *APILogger, ctxKey string) {
+	t.apiLogger = logger
+	t.ctxKey = ctxKey
+}
+
 func (t *daveTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.Method == http.MethodPost && req.Body != nil && len(t.extraBody) > 0 {
+	var finalBody []byte
+
+	if req.Method == http.MethodPost && req.Body != nil {
 		body, err := io.ReadAll(req.Body)
 		req.Body.Close()
 		if err != nil {
@@ -55,12 +66,16 @@ func (t *daveTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			if err != nil {
 				return nil, err
 			}
-			req.Body = io.NopCloser(bytes.NewReader(newBody))
-			req.ContentLength = int64(len(newBody))
+			finalBody = newBody
 		} else {
-			req.Body = io.NopCloser(bytes.NewReader(body))
-			req.ContentLength = int64(len(body))
+			finalBody = body
 		}
+		req.Body = io.NopCloser(bytes.NewReader(finalBody))
+		req.ContentLength = int64(len(finalBody))
+	}
+
+	if len(finalBody) > 0 && t.apiLogger != nil {
+		t.apiLogger.LogRequest(t.ctxKey, finalBody)
 	}
 
 	resp, err := t.base.RoundTrip(req)
@@ -68,20 +83,24 @@ func (t *daveTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return resp, err
 	}
 
+	ct := resp.Header.Get("Content-Type")
+	t.isStream = ct == "text/event-stream"
+
 	t.mu.Lock()
 	shouldCapture := t.captureBody
 	t.mu.Unlock()
 
-	if shouldCapture {
-		ct := resp.Header.Get("Content-Type")
-		if ct != "text/event-stream" {
-			body, err := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if err == nil {
-				t.mu.Lock()
-				t.capturedBody = body
-				t.mu.Unlock()
-				resp.Body = io.NopCloser(bytes.NewReader(body))
+	if shouldCapture && !t.isStream {
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err == nil {
+			t.mu.Lock()
+			t.capturedBody = body
+			t.mu.Unlock()
+			resp.Body = io.NopCloser(bytes.NewReader(body))
+
+			if t.apiLogger != nil {
+				t.apiLogger.LogResponse(t.ctxKey, body)
 			}
 		}
 	}

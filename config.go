@@ -26,6 +26,7 @@ type Config struct {
 	Persist            PersistConfig
 	MCPs               map[string]MCPConfig `toml:"mcps"`
 	ScrollbackLines    int                  `toml:"scrollback_lines"`
+	APILog             APILogConfig         `toml:"api_log"`
 }
 
 type Network struct {

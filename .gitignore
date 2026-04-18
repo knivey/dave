@@ -9,3 +9,4 @@ contexts.json
 contexts.json.tmp
 opencode.json
 mcp-prod/
+api_logs/

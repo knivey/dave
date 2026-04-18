@@ -75,6 +75,9 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 	aiConfig.HTTPClient = &http.Client{Transport: transport}
 	aiClient := gogpt.NewClientWithConfig(aiConfig)
 
+	ctx_key := network.Name + e.Params[0] + e.Source.Name
+	transport.setAPILogger(apiLogger, ctx_key)
+
 	logger := logxi.New(network.Name + ".completion." + cfg.Name)
 	logger.SetLevel(logxi.LevelAll)
 
@@ -82,7 +85,6 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 	defer stoppedRunning(network.Name + e.Params[0])
 
 	var messages []gogpt.ChatCompletionMessage
-	ctx_key := network.Name + e.Params[0] + e.Source.Name
 	if !ContextExists(ctx_key) {
 		var systemContent string
 		if cfg.SystemTmpl != nil {
@@ -199,6 +201,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 			var assistantRole string
 			var streamUsage *gogpt.Usage
 			streamDone := false
+			streamModel := cfg.Model
 
 			type recvResult struct {
 				data []byte
@@ -239,6 +242,9 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 					idleTimer.Reset(cfg.StreamTimeout)
 
 					rawBytes := res.data
+					if apiLogger != nil {
+						apiLogger.LogStreamChunk(ctx_key, rawBytes)
+					}
 					var resp gogpt.ChatCompletionStreamResponse
 					if err := json.Unmarshal(rawBytes, &resp); err != nil {
 						logger.Error("failed to unmarshal stream chunk", "error", err)
@@ -318,6 +324,8 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 					return
 				}
 			}
+
+			logStreamCompletion(ctx_key, streamModel, bufferb, reasoningBuffer, accumulatedToolCalls, streamUsage, assistantRole)
 
 			flushStreamedOutput := func() {
 				logger.Info(bufferb)
@@ -533,4 +541,40 @@ func BuildChatRequest(cfg AIConfig, messages []gogpt.ChatCompletionMessage) gogp
 		req.StreamOptions = &gogpt.StreamOptions{IncludeUsage: true}
 	}
 	return req
+}
+
+func logStreamCompletion(ctxKey, model, content, reasoning string, toolCalls []gogpt.ToolCall, usage *gogpt.Usage, role string) {
+	if apiLogger == nil {
+		return
+	}
+	if role == "" {
+		role = gogpt.ChatMessageRoleAssistant
+	}
+	msg := map[string]any{
+		"choices": []map[string]any{
+			{
+				"message": map[string]any{
+					"role":    role,
+					"content": content,
+				},
+				"finish_reason": "stop",
+			},
+		},
+		"model": model,
+	}
+	if reasoning != "" {
+		msg["choices"].([]map[string]any)[0]["message"].(map[string]any)["reasoning_content"] = reasoning
+	}
+	if len(toolCalls) > 0 {
+		msg["choices"].([]map[string]any)[0]["tool_calls"] = toolCalls
+		msg["choices"].([]map[string]any)[0]["finish_reason"] = "tool_calls"
+	}
+	if usage != nil {
+		msg["usage"] = usage
+	}
+	body, err := json.Marshal(msg)
+	if err != nil {
+		return
+	}
+	apiLogger.LogStreamResponse(ctxKey, body)
 }

@@ -170,6 +170,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 	req.Tools = mcpTools
 	if len(mcpTools) > 0 {
 		req.ToolChoice = "auto"
+		req.ParallelToolCalls = cfg.ParallelToolCalls
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
@@ -528,10 +529,10 @@ func BuildChatRequest(cfg AIConfig, messages []gogpt.ChatCompletionMessage) gogp
 		Stop:                cfg.Stop,
 		PresencePenalty:     cfg.PresencePenalty,
 		FrequencyPenalty:    cfg.FrequencyPenalty,
-		ParallelToolCalls:   cfg.ParallelToolCalls,
-		ReasoningEffort:     cfg.ReasoningEffort,
-		ServiceTier:         gogpt.ServiceTier(cfg.ServiceTier),
-		Verbosity:           cfg.Verbosity,
+
+		ReasoningEffort: cfg.ReasoningEffort,
+		ServiceTier:     gogpt.ServiceTier(cfg.ServiceTier),
+		Verbosity:       cfg.Verbosity,
 	}
 	if cfg.ChatTemplateKwargs != nil {
 		req.ChatTemplateKwargs = cfg.ChatTemplateKwargs

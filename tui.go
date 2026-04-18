@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -26,6 +28,11 @@ var (
 	origStdoutFd int
 	origStderrFd int
 	logPipeR     *os.File
+
+	logBufMu     sync.Mutex
+	logBuf       []string
+	logFlushStop chan struct{}
+	logFlushDone chan struct{}
 )
 
 const cmdHistoryMax = 100
@@ -73,11 +80,16 @@ func initTUI() (*tview.Application, error) {
 
 	app := tview.NewApplication()
 
+	scrollbackLines := config.ScrollbackLines
+	if scrollbackLines <= 0 {
+		scrollbackLines = 5000
+	}
+
 	logView = tview.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
 		SetWrap(true).
-		SetMaxLines(10000).
+		SetMaxLines(scrollbackLines).
 		SetChangedFunc(func() {
 			if autoScroll {
 				logView.ScrollToEnd()
@@ -159,6 +171,10 @@ func initTUI() (*tview.Application, error) {
 
 	go readPipeToView(logPipeR, logView, app)
 
+	logFlushStop = make(chan struct{})
+	logFlushDone = make(chan struct{})
+	go flushLogBuf(logView, app, logFlushStop, logFlushDone)
+
 	tuiApp = app
 	return app, nil
 }
@@ -186,9 +202,52 @@ func readPipeToView(reader *os.File, view *tview.TextView, app *tview.Applicatio
 		line = strings.TrimRight(line, "\r")
 		escaped := tview.Escape(line)
 		translated := tview.TranslateANSI(escaped)
-		app.QueueUpdateDraw(func() {
-			fmt.Fprintf(view, "%s\n", translated)
-		})
+		logBufMu.Lock()
+		logBuf = append(logBuf, translated)
+		logBufMu.Unlock()
+	}
+}
+
+func flushLogBuf(view *tview.TextView, app *tview.Application, stop <-chan struct{}, done chan<- struct{}) {
+	defer close(done)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			logBufMu.Lock()
+			batch := logBuf
+			logBuf = nil
+			logBufMu.Unlock()
+			if len(batch) > 0 {
+				app.QueueUpdateDraw(func() {
+					var b strings.Builder
+					for _, line := range batch {
+						b.WriteString(line)
+						b.WriteByte('\n')
+					}
+					fmt.Fprint(view, b.String())
+				})
+			}
+			return
+		case <-ticker.C:
+			logBufMu.Lock()
+			if len(logBuf) == 0 {
+				logBufMu.Unlock()
+				continue
+			}
+			batch := logBuf
+			logBuf = nil
+			logBufMu.Unlock()
+			app.QueueUpdateDraw(func() {
+				var b strings.Builder
+				for _, line := range batch {
+					b.WriteString(line)
+					b.WriteByte('\n')
+				}
+				fmt.Fprint(view, b.String())
+			})
+		}
 	}
 }
 
@@ -315,6 +374,12 @@ func requestShutdown() {
 	}
 	go func() {
 		logger.Info("Shutdown requested via TUI")
+
+		if logFlushStop != nil {
+			close(logFlushStop)
+			<-logFlushDone
+		}
+
 		StopPendingSave()
 		SaveContextStore()
 		closeMCPClients()

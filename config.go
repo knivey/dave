@@ -25,6 +25,7 @@ type Config struct {
 	UploadURL          string `toml:"uploadurl"`
 	Persist            PersistConfig
 	MCPs               map[string]MCPConfig `toml:"mcps"`
+	ScrollbackLines    int                  `toml:"scrollback_lines"`
 }
 
 type Network struct {
@@ -280,6 +281,9 @@ func loadConfigDir(dir string) (Config, error) {
 	}
 	if len(config.Ratemsgs) == 0 {
 		config.Ratemsgs = []string{"hold on you're going to fast"}
+	}
+	if config.ScrollbackLines == 0 {
+		config.ScrollbackLines = 5000
 	}
 	for name, network := range config.Networks {
 		network.Name = name

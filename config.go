@@ -121,6 +121,8 @@ type AIConfig struct {
 	Verbosity           string         `toml:"verbosity"`
 	ChatTemplateKwargs  map[string]any `toml:"chat_template_kwargs"`
 	ExtraBody           map[string]any `toml:"extra_body"`
+	Timeout             time.Duration  `toml:"timeout"`
+	StreamTimeout       time.Duration  `toml:"streamtimeout"`
 }
 
 type Service struct {
@@ -129,11 +131,13 @@ type Service struct {
 	MaxCompletionTokens int `toml:"maxcompletiontokens"` //use this one now with openai
 	BaseURL             string
 	Temperature         float32
-	MaxHistory          int    `toml:"maxhistory"`
-	ComfyTimeout        int    `toml:"comfy_timeout"` // WebSocket timeout in seconds
-	ImageFormat         string `toml:"imageformat"`
-	ImageQuality        int    `toml:"imagequality"`
-	MaxImageSize        string `toml:"maximagesize"`
+	MaxHistory          int           `toml:"maxhistory"`
+	ComfyTimeout        int           `toml:"comfy_timeout"` // WebSocket timeout in seconds
+	ImageFormat         string        `toml:"imageformat"`
+	ImageQuality        int           `toml:"imagequality"`
+	MaxImageSize        string        `toml:"maximagesize"`
+	Timeout             time.Duration `toml:"timeout"`
+	StreamTimeout       time.Duration `toml:"streamtimeout"`
 }
 
 type MCPConfig struct {
@@ -216,6 +220,18 @@ func (cfg *AIConfig) ApplyDefaults(service Service) {
 		if cfg.MaxImageSize == "" {
 			cfg.MaxImageSize = "1024x1024"
 		}
+	}
+	if cfg.Timeout == 0 {
+		cfg.Timeout = service.Timeout
+	}
+	if cfg.Timeout == 0 {
+		cfg.Timeout = 60 * time.Second
+	}
+	if cfg.StreamTimeout == 0 {
+		cfg.StreamTimeout = service.StreamTimeout
+	}
+	if cfg.StreamTimeout == 0 {
+		cfg.StreamTimeout = cfg.Timeout
 	}
 }
 

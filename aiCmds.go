@@ -170,7 +170,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 		req.ToolChoice = "auto"
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
 	defer cancel()
 
 	for {
@@ -200,96 +200,122 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 			var streamUsage *gogpt.Usage
 			streamDone := false
 
+			type recvResult struct {
+				data []byte
+				err  error
+			}
+
+			idleTimer := time.NewTimer(cfg.StreamTimeout)
+			defer idleTimer.Stop()
+
+		StreamLoop:
 			for {
 				if !getRunning(network.Name + e.Params[0]) {
 					logger.Info("Closing stream")
 					stream.Close()
 					return
 				}
-				rawBytes, err := stream.RecvRaw()
-				if errors.Is(err, io.EOF) {
-					logger.Info("Stream completed")
-					streamDone = true
+
+				ch := make(chan recvResult, 1)
+				go func() {
+					raw, err := stream.RecvRaw()
+					ch <- recvResult{data: raw, err: err}
+				}()
+
+				select {
+				case res := <-ch:
+					if errors.Is(res.err, io.EOF) {
+						logger.Info("Stream completed")
+						streamDone = true
+						stream.Close()
+						break StreamLoop
+					}
+					if res.err != nil {
+						stream.Close()
+						c.Cmd.Reply(e, errorMsg(res.err.Error()))
+						logger.Error(res.err.Error())
+						return
+					}
+					idleTimer.Reset(cfg.StreamTimeout)
+
+					rawBytes := res.data
+					var resp gogpt.ChatCompletionStreamResponse
+					if err := json.Unmarshal(rawBytes, &resp); err != nil {
+						logger.Error("failed to unmarshal stream chunk", "error", err)
+						continue
+					}
+
+					chunkReasoning := resp.Choices[0].Delta.ReasoningContent
+					if chunkReasoning == "" {
+						chunkReasoning = extractStreamReasoning(rawBytes)
+					}
+					if chunkReasoning == "" {
+						chunkReasoning = extractReasoningFromField(rawBytes)
+					}
+					reasoningBuffer += chunkReasoning
+
+					if resp.Usage != nil {
+						streamUsage = resp.Usage
+					}
+					if len(resp.Choices) == 0 {
+						continue
+					}
+					choice := resp.Choices[0]
+					delta := choice.Delta
+
+					if delta.Role != "" {
+						assistantRole = delta.Role
+					}
+
+					for _, tc := range delta.ToolCalls {
+						if tc.Index != nil {
+							idx := *tc.Index
+							for len(accumulatedToolCalls) <= idx {
+								accumulatedToolCalls = append(accumulatedToolCalls, gogpt.ToolCall{})
+							}
+							if tc.ID != "" {
+								accumulatedToolCalls[idx].ID = tc.ID
+							}
+							if tc.Type != "" {
+								accumulatedToolCalls[idx].Type = tc.Type
+							}
+							accumulatedToolCalls[idx].Function.Name += tc.Function.Name
+							accumulatedToolCalls[idx].Function.Arguments += tc.Function.Arguments
+						}
+					}
+
+					textDelta := delta.Content
+					bufferb += textDelta
+					if streamingRenderer != nil {
+						for _, line := range streamingRenderer.Process(textDelta) {
+							logBuf.WriteString(line)
+							logBuf.WriteString("\n")
+							sendLoop(line, network, c, e)
+						}
+					} else {
+						if strings.Contains(bufferb, "\n") {
+							logBuf.WriteString(bufferb)
+							sendLoop(bufferb, network, c, e)
+							bufferb = ""
+						}
+					}
+
+					if choice.FinishReason == gogpt.FinishReasonToolCalls {
+						logger.Info("stream finished with tool calls")
+						stream.Close()
+						break StreamLoop
+					}
+					if choice.FinishReason == gogpt.FinishReasonStop || choice.FinishReason == gogpt.FinishReasonLength {
+						streamDone = true
+						stream.Close()
+						break StreamLoop
+					}
+
+				case <-idleTimer.C:
 					stream.Close()
-					break
-				}
-				if err != nil {
-					stream.Close()
-					c.Cmd.Reply(e, errorMsg(err.Error()))
-					logger.Error(err.Error())
+					c.Cmd.Reply(e, "error: stream timed out (no data received)")
+					logger.Error("stream idle timeout exceeded", "timeout", cfg.StreamTimeout)
 					return
-				}
-
-				var resp gogpt.ChatCompletionStreamResponse
-				if err := json.Unmarshal(rawBytes, &resp); err != nil {
-					logger.Error("failed to unmarshal stream chunk", "error", err)
-					continue
-				}
-
-				chunkReasoning := resp.Choices[0].Delta.ReasoningContent
-				if chunkReasoning == "" {
-					chunkReasoning = extractStreamReasoning(rawBytes)
-				}
-				if chunkReasoning == "" {
-					chunkReasoning = extractReasoningFromField(rawBytes)
-				}
-				reasoningBuffer += chunkReasoning
-
-				if resp.Usage != nil {
-					streamUsage = resp.Usage
-				}
-				if len(resp.Choices) == 0 {
-					continue
-				}
-				choice := resp.Choices[0]
-				delta := choice.Delta
-
-				if delta.Role != "" {
-					assistantRole = delta.Role
-				}
-
-				for _, tc := range delta.ToolCalls {
-					if tc.Index != nil {
-						idx := *tc.Index
-						for len(accumulatedToolCalls) <= idx {
-							accumulatedToolCalls = append(accumulatedToolCalls, gogpt.ToolCall{})
-						}
-						if tc.ID != "" {
-							accumulatedToolCalls[idx].ID = tc.ID
-						}
-						if tc.Type != "" {
-							accumulatedToolCalls[idx].Type = tc.Type
-						}
-						accumulatedToolCalls[idx].Function.Name += tc.Function.Name
-						accumulatedToolCalls[idx].Function.Arguments += tc.Function.Arguments
-					}
-				}
-
-				textDelta := delta.Content
-				bufferb += textDelta
-				if streamingRenderer != nil {
-					for _, line := range streamingRenderer.Process(textDelta) {
-						logBuf.WriteString(line)
-						logBuf.WriteString("\n")
-						sendLoop(line, network, c, e)
-					}
-				} else {
-					if strings.Contains(bufferb, "\n") {
-						logBuf.WriteString(bufferb)
-						sendLoop(bufferb, network, c, e)
-						bufferb = ""
-					}
-				}
-
-				if choice.FinishReason == gogpt.FinishReasonToolCalls {
-					logger.Info("stream finished with tool calls")
-					stream.Close()
-					break
-				}
-				if choice.FinishReason == gogpt.FinishReasonStop || choice.FinishReason == gogpt.FinishReasonLength {
-					streamDone = true
-					stream.Close()
-					break
 				}
 			}
 

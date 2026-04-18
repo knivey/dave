@@ -51,6 +51,7 @@ func completion(network Network, c *girc.Client, e girc.Event, cfg AIConfig, arg
 
 func logUsage(logger logxi.Logger, usage *gogpt.Usage) {
 	if usage == nil {
+		logger.Debug("no usage reported")
 		return
 	}
 	fields := []interface{}{
@@ -196,6 +197,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 
 			var accumulatedToolCalls []gogpt.ToolCall
 			var assistantRole string
+			var streamUsage *gogpt.Usage
 			streamDone := false
 
 			for {
@@ -234,7 +236,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 				reasoningBuffer += chunkReasoning
 
 				if resp.Usage != nil {
-					logUsage(logger, resp.Usage)
+					streamUsage = resp.Usage
 				}
 				if len(resp.Choices) == 0 {
 					continue
@@ -309,6 +311,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 					sendLoop(bufferb, network, c, e)
 				}
 				logger.Info("output", "text", logBuf.String())
+				logUsage(logger, streamUsage)
 				if reasoningBuffer != "" {
 					logger.Info("reasoning", "content", reasoningBuffer)
 				}
@@ -320,6 +323,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 			}
 
 			logger.Info("stream made tool calls", "count", len(accumulatedToolCalls))
+			logUsage(logger, streamUsage)
 
 			if assistantRole == "" {
 				assistantRole = gogpt.ChatMessageRoleAssistant
@@ -414,6 +418,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 		}
 
 		logger.Info("assistant made tool calls", "count", len(msg.ToolCalls))
+		logUsage(logger, &resp.Usage)
 		messages = append(messages, msg)
 
 		AddContext(cfg, ctx_key, gogpt.ChatCompletionMessage{

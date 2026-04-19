@@ -1,0 +1,65 @@
+# Example configuration for img-mcp
+# Copy this file to config.toml, prod.toml, or test.toml and fill in your values
+
+[server]
+# Server identification
+name = "img-mcp"
+version = "0.1.0"
+# HTTP server address (only used in HTTP mode)
+addr = ":8080"
+
+[comfy]
+# ComfyUI server URL
+baseurl = "http://localhost:8188"
+# Timeout in seconds for ComfyUI requests
+timeout = 90
+# Default workflow name (must match one of the [workflow.*] sections below)
+default_workflow = "zimage"
+
+[upload]
+# File upload service URL for hosting generated images
+url = "https://upload.example.com"
+# Length of generated URL suffix
+url_len = 16
+# Expiry time for uploaded images in seconds (86400 = 24 hours)
+expiry = 86400
+
+[queue]
+# Maximum number of concurrent image generation workers
+max_workers = 1
+# Maximum queue depth (number of pending jobs)
+max_depth = 100
+# How long to keep job results in memory (e.g., "1h", "30m", "24h")
+result_ttl = "1h"
+
+[enhancement.default]
+# Prompt enhancement settings (optional)
+description = "General purpose image prompt enhancer"
+# LLM API endpoint for prompt enhancement
+baseurl = "https://api.x.ai/v1/"
+# API key for the LLM service
+key = "YOUR_API_KEY_HERE"
+# Model to use for enhancement
+model = "grok-4-1-fast-reasoning"
+# System prompt for the enhancement model
+systemprompt = "You are an expert at writing prompts for AI image generation..."
+# Timeout in seconds for enhancement requests
+timeout = 30
+
+[workflow.zimage]
+# Workflow configuration for each ComfyUI workflow
+description = "Z Image Turbo. Fast generation with lower quality."
+# Path to the workflow JSON file (relative to config file location)
+workflow_path = "workflows/z_image_turbo.json"
+# Client ID to use for ComfyUI
+clientid = "img-mcp"
+# Node IDs from the workflow (these depend on your specific ComfyUI workflow)
+output_node = "28"
+prompt_node = "6"
+negative_prompt_node = "7"
+seed_nodes = ["3"]
+# Expected generation time for ETA calculations
+typical_time = "30s"
+
+# Add more [workflow.*] sections for additional workflows
+# The workflow name (e.g., "zimage") is what you'll use in tool calls

@@ -1,6 +1,6 @@
 [qwen]
 description = "Qwen enhanced image generation"
-mcp = "dave-mcp"
+mcp = "img-mcp"
 tool = "enhance_and_generate"
 arg = "prompt"
 timeout = "2m"
@@ -8,7 +8,7 @@ args = { workflow = "qwen", output_format = "url" }
 
 [qwenHD]
 description = "Qwen enhanced image generation"
-mcp = "dave-mcp"
+mcp = "img-mcp"
 tool = "enhance_and_generate"
 arg = "prompt"
 timeout = "2m"
@@ -16,7 +16,7 @@ args = { workflow = "qwenHD", output_format = "url" }
 
 [zimage]
 description = "Qwen enhanced image generation"
-mcp = "dave-mcp"
+mcp = "img-mcp"
 tool = "enhance_and_generate"
 arg = "prompt"
 timeout = "2m"
@@ -24,6 +24,6 @@ args = { workflow = "zimage", output_format = "url" }
 
 [queue]
 description = "View generation queue status"
-mcp = "dave-mcp"
+mcp = "img-mcp"
 tool = "queue_status"
 skipbusy = true

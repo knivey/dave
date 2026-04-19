@@ -9,10 +9,15 @@ Go IRC chatbot for OpenAI-compatible APIs, Stable Diffusion, ComfyUI image gen. 
 ## Commands
 ```bash
 go build -o dave .
+go build -o mcps/img-mcp/img-mcp ./mcps/img-mcp
 
 ./dave              # config/ directory
 ./dave prod         # prod/ directory
 ./dave test         # test/ directory
+
+./mcps/img-mcp/img-mcp              # uses mcps/img-mcp/config.toml
+./mcps/img-mcp/img-mcp prod.toml    # uses specified config (relative to binary dir)
+./mcps/img-mcp/img-mcp --http       # HTTP mode
 
 go test ./...                    # all tests
 go test ./MarkdownToIRC/...      # markdown tests only
@@ -36,6 +41,14 @@ No Makefile, no linter config. Use `go fmt` + `go vet`.
   - Missing command/service/promptenhancement/mcps files = empty maps (not fatal).
   - `ignores.txt` (see `.example`) for host ignores (wildcard).
   - `contexts.json` (gitignored) for persistent chat history.
+- MCP servers are self-contained packages in `mcps/<mcp-name>/`. Each MCP includes its own source code, binary, config files, and resources (e.g., workflows).
+  - `mcps/img-mcp/`: ComfyUI image generation MCP with prompt enhancement.
+    - Binary: `mcps/img-mcp/img-mcp`
+    - Config files: `config.toml` (default), `prod.toml`, `test.toml`, `example.toml`
+    - Workflows: `mcps/img-mcp/workflows/*.json`
+    - Config path is relative to binary directory by default
+    - Built via: `go build -o mcps/img-mcp/img-mcp ./mcps/img-mcp`
+  - MCPs are referenced in dave's config via `mcps.toml` (transport: stdio/http, command path, timeout) and `tools.toml` (mcp server name, tool name, args).
 
 ## High-Signal Gotchas
 - Config validation: `loadConfigDirOrDie` calls `os.Exit(1)` on any error at startup. `loadCommandsDir` and `loadReloadableDir` return errors for hot-reload (no exit).

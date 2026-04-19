@@ -105,15 +105,15 @@ func TestFormatToolInfo(t *testing.T) {
 	}{
 		{
 			name:      "basic tool info",
-			mcpServer: "dave-mcp",
+			mcpServer: "img-mcp",
 			tool:      "generate_image",
-			want:      "[dave-mcp/generate_image]",
+			want:      "[img-mcp/generate_image]",
 		},
 		{
 			name:      "enhance tool",
-			mcpServer: "dave-mcp",
+			mcpServer: "img-mcp",
 			tool:      "enhance_and_generate",
-			want:      "[dave-mcp/enhance_and_generate]",
+			want:      "[img-mcp/enhance_and_generate]",
 		},
 	}
 

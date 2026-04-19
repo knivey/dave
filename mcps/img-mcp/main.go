@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -17,12 +18,22 @@ func main() {
 	httpMode := flag.Bool("http", false, "use HTTP transport instead of stdio")
 	flag.Parse()
 
-	configDir := "mcp-config"
+	exePath, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error getting executable path: %v\n", err)
+		os.Exit(1)
+	}
+	exeDir := filepath.Dir(exePath)
+
+	configPath := filepath.Join(exeDir, "config.toml")
 	if args := flag.Args(); len(args) > 0 {
-		configDir = args[0]
+		configPath = args[0]
+		if !filepath.IsAbs(configPath) {
+			configPath = filepath.Join(exeDir, configPath)
+		}
 	}
 
-	cfg, err := loadConfig(configDir)
+	cfg, err := loadConfig(configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
 		os.Exit(1)
@@ -76,7 +87,7 @@ func serveHTTP(ctx context.Context, cfg Config, server *mcp.Server) {
 		httpServer.Shutdown(context.Background())
 	}()
 
-	log.Printf("dave-mcp HTTP server listening on %s", cfg.Server.Addr)
+	log.Printf("img-mcp HTTP server listening on %s", cfg.Server.Addr)
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fmt.Fprintf(os.Stderr, "HTTP server error: %v\n", err)
 		os.Exit(1)

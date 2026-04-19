@@ -1,13 +1,13 @@
 dave
-dave-mcp
 prod/
 test/
 .idea
 testMD/testMD
 ignores.txt
-workflows/*
 contexts.json
 contexts.json.tmp
 opencode.json
-mcp-prod/
 api_logs/
+mcps/img-mcp/prod.toml
+mcps/img-mcp/test.toml
+mcps/img-mcp/img-mcp

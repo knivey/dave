@@ -63,15 +63,16 @@ type WorkflowConfig struct {
 	Description        string        `toml:"description"`
 }
 
-func loadConfig(dir string) (Config, error) {
+func loadConfig(configFile string) (Config, error) {
 	var cfg Config
 
-	mainFile := filepath.Join(dir, "config.toml")
-	if _, err := toml.DecodeFile(mainFile, &cfg); err != nil {
-		return cfg, fmt.Errorf("loading %s: %w", mainFile, err)
+	if _, err := toml.DecodeFile(configFile, &cfg); err != nil {
+		return cfg, fmt.Errorf("loading %s: %w", configFile, err)
 	}
 
-	cfg.Server.Name = defaultString(cfg.Server.Name, "dave-mcp")
+	configDir := filepath.Dir(configFile)
+
+	cfg.Server.Name = defaultString(cfg.Server.Name, "img-mcp")
 	cfg.Server.Version = defaultString(cfg.Server.Version, "0.1.0")
 	cfg.Server.Addr = defaultString(cfg.Server.Addr, ":8080")
 
@@ -126,7 +127,7 @@ func loadConfig(dir string) (Config, error) {
 		cfg.Workflows = make(map[string]WorkflowConfig)
 	}
 	for name, wc := range cfg.Workflows {
-		wc.WorkflowPath = resolvePath(dir, wc.WorkflowPath)
+		wc.WorkflowPath = resolvePath(configDir, wc.WorkflowPath)
 		if wc.WorkflowPath == "" {
 			return cfg, fmt.Errorf("workflow.%s workflow_path is required", name)
 		}

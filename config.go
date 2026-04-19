@@ -54,15 +54,15 @@ type Commands struct {
 }
 
 type MCPCommandConfig struct {
-	Name          string
-	Regex         string
-	MCP           string         `toml:"mcp"`
-	Tool          string         `toml:"tool"`
-	Arg           string         `toml:"arg"`
-	Args          map[string]any `toml:"args"`
-	Timeout       time.Duration  `toml:"timeout"`
-	SkipBusy     bool           `toml:"skipbusy"`
-	Description   string
+	Name        string
+	Regex       string
+	MCP         string         `toml:"mcp"`
+	Tool        string         `toml:"tool"`
+	Arg         string         `toml:"arg"`
+	Args        map[string]any `toml:"args"`
+	Timeout     time.Duration  `toml:"timeout"`
+	SkipBusy    bool           `toml:"skipbusy"`
+	Description string
 }
 
 type AIConfig struct {

@@ -6,7 +6,7 @@ import (
 )
 
 func TestRunningStateFunctions(t *testing.T) {
-	runningPrompts = make(map[string]bool)
+	runningPrompts = make(map[string]int)
 	runningMutex = sync.Mutex{}
 
 	t.Run("initially not running", func(t *testing.T) {
@@ -22,7 +22,7 @@ func TestRunningStateFunctions(t *testing.T) {
 		}
 	})
 
-	t.Run("stoppedRunning clears state", func(t *testing.T) {
+	t.Run("stoppedRunning decrements state", func(t *testing.T) {
 		startedRunning("testchan2")
 		stoppedRunning("testchan2")
 		if getRunning("testchan2") {
@@ -59,17 +59,58 @@ func TestRunningStateFunctions(t *testing.T) {
 		}
 	})
 
-	t.Run("double startedRunning keeps true", func(t *testing.T) {
+	t.Run("double startedRunning keeps running", func(t *testing.T) {
 		startedRunning("chan4")
 		startedRunning("chan4")
 		if !getRunning("chan4") {
 			t.Error("chan4 should be running")
 		}
 	})
+
+	t.Run("reference counting: two starts need two stops", func(t *testing.T) {
+		runningPrompts = make(map[string]int)
+		startedRunning("refchan")
+		startedRunning("refchan")
+		if !getRunning("refchan") {
+			t.Error("refchan should be running after two starts")
+		}
+		stoppedRunning("refchan")
+		if !getRunning("refchan") {
+			t.Error("refchan should still be running after one stop (count=1)")
+		}
+		stoppedRunning("refchan")
+		if getRunning("refchan") {
+			t.Error("refchan should not be running after two stops (count=0)")
+		}
+	})
+
+	t.Run("forceStopRunning resets to zero", func(t *testing.T) {
+		runningPrompts = make(map[string]int)
+		startedRunning("forcechan")
+		startedRunning("forcechan")
+		startedRunning("forcechan")
+		if !getRunning("forcechan") {
+			t.Error("forcechan should be running")
+		}
+		forceStopRunning("forcechan")
+		if getRunning("forcechan") {
+			t.Error("forcechan should not be running after forceStopRunning")
+		}
+	})
+
+	t.Run("stoppedRunning after forceStopRunning stays at zero", func(t *testing.T) {
+		runningPrompts = make(map[string]int)
+		startedRunning("postforce")
+		forceStopRunning("postforce")
+		stoppedRunning("postforce")
+		if getRunning("postforce") {
+			t.Error("postforce should not be running (count clamped at 0)")
+		}
+	})
 }
 
 func TestRunningStateConcurrency(t *testing.T) {
-	runningPrompts = make(map[string]bool)
+	runningPrompts = make(map[string]int)
 	runningMutex = sync.Mutex{}
 
 	const goroutines = 50

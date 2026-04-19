@@ -231,7 +231,7 @@ func sendLoop(out string, network Network, c *girc.Client, e girc.Event) {
 
 func stop(network Network, _ *girc.Client, m girc.Event, _ interface{}, _ ...string) {
 	logger.Info("stop requested")
-	stoppedRunning(network.Name + m.Params[0])
+	forceStopRunning(network.Name + m.Params[0])
 }
 
 func isIgnored(host string) bool {

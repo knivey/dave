@@ -2,30 +2,35 @@ package main
 
 import "sync"
 
-var runningPrompts map[string]bool
+var runningPrompts map[string]int
 var runningMutex sync.Mutex
 
 func init() {
-	runningPrompts = make(map[string]bool)
+	runningPrompts = make(map[string]int)
 }
 
 func startedRunning(netchan string) {
 	runningMutex.Lock()
-	runningPrompts[netchan] = true
+	runningPrompts[netchan]++
 	runningMutex.Unlock()
 }
 
 func getRunning(netchan string) bool {
 	runningMutex.Lock()
 	defer runningMutex.Unlock()
-	if val, ok := runningPrompts[netchan]; ok && val {
-		return true
-	}
-	return false
+	return runningPrompts[netchan] > 0
 }
 
 func stoppedRunning(netchan string) {
 	runningMutex.Lock()
-	runningPrompts[netchan] = false
+	if runningPrompts[netchan] > 0 {
+		runningPrompts[netchan]--
+	}
+	runningMutex.Unlock()
+}
+
+func forceStopRunning(netchan string) {
+	runningMutex.Lock()
+	runningPrompts[netchan] = 0
 	runningMutex.Unlock()
 }

@@ -96,29 +96,32 @@ func TestFormatDesc(t *testing.T) {
 	}
 }
 
-func TestFormatComfyInfo(t *testing.T) {
+func TestFormatToolInfo(t *testing.T) {
 	tests := []struct {
-		name          string
-		enhancePrompt string
-		want          string
+		name      string
+		mcpServer string
+		tool      string
+		want      string
 	}{
 		{
-			name:          "no enhancement",
-			enhancePrompt: "",
-			want:          "",
+			name:      "basic tool info",
+			mcpServer: "dave-mcp",
+			tool:      "generate_image",
+			want:      "[dave-mcp/generate_image]",
 		},
 		{
-			name:          "with enhancement",
-			enhancePrompt: "some enhancer",
-			want:          "[prompt enhanced]",
+			name:      "enhance tool",
+			mcpServer: "dave-mcp",
+			tool:      "enhance_and_generate",
+			want:      "[dave-mcp/enhance_and_generate]",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := formatComfyInfo(tt.enhancePrompt)
+			got := formatToolInfo(tt.mcpServer, tt.tool)
 			if got != tt.want {
-				t.Errorf("formatComfyInfo() = %q, want %q", got, tt.want)
+				t.Errorf("formatToolInfo() = %q, want %q", got, tt.want)
 			}
 		})
 	}

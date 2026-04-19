@@ -63,6 +63,7 @@ var builtInCmds = CmdMap{
 }
 
 var configCmds CmdMap
+var rateExemptCmds map[*regexp.Regexp]bool
 
 func registerCommands(cmds Commands) {
 	commandsMutex.Lock()
@@ -72,6 +73,7 @@ func registerCommands(cmds Commands) {
 
 func registerCommandsLocked(cmds Commands) {
 	newConfigCmds := CmdMap{}
+	newExemptCmds := make(map[*regexp.Regexp]bool)
 
 	for _, c := range cmds.Completions {
 		logger.Debug("added Completions command", c)
@@ -87,22 +89,23 @@ func registerCommandsLocked(cmds Commands) {
 			chat(network, client, e, c, args...)
 		}
 	}
-	for _, c := range cmds.SD {
-		logger.Debug("added SD command", c)
-		re := regexp.MustCompile("^" + c.Regex + " (.+)$")
-		newConfigCmds[re] = func(network Network, client *girc.Client, e girc.Event, args ...string) {
-			sd(network, client, e, c, args...)
+	for _, c := range cmds.Tools {
+		logger.Debug("added Tools command", c)
+		pattern := "^" + c.Regex + "$"
+		if c.Arg != "" {
+			pattern = "^" + c.Regex + " (.+)$"
 		}
-	}
-	for _, c := range cmds.Comfy {
-		logger.Debug("added Comfy command", c)
-		re := regexp.MustCompile("^" + c.Regex + " (.+)$")
+		re := regexp.MustCompile(pattern)
 		newConfigCmds[re] = func(network Network, client *girc.Client, e girc.Event, args ...string) {
-			comfy(network, client, e, c, args...)
+			mcpCmd(network, client, e, c, args...)
+		}
+		if c.SkipBusy {
+			newExemptCmds[re] = true
 		}
 	}
 
 	configCmds = newConfigCmds
+	rateExemptCmds = newExemptCmds
 }
 
 func reloadAll() error {
@@ -339,7 +342,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 				client.Cmd.Reply(event, warnMsg(config.Ratemsg()))
 				return
 			}
-			if getRunning(network.Name + event.Params[0]) {
+			if !rateExemptCmds[r] && getRunning(network.Name+event.Params[0]) {
 				client.Cmd.Reply(event, warnMsg(config.Busymsg()))
 				return
 			}

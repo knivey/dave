@@ -14,19 +14,18 @@ import (
 )
 
 type Config struct {
-	Trigger            string
-	Quitmsg            string
-	Networks           map[string]Network
-	Services           map[string]Service
-	Commands           Commands
-	PromptEnhancements map[string]PromptEnhancementConfig `toml:"promptenhancements"`
-	Busymsgs           []string
-	Ratemsgs           []string
-	UploadURL          string `toml:"uploadurl"`
-	Persist            PersistConfig
-	MCPs               map[string]MCPConfig `toml:"mcps"`
-	ScrollbackLines    int                  `toml:"scrollback_lines"`
-	APILog             APILogConfig         `toml:"api_log"`
+	Trigger         string
+	Quitmsg         string
+	Networks        map[string]Network
+	Services        map[string]Service
+	Commands        Commands
+	Busymsgs        []string
+	Ratemsgs        []string
+	UploadURL       string `toml:"uploadurl"`
+	Persist         PersistConfig
+	MCPs            map[string]MCPConfig `toml:"mcps"`
+	ScrollbackLines int                  `toml:"scrollback_lines"`
+	APILog          APILogConfig         `toml:"api_log"`
 }
 
 type Network struct {
@@ -51,42 +50,19 @@ type Server struct {
 type Commands struct {
 	Completions map[string]AIConfig
 	Chats       map[string]AIConfig
-	SD          map[string]SDConfig
-	Comfy       map[string]ComfyConfig
+	Tools       map[string]MCPCommandConfig
 }
 
-type SDConfig struct {
-	Name         string //gets set to key name
-	Regex        string
-	Service      string
-	Steps        int64
-	SamplerName  string `toml:"samplername"`
-	SamplerIndex string `toml:"samplerindex"`
-	Scheduler    string
-	Width        int64
-	Height       int64
-	Description  string
-}
-
-type PromptEnhancementConfig struct {
-	Service      string `toml:"service"`
-	Model        string `toml:"model"`
-	SystemPrompt string `toml:"systemprompt"`
-}
-
-type ComfyConfig struct {
-	Name               string //gets set to key name
-	Regex              string
-	Service            string
-	WorkflowPath       string   `toml:"workflow_path"`
-	ClientID           string   `toml:"clientid"`
-	OutputNode         string   `toml:"output_node"`
-	PromptNode         string   `toml:"prompt_node"`
-	NegativePromptNode string   `toml:"negative_prompt_node"`
-	SeedNodes          []string `toml:"seed_nodes"`
-	Timeout            int
-	EnhancePrompt      string `toml:"enhanceprompt"`
-	Description        string
+type MCPCommandConfig struct {
+	Name          string
+	Regex         string
+	MCP           string         `toml:"mcp"`
+	Tool          string         `toml:"tool"`
+	Arg           string         `toml:"arg"`
+	Args          map[string]any `toml:"args"`
+	Timeout       time.Duration  `toml:"timeout"`
+	SkipBusy     bool           `toml:"skipbusy"`
+	Description   string
 }
 
 type AIConfig struct {
@@ -128,12 +104,11 @@ type AIConfig struct {
 
 type Service struct {
 	Key                 string
-	MaxTokens           int `toml:"maxtokens"`           //best to keep both for compatibility with non-openai
-	MaxCompletionTokens int `toml:"maxcompletiontokens"` //use this one now with openai
+	MaxTokens           int `toml:"maxtokens"`
+	MaxCompletionTokens int `toml:"maxcompletiontokens"`
 	BaseURL             string
 	Temperature         float32
 	MaxHistory          int           `toml:"maxhistory"`
-	ComfyTimeout        int           `toml:"comfy_timeout"` // WebSocket timeout in seconds
 	ImageFormat         string        `toml:"imageformat"`
 	ImageQuality        int           `toml:"imagequality"`
 	MaxImageSize        string        `toml:"maximagesize"`
@@ -170,19 +145,6 @@ func (config *Config) Busymsg() string {
 
 func (config *Config) Ratemsg() string {
 	return config.Ratemsgs[rand.Intn(len(config.Ratemsgs))]
-}
-
-func (cfg *SDConfig) ApplyDefaults(service Service) {
-
-}
-
-func (cfg *ComfyConfig) ApplyDefaults(service Service) {
-	if cfg.Timeout == 0 {
-		cfg.Timeout = service.ComfyTimeout
-	}
-	if cfg.Timeout == 0 {
-		cfg.Timeout = 300
-	}
 }
 
 func (cfg *AIConfig) ApplyDefaults(service Service) {
@@ -317,10 +279,6 @@ func loadConfigDir(dir string) (Config, error) {
 		return config, err
 	}
 
-	if err := loadPromptEnhancementsFile(dir, &config); err != nil {
-		return config, err
-	}
-
 	if err := loadMCPsFile(dir, &config); err != nil {
 		return config, err
 	}
@@ -346,16 +304,6 @@ func loadServicesFile(dir string, config *Config) error {
 			service.MaxHistory = 8
 		}
 		config.Services[name] = service
-	}
-	return nil
-}
-
-func loadPromptEnhancementsFile(dir string, config *Config) error {
-	if err := loadCommandFile(filepath.Join(dir, "promptenhancements.toml"), &config.PromptEnhancements); err != nil {
-		return fmt.Errorf("loading promptenhancements: %w", err)
-	}
-	if config.PromptEnhancements == nil {
-		config.PromptEnhancements = make(map[string]PromptEnhancementConfig)
 	}
 	return nil
 }
@@ -402,10 +350,6 @@ func loadReloadableDir(dir string, config *Config) error {
 		return err
 	}
 
-	if err := loadPromptEnhancementsFile(dir, &tmpConfig); err != nil {
-		return err
-	}
-
 	commands, err := loadCommandsDir(dir, &tmpConfig)
 	if err != nil {
 		return err
@@ -413,7 +357,6 @@ func loadReloadableDir(dir string, config *Config) error {
 
 	config.MCPs = tmpConfig.MCPs
 	config.Services = tmpConfig.Services
-	config.PromptEnhancements = tmpConfig.PromptEnhancements
 	config.Commands = commands
 
 	return nil
@@ -432,8 +375,7 @@ func loadCommandsDir(dir string, config *Config) (Commands, error) {
 	var commands Commands
 	commands.Completions = make(map[string]AIConfig)
 	commands.Chats = make(map[string]AIConfig)
-	commands.SD = make(map[string]SDConfig)
-	commands.Comfy = make(map[string]ComfyConfig)
+	commands.Tools = make(map[string]MCPCommandConfig)
 
 	if err := loadCommandFile(filepath.Join(dir, "completions.toml"), &commands.Completions); err != nil {
 		return commands, fmt.Errorf("loading completions: %w", err)
@@ -441,11 +383,8 @@ func loadCommandsDir(dir string, config *Config) (Commands, error) {
 	if err := loadCommandFile(filepath.Join(dir, "chats.toml"), &commands.Chats); err != nil {
 		return commands, fmt.Errorf("loading chats: %w", err)
 	}
-	if err := loadCommandFile(filepath.Join(dir, "sd.toml"), &commands.SD); err != nil {
-		return commands, fmt.Errorf("loading sd: %w", err)
-	}
-	if err := loadCommandFile(filepath.Join(dir, "comfy.toml"), &commands.Comfy); err != nil {
-		return commands, fmt.Errorf("loading comfy: %w", err)
+	if err := loadCommandFile(filepath.Join(dir, "tools.toml"), &commands.Tools); err != nil {
+		return commands, fmt.Errorf("loading tools: %w", err)
 	}
 
 	if err := validateCommands(&commands, config); err != nil {
@@ -517,60 +456,25 @@ func validateCommands(commands *Commands, config *Config) error {
 		commands.Chats[name] = cfg
 	}
 
-	for name, cfg := range commands.SD {
+	for name, cfg := range commands.Tools {
 		cfg.Name = name
 		if cfg.Regex == "" {
 			cfg.Regex = name
 		}
-		if service, ok := config.Services[cfg.Service]; ok {
-			cfg.ApplyDefaults(service)
+		if cfg.MCP == "" {
+			return fmt.Errorf("commands.tools.%s mcp is required", name)
+		}
+		if mcpCfg, ok := config.MCPs[cfg.MCP]; ok {
+			if cfg.Timeout == 0 {
+				cfg.Timeout = mcpCfg.Timeout
+			}
 		} else {
-			return fmt.Errorf("commands.sd.%s service %s is undefined", name, cfg.Service)
+			return fmt.Errorf("commands.tools.%s mcp %s is undefined", name, cfg.MCP)
 		}
-		commands.SD[name] = cfg
-	}
-
-	for name, cfg := range commands.Comfy {
-		cfg.Name = name
-		if cfg.Regex == "" {
-			cfg.Regex = name
+		if cfg.Tool == "" {
+			return fmt.Errorf("commands.tools.%s tool is required", name)
 		}
-		if service, ok := config.Services[cfg.Service]; ok {
-			cfg.ApplyDefaults(service)
-		} else {
-			return fmt.Errorf("commands.comfy.%s service %s is undefined", name, cfg.Service)
-		}
-		if cfg.WorkflowPath == "" {
-			return fmt.Errorf("commands.comfy.%s workflow_path is required", name)
-		}
-		if cfg.ClientID == "" {
-			return fmt.Errorf("commands.comfy.%s clientid is required", name)
-		}
-		if cfg.OutputNode == "" {
-			return fmt.Errorf("commands.comfy.%s output_node is required", name)
-		}
-		if cfg.PromptNode == "" {
-			return fmt.Errorf("commands.comfy.%s prompt_node is required", name)
-		}
-		if cfg.EnhancePrompt != "" {
-			if _, ok := config.PromptEnhancements[cfg.EnhancePrompt]; !ok {
-				return fmt.Errorf("commands.comfy.%s enhanceprompt %s is not defined in [promptenhancements]", name, cfg.EnhancePrompt)
-			}
-			enhCfg := config.PromptEnhancements[cfg.EnhancePrompt]
-			if enhCfg.Service == "" {
-				return fmt.Errorf("promptenhancements.%s service is required", cfg.EnhancePrompt)
-			}
-			if _, ok := config.Services[enhCfg.Service]; !ok {
-				return fmt.Errorf("promptenhancements.%s service %s is undefined", cfg.EnhancePrompt, enhCfg.Service)
-			}
-			if enhCfg.Model == "" {
-				return fmt.Errorf("promptenhancements.%s model is required", cfg.EnhancePrompt)
-			}
-			if enhCfg.SystemPrompt == "" {
-				return fmt.Errorf("promptenhancements.%s systemprompt is required", cfg.EnhancePrompt)
-			}
-		}
-		commands.Comfy[name] = cfg
+		commands.Tools[name] = cfg
 	}
 
 	return nil

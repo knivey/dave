@@ -103,23 +103,24 @@ func help(network Network, client *girc.Client, event girc.Event, args ...string
 		}
 	}
 
-	if len(config.Commands.SD) > 0 || len(config.Commands.Comfy) > 0 {
+	if len(config.Commands.Tools) > 0 {
 		var entries []helpEntry
-		for _, c := range config.Commands.SD {
+		toolKeys := make([]string, 0, len(config.Commands.Tools))
+		for k := range config.Commands.Tools {
+			toolKeys = append(toolKeys, k)
+		}
+		sort.Slice(toolKeys, func(i, j int) bool {
+			return toolKeys[i] < toolKeys[j]
+		})
+		for _, k := range toolKeys {
+			c := config.Commands.Tools[k]
 			entries = append(entries, helpEntry{
 				cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
-				info: "",
+				info: formatToolInfo(c.MCP, c.Tool),
 				desc: formatDesc(c.Description, false),
 			})
 		}
-		for _, c := range config.Commands.Comfy {
-			entries = append(entries, helpEntry{
-				cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
-				info: formatComfyInfo(c.EnhancePrompt),
-				desc: formatDesc(c.Description, false),
-			})
-		}
-		lines = append(lines, "\x02Image commands:\x02")
+		lines = append(lines, "\x02Tool commands:\x02")
 		for _, l := range formatTable(entries) {
 			lines = append(lines, "  "+l)
 		}
@@ -193,11 +194,11 @@ func findCommandHelp(network Network, cmdName string) (helpEntry, bool) {
 			}
 		}
 	}
-	for _, c := range config.Commands.SD {
+	for _, c := range config.Commands.Tools {
 		if c.Name == cmdName || c.Regex == cmdName {
 			return helpEntry{
 				cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
-				info: "",
+				info: formatToolInfo(c.MCP, c.Tool),
 				desc: formatDesc(c.Description, false),
 			}, true
 		}
@@ -206,26 +207,7 @@ func findCommandHelp(network Network, cmdName string) (helpEntry, bool) {
 			if re.MatchString(cmdName) {
 				return helpEntry{
 					cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
-					info: "",
-					desc: formatDesc(c.Description, false),
-				}, true
-			}
-		}
-	}
-	for _, c := range config.Commands.Comfy {
-		if c.Name == cmdName || c.Regex == cmdName {
-			return helpEntry{
-				cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
-				info: formatComfyInfo(c.EnhancePrompt),
-				desc: formatDesc(c.Description, false),
-			}, true
-		}
-		if c.Regex != c.Name {
-			re := regexp.MustCompile("^" + c.Regex + "$")
-			if re.MatchString(cmdName) {
-				return helpEntry{
-					cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
-					info: formatComfyInfo(c.EnhancePrompt),
+					info: formatToolInfo(c.MCP, c.Tool),
 					desc: formatDesc(c.Description, false),
 				}, true
 			}
@@ -259,11 +241,8 @@ func formatDesc(desc string, detectImages bool) string {
 	return desc
 }
 
-func formatComfyInfo(enhancePrompt string) string {
-	if enhancePrompt != "" {
-		return "[prompt enhanced]"
-	}
-	return ""
+func formatToolInfo(mcpServer, tool string) string {
+	return fmt.Sprintf("[%s/%s]", mcpServer, tool)
 }
 
 func formatTable(entries []helpEntry) []string {

@@ -244,6 +244,12 @@ func reconnectMCPServer(name string) error {
 	return nil
 }
 
+func getMCPServerForTool(toolName string) string {
+	mcpServersMu.Lock()
+	defer mcpServersMu.Unlock()
+	return mcpToolToServer[toolName]
+}
+
 func callMCPTool(toolName string, args map[string]any) (*mcp.CallToolResult, error) {
 	return callMCPToolWithTimeout(toolName, args, 0)
 }

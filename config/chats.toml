@@ -12,6 +12,7 @@
 # reasoningeffort = "medium"  # For o1/o3 models: "low", "medium", "high"
 # servicetier = "auto"        # Processing tier: "auto", "default", "flex", "priority"
 # verbosity = "medium"        # Output token count for gpt-5 models: "low", "medium", "high"
+# toolverbose = false         # Hide 🔧 tool call notifications in IRC (default: true, cascades from service)
 # chat_template_kwargs = {}   # Provider-specific parameters (see examples below)
 
 [chat]

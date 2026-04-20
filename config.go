@@ -114,6 +114,7 @@ type AIConfig struct {
 	ExtraBody           map[string]any `toml:"extra_body"`
 	Timeout             time.Duration  `toml:"timeout"`
 	StreamTimeout       time.Duration  `toml:"streamtimeout"`
+	ToolVerbose         *bool          `toml:"toolverbose"`
 }
 
 type Service struct {
@@ -128,6 +129,7 @@ type Service struct {
 	MaxImageSize        string        `toml:"maximagesize"`
 	Timeout             time.Duration `toml:"timeout"`
 	StreamTimeout       time.Duration `toml:"streamtimeout"`
+	ToolVerbose         *bool         `toml:"toolverbose"`
 }
 
 type MCPConfig struct {
@@ -209,6 +211,9 @@ func (cfg *AIConfig) ApplyDefaults(service Service) {
 	}
 	if cfg.StreamTimeout == 0 {
 		cfg.StreamTimeout = cfg.Timeout
+	}
+	if cfg.ToolVerbose == nil {
+		cfg.ToolVerbose = service.ToolVerbose
 	}
 }
 

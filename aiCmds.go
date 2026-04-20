@@ -384,10 +384,14 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 
 			AddContext(cfg, ctx_key, assistantMsg)
 
-			for _, tc := range accumulatedToolCalls {
-				var toolArgs map[string]any
-				json.Unmarshal([]byte(tc.Function.Arguments), &toolArgs)
-				result, err := callMCPTool(tc.Function.Name, toolArgs)
+		for _, tc := range accumulatedToolCalls {
+			if cfg.ToolVerbose == nil || *cfg.ToolVerbose {
+				serverName := getMCPServerForTool(tc.Function.Name)
+				sendLoop(fmt.Sprintf("\x0315🔧 ToolCall: %s > %s", serverName, tc.Function.Name), network, c, e)
+			}
+			var toolArgs map[string]any
+			json.Unmarshal([]byte(tc.Function.Arguments), &toolArgs)
+			result, err := callMCPTool(tc.Function.Name, toolArgs)
 				if err != nil {
 					toolMsg := gogpt.ChatCompletionMessage{
 						Role:       gogpt.ChatMessageRoleTool,
@@ -475,10 +479,14 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 			logger.Info("reasoning", "content", reasoning)
 		}
 
-		for _, tc := range msg.ToolCalls {
-			var toolArgs map[string]any
-			json.Unmarshal([]byte(tc.Function.Arguments), &toolArgs)
-			result, err := callMCPTool(tc.Function.Name, toolArgs)
+	for _, tc := range msg.ToolCalls {
+	if cfg.ToolVerbose == nil || *cfg.ToolVerbose {
+		serverName := getMCPServerForTool(tc.Function.Name)
+		sendLoop(fmt.Sprintf("\x0315🔧 ToolCall: %s > %s", serverName, tc.Function.Name), network, c, e)
+	}
+		var toolArgs map[string]any
+		json.Unmarshal([]byte(tc.Function.Arguments), &toolArgs)
+		result, err := callMCPTool(tc.Function.Name, toolArgs)
 			if err != nil {
 				toolMsg := gogpt.ChatCompletionMessage{
 					Role:       gogpt.ChatMessageRoleTool,

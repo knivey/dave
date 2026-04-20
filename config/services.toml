@@ -6,6 +6,7 @@ temperature = 0.7  # optional
 imageformat = "jpg"      # default image format for chat commands
 imagequality = 75
 maximagesize = "1024x1024"
+# toolverbose = false  # hide 🔧 tool call notifications in IRC (default: true)
 
 [local]
 maxtokens = 500

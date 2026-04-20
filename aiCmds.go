@@ -49,6 +49,50 @@ func completion(network Network, c *girc.Client, e girc.Event, cfg AIConfig, arg
 	sendLoop(resp.Choices[0].Text, network, c, e)
 }
 
+type Timings struct {
+	CacheN              int     `json:"cache_n"`
+	PromptN             int     `json:"prompt_n"`
+	PromptMs            float64 `json:"prompt_ms"`
+	PromptPerTokenMs    float64 `json:"prompt_per_token_ms"`
+	PromptPerSecond     float64 `json:"prompt_per_second"`
+	PredictedN          int     `json:"predicted_n"`
+	PredictedMs         float64 `json:"predicted_ms"`
+	PredictedPerTokenMs float64 `json:"predicted_per_token_ms"`
+	PredictedPerSecond  float64 `json:"predicted_per_second"`
+}
+
+func extractTimings(raw []byte) *Timings {
+	var wrapper struct {
+		Timings *Timings `json:"timings"`
+	}
+	if err := json.Unmarshal(raw, &wrapper); err != nil || wrapper.Timings == nil {
+		return nil
+	}
+	return wrapper.Timings
+}
+
+func logTimings(logger logxi.Logger, timings *Timings) {
+	if timings == nil {
+		return
+	}
+	fields := []interface{}{
+		"prompt", timings.PromptN,
+		"cache", timings.CacheN,
+		"completion", timings.PredictedN,
+		"prompt_speed", fmt.Sprintf("%.1ftok/s", timings.PromptPerSecond),
+		"completion_speed", fmt.Sprintf("%.1ftok/s", timings.PredictedPerSecond),
+		"prompt_time", fmt.Sprintf("%.0fms", timings.PromptMs),
+		"completion_time", fmt.Sprintf("%.0fms", timings.PredictedMs),
+	}
+	if timings.PredictedPerTokenMs > 0 {
+		fields = append(fields, "completion_per_token", fmt.Sprintf("%.1fms", timings.PredictedPerTokenMs))
+	}
+	if timings.PromptPerTokenMs > 0 {
+		fields = append(fields, "prompt_per_token", fmt.Sprintf("%.1fms", timings.PromptPerTokenMs))
+	}
+	logger.Info("timings", fields...)
+}
+
 func logUsage(logger logxi.Logger, usage *gogpt.Usage) {
 	if usage == nil {
 		logger.Debug("no usage reported")
@@ -71,7 +115,12 @@ func logUsage(logger logxi.Logger, usage *gogpt.Usage) {
 func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...string) {
 	aiConfig := gogpt.DefaultConfig(config.Services[cfg.Service].Key)
 	aiConfig.BaseURL = config.Services[cfg.Service].BaseURL
-	transport := newDaveTransport(cfg.ExtraBody)
+	extraBody := make(map[string]any, len(cfg.ExtraBody)+1)
+	for k, v := range cfg.ExtraBody {
+		extraBody[k] = v
+	}
+	extraBody["timings_per_token"] = true
+	transport := newDaveTransport(extraBody)
 	aiConfig.HTTPClient = &http.Client{Transport: transport}
 	aiClient := gogpt.NewClientWithConfig(aiConfig)
 
@@ -202,6 +251,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 			var accumulatedToolCalls []gogpt.ToolCall
 			var assistantRole string
 			var streamUsage *gogpt.Usage
+			var streamTimings *Timings
 			streamDone := false
 			streamModel := cfg.Model
 
@@ -264,6 +314,9 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 
 					if resp.Usage != nil {
 						streamUsage = resp.Usage
+					}
+					if t := extractTimings(rawBytes); t != nil {
+						streamTimings = t
 					}
 					if len(resp.Choices) == 0 {
 						continue
@@ -349,6 +402,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 				}
 				logger.Info("output", "text", logBuf.String())
 				logUsage(logger, streamUsage)
+				logTimings(logger, streamTimings)
 				if reasoningBuffer != "" {
 					logger.Info("reasoning", "content", reasoningBuffer)
 				}
@@ -361,6 +415,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 
 			logger.Info("stream made tool calls", "count", len(accumulatedToolCalls))
 			logUsage(logger, streamUsage)
+			logTimings(logger, streamTimings)
 
 			if assistantRole == "" {
 				assistantRole = gogpt.ChatMessageRoleAssistant
@@ -384,14 +439,14 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 
 			AddContext(cfg, ctx_key, assistantMsg)
 
-		for _, tc := range accumulatedToolCalls {
-			if cfg.ToolVerbose == nil || *cfg.ToolVerbose {
-				serverName := getMCPServerForTool(tc.Function.Name)
-				sendLoop(fmt.Sprintf("\x0315🔧 ToolCall: %s > %s", serverName, tc.Function.Name), network, c, e)
-			}
-			var toolArgs map[string]any
-			json.Unmarshal([]byte(tc.Function.Arguments), &toolArgs)
-			result, err := callMCPTool(tc.Function.Name, toolArgs)
+			for _, tc := range accumulatedToolCalls {
+				if cfg.ToolVerbose == nil || *cfg.ToolVerbose {
+					serverName := getMCPServerForTool(tc.Function.Name)
+					sendLoop(fmt.Sprintf("\x0315🔧 ToolCall: %s > %s", serverName, tc.Function.Name), network, c, e)
+				}
+				var toolArgs map[string]any
+				json.Unmarshal([]byte(tc.Function.Arguments), &toolArgs)
+				result, err := callMCPTool(tc.Function.Name, toolArgs)
 				if err != nil {
 					toolMsg := gogpt.ChatCompletionMessage{
 						Role:       gogpt.ChatMessageRoleTool,
@@ -428,13 +483,15 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 		msg := resp.Choices[0].Message
 
 		reasoning := msg.ReasoningContent
-		rawReasoning, rawDetails := extractResponseReasoning(transport.getCapturedBody())
+		capturedBody := transport.getCapturedBody()
+		rawReasoning, rawDetails := extractResponseReasoning(capturedBody)
 		if reasoning == "" && rawReasoning != "" {
 			reasoning = rawReasoning
 		}
 		if reasoning == "" && len(rawDetails) > 0 {
 			reasoning = extractReasoningText(rawDetails)
 		}
+		nonStreamTimings := extractTimings(capturedBody)
 
 		if len(msg.ToolCalls) == 0 {
 			AddContext(cfg, ctx_key, gogpt.ChatCompletionMessage{
@@ -447,6 +504,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 			text := ExtractFinalText(msg.Content)
 
 			logUsage(logger, &resp.Usage)
+			logTimings(logger, nonStreamTimings)
 			if reasoning != "" {
 				logger.Info("reasoning", "content", reasoning)
 			}
@@ -460,6 +518,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 
 		logger.Info("assistant made tool calls", "count", len(msg.ToolCalls))
 		logUsage(logger, &resp.Usage)
+		logTimings(logger, nonStreamTimings)
 		messages = append(messages, msg)
 
 		AddContext(cfg, ctx_key, gogpt.ChatCompletionMessage{
@@ -479,14 +538,14 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 			logger.Info("reasoning", "content", reasoning)
 		}
 
-	for _, tc := range msg.ToolCalls {
-	if cfg.ToolVerbose == nil || *cfg.ToolVerbose {
-		serverName := getMCPServerForTool(tc.Function.Name)
-		sendLoop(fmt.Sprintf("\x0315🔧 ToolCall: %s > %s", serverName, tc.Function.Name), network, c, e)
-	}
-		var toolArgs map[string]any
-		json.Unmarshal([]byte(tc.Function.Arguments), &toolArgs)
-		result, err := callMCPTool(tc.Function.Name, toolArgs)
+		for _, tc := range msg.ToolCalls {
+			if cfg.ToolVerbose == nil || *cfg.ToolVerbose {
+				serverName := getMCPServerForTool(tc.Function.Name)
+				sendLoop(fmt.Sprintf("\x0315🔧 ToolCall: %s > %s", serverName, tc.Function.Name), network, c, e)
+			}
+			var toolArgs map[string]any
+			json.Unmarshal([]byte(tc.Function.Arguments), &toolArgs)
+			result, err := callMCPTool(tc.Function.Name, toolArgs)
 			if err != nil {
 				toolMsg := gogpt.ChatCompletionMessage{
 					Role:       gogpt.ChatMessageRoleTool,

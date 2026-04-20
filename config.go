@@ -14,18 +14,31 @@ import (
 )
 
 type Config struct {
-	Trigger         string
-	Quitmsg         string
-	Networks        map[string]Network
-	Services        map[string]Service
-	Commands        Commands
-	Busymsgs        []string
-	Ratemsgs        []string
-	UploadURL       string `toml:"uploadurl"`
-	Persist         PersistConfig
-	MCPs            map[string]MCPConfig `toml:"mcps"`
-	ScrollbackLines int                  `toml:"scrollback_lines"`
-	APILog          APILogConfig         `toml:"api_log"`
+	Trigger   string
+	Quitmsg   string
+	Networks  map[string]Network
+	Services  map[string]Service
+	Commands  Commands
+	Busymsgs  []string
+	Ratemsgs  []string
+	UploadURL string `toml:"uploadurl"`
+	Persist   PersistConfig
+	MCPs      map[string]MCPConfig `toml:"mcps"`
+	TUI       TUIConfig
+	APILog    APILogConfig `toml:"api_log"`
+}
+
+type TUIConfig struct {
+	ScrollbackLines int                `toml:"scrollback_lines"`
+	Scrollbar       TUIScrollbarConfig `toml:"scrollbar"`
+}
+
+type TUIScrollbarConfig struct {
+	Visible         bool   `toml:"visible"`
+	ShowAlways      bool   `toml:"show_always"`
+	Color           string `toml:"color"`
+	BackgroundColor string `toml:"background_color"`
+	Width           int    `toml:"width"`
 }
 
 type Network struct {
@@ -261,8 +274,17 @@ func loadConfigDir(dir string) (Config, error) {
 	if len(config.Ratemsgs) == 0 {
 		config.Ratemsgs = []string{"hold on you're going to fast"}
 	}
-	if config.ScrollbackLines == 0 {
-		config.ScrollbackLines = 5000
+	if config.TUI.ScrollbackLines == 0 {
+		config.TUI.ScrollbackLines = 5000
+	}
+	if config.TUI.Scrollbar.Color == "" {
+		config.TUI.Scrollbar.Color = "gray"
+	}
+	if config.TUI.Scrollbar.BackgroundColor == "" {
+		config.TUI.Scrollbar.BackgroundColor = "black"
+	}
+	if config.TUI.Scrollbar.Width == 0 {
+		config.TUI.Scrollbar.Width = 1
 	}
 	for name, network := range config.Networks {
 		network.Name = name

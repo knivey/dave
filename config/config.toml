@@ -19,6 +19,16 @@ max_age_days = 7     # delete old contexts
 max_contexts = 100   # max stored
 save_delay = "30s"   # auto-save interval
 
+[tui]
+scrollback_lines = 5000
+
+[tui.scrollbar]
+visible = true
+show_always = true
+color = "gray"
+background_color = "black"
+width = 1
+
 [api_log]
 enabled = true
 dir = "api_logs"

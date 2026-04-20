@@ -27,6 +27,7 @@ visible = true
 show_always = true
 color = "gray"
 background_color = "black"
+track_color = "darkgray"
 width = 1
 
 [api_log]

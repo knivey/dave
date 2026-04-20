@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"math"
 	"os"
 	"strings"
 	"sync"
@@ -34,116 +33,7 @@ var (
 	logBuf       []string
 	logFlushStop chan struct{}
 	logFlushDone chan struct{}
-
-	scrollbarWidth      = 1
-	scrollbarColor      = tcell.ColorGray
-	scrollbarBgColor    = tcell.ColorBlack
-	scrollbarShowAlways = true
-	scrollbarVisible    = true
 )
-
-type Scrollbar struct {
-	view       *tview.TextView
-	visible    bool
-	showAlways bool
-	width      int
-	color      tcell.Color
-	bgColor    tcell.Color
-}
-
-func NewScrollbar(view *tview.TextView) *Scrollbar {
-	return &Scrollbar{
-		view:       view,
-		visible:    scrollbarVisible,
-		showAlways: scrollbarShowAlways,
-		width:      scrollbarWidth,
-		color:      scrollbarColor,
-		bgColor:    scrollbarBgColor,
-	}
-}
-
-func (s *Scrollbar) Draw(screen tcell.Screen, x, y, width, height int) {
-	if !s.visible {
-		return
-	}
-
-	totalLines := s.view.GetWrappedLineCount()
-	if totalLines == 0 {
-		return
-	}
-
-	row, _ := s.view.GetScrollOffset()
-	_, _, viewHeight, _ := s.view.GetInnerRect()
-
-	if !s.showAlways && totalLines <= viewHeight {
-		return
-	}
-
-	scrollX := x + width - s.width
-
-	const subblocks = 8
-	var blocks = [9]rune{' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
-
-	visibleLines := viewHeight
-	if visibleLines > totalLines {
-		visibleLines = totalLines
-	}
-
-	startPos := int(math.Round(float64(row*height*subblocks) / float64(totalLines)))
-	visibleSize := int(math.Round(float64(visibleLines*height*subblocks) / float64(totalLines)))
-	endPos := startPos + visibleSize
-
-	if endPos-startPos < subblocks {
-		mid := (startPos + endPos) / 2
-		startPos = mid - subblocks/2
-		endPos = mid + subblocks/2 + subblocks%2
-		if startPos < 0 {
-			startPos = 0
-			endPos = subblocks
-		} else if endPos > height*subblocks {
-			endPos = height * subblocks
-			startPos = endPos - subblocks
-		}
-	}
-
-	for i := 0; i < height; i++ {
-		inverted := startPos <= i*subblocks
-		blockCount := min(endPos, (i+1)*subblocks) - max(startPos, i*subblocks)
-		if blockCount < 0 {
-			blockCount = 0
-		}
-		if inverted {
-			blockCount = subblocks - blockCount
-		}
-		if blockCount < 0 {
-			blockCount = 0
-		}
-		if blockCount > 8 {
-			blockCount = 8
-		}
-
-		block := blocks[blockCount]
-		style := tcell.StyleDefault.Background(s.bgColor).Foreground(s.color).Reverse(inverted)
-		for w := 0; w < s.width; w++ {
-			screen.SetContent(scrollX+w, y+i, block, nil, style)
-		}
-	}
-}
-
-func (s *Scrollbar) ShouldDraw() bool {
-	if !s.visible {
-		return false
-	}
-	totalLines := s.view.GetWrappedLineCount()
-	if totalLines == 0 {
-		return false
-	}
-	if s.showAlways {
-		return true
-	}
-	_, _, viewHeight, _ := s.view.GetInnerRect()
-	return totalLines > viewHeight
-}
 
 const cmdHistoryMax = 100
 
@@ -195,12 +85,6 @@ func initTUI() (*tview.Application, error) {
 		scrollbackLines = 5000
 	}
 
-	scrollbarVisible = config.TUI.Scrollbar.Visible
-	scrollbarShowAlways = config.TUI.Scrollbar.ShowAlways
-	scrollbarColor = tcell.ColorNames[config.TUI.Scrollbar.Color]
-	scrollbarBgColor = tcell.ColorNames[config.TUI.Scrollbar.BackgroundColor]
-	scrollbarWidth = config.TUI.Scrollbar.Width
-
 	logView = tview.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
@@ -233,13 +117,16 @@ func initTUI() (*tview.Application, error) {
 		}
 	})
 
-	scrollbar := NewScrollbar(logView)
+	scrollbar := NewScrollbar(config.TUI.Scrollbar)
+	sbWidth := scrollbar.width
 	logContainer := tview.NewBox()
 	logContainer.SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
-		logView.SetRect(x, y, width-scrollbarWidth, height)
+		logView.SetRect(x, y, width-sbWidth, height)
 		logView.Draw(screen)
-		if scrollbar.ShouldDraw() {
-			scrollbar.Draw(screen, x, y, width, height)
+		totalLines := logView.GetWrappedLineCount()
+		row, _ := logView.GetScrollOffset()
+		if scrollbar.ShouldDraw(totalLines, height) {
+			scrollbar.Draw(screen, x, y, width, height, row, totalLines)
 		}
 		return x, y, width, height
 	})

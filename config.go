@@ -34,10 +34,11 @@ type TUIConfig struct {
 }
 
 type TUIScrollbarConfig struct {
-	Visible         bool   `toml:"visible"`
-	ShowAlways      bool   `toml:"show_always"`
+	Visible         *bool  `toml:"visible"`
+	ShowAlways      *bool  `toml:"show_always"`
 	Color           string `toml:"color"`
 	BackgroundColor string `toml:"background_color"`
+	TrackColor      string `toml:"track_color"`
 	Width           int    `toml:"width"`
 }
 
@@ -282,6 +283,9 @@ func loadConfigDir(dir string) (Config, error) {
 	}
 	if config.TUI.Scrollbar.BackgroundColor == "" {
 		config.TUI.Scrollbar.BackgroundColor = "black"
+	}
+	if config.TUI.Scrollbar.TrackColor == "" {
+		config.TUI.Scrollbar.TrackColor = "darkgray"
 	}
 	if config.TUI.Scrollbar.Width == 0 {
 		config.TUI.Scrollbar.Width = 1

@@ -64,6 +64,7 @@ var builtInCmds = CmdMap{
 
 var configCmds CmdMap
 var rateExemptCmds map[*regexp.Regexp]bool
+var chatCmds map[*regexp.Regexp]bool
 
 func registerCommands(cmds Commands) {
 	commandsMutex.Lock()
@@ -74,6 +75,7 @@ func registerCommands(cmds Commands) {
 func registerCommandsLocked(cmds Commands) {
 	newConfigCmds := CmdMap{}
 	newExemptCmds := make(map[*regexp.Regexp]bool)
+	newChatCmds := make(map[*regexp.Regexp]bool)
 
 	for _, c := range cmds.Completions {
 		logger.Debug("added Completions command", c)
@@ -88,6 +90,7 @@ func registerCommandsLocked(cmds Commands) {
 		newConfigCmds[re] = func(network Network, client *girc.Client, e girc.Event, args ...string) {
 			chat(network, client, e, c, args...)
 		}
+		newChatCmds[re] = true
 	}
 	for _, c := range cmds.Tools {
 		logger.Debug("added Tools command", c)
@@ -106,6 +109,7 @@ func registerCommandsLocked(cmds Commands) {
 
 	configCmds = newConfigCmds
 	rateExemptCmds = newExemptCmds
+	chatCmds = newChatCmds
 }
 
 func reloadAll() error {
@@ -322,7 +326,6 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 				client.Cmd.Reply(event, warnMsg(config.Busymsg()))
 				return
 			}
-			ClearContext(ctx_key)
 			go cmd(network, client, event, args...)
 			return
 		}
@@ -346,7 +349,9 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 				client.Cmd.Reply(event, warnMsg(config.Busymsg()))
 				return
 			}
-			ClearContext(ctx_key)
+			if chatCmds[r] {
+				ClearContext(ctx_key)
+			}
 			go cmd(network, client, event, args...)
 			return
 		}

@@ -79,6 +79,7 @@ func initTUI() (*tview.Application, error) {
 	logPipeR = pipeR
 
 	app := tview.NewApplication()
+	app.EnableMouse(true)
 
 	scrollbackLines := config.TUI.ScrollbackLines
 	if scrollbackLines <= 0 {
@@ -129,6 +130,32 @@ func initTUI() (*tview.Application, error) {
 			scrollbar.Draw(screen, x, y, width, height, row, totalLines)
 		}
 		return x, y, width, height
+	})
+
+	logContainer.SetMouseCapture(func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
+		switch action {
+		case tview.MouseScrollUp:
+			autoScroll = false
+			row, _ := logView.GetScrollOffset()
+			newRow := row - 3
+			if newRow < 0 {
+				newRow = 0
+			}
+			logView.ScrollTo(newRow, 0)
+			return tview.MouseConsumed, nil
+		case tview.MouseScrollDown:
+			row, _ := logView.GetScrollOffset()
+			_, _, _, height := logView.GetInnerRect()
+			totalLines := logView.GetWrappedLineCount()
+			if row+3+height >= totalLines {
+				autoScroll = true
+				logView.ScrollToEnd()
+			} else {
+				logView.ScrollTo(row+3, 0)
+			}
+			return tview.MouseConsumed, nil
+		}
+		return action, event
 	})
 
 	flex := tview.NewFlex().SetDirection(tview.FlexRow).

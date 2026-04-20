@@ -136,10 +136,7 @@ prod/
 ├── chats.toml               # Chat commands (persistent context)
 ├── completions.toml         # Completion commands (one-shot)
 ├── tools.toml               # MCP tool commands
-├── mcps.toml                # MCP server connections
-├── promptenhancements.toml  # Image prompt enhancement configs
-├── sd.toml                  # Stable Diffusion settings
-└── comfy.toml               # ComfyUI settings
+└── mcps.toml                # MCP server connections
 
 # These live in the working directory (where you run ./dave):
 contexts.json                # Persistent chat history (auto-created, from persist.file_path)

@@ -1,9 +1,0 @@
-[flux]
-description = "Flux SD image generation"
-service = "sd"
-steps = 12
-samplername = "Euler"
-samplerindex = "0"  # optional
-scheduler = "Simple"
-width = 1024
-height = 1024

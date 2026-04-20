@@ -142,6 +142,7 @@ func initTUI() (*tview.Application, error) {
 			if newRow+height >= logView.GetWrappedLineCount() {
 				autoScroll = true
 				logView.ScrollToEnd()
+				logView.ScrollTo(logView.GetWrappedLineCount()-height, 0)
 			} else {
 				logView.ScrollTo(newRow, 0)
 			}

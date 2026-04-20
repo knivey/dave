@@ -191,6 +191,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 			}
 
 			bufferb := ""
+			fullContent := ""
 			reasoningBuffer := ""
 			logBuf := strings.Builder{}
 			var streamingRenderer *markdowntoirc.StreamingRenderer
@@ -293,6 +294,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 
 					textDelta := delta.Content
 					bufferb += textDelta
+					fullContent += textDelta
 					if streamingRenderer != nil {
 						for _, line := range streamingRenderer.Process(textDelta) {
 							logBuf.WriteString(line)
@@ -326,13 +328,13 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 				}
 			}
 
-			logStreamCompletion(ctx_key, streamModel, bufferb, reasoningBuffer, accumulatedToolCalls, streamUsage, assistantRole)
+			logStreamCompletion(ctx_key, streamModel, fullContent, reasoningBuffer, accumulatedToolCalls, streamUsage, assistantRole)
 
 			flushStreamedOutput := func() {
-				logger.Info(bufferb)
+				logger.Info(fullContent)
 				AddContext(cfg, ctx_key, gogpt.ChatCompletionMessage{
 					Role:             gogpt.ChatMessageRoleAssistant,
-					Content:          bufferb,
+					Content:          fullContent,
 					ReasoningContent: reasoningBuffer,
 				})
 				if streamingRenderer != nil {
@@ -366,7 +368,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 
 			assistantMsg := gogpt.ChatCompletionMessage{
 				Role:             assistantRole,
-				Content:          bufferb,
+				Content:          fullContent,
 				ReasoningContent: reasoningBuffer,
 				ToolCalls:        accumulatedToolCalls,
 			}

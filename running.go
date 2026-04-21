@@ -9,28 +9,36 @@ func init() {
 	runningPrompts = make(map[string]int)
 }
 
-func startedRunning(netchan string) {
+func runningKey(network, channel, nick string) string {
+	return network + channel + nick
+}
+
+func startedRunning(network, channel, nick string) {
+	key := runningKey(network, channel, nick)
 	runningMutex.Lock()
-	runningPrompts[netchan]++
+	runningPrompts[key]++
 	runningMutex.Unlock()
 }
 
-func getRunning(netchan string) bool {
+func getRunning(network, channel, nick string) bool {
+	key := runningKey(network, channel, nick)
 	runningMutex.Lock()
 	defer runningMutex.Unlock()
-	return runningPrompts[netchan] > 0
+	return runningPrompts[key] > 0
 }
 
-func stoppedRunning(netchan string) {
+func stoppedRunning(network, channel, nick string) {
+	key := runningKey(network, channel, nick)
 	runningMutex.Lock()
-	if runningPrompts[netchan] > 0 {
-		runningPrompts[netchan]--
+	if runningPrompts[key] > 0 {
+		runningPrompts[key]--
 	}
 	runningMutex.Unlock()
 }
 
-func forceStopRunning(netchan string) {
+func forceStopRunning(network, channel, nick string) {
+	key := runningKey(network, channel, nick)
 	runningMutex.Lock()
-	runningPrompts[netchan] = 0
+	runningPrompts[key] = 0
 	runningMutex.Unlock()
 }

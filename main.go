@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -46,6 +47,12 @@ type CmdFunc func(Network, *girc.Client, girc.Event, ...string)
 
 var stop_re = regexp.MustCompile("^stop$")
 var help_re = regexp.MustCompile("^help(?:\\s+(.+))?$")
+var sessions_re = regexp.MustCompile("^sessions$")
+var history_re = regexp.MustCompile("^history(?:\\s+(.+))?$")
+var stats_re = regexp.MustCompile("^mystats$")
+var delete_re = regexp.MustCompile("^delete\\s+(\\d+)$")
+var resume_re = regexp.MustCompile("^resume\\s+(\\d+)$")
+var jobs_re = regexp.MustCompile("^jobs$")
 
 type CmdMap map[*regexp.Regexp]CmdFunc
 
@@ -58,10 +65,15 @@ func warnMsg(msg string) string {
 }
 
 var builtInCmds = CmdMap{
-	stop_re: func(n Network, c *girc.Client, e girc.Event, s ...string) { stop(n, c, e, nil, s...) },
-	help_re: func(n Network, c *girc.Client, e girc.Event, s ...string) { help(n, c, e, s...) },
+	stop_re:     func(n Network, c *girc.Client, e girc.Event, s ...string) { stop(n, c, e, nil, s...) },
+	help_re:     func(n Network, c *girc.Client, e girc.Event, s ...string) { help(n, c, e, s...) },
+	sessions_re: func(n Network, c *girc.Client, e girc.Event, s ...string) { historySessions(n, c, e, s...) },
+	history_re:  func(n Network, c *girc.Client, e girc.Event, s ...string) { historyShow(n, c, e, s...) },
+	stats_re:    func(n Network, c *girc.Client, e girc.Event, s ...string) { historyStats(n, c, e, s...) },
+	delete_re:   func(n Network, c *girc.Client, e girc.Event, s ...string) { historyDelete(n, c, e, s...) },
+	resume_re:   func(n Network, c *girc.Client, e girc.Event, s ...string) { historyResume(n, c, e, s...) },
+	jobs_re:     func(n Network, c *girc.Client, e girc.Event, s ...string) { historyJobs(n, c, e, s...) },
 }
-
 var configCmds CmdMap
 var rateExemptCmds map[*regexp.Regexp]bool
 var chatCmds map[*regexp.Regexp]bool
@@ -155,11 +167,19 @@ func main() {
 	logger.SetLevel(logxi.LevelAll)
 	logger.Info("Config loaded", "networks", len(config.Networks))
 	initAPILogger(config, configDir)
-	persistCfg = config.Persist
+
+	var dbErr error
+	theDB, dbErr = initDB(config.Database)
+	if dbErr != nil {
+		fmt.Fprintf(os.Stderr, "Failed to initialize database: %v\n", dbErr)
+		os.Exit(1)
+	}
+
 	LoadContextStore()
 	CleanupContexts()
-	StartSaveTimer()
 	initMCPClients()
+	startJobManager()
+	recoverPendingJobs()
 	registerCommands(config.Commands)
 
 	if !noTUI {
@@ -175,13 +195,25 @@ func main() {
 	signal.Notify(sigs, syscall.SIGINT)
 	go func() {
 		signal := <-sigs
+		if !atomic.CompareAndSwapInt32(&shutdownOnce, 0, 1) {
+			return
+		}
 		logger.Info("Caught signal", "signal", signal.String())
+
+		if logFlushStop != nil {
+			close(logFlushStop)
+			<-logFlushDone
+		}
+
 		StopPendingSave()
 		SaveContextStore()
 		if apiLogger != nil {
 			apiLogger.CloseAll()
 		}
 		closeMCPClients()
+		stopJobManager()
+		closeDB(theDB)
+		closeLogFile()
 		for _, bot := range bots {
 			bot.Quit()
 		}
@@ -218,10 +250,8 @@ func wrapForIRC(out string) []string {
 }
 
 func sendLoop(out string, network Network, c *girc.Client, e girc.Event) {
-	// for each new line break in response choices write to channel
 	for _, line := range wrapForIRC(out) {
-		//TODO better sync here
-		if !getRunning(network.Name + e.Params[0]) {
+		if !getRunning(network.Name, e.Params[0], e.Source.Name) {
 			break
 		}
 		if len(line) <= 0 {
@@ -235,7 +265,7 @@ func sendLoop(out string, network Network, c *girc.Client, e girc.Event) {
 
 func stop(network Network, _ *girc.Client, m girc.Event, _ interface{}, _ ...string) {
 	logger.Info("stop requested")
-	forceStopRunning(network.Name + m.Params[0])
+	forceStopRunning(network.Name, m.Params[0], m.Source.Name)
 }
 
 func isIgnored(host string) bool {
@@ -282,7 +312,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 			client.Cmd.Reply(event, warnMsg(config.Ratemsg()))
 			return
 		}
-		if getRunning(network.Name + event.Params[0]) {
+		if getRunning(network.Name, event.Params[0], event.Source.Name) {
 			client.Cmd.Reply(event, warnMsg(config.Busymsg()))
 			return
 		}
@@ -317,12 +347,16 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 				cmd(network, client, event, args...)
 				return
 			}
+			if r == jobs_re {
+				cmd(network, client, event, args...)
+				return
+			}
 
 			if !checkRate(network, event.Params[0]) {
 				client.Cmd.Reply(event, warnMsg(config.Ratemsg()))
 				return
 			}
-			if getRunning(network.Name + event.Params[0]) {
+			if getRunning(network.Name, event.Params[0], event.Source.Name) {
 				client.Cmd.Reply(event, warnMsg(config.Busymsg()))
 				return
 			}
@@ -345,7 +379,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 				client.Cmd.Reply(event, warnMsg(config.Ratemsg()))
 				return
 			}
-			if !rateExemptCmds[r] && getRunning(network.Name+event.Params[0]) {
+			if !rateExemptCmds[r] && getRunning(network.Name, event.Params[0], event.Source.Name) {
 				client.Cmd.Reply(event, warnMsg(config.Busymsg()))
 				return
 			}

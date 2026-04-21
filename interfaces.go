@@ -9,8 +9,9 @@ import (
 )
 
 type ChatContext struct {
-	Messages []gogpt.ChatCompletionMessage
-	Config   AIConfig
+	Messages  []gogpt.ChatCompletionMessage
+	Config    AIConfig
+	SessionID int64
 }
 
 type ChatContextStore interface {

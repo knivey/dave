@@ -11,3 +11,5 @@ api_logs/
 mcps/img-mcp/prod.toml
 mcps/img-mcp/test.toml
 mcps/img-mcp/img-mcp
+data/*
+logs/

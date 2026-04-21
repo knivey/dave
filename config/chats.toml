@@ -1,5 +1,5 @@
 # Chat commands support templating in the system prompt.
-# Available variables: {{.Nick}} (caller's nickname), {{.BotNick}} (bot's nickname), {{.Channel}} (channel name), {{.Network}} (network name), {{.ChanNicks}} (JSON array of ALL nicknames in {{.Channel}})
+# Available variables: {{.Nick}} (caller's nickname), {{.BotNick}} (bot's nickname), {{.Channel}} (channel name), {{.Network}} (network name), {{.ChanNicks}} (JSON array of ALL nicknames in {{.Channel}}), {{.Vars.*}} (custom variables from templatevars.toml)
 # Templates are processed when starting a new chat context. Invalid templates will cause the bot to fail at startup.
 # Example: system = "You are {{.BotNick}} chatting with {{.Nick}} in {{.Channel}} on {{.Network}}."
 

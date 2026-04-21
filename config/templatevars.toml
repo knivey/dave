@@ -1,0 +1,5 @@
+# Custom variables available in system prompt templates as {{.Vars.KeyName}}
+# Use these to inject reusable text blocks, notes, or configuration into your prompts.
+# Missing file = empty map (not fatal).
+
+# AsyncToolsNote = "You have access to both synchronous and asynchronous tools. Async tools return a job_id immediately. After calling an async tool, use register_background_job to monitor it — you will receive the result automatically when it completes. Do not poll or wait for results."

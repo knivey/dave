@@ -30,8 +30,8 @@ func mcpCmd(network Network, c *girc.Client, e girc.Event, cfg MCPCommandConfig,
 		return
 	}
 
-	startedRunning(network.Name + e.Params[0])
-	defer stoppedRunning(network.Name + e.Params[0])
+	startedRunning(network.Name, e.Params[0], e.Source.Name)
+	defer stoppedRunning(network.Name, e.Params[0], e.Source.Name)
 
 	toolArgs := make(map[string]any)
 	for k, v := range cfg.Args {

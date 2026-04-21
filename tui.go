@@ -28,6 +28,7 @@ var (
 	origStdoutFd int
 	origStderrFd int
 	logPipeR     *os.File
+	logFile      *os.File
 
 	logBufMu     sync.Mutex
 	logBuf       []string
@@ -213,6 +214,10 @@ func initTUI() (*tview.Application, error) {
 
 	go readPipeToView(logPipeR, logView, app)
 
+	if err := openLogFile(); err != nil {
+		fmt.Fprintf(logView, "[yellow]Warning: could not open log file: %v[white]\n", err)
+	}
+
 	logFlushStop = make(chan struct{})
 	logFlushDone = make(chan struct{})
 	go flushLogBuf(logView, app, logFlushStop, logFlushDone)
@@ -236,12 +241,35 @@ func restoreStdoutStderr() {
 	os.Stderr = os.NewFile(uintptr(syscall.Stderr), "/dev/stderr")
 }
 
+func openLogFile() error {
+	if err := os.MkdirAll("logs", 0755); err != nil {
+		return fmt.Errorf("creating logs directory: %w", err)
+	}
+	name := fmt.Sprintf("logs/dave-%s.log", time.Now().Format("2006-01-02"))
+	f, err := os.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return fmt.Errorf("opening log file: %w", err)
+	}
+	logFile = f
+	return nil
+}
+
+func closeLogFile() {
+	if logFile != nil {
+		logFile.Close()
+		logFile = nil
+	}
+}
+
 func readPipeToView(reader *os.File, view *tview.TextView, app *tview.Application) {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
 		line = strings.TrimRight(line, "\r")
+		if logFile != nil {
+			logFile.WriteString(line + "\n")
+		}
 		escaped := tview.Escape(line)
 		translated := tview.TranslateANSI(escaped)
 		logBufMu.Lock()
@@ -428,6 +456,8 @@ func requestShutdown() {
 			apiLogger.CloseAll()
 		}
 		closeMCPClients()
+		closeDB(theDB)
+		closeLogFile()
 		for _, bot := range bots {
 			bot.Quit()
 		}

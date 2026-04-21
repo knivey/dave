@@ -25,8 +25,8 @@ func completion(network Network, c *girc.Client, e girc.Event, cfg AIConfig, arg
 	logger := logxi.New(network.Name + ".completion." + cfg.Name)
 	logger.SetLevel(logxi.LevelAll)
 
-	startedRunning(network.Name + e.Params[0])
-	defer stoppedRunning(network.Name + e.Params[0])
+	startedRunning(network.Name, e.Params[0], e.Source.Name)
+	defer stoppedRunning(network.Name, e.Params[0], e.Source.Name)
 
 	req := gogpt.CompletionRequest{
 		Model:       cfg.Model,
@@ -112,7 +112,19 @@ func logUsage(logger logxi.Logger, usage *gogpt.Usage) {
 	logger.Info("token usage", fields...)
 }
 
-func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...string) {
+type chatRunner struct {
+	aiClient  *gogpt.Client
+	transport *daveTransport
+	cfg       AIConfig
+	network   Network
+	client    *girc.Client
+	channel   string
+	nick      string
+	ctxKey    string
+	logger    logxi.Logger
+}
+
+func newChatRunner(network Network, client *girc.Client, cfg AIConfig) *chatRunner {
 	aiConfig := gogpt.DefaultConfig(config.Services[cfg.Service].Key)
 	aiConfig.BaseURL = config.Services[cfg.Service].BaseURL
 	extraBody := make(map[string]any, len(cfg.ExtraBody)+1)
@@ -124,119 +136,85 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 	aiConfig.HTTPClient = &http.Client{Transport: transport}
 	aiClient := gogpt.NewClientWithConfig(aiConfig)
 
-	ctx_key := network.Name + e.Params[0] + e.Source.Name
-	transport.setAPILogger(apiLogger, ctx_key)
-
+	ctxKey := network.Name + client.GetNick()
 	logger := logxi.New(network.Name + ".completion." + cfg.Name)
 	logger.SetLevel(logxi.LevelAll)
 
-	startedRunning(network.Name + e.Params[0])
-	defer stoppedRunning(network.Name + e.Params[0])
-
-	var messages []gogpt.ChatCompletionMessage
-	if !ContextExists(ctx_key) {
-		var systemContent string
-		if cfg.SystemTmpl != nil {
-			data := SystemPromptData{
-				Nick:      e.Source.Name,
-				BotNick:   c.GetNick(),
-				Channel:   e.Params[0],
-				Network:   network.Name,
-				ChanNicks: "",
-			}
-
-			ch := c.LookupChannel(data.Channel)
-			var nicks []string
-			if ch != nil {
-				for _, u := range ch.Users(c) {
-					nicks = append(nicks, u.Nick)
-				}
-				sort.Strings(nicks)
-			}
-			data.ChanNicks = `["` + strings.Join(nicks, `","`) + `"]`
-
-			var buf strings.Builder
-			err := cfg.SystemTmpl.Execute(&buf, data)
-			if err != nil {
-				logger.Error("system prompt template execution error:", err)
-				systemContent = cfg.System
-			} else {
-				systemContent = buf.String()
-			}
-		} else {
-			systemContent = cfg.System
-		}
-		AddContext(cfg, ctx_key, gogpt.ChatCompletionMessage{
-			Role:    gogpt.ChatMessageRoleSystem,
-			Content: systemContent,
-		})
+	return &chatRunner{
+		aiClient:  aiClient,
+		transport: transport,
+		cfg:       cfg,
+		network:   network,
+		client:    client,
+		logger:    logger,
+		ctxKey:    ctxKey,
 	}
-	messages = GetContext(ctx_key).Messages
+}
 
-	var userMsg gogpt.ChatCompletionMessage
-	if cfg.DetectImages {
-		cleanText, imageUrls := detectImageURLs(args[0])
+func (cr *chatRunner) setChannel(channel, nick string) {
+	cr.channel = channel
+	cr.nick = nick
+	cr.ctxKey = cr.network.Name + channel + nick
+	cr.transport.setAPILogger(apiLogger, cr.ctxKey)
+}
 
-		if len(imageUrls) > 0 {
-			existingImages := countContextImages(messages)
-			remaining := cfg.MaxContextImages - existingImages
-
-			if remaining <= 0 {
-				c.Cmd.Reply(e, warnMsg(fmt.Sprintf("image limit reached (%d max in context), send text only", cfg.MaxContextImages)))
-				return
-			}
-
-			if len(imageUrls) > remaining {
-				c.Cmd.Reply(e, warnMsg(fmt.Sprintf("only %d more image(s) allowed in this context (%d/%d used)", remaining, existingImages, cfg.MaxContextImages)))
-				return
-			}
-
-			var err error
-			userMsg, err = buildImageMessage(cleanText, imageUrls, cfg.MaxImages, cfg.ImageFormat, cfg.ImageQuality, cfg.MaxImageWidth, cfg.MaxImageHeight)
-			if err != nil {
-				c.Cmd.Reply(e, errorMsg("failed to process images: "+err.Error()))
-				return
-			}
-		} else {
-			userMsg = gogpt.ChatCompletionMessage{
-				Role:    gogpt.ChatMessageRoleUser,
-				Content: cleanText,
-			}
+func (cr *chatRunner) sendIRC(out string) {
+	for _, line := range wrapForIRC(out) {
+		if !getRunning(cr.network.Name, cr.channel, cr.nick) {
+			break
 		}
-	} else {
-		userMsg = gogpt.ChatCompletionMessage{
-			Role:    gogpt.ChatMessageRoleUser,
-			Content: args[0],
+		if len(line) <= 0 {
+			continue
 		}
+		cr.client.Cmd.Message(cr.channel, "\x02\x02"+line)
+		time.Sleep(time.Millisecond * cr.network.Throttle)
 	}
+}
 
-	messages = AddContext(cfg, ctx_key, userMsg)
-	logger.Debug("running completion with messages:", "messages", sanitizeMessages(messages))
+func (cr *chatRunner) sendError(msg string) {
+	cr.client.Cmd.Message(cr.channel, errorMsg(msg))
+}
 
-	mcpTools := getMCPTools(cfg.MCPs)
+func (cr *chatRunner) sendWarning(msg string) {
+	cr.client.Cmd.Message(cr.channel, warnMsg(msg))
+}
 
-	req := BuildChatRequest(cfg, messages)
+func (cr *chatRunner) runTurn(messages []gogpt.ChatCompletionMessage) ([]gogpt.ChatCompletionMessage, bool) {
+	mcpTools := getMCPTools(cr.cfg.MCPs)
+	mcpTools = append(mcpTools, registerBackgroundJobTool())
+
+	req := BuildChatRequest(cr.cfg, messages)
 	req.Tools = mcpTools
 	if len(mcpTools) > 0 {
 		req.ToolChoice = "auto"
-		req.ParallelToolCalls = cfg.ParallelToolCalls
+		req.ParallelToolCalls = cr.cfg.ParallelToolCalls
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), cr.cfg.Timeout)
 	defer cancel()
 
+	const maxToolIterations = 20
+	iterations := 0
+
 	for {
+		if iterations >= maxToolIterations {
+			cr.sendIRC("\x0308⚠️ Tool call limit reached, stopping.\x0F")
+			cr.logger.Warn("max tool iterations reached", "limit", maxToolIterations)
+			return messages, true
+		}
+		iterations++
+
 		req.Messages = messages
 
-		if cfg.Streaming {
+		if cr.cfg.Streaming {
 			req.Stream = true
 			req.StreamOptions = &gogpt.StreamOptions{IncludeUsage: true}
 
-			stream, err := aiClient.CreateChatCompletionStream(ctx, req)
+			stream, err := cr.aiClient.CreateChatCompletionStream(ctx, req)
 			if err != nil {
-				c.Cmd.Reply(e, errorMsg(err.Error()))
-				logger.Error(err.Error())
-				return
+				cr.sendError(err.Error())
+				cr.logger.Error(err.Error())
+				return messages, true
 			}
 
 			bufferb := ""
@@ -244,7 +222,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 			reasoningBuffer := ""
 			logBuf := strings.Builder{}
 			var streamingRenderer *markdowntoirc.StreamingRenderer
-			if cfg.RenderMarkdown {
+			if cr.cfg.RenderMarkdown {
 				streamingRenderer = markdowntoirc.NewStreamingRenderer()
 			}
 
@@ -253,22 +231,22 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 			var streamUsage *gogpt.Usage
 			var streamTimings *Timings
 			streamDone := false
-			streamModel := cfg.Model
+			streamModel := cr.cfg.Model
 
 			type recvResult struct {
 				data []byte
 				err  error
 			}
 
-			idleTimer := time.NewTimer(cfg.StreamTimeout)
+			idleTimer := time.NewTimer(cr.cfg.StreamTimeout)
 			defer idleTimer.Stop()
 
 		StreamLoop:
 			for {
-				if !getRunning(network.Name + e.Params[0]) {
-					logger.Info("Closing stream")
+				if !getRunning(cr.network.Name, cr.channel, cr.nick) {
+					cr.logger.Info("Closing stream")
 					stream.Close()
-					return
+					return messages, true
 				}
 
 				ch := make(chan recvResult, 1)
@@ -280,26 +258,26 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 				select {
 				case res := <-ch:
 					if errors.Is(res.err, io.EOF) {
-						logger.Info("Stream completed")
+						cr.logger.Info("Stream completed")
 						streamDone = true
 						stream.Close()
 						break StreamLoop
 					}
 					if res.err != nil {
 						stream.Close()
-						c.Cmd.Reply(e, errorMsg(res.err.Error()))
-						logger.Error(res.err.Error())
-						return
+						cr.sendError(res.err.Error())
+						cr.logger.Error(res.err.Error())
+						return messages, true
 					}
-					idleTimer.Reset(cfg.StreamTimeout)
+					idleTimer.Reset(cr.cfg.StreamTimeout)
 
 					rawBytes := res.data
 					if apiLogger != nil {
-						apiLogger.LogStreamChunk(ctx_key, rawBytes)
+						apiLogger.LogStreamChunk(cr.ctxKey, rawBytes)
 					}
 					var resp gogpt.ChatCompletionStreamResponse
 					if err := json.Unmarshal(rawBytes, &resp); err != nil {
-						logger.Error("failed to unmarshal stream chunk", "error", err)
+						cr.logger.Error("failed to unmarshal stream chunk", "error", err)
 						continue
 					}
 
@@ -352,18 +330,18 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 						for _, line := range streamingRenderer.Process(textDelta) {
 							logBuf.WriteString(line)
 							logBuf.WriteString("\n")
-							sendLoop(line, network, c, e)
+							cr.sendIRC(line)
 						}
 					} else {
 						if strings.Contains(bufferb, "\n") {
 							logBuf.WriteString(bufferb)
-							sendLoop(bufferb, network, c, e)
+							cr.sendIRC(bufferb)
 							bufferb = ""
 						}
 					}
 
 					if choice.FinishReason == gogpt.FinishReasonToolCalls {
-						logger.Info("stream finished with tool calls")
+						cr.logger.Info("stream finished with tool calls")
 						stream.Close()
 						break StreamLoop
 					}
@@ -375,47 +353,51 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 
 				case <-idleTimer.C:
 					stream.Close()
-					c.Cmd.Reply(e, "error: stream timed out (no data received)")
-					logger.Error("stream idle timeout exceeded", "timeout", cfg.StreamTimeout)
-					return
+					cr.sendError("stream timed out (no data received)")
+					cr.logger.Error("stream idle timeout exceeded", "timeout", cr.cfg.StreamTimeout)
+					return messages, true
 				}
 			}
 
-			logStreamCompletion(ctx_key, streamModel, fullContent, reasoningBuffer, accumulatedToolCalls, streamUsage, assistantRole)
+			logStreamCompletion(cr.ctxKey, streamModel, fullContent, reasoningBuffer, accumulatedToolCalls, streamUsage, assistantRole)
 
 			flushStreamedOutput := func() {
-				logger.Info(fullContent)
-				AddContext(cfg, ctx_key, gogpt.ChatCompletionMessage{
+				cr.logger.Info(fullContent)
+				content := fullContent
+				if content == "" && reasoningBuffer == "" {
+					content = "..."
+				}
+				AddContext(cr.cfg, cr.ctxKey, gogpt.ChatCompletionMessage{
 					Role:             gogpt.ChatMessageRoleAssistant,
-					Content:          fullContent,
+					Content:          content,
 					ReasoningContent: reasoningBuffer,
-				})
+				}, cr.network.Name, cr.channel, cr.nick)
 				if streamingRenderer != nil {
 					for _, line := range streamingRenderer.Process("") {
 						logBuf.WriteString(line)
 						logBuf.WriteString("\n")
-						sendLoop(line, network, c, e)
+						cr.sendIRC(line)
 					}
 				} else if bufferb != "" {
 					logBuf.WriteString(bufferb)
-					sendLoop(bufferb, network, c, e)
+					cr.sendIRC(bufferb)
 				}
-				logger.Info("output", "text", logBuf.String())
-				logUsage(logger, streamUsage)
-				logTimings(logger, streamTimings)
+				cr.logger.Info("output", "text", logBuf.String())
+				logUsage(cr.logger, streamUsage)
+				logTimings(cr.logger, streamTimings)
 				if reasoningBuffer != "" {
-					logger.Info("reasoning", "content", reasoningBuffer)
+					cr.logger.Info("reasoning", "content", reasoningBuffer)
 				}
 			}
 
 			if streamDone || len(accumulatedToolCalls) == 0 {
 				flushStreamedOutput()
-				return
+				return messages, true
 			}
 
-			logger.Info("stream made tool calls", "count", len(accumulatedToolCalls))
-			logUsage(logger, streamUsage)
-			logTimings(logger, streamTimings)
+			cr.logger.Info("stream made tool calls", "count", len(accumulatedToolCalls))
+			logUsage(cr.logger, streamUsage)
+			logTimings(cr.logger, streamTimings)
 
 			if assistantRole == "" {
 				assistantRole = gogpt.ChatMessageRoleAssistant
@@ -431,59 +413,35 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 
 			if bufferb != "" {
 				text := ExtractFinalText(bufferb)
-				if cfg.RenderMarkdown {
+				if cr.cfg.RenderMarkdown {
 					text = markdowntoirc.MarkdownToIRC(text)
 				}
-				sendLoop(text, network, c, e)
+				cr.sendIRC(text)
 			}
 
-			AddContext(cfg, ctx_key, assistantMsg)
+			AddContext(cr.cfg, cr.ctxKey, assistantMsg, cr.network.Name, cr.channel, cr.nick)
 
-			for _, tc := range accumulatedToolCalls {
-				if cfg.ToolVerbose == nil || *cfg.ToolVerbose {
-					serverName := getMCPServerForTool(tc.Function.Name)
-					sendLoop(fmt.Sprintf("\x0315🔧 ToolCall: %s > %s", serverName, tc.Function.Name), network, c, e)
-				}
-				var toolArgs map[string]any
-				json.Unmarshal([]byte(tc.Function.Arguments), &toolArgs)
-				result, err := callMCPTool(tc.Function.Name, toolArgs)
-				if err != nil {
-					toolMsg := gogpt.ChatCompletionMessage{
-						Role:       gogpt.ChatMessageRoleTool,
-						Content:    "error: " + err.Error(),
-						ToolCallID: tc.ID,
-					}
-					messages = append(messages, toolMsg)
-					AddContext(cfg, ctx_key, toolMsg)
-					continue
-				}
-				toolText := mcpToolResultToText(result)
-				logger.Info("MCP tool result", "tool", tc.Function.Name, "result", toolText)
-				toolMsg := gogpt.ChatCompletionMessage{
-					Role:       gogpt.ChatMessageRoleTool,
-					Content:    toolText,
-					ToolCallID: tc.ID,
-				}
-				messages = append(messages, toolMsg)
-				AddContext(cfg, ctx_key, toolMsg)
+			var registeredJob bool
+			messages, registeredJob = cr.executeToolCalls(messages, accumulatedToolCalls)
+			if registeredJob {
+				return messages, true
 			}
-
 			continue
 		}
 
-		transport.setCaptureBody(true)
-		resp, err := aiClient.CreateChatCompletion(ctx, req)
-		transport.setCaptureBody(false)
+		cr.transport.setCaptureBody(true)
+		resp, err := cr.aiClient.CreateChatCompletion(ctx, req)
+		cr.transport.setCaptureBody(false)
 		if err != nil {
-			c.Cmd.Reply(e, errorMsg(err.Error()))
-			logger.Error(err.Error())
-			return
+			cr.sendError(err.Error())
+			cr.logger.Error(err.Error())
+			return messages, true
 		}
 
 		msg := resp.Choices[0].Message
 
 		reasoning := msg.ReasoningContent
-		capturedBody := transport.getCapturedBody()
+		capturedBody := cr.transport.getCapturedBody()
 		rawReasoning, rawDetails := extractResponseReasoning(capturedBody)
 		if reasoning == "" && rawReasoning != "" {
 			reasoning = rawReasoning
@@ -494,77 +452,297 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 		nonStreamTimings := extractTimings(capturedBody)
 
 		if len(msg.ToolCalls) == 0 {
-			AddContext(cfg, ctx_key, gogpt.ChatCompletionMessage{
+			content := msg.Content
+			if content == "" && reasoning == "" {
+				content = "..."
+			}
+			AddContext(cr.cfg, cr.ctxKey, gogpt.ChatCompletionMessage{
 				Role:             gogpt.ChatMessageRoleAssistant,
-				Content:          msg.Content,
+				Content:          content,
 				ReasoningContent: reasoning,
-			})
-			out := FormatOutput(msg.Content)
-			logger.Info(out)
-			text := ExtractFinalText(msg.Content)
+			}, cr.network.Name, cr.channel, cr.nick)
+			out := FormatOutput(content)
+			cr.logger.Info(out)
+			text := ExtractFinalText(content)
 
-			logUsage(logger, &resp.Usage)
-			logTimings(logger, nonStreamTimings)
+			logUsage(cr.logger, &resp.Usage)
+			logTimings(cr.logger, nonStreamTimings)
 			if reasoning != "" {
-				logger.Info("reasoning", "content", reasoning)
+				cr.logger.Info("reasoning", "content", reasoning)
 			}
 
-			if cfg.RenderMarkdown {
-				text = markdowntoirc.MarkdownToIRC(text)
+			if text != "" && text != "..." {
+				if cr.cfg.RenderMarkdown {
+					text = markdowntoirc.MarkdownToIRC(text)
+				}
+				cr.sendIRC(text)
 			}
-			sendLoop(text, network, c, e)
-			return
+			return messages, true
 		}
 
-		logger.Info("assistant made tool calls", "count", len(msg.ToolCalls))
-		logUsage(logger, &resp.Usage)
-		logTimings(logger, nonStreamTimings)
+		cr.logger.Info("assistant made tool calls", "count", len(msg.ToolCalls))
+		logUsage(cr.logger, &resp.Usage)
+		logTimings(cr.logger, nonStreamTimings)
 		messages = append(messages, msg)
 
-		AddContext(cfg, ctx_key, gogpt.ChatCompletionMessage{
+		AddContext(cr.cfg, cr.ctxKey, gogpt.ChatCompletionMessage{
 			Role:             gogpt.ChatMessageRoleAssistant,
 			Content:          msg.Content,
 			ReasoningContent: reasoning,
 			ToolCalls:        msg.ToolCalls,
-		})
+		}, cr.network.Name, cr.channel, cr.nick)
 		if msg.Content != "" {
 			text := ExtractFinalText(msg.Content)
-			if cfg.RenderMarkdown {
+			if cr.cfg.RenderMarkdown {
 				text = markdowntoirc.MarkdownToIRC(text)
 			}
-			sendLoop(text, network, c, e)
+			cr.sendIRC(text)
 		}
 		if reasoning != "" {
-			logger.Info("reasoning", "content", reasoning)
+			cr.logger.Info("reasoning", "content", reasoning)
 		}
 
-		for _, tc := range msg.ToolCalls {
-			if cfg.ToolVerbose == nil || *cfg.ToolVerbose {
-				serverName := getMCPServerForTool(tc.Function.Name)
-				sendLoop(fmt.Sprintf("\x0315🔧 ToolCall: %s > %s", serverName, tc.Function.Name), network, c, e)
-			}
-			var toolArgs map[string]any
-			json.Unmarshal([]byte(tc.Function.Arguments), &toolArgs)
-			result, err := callMCPTool(tc.Function.Name, toolArgs)
-			if err != nil {
-				toolMsg := gogpt.ChatCompletionMessage{
-					Role:       gogpt.ChatMessageRoleTool,
-					Content:    "error: " + err.Error(),
-					ToolCallID: tc.ID,
-				}
-				messages = append(messages, toolMsg)
-				AddContext(cfg, ctx_key, toolMsg)
-				continue
-			}
-			toolText := mcpToolResultToText(result)
-			logger.Info("MCP tool result", "tool", tc.Function.Name, "result", toolText)
+		var registeredJob bool
+		messages, registeredJob = cr.executeToolCalls(messages, msg.ToolCalls)
+		if registeredJob {
+			return messages, true
+		}
+	}
+}
+
+func (cr *chatRunner) executeToolCalls(messages []gogpt.ChatCompletionMessage, toolCalls []gogpt.ToolCall) ([]gogpt.ChatCompletionMessage, bool) {
+	registeredJob := false
+	for _, tc := range toolCalls {
+		if tc.Function.Name == backgroundJobToolName {
+			messages = cr.handleRegisterBackgroundJob(messages, tc)
+			registeredJob = true
+			continue
+		}
+		if cr.cfg.ToolVerbose == nil || *cr.cfg.ToolVerbose {
+			serverName := getMCPServerForTool(tc.Function.Name)
+			cr.sendIRC(fmt.Sprintf("\x0315🔧 ToolCall: %s > %s", serverName, tc.Function.Name))
+		}
+		var toolArgs map[string]any
+		json.Unmarshal([]byte(tc.Function.Arguments), &toolArgs)
+		result, err := callMCPTool(tc.Function.Name, toolArgs)
+		if err != nil {
 			toolMsg := gogpt.ChatCompletionMessage{
 				Role:       gogpt.ChatMessageRoleTool,
-				Content:    toolText,
+				Content:    "error: " + err.Error(),
 				ToolCallID: tc.ID,
 			}
 			messages = append(messages, toolMsg)
-			AddContext(cfg, ctx_key, toolMsg)
+			AddContext(cr.cfg, cr.ctxKey, toolMsg, cr.network.Name, cr.channel, cr.nick)
+			continue
+		}
+		toolText := mcpToolResultToText(result)
+		cr.logger.Info("MCP tool result", "tool", tc.Function.Name, "result", toolText)
+		toolMsg := gogpt.ChatCompletionMessage{
+			Role:       gogpt.ChatMessageRoleTool,
+			Content:    toolText,
+			ToolCallID: tc.ID,
+		}
+		messages = append(messages, toolMsg)
+		AddContext(cr.cfg, cr.ctxKey, toolMsg, cr.network.Name, cr.channel, cr.nick)
+	}
+	return messages, registeredJob
+}
+
+func (cr *chatRunner) handleRegisterBackgroundJob(messages []gogpt.ChatCompletionMessage, tc gogpt.ToolCall) []gogpt.ChatCompletionMessage {
+	var args struct {
+		JobID      string `json:"job_id"`
+		ToolName   string `json:"tool_name"`
+		ServerName string `json:"server_name"`
+	}
+	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+		toolMsg := gogpt.ChatCompletionMessage{
+			Role:       gogpt.ChatMessageRoleTool,
+			Content:    "error: failed to parse arguments: " + err.Error(),
+			ToolCallID: tc.ID,
+		}
+		messages = append(messages, toolMsg)
+		AddContext(cr.cfg, cr.ctxKey, toolMsg, cr.network.Name, cr.channel, cr.nick)
+		return messages
+	}
+
+	if args.JobID == "" || args.ToolName == "" || args.ServerName == "" {
+		toolMsg := gogpt.ChatCompletionMessage{
+			Role:       gogpt.ChatMessageRoleTool,
+			Content:    "error: job_id, tool_name, and server_name are required",
+			ToolCallID: tc.ID,
+		}
+		messages = append(messages, toolMsg)
+		AddContext(cr.cfg, cr.ctxKey, toolMsg, cr.network.Name, cr.channel, cr.nick)
+		return messages
+	}
+
+	jobMgr.mu.Lock()
+	_, alreadyRegistered := jobMgr.jobs[args.JobID]
+	jobMgr.mu.Unlock()
+	if alreadyRegistered {
+		toolMsg := gogpt.ChatCompletionMessage{
+			Role:       gogpt.ChatMessageRoleTool,
+			Content:    "Job already registered and being monitored.",
+			ToolCallID: tc.ID,
+		}
+		messages = append(messages, toolMsg)
+		AddContext(cr.cfg, cr.ctxKey, toolMsg, cr.network.Name, cr.channel, cr.nick)
+		return messages
+	}
+
+	cr.logger.Info("registering background job", "job_id", args.JobID, "tool", args.ToolName, "server", args.ServerName)
+
+	chatContextsMutex.Lock()
+	ctx := chatContextsMap[cr.ctxKey]
+	sessionID := ctx.SessionID
+	chatContextsMutex.Unlock()
+
+	if sessionID == 0 {
+		toolMsg := gogpt.ChatCompletionMessage{
+			Role:       gogpt.ChatMessageRoleTool,
+			Content:    "error: no active session to register job against",
+			ToolCallID: tc.ID,
+		}
+		messages = append(messages, toolMsg)
+		AddContext(cr.cfg, cr.ctxKey, toolMsg, cr.network.Name, cr.channel, cr.nick)
+		return messages
+	}
+
+	if err := createPendingJob(sessionID, args.JobID, args.ToolName, args.ServerName); err != nil {
+		cr.logger.Error("failed to create pending job", "error", err)
+		toolMsg := gogpt.ChatCompletionMessage{
+			Role:       gogpt.ChatMessageRoleTool,
+			Content:    "error: failed to register job: " + err.Error(),
+			ToolCallID: tc.ID,
+		}
+		messages = append(messages, toolMsg)
+		AddContext(cr.cfg, cr.ctxKey, toolMsg, cr.network.Name, cr.channel, cr.nick)
+		return messages
+	}
+
+	registerAsyncJob(args.JobID, sessionID, cr.ctxKey, args.ToolName, args.ServerName, cr.network.Name, cr.channel, cr.nick)
+
+	toolMsg := gogpt.ChatCompletionMessage{
+		Role:       gogpt.ChatMessageRoleTool,
+		Content:    "Job registered. You will receive the result when it completes.",
+		ToolCallID: tc.ID,
+	}
+	messages = append(messages, toolMsg)
+	AddContext(cr.cfg, cr.ctxKey, toolMsg, cr.network.Name, cr.channel, cr.nick)
+	return messages
+}
+
+func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...string) {
+	runner := newChatRunner(network, c, cfg)
+	runner.setChannel(e.Params[0], e.Source.Name)
+
+	ctx_key := runner.ctxKey
+
+	startedRunning(network.Name, e.Params[0], e.Source.Name)
+	defer stoppedRunning(network.Name, e.Params[0], e.Source.Name)
+
+	var messages []gogpt.ChatCompletionMessage
+	if !ContextExists(ctx_key) {
+		var systemContent string
+		if cfg.SystemTmpl != nil {
+			data := SystemPromptData{
+				Nick:      e.Source.Name,
+				BotNick:   c.GetNick(),
+				Channel:   e.Params[0],
+				Network:   network.Name,
+				ChanNicks: "",
+				Vars:      config.TemplateVars,
+			}
+
+			ch := c.LookupChannel(data.Channel)
+			var nicks []string
+			if ch != nil {
+				for _, u := range ch.Users(c) {
+					nicks = append(nicks, u.Nick)
+				}
+				sort.Strings(nicks)
+			}
+			data.ChanNicks = `["` + strings.Join(nicks, `","`) + `"]`
+
+			var buf strings.Builder
+			err := cfg.SystemTmpl.Execute(&buf, data)
+			if err != nil {
+				runner.logger.Error("system prompt template execution error:", err)
+				systemContent = cfg.System
+			} else {
+				systemContent = buf.String()
+			}
+		} else {
+			systemContent = cfg.System
+		}
+		AddContext(cfg, ctx_key, gogpt.ChatCompletionMessage{
+			Role:    gogpt.ChatMessageRoleSystem,
+			Content: systemContent,
+		}, network.Name, e.Params[0], e.Source.Name)
+	}
+	messages = GetContext(ctx_key).Messages
+
+	var userMsg gogpt.ChatCompletionMessage
+	if cfg.DetectImages {
+		cleanText, imageUrls := detectImageURLs(args[0])
+
+		if len(imageUrls) > 0 {
+			existingImages := countContextImages(messages)
+			remaining := cfg.MaxContextImages - existingImages
+
+			if remaining <= 0 {
+				runner.sendWarning(fmt.Sprintf("image limit reached (%d max in context), send text only", cfg.MaxContextImages))
+				return
+			}
+
+			if len(imageUrls) > remaining {
+				runner.sendWarning(fmt.Sprintf("only %d more image(s) allowed in this context (%d/%d used)", remaining, existingImages, cfg.MaxContextImages))
+				return
+			}
+
+			var err error
+			userMsg, err = buildImageMessage(cleanText, imageUrls, cfg.MaxImages, cfg.ImageFormat, cfg.ImageQuality, cfg.MaxImageWidth, cfg.MaxImageHeight)
+			if err != nil {
+				runner.sendError("failed to process images: " + err.Error())
+				return
+			}
+		} else {
+			userMsg = gogpt.ChatCompletionMessage{
+				Role:    gogpt.ChatMessageRoleUser,
+				Content: cleanText,
+			}
+		}
+	} else {
+		userMsg = gogpt.ChatCompletionMessage{
+			Role:    gogpt.ChatMessageRoleUser,
+			Content: args[0],
+		}
+	}
+
+	messages = AddContext(cfg, ctx_key, userMsg, network.Name, e.Params[0], e.Source.Name)
+	runner.logger.Debug("running completion with messages:", "messages", sanitizeMessages(messages))
+
+	messages, _ = runner.runTurn(messages)
+
+	if theDB != nil {
+		chatContextsMutex.Lock()
+		ctx := chatContextsMap[ctx_key]
+		chatContextsMutex.Unlock()
+		if ctx.SessionID != 0 {
+			for {
+				completedJobs, err := getCompletedPendingJobs(ctx.SessionID)
+				if err != nil || len(completedJobs) == 0 {
+					break
+				}
+				for _, cj := range completedJobs {
+					injectAsyncResultFromDB(ctx_key, ctx, cj, network.Name, e.Params[0], e.Source.Name)
+					markPendingJobDelivered(cj.JobID)
+				}
+				chatContextsMutex.Lock()
+				messages = chatContextsMap[ctx_key].Messages
+				chatContextsMutex.Unlock()
+				messages, _ = runner.runTurn(messages)
+			}
 		}
 	}
 }
@@ -585,6 +763,36 @@ func ExtractFinalText(text string) string {
 		return text[cut:]
 	}
 	return text
+}
+
+const backgroundJobToolName = "register_background_job"
+
+func registerBackgroundJobTool() gogpt.Tool {
+	return gogpt.Tool{
+		Type: "function",
+		Function: &gogpt.FunctionDefinition{
+			Name:        backgroundJobToolName,
+			Description: "Register a background job for monitoring. When an async tool (e.g. generate_image_async) returns a job_id, call this to have the system monitor the job. You will be notified with the result when it completes. Do not poll or wait for results. Continue the conversation normally.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"job_id": map[string]any{
+						"type":        "string",
+						"description": "The job_id returned by the async tool",
+					},
+					"tool_name": map[string]any{
+						"type":        "string",
+						"description": "Name of the async tool that started the job (e.g. 'generate_image_async')",
+					},
+					"server_name": map[string]any{
+						"type":        "string",
+						"description": "Name of the MCP server running the job",
+					},
+				},
+				"required": []string{"job_id", "tool_name", "server_name"},
+			},
+		},
+	}
 }
 
 func BuildChatRequest(cfg AIConfig, messages []gogpt.ChatCompletionMessage) gogpt.ChatCompletionRequest {

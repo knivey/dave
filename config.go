@@ -14,18 +14,19 @@ import (
 )
 
 type Config struct {
-	Trigger   string
-	Quitmsg   string
-	Networks  map[string]Network
-	Services  map[string]Service
-	Commands  Commands
-	Busymsgs  []string
-	Ratemsgs  []string
-	UploadURL string `toml:"uploadurl"`
-	Persist   PersistConfig
-	MCPs      map[string]MCPConfig `toml:"mcps"`
-	TUI       TUIConfig
-	APILog    APILogConfig `toml:"api_log"`
+	Trigger      string
+	Quitmsg      string
+	Networks     map[string]Network
+	Services     map[string]Service
+	Commands     Commands
+	Busymsgs     []string
+	Ratemsgs     []string
+	UploadURL    string `toml:"uploadurl"`
+	Database     DatabaseConfig
+	MCPs         map[string]MCPConfig `toml:"mcps"`
+	TUI          TUIConfig
+	APILog       APILogConfig      `toml:"api_log"`
+	TemplateVars map[string]string `toml:"-"`
 }
 
 type TUIConfig struct {
@@ -146,11 +147,12 @@ type SystemPromptData struct {
 	BotNick   string
 	Channel   string
 	Network   string
-	ChanNicks string // JSON array of channel nicks
+	ChanNicks string
+	Vars      map[string]string
 }
 
 func validateSystemPromptTemplate(tmpl *template.Template) error {
-	dummy := SystemPromptData{Nick: "dummy", BotNick: "dummy", Channel: "dummy", Network: "dummy", ChanNicks: `["dummy1","dummy2"]`}
+	dummy := SystemPromptData{Nick: "dummy", BotNick: "dummy", Channel: "dummy", Network: "dummy", ChanNicks: `["dummy1","dummy2"]`, Vars: map[string]string{"example": "test"}}
 	var buf strings.Builder
 	return tmpl.Execute(&buf, dummy)
 }
@@ -318,7 +320,11 @@ func loadConfigDir(dir string) (Config, error) {
 		return config, err
 	}
 
-	config.Persist.SetDefaults()
+	if err := loadTemplateVarsFile(dir, &config); err != nil {
+		return config, err
+	}
+
+	config.Database.SetDefaults()
 
 	return config, nil
 }
@@ -370,6 +376,23 @@ func loadMCPsFile(dir string, config *Config) error {
 	return nil
 }
 
+func loadTemplateVarsFile(dir string, config *Config) error {
+	path := filepath.Join(dir, "templatevars.toml")
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		if config.TemplateVars == nil {
+			config.TemplateVars = make(map[string]string)
+		}
+		return nil
+	}
+	if _, err := toml.DecodeFile(path, &config.TemplateVars); err != nil {
+		return fmt.Errorf("loading templatevars: %w", err)
+	}
+	if config.TemplateVars == nil {
+		config.TemplateVars = make(map[string]string)
+	}
+	return nil
+}
+
 func loadReloadableDir(dir string, config *Config) error {
 	var tmpConfig Config
 
@@ -381,6 +404,10 @@ func loadReloadableDir(dir string, config *Config) error {
 		return err
 	}
 
+	if err := loadTemplateVarsFile(dir, &tmpConfig); err != nil {
+		return err
+	}
+
 	commands, err := loadCommandsDir(dir, &tmpConfig)
 	if err != nil {
 		return err
@@ -389,6 +416,7 @@ func loadReloadableDir(dir string, config *Config) error {
 	config.MCPs = tmpConfig.MCPs
 	config.Services = tmpConfig.Services
 	config.Commands = commands
+	config.TemplateVars = tmpConfig.TemplateVars
 
 	return nil
 }

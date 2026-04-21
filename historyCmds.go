@@ -1,0 +1,375 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/lrstanley/girc"
+	gogpt "github.com/sashabaranov/go-openai"
+)
+
+const historyPageSize = 10
+
+func historySessions(network Network, c *girc.Client, e girc.Event, args ...string) {
+	if theDB == nil {
+		c.Cmd.Reply(e, errorMsg("database not available"))
+		return
+	}
+
+	startedRunning(network.Name, e.Params[0], e.Source.Name)
+	defer stoppedRunning(network.Name, e.Params[0], e.Source.Name)
+
+	sessions, err := getUserDBSessions(network.Name, e.Params[0], e.Source.Name, 20)
+	if err != nil {
+		c.Cmd.Reply(e, errorMsg("failed to query sessions: "+err.Error()))
+		return
+	}
+
+	if len(sessions) == 0 {
+		c.Cmd.Reply(e, "No session history found.")
+		return
+	}
+
+	c.Cmd.Reply(e, fmt.Sprintf("\x02Session History (%s on %s):\x02", e.Source.Name, network.Name))
+	for _, s := range sessions {
+		statusIcon := "\x0303●\x0F"
+		if s.Status != "active" {
+			statusIcon = "\x0304○\x0F"
+		}
+
+		var msgCount int
+		theDB.Get(&msgCount, "SELECT COUNT(*) FROM messages WHERE session_id = ?", s.ID)
+
+		lastActive := formatTimeAgo(s.LastActive)
+		line := fmt.Sprintf("  %s #%d [\x02%s\x02] %d msgs, %s ago",
+			statusIcon, s.ID, s.ChatCommand, msgCount, lastActive)
+
+		for _, wrapped := range wrapLine(line) {
+			c.Cmd.Reply(e, "\x02\x02"+wrapped)
+			time.Sleep(time.Millisecond * network.Throttle)
+		}
+	}
+}
+
+func historyShow(network Network, c *girc.Client, e girc.Event, args ...string) {
+	if theDB == nil {
+		c.Cmd.Reply(e, errorMsg("database not available"))
+		return
+	}
+
+	if len(args) == 0 || args[0] == "" {
+		c.Cmd.Reply(e, errorMsg("usage: "+network.Trigger+"history <session-id>"))
+		return
+	}
+
+	sessionID, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		c.Cmd.Reply(e, errorMsg("invalid session id"))
+		return
+	}
+
+	startedRunning(network.Name, e.Params[0], e.Source.Name)
+	defer stoppedRunning(network.Name, e.Params[0], e.Source.Name)
+
+	session, err := getDBSessionByID(sessionID)
+	if err != nil {
+		c.Cmd.Reply(e, errorMsg("session not found"))
+		return
+	}
+
+	if session.Network != network.Name || session.Channel != e.Params[0] || session.Nick != e.Source.Name {
+		c.Cmd.Reply(e, errorMsg("that session doesn't belong to you"))
+		return
+	}
+
+	messages, err := loadDBSessionMessages(sessionID)
+	if err != nil {
+		c.Cmd.Reply(e, errorMsg("failed to load messages: "+err.Error()))
+		return
+	}
+
+	var visible []dbMessage
+	for _, m := range messages {
+		if m.Role != "system" && m.Role != "tool" {
+			visible = append(visible, m)
+		}
+	}
+
+	c.Cmd.Reply(e, fmt.Sprintf("\x02Session #%d (%s) — %d messages:\x02", sessionID, session.ChatCommand, len(visible)))
+
+	var shown []dbMessage
+	if len(visible) <= 4 {
+		shown = visible
+	} else {
+		shown = append(visible[:2], visible[len(visible)-2:]...)
+	}
+
+	sendHistoryMsg := func(m dbMessage) {
+		var roleIcon string
+		switch m.Role {
+		case "user":
+			roleIcon = "\x0312►\x0F"
+		case "assistant":
+			roleIcon = "\x0303◄\x0F"
+		default:
+			roleIcon = "·"
+		}
+
+		content := m.Content
+		if len(content) > 200 {
+			content = content[:197] + "..."
+		}
+		content = strings.ReplaceAll(content, "\n", " ")
+
+		line := fmt.Sprintf("  %s %s", roleIcon, content)
+		for _, wrapped := range wrapLine(line) {
+			if !getRunning(network.Name, e.Params[0], e.Source.Name) {
+				return
+			}
+			c.Cmd.Reply(e, "\x02\x02"+wrapped)
+			time.Sleep(time.Millisecond * network.Throttle)
+		}
+	}
+
+	if len(visible) > 4 {
+		sendHistoryMsg(shown[0])
+		sendHistoryMsg(shown[1])
+		c.Cmd.Reply(e, fmt.Sprintf("  \x0314... (%d more) ...\x0F", len(visible)-4))
+		sendHistoryMsg(shown[2])
+		sendHistoryMsg(shown[3])
+	} else {
+		for _, m := range shown {
+			if !getRunning(network.Name, e.Params[0], e.Source.Name) {
+				return
+			}
+			sendHistoryMsg(m)
+		}
+	}
+}
+
+func historyStats(network Network, c *girc.Client, e girc.Event, args ...string) {
+	if theDB == nil {
+		c.Cmd.Reply(e, errorMsg("database not available"))
+		return
+	}
+
+	startedRunning(network.Name, e.Params[0], e.Source.Name)
+	defer stoppedRunning(network.Name, e.Params[0], e.Source.Name)
+
+	sessionCount, messageCount, err := getUserDBStats(network.Name, e.Params[0], e.Source.Name)
+	if err != nil {
+		c.Cmd.Reply(e, errorMsg("failed to query stats: "+err.Error()))
+		return
+	}
+
+	c.Cmd.Reply(e, fmt.Sprintf("\x02Your stats on %s/%s:\x02 %d sessions, %d total messages",
+		network.Name, e.Params[0], sessionCount, messageCount))
+}
+
+func historyDelete(network Network, c *girc.Client, e girc.Event, args ...string) {
+	if theDB == nil {
+		c.Cmd.Reply(e, errorMsg("database not available"))
+		return
+	}
+
+	if len(args) == 0 || args[0] == "" {
+		c.Cmd.Reply(e, errorMsg("usage: "+network.Trigger+"delete <session-id>"))
+		return
+	}
+
+	sessionID, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		c.Cmd.Reply(e, errorMsg("invalid session id"))
+		return
+	}
+
+	startedRunning(network.Name, e.Params[0], e.Source.Name)
+	defer stoppedRunning(network.Name, e.Params[0], e.Source.Name)
+
+	session, err := getDBSessionByID(sessionID)
+	if err != nil {
+		c.Cmd.Reply(e, errorMsg("session not found"))
+		return
+	}
+
+	if session.Network != network.Name || session.Channel != e.Params[0] || session.Nick != e.Source.Name {
+		c.Cmd.Reply(e, errorMsg("that session doesn't belong to you"))
+		return
+	}
+
+	if err := deleteDBSession(sessionID); err != nil {
+		c.Cmd.Reply(e, errorMsg("failed to delete session: "+err.Error()))
+		return
+	}
+
+	chatContextsMutex.Lock()
+	if ctx, ok := chatContextsMap[session.ContextKey]; ok && ctx.SessionID == sessionID {
+		chatContextsMap[session.ContextKey] = ChatContext{}
+	}
+	chatContextsMutex.Unlock()
+
+	c.Cmd.Reply(e, fmt.Sprintf("Deleted session #%d.", sessionID))
+}
+
+func historyResume(network Network, c *girc.Client, e girc.Event, args ...string) {
+	if theDB == nil {
+		c.Cmd.Reply(e, errorMsg("database not available"))
+		return
+	}
+
+	if len(args) == 0 || args[0] == "" {
+		c.Cmd.Reply(e, errorMsg("usage: "+network.Trigger+"resume <session-id>"))
+		return
+	}
+
+	sessionID, err := strconv.ParseInt(args[0], 10, 64)
+	if err != nil {
+		c.Cmd.Reply(e, errorMsg("invalid session id"))
+		return
+	}
+
+	startedRunning(network.Name, e.Params[0], e.Source.Name)
+	defer stoppedRunning(network.Name, e.Params[0], e.Source.Name)
+
+	session, err := getDBSessionByID(sessionID)
+	if err != nil {
+		c.Cmd.Reply(e, errorMsg("session not found"))
+		return
+	}
+
+	if session.Network != network.Name || session.Channel != e.Params[0] || session.Nick != e.Source.Name {
+		c.Cmd.Reply(e, errorMsg("that session doesn't belong to you"))
+		return
+	}
+
+	currentCfg, ok := config.Commands.Chats[session.ChatCommand]
+	if !ok {
+		c.Cmd.Reply(e, errorMsg(fmt.Sprintf("chat command %q no longer exists, cannot resume", session.ChatCommand)))
+		return
+	}
+
+	dbMsgs, err := loadDBSessionMessages(sessionID)
+	if err != nil {
+		c.Cmd.Reply(e, errorMsg("failed to load messages: "+err.Error()))
+		return
+	}
+
+	var messages []gogpt.ChatCompletionMessage
+	for _, dm := range dbMsgs {
+		msg := gogpt.ChatCompletionMessage{
+			Role:    dm.Role,
+			Content: dm.Content,
+		}
+		if dm.ToolCallID != nil {
+			msg.ToolCallID = *dm.ToolCallID
+		}
+		if dm.ReasoningContent != nil {
+			msg.ReasoningContent = *dm.ReasoningContent
+		}
+		if dm.ToolCalls != nil {
+			var toolCalls []gogpt.ToolCall
+			if err := json.Unmarshal([]byte(*dm.ToolCalls), &toolCalls); err == nil {
+				msg.ToolCalls = toolCalls
+			}
+		}
+		messages = append(messages, msg)
+	}
+
+	if len(messages) == 0 {
+		c.Cmd.Reply(e, errorMsg("session has no messages"))
+		return
+	}
+
+	ctxKey := network.Name + e.Params[0] + e.Source.Name
+
+	chatContextsMutex.Lock()
+	oldCtx := chatContextsMap[ctxKey]
+	if oldCtx.SessionID != 0 && oldCtx.SessionID != sessionID {
+		if theDB != nil {
+			completeDBSession(oldCtx.SessionID)
+		}
+		c.Cmd.Reply(e, fmt.Sprintf("Paused your previous session #%d.", oldCtx.SessionID))
+	}
+	messages = TruncateHistory(messages, currentCfg.MaxHistory)
+	chatContextsMap[ctxKey] = ChatContext{
+		Messages:  messages,
+		Config:    currentCfg,
+		SessionID: sessionID,
+	}
+	chatContextsMutex.Unlock()
+	SetContextLastActive(ctxKey)
+
+	if theDB != nil {
+		theDB.Exec("UPDATE sessions SET status = 'active' WHERE id = ?", sessionID)
+	}
+
+	c.Cmd.Reply(e, fmt.Sprintf("Resumed session #%d (%s) with %d messages.", sessionID, session.ChatCommand, len(messages)))
+}
+
+func formatTimeAgo(dbTime string) string {
+	for _, layout := range []string{
+		"2006-01-02T15:04:05Z07:00",
+		"2006-01-02T15:04:05Z",
+		"2006-01-02 15:04:05",
+		time.RFC3339,
+		time.RFC3339Nano,
+	} {
+		if t, err := time.Parse(layout, dbTime); err == nil {
+			d := time.Since(t)
+			if d < time.Minute {
+				return "just now"
+			}
+			if d < time.Hour {
+				return fmt.Sprintf("%dm", int(d.Minutes()))
+			}
+			if d < 24*time.Hour {
+				return fmt.Sprintf("%dh", int(d.Hours()))
+			}
+			return fmt.Sprintf("%dd", int(d.Hours()/24))
+		}
+	}
+	return dbTime
+}
+
+func historyJobs(network Network, c *girc.Client, e girc.Event, args ...string) {
+	if theDB == nil {
+		c.Cmd.Reply(e, errorMsg("database not available"))
+		return
+	}
+
+	startedRunning(network.Name, e.Params[0], e.Source.Name)
+	defer stoppedRunning(network.Name, e.Params[0], e.Source.Name)
+
+	jobs, err := getPendingJobsForUser(network.Name, e.Params[0], e.Source.Name)
+	if err != nil {
+		c.Cmd.Reply(e, errorMsg("failed to query jobs: "+err.Error()))
+		return
+	}
+
+	if len(jobs) == 0 {
+		c.Cmd.Reply(e, "No background jobs found.")
+		return
+	}
+
+	c.Cmd.Reply(e, fmt.Sprintf("\x02Your background jobs:\x02"))
+	for _, j := range jobs {
+		var statusIcon string
+		switch j.Status {
+		case "pending", "running":
+			statusIcon = "\x0303●\x0F"
+		case "completed":
+			statusIcon = "\x0308◉\x0F"
+		default:
+			statusIcon = "·"
+		}
+		elapsed := formatTimeAgo(j.CreatedAt)
+		line := fmt.Sprintf("  %s %s [%s/%s] %s, %s ago", statusIcon, j.JobID, j.ToolName, j.MCPServer, j.Status, elapsed)
+		for _, wrapped := range wrapLine(line) {
+			c.Cmd.Reply(e, "\x02\x02"+wrapped)
+			time.Sleep(time.Millisecond * network.Throttle)
+		}
+	}
+}

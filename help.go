@@ -19,9 +19,8 @@ type helpEntry struct {
 }
 
 func help(network Network, client *girc.Client, event girc.Event, args ...string) {
-	key := network.Name + event.Params[0]
-	startedRunning(key)
-	defer stoppedRunning(key)
+	startedRunning(network.Name, event.Params[0], event.Source.Name)
+	defer stoppedRunning(network.Name, event.Params[0], event.Source.Name)
 
 	botnick := client.GetNick()
 	var lines []string
@@ -52,6 +51,16 @@ func help(network Network, client *girc.Client, event girc.Event, args ...string
 	lines = append(lines, fmt.Sprintf("Only Chat commands start a persistent context. After starting one, reply with my nick (e.g. \"%s, your message here\") to continue that context without using a command.", botnick))
 	lines = append(lines, "Commands marked with (regex) use pattern matching, the trigger can match more than one name.")
 	lines = append(lines, fmt.Sprintf("  %sstop \u2014 Stop text generation (including this help message)", network.Trigger))
+
+	if theDB != nil {
+		lines = append(lines, "\x02History:\x02")
+		lines = append(lines, fmt.Sprintf("  %ssessions \u2014 List your recent sessions", network.Trigger))
+		lines = append(lines, fmt.Sprintf("  %shistory <id> \u2014 Show messages from a session", network.Trigger))
+		lines = append(lines, fmt.Sprintf("  %sresume <id> \u2014 Resume a previous session", network.Trigger))
+		lines = append(lines, fmt.Sprintf("  %sdelete <id> \u2014 Delete a session", network.Trigger))
+		lines = append(lines, fmt.Sprintf("  %smystats \u2014 Show your session/message stats", network.Trigger))
+		lines = append(lines, fmt.Sprintf("  %sjobs \u2014 List your background jobs", network.Trigger))
+	}
 
 	if len(config.Commands.Completions) > 0 {
 		var entries []helpEntry
@@ -127,11 +136,11 @@ func help(network Network, client *girc.Client, event girc.Event, args ...string
 	}
 
 	for _, line := range lines {
-		if !getRunning(key) {
+		if !getRunning(network.Name, event.Params[0], event.Source.Name) {
 			return
 		}
 		for _, wrapped := range wrapLine(line) {
-			if !getRunning(key) {
+			if !getRunning(network.Name, event.Params[0], event.Source.Name) {
 				return
 			}
 			client.Cmd.Reply(event, "\x02\x02"+wrapped)
@@ -218,6 +227,42 @@ func findCommandHelp(network Network, cmdName string) (helpEntry, bool) {
 			cmd:  network.Trigger + "stop",
 			info: "",
 			desc: "Stop text generation (including this help message)",
+		}, true
+	}
+	if cmdName == "sessions" {
+		return helpEntry{
+			cmd:  network.Trigger + "sessions",
+			desc: "List your recent chat sessions",
+		}, true
+	}
+	if cmdName == "history" {
+		return helpEntry{
+			cmd:  network.Trigger + "history <session-id>",
+			desc: "Show messages from a session (first/last 2 with ... in between, tool calls hidden)",
+		}, true
+	}
+	if cmdName == "resume" {
+		return helpEntry{
+			cmd:  network.Trigger + "resume <session-id>",
+			desc: "Resume a previous session, pausing any current active session",
+		}, true
+	}
+	if cmdName == "delete" {
+		return helpEntry{
+			cmd:  network.Trigger + "delete <session-id>",
+			desc: "Delete a session and its messages",
+		}, true
+	}
+	if cmdName == "mystats" {
+		return helpEntry{
+			cmd:  network.Trigger + "mystats",
+			desc: "Show your total sessions and messages on this network/channel",
+		}, true
+	}
+	if cmdName == "jobs" {
+		return helpEntry{
+			cmd:  network.Trigger + "jobs",
+			desc: "List your pending, running, and recently completed background jobs",
 		}, true
 	}
 	return helpEntry{}, false

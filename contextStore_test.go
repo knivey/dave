@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jmoiron/sqlx"
 	gogpt "github.com/sashabaranov/go-openai"
 )
 
@@ -15,513 +16,394 @@ func TestMain(m *testing.M) {
 	chatContextsMap = make(map[string]ChatContext)
 	chatContextsMutex.Unlock()
 	contextLastActive = make(map[string]int64)
-	contextsModified = false
 
 	os.Exit(m.Run())
 }
 
-func TestContextStoreRoundtrip(t *testing.T) {
+func setupTestDB(t *testing.T) (*sqlx.DB, func()) {
+	t.Helper()
+	chatContextsMutex.Lock()
+	chatContextsMap = make(map[string]ChatContext)
+	chatContextsMutex.Unlock()
+	contextLastActive = make(map[string]int64)
+
 	tmpDir := t.TempDir()
-	oldPath := persistCfg.FilePath
-	persistCfg.FilePath = filepath.Join(tmpDir, "test_contexts.json")
-	defer func() { persistCfg.FilePath = oldPath }()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	db, err := initDB(DatabaseConfig{Path: dbPath, MaxAgeDays: 90})
+	if err != nil {
+		t.Fatalf("failed to init test db: %v", err)
+	}
+	oldDB := theDB
+	theDB = db
+	return db, func() {
+		theDB = oldDB
+		db.Close()
+	}
+}
+
+func TestDBSessionRoundtrip(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+	_ = db
 
 	chatContextsMutex.Lock()
-	chatContextsMap["testkey1"] = ChatContext{
+	chatContextsMap["net#chanuser"] = ChatContext{
 		Messages: []gogpt.ChatCompletionMessage{
 			{Role: "system", Content: "You are a helpful assistant"},
 			{Role: "user", Content: "Hello"},
 			{Role: "assistant", Content: "Hi there!"},
 		},
-		Config: AIConfig{Name: "testcmd", MaxHistory: 5, Temperature: 0.7},
+		Config:    AIConfig{Name: "testcmd", MaxHistory: 5, Temperature: 0.7},
+		SessionID: 0,
 	}
 	chatContextsMutex.Unlock()
 
-	// setup config for lookup in LoadContextStore
-	oldChats := config.Commands.Chats
-	config.Commands.Chats = map[string]AIConfig{
-		"testcmd": {Name: "testcmd", MaxHistory: 5, Temperature: 0.7},
+	ctxKey := "net#chanuser"
+	sid, err := createDBSession(ctxKey, "net", "#chan", "user", "testcmd")
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
 	}
-	defer func() { config.Commands.Chats = oldChats }()
-	contextLastActive["testkey1"] = time.Now().Unix()
 
-	SaveContextStore()
+	chatContextsMutex.Lock()
+	ctx := chatContextsMap[ctxKey]
+	ctx.SessionID = sid
+	chatContextsMap[ctxKey] = ctx
+	chatContextsMutex.Unlock()
+
+	for _, msg := range chatContextsMap[ctxKey].Messages {
+		toolCallsJSON := func(m gogpt.ChatCompletionMessage) *string {
+			if len(m.ToolCalls) > 0 {
+				data, _ := json.Marshal(m.ToolCalls)
+				s := string(data)
+				return &s
+			}
+			return nil
+		}(msg)
+		if err := insertDBMessage(sid, msg.Role, msg.Content, toolCallsJSON, nil, nil); err != nil {
+			t.Fatalf("failed to insert message: %v", err)
+		}
+	}
 
 	chatContextsMutex.Lock()
 	chatContextsMap = make(map[string]ChatContext)
 	chatContextsMutex.Unlock()
 	contextLastActive = make(map[string]int64)
 
+	oldChats := config.Commands.Chats
+	config.Commands.Chats = map[string]AIConfig{
+		"testcmd": {Name: "testcmd", MaxHistory: 5, Temperature: 0.7},
+	}
+	defer func() { config.Commands.Chats = oldChats }()
+
 	LoadContextStore()
 
 	chatContextsMutex.Lock()
-	ctx, ok := chatContextsMap["testkey1"]
+	ctx2, ok := chatContextsMap[ctxKey]
 	chatContextsMutex.Unlock()
 
 	if !ok {
 		t.Fatal("expected context to be loaded")
 	}
 
-	if len(ctx.Messages) != 3 {
-		t.Errorf("expected 3 messages, got %d", len(ctx.Messages))
+	if len(ctx2.Messages) != 3 {
+		t.Errorf("expected 3 messages, got %d", len(ctx2.Messages))
 	}
 
-	if ctx.Messages[0].Role != "system" {
-		t.Errorf("first message should be system, got %s", ctx.Messages[0].Role)
+	if ctx2.Messages[0].Role != "system" {
+		t.Errorf("first message should be system, got %s", ctx2.Messages[0].Role)
 	}
 
-	if ctx.Messages[0].Content != "You are a helpful assistant" {
-		t.Errorf("system prompt mismatch: %s", ctx.Messages[0].Content)
+	if ctx2.Messages[0].Content != "You are a helpful assistant" {
+		t.Errorf("system prompt mismatch: %s", ctx2.Messages[0].Content)
 	}
 }
 
-func TestContextStoreMissingFile(t *testing.T) {
-	tmpDir := t.TempDir()
-	oldPath := persistCfg.FilePath
-	persistCfg.FilePath = filepath.Join(tmpDir, "nonexistent.json")
-	defer func() { persistCfg.FilePath = oldPath }()
+func TestDBCleanupByAge(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+	_ = db
 
-	chatContextsMutex.Lock()
-	chatContextsMap = make(map[string]ChatContext)
-	chatContextsMutex.Unlock()
-	contextLastActive = make(map[string]int64)
-
-	LoadContextStore()
-
-	chatContextsMutex.Lock()
-	if len(chatContextsMap) != 0 {
-		t.Errorf("expected empty map after loading missing file, got %d", len(chatContextsMap))
-	}
-	chatContextsMutex.Unlock()
-}
-
-func TestContextStoreCorruptFile(t *testing.T) {
-	tmpDir := t.TempDir()
-	oldPath := persistCfg.FilePath
-	persistCfg.FilePath = filepath.Join(tmpDir, "corrupt.json")
-	defer func() { persistCfg.FilePath = oldPath }()
-
-	err := os.WriteFile(persistCfg.FilePath, []byte("not valid json{{{"), 0644)
+	sid, err := createDBSession("oldkey", "net", "#chan", "user", "testcmd")
 	if err != nil {
-		t.Fatalf("failed to write corrupt file: %v", err)
+		t.Fatalf("failed to create session: %v", err)
 	}
+	insertDBMessage(sid, "user", "hello", nil, nil, nil)
 
-	chatContextsMutex.Lock()
-	chatContextsMap = make(map[string]ChatContext)
-	chatContextsMutex.Unlock()
-	contextLastActive = make(map[string]int64)
+	theDB.Exec("UPDATE sessions SET last_active = datetime('now', '-100 days') WHERE id = ?", sid)
 
-	LoadContextStore()
-
-	chatContextsMutex.Lock()
-	if len(chatContextsMap) != 0 {
-		t.Errorf("expected empty map after loading corrupt file, got %d", len(chatContextsMap))
-	}
-	chatContextsMutex.Unlock()
-}
-
-func TestContextStoreCleanupByAge(t *testing.T) {
-	tmpDir := t.TempDir()
-	oldPath := persistCfg.FilePath
-	persistCfg.FilePath = filepath.Join(tmpDir, "cleanup_test.json")
-	defer func() { persistCfg.FilePath = oldPath }()
-
-	now := time.Now().Unix()
-
-	chatContextsMutex.Lock()
-	chatContextsMap = map[string]ChatContext{
-		"active": {
-			Messages: []gogpt.ChatCompletionMessage{{Role: "user", Content: "hi"}},
-			Config:   AIConfig{MaxHistory: 5},
-		},
-		"old": {
-			Messages: []gogpt.ChatCompletionMessage{{Role: "user", Content: "old"}},
-			Config:   AIConfig{MaxHistory: 5},
-		},
-	}
-	chatContextsMutex.Unlock()
-
-	contextLastActive = map[string]int64{
-		"active": now,
-		"old":    now - 10*86400,
-	}
-
-	oldMaxAge := persistCfg.MaxAgeDays
-	persistCfg.MaxAgeDays = 7
-	defer func() { persistCfg.MaxAgeDays = oldMaxAge }()
-
-	CleanupContexts()
-
-	chatContextsMutex.Lock()
-	_, hasActive := chatContextsMap["active"]
-	_, hasOld := chatContextsMap["old"]
-	chatContextsMutex.Unlock()
-
-	if !hasActive {
-		t.Error("expected active context to remain")
-	}
-
-	if hasOld {
-		t.Error("expected old context to be deleted")
-	}
-}
-
-func TestContextStoreCleanupByMaxContexts(t *testing.T) {
-	tmpDir := t.TempDir()
-	oldPath := persistCfg.FilePath
-	persistCfg.FilePath = filepath.Join(tmpDir, "max_cleanup_test.json")
-	defer func() { persistCfg.FilePath = oldPath }()
-
-	now := time.Now().Unix()
-
-	chatContextsMutex.Lock()
-	chatContextsMap = make(map[string]ChatContext)
-	for i := 0; i < 15; i++ {
-		chatContextsMap[string(rune('a'+i))] = ChatContext{
-			Messages: []gogpt.ChatCompletionMessage{{Role: "user", Content: "test"}},
-			Config:   AIConfig{MaxHistory: 5},
-		}
-	}
-	chatContextsMutex.Unlock()
-
-	contextLastActive = make(map[string]int64)
-	for i := 0; i < 15; i++ {
-		contextLastActive[string(rune('a'+i))] = now - int64(i)
-	}
-
-	oldMaxContexts := persistCfg.MaxContexts
-	persistCfg.MaxContexts = 10
-	defer func() { persistCfg.MaxContexts = oldMaxContexts }()
-
-	CleanupContexts()
-
-	chatContextsMutex.Lock()
-	count := len(chatContextsMap)
-	chatContextsMutex.Unlock()
-
-	if count != 10 {
-		t.Errorf("expected 10 contexts after cleanup, got %d", count)
-	}
-}
-
-func TestContextStoreEmptyContextsNotSaved(t *testing.T) {
-	tmpDir := t.TempDir()
-	oldPath := persistCfg.FilePath
-	persistCfg.FilePath = filepath.Join(tmpDir, "empty_test.json")
-	defer func() { persistCfg.FilePath = oldPath }()
-
-	chatContextsMutex.Lock()
-	chatContextsMap = make(map[string]ChatContext)
-	chatContextsMutex.Unlock()
-	contextLastActive = make(map[string]int64)
-
-	SaveContextStore()
-
-	data, err := os.ReadFile(persistCfg.FilePath)
+	affected, err := cleanupDBSessions(90)
 	if err != nil {
-		t.Fatalf("failed to read saved file: %v", err)
+		t.Fatalf("cleanup failed: %v", err)
+	}
+	if affected != 1 {
+		t.Errorf("expected 1 session cleaned up, got %d", affected)
 	}
 
-	var store ContextStore
-	err = json.Unmarshal(data, &store)
+	session, err := getDBSessionByID(sid)
 	if err != nil {
-		t.Fatalf("failed to unmarshal: %v", err)
+		t.Fatalf("failed to get session: %v", err)
 	}
-
-	if len(store.Contexts) != 0 {
-		t.Errorf("expected empty contexts in saved file, got %d", len(store.Contexts))
+	if session.Status != "completed" {
+		t.Errorf("expected status 'completed', got %s", session.Status)
 	}
 }
 
-func TestPersistConfigSetDefaults(t *testing.T) {
-	cfg := PersistConfig{}
+func TestDBSessionCreateAndMessage(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+	_ = db
+
+	sid, err := createDBSession("testkey", "net", "#chan", "nick", "chat")
+	if err != nil {
+		t.Fatalf("createDBSession failed: %v", err)
+	}
+	if sid == 0 {
+		t.Error("expected non-zero session id")
+	}
+
+	err = insertDBMessage(sid, "system", "You are helpful", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("insertDBMessage failed: %v", err)
+	}
+	err = insertDBMessage(sid, "user", "Hello!", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("insertDBMessage failed: %v", err)
+	}
+
+	msgs, err := loadDBSessionMessages(sid)
+	if err != nil {
+		t.Fatalf("loadDBSessionMessages failed: %v", err)
+	}
+	if len(msgs) != 2 {
+		t.Errorf("expected 2 messages, got %d", len(msgs))
+	}
+	if msgs[0].Role != "system" {
+		t.Errorf("expected first message role 'system', got %s", msgs[0].Role)
+	}
+	if msgs[1].Content != "Hello!" {
+		t.Errorf("expected second message content 'Hello!', got %s", msgs[1].Content)
+	}
+}
+
+func TestDBSessionComplete(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+	_ = db
+
+	sid, _ := createDBSession("testkey", "net", "#chan", "nick", "chat")
+
+	err := completeDBSession(sid)
+	if err != nil {
+		t.Fatalf("completeDBSession failed: %v", err)
+	}
+
+	session, err := getDBSessionByID(sid)
+	if err != nil {
+		t.Fatalf("getDBSessionByID failed: %v", err)
+	}
+	if session.Status != "completed" {
+		t.Errorf("expected status 'completed', got %s", session.Status)
+	}
+}
+
+func TestDBDeleteSession(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+	_ = db
+
+	sid, _ := createDBSession("testkey", "net", "#chan", "nick", "chat")
+	insertDBMessage(sid, "user", "hello", nil, nil, nil)
+
+	err := deleteDBSession(sid)
+	if err != nil {
+		t.Fatalf("deleteDBSession failed: %v", err)
+	}
+
+	_, err = getDBSessionByID(sid)
+	if err == nil {
+		t.Error("expected error getting deleted session")
+	}
+}
+
+func TestDBUserSessions(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+	_ = db
+
+	for i := 0; i < 3; i++ {
+		createDBSession("key"+string(rune('a'+i)), "net", "#chan", "nick", "chat")
+	}
+	createDBSession("other", "net", "#chan", "other", "chat")
+
+	sessions, err := getUserDBSessions("net", "#chan", "nick", 10)
+	if err != nil {
+		t.Fatalf("getUserDBSessions failed: %v", err)
+	}
+	if len(sessions) != 3 {
+		t.Errorf("expected 3 sessions for nick, got %d", len(sessions))
+	}
+}
+
+func TestDBUserStats(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+	_ = db
+
+	sid1, _ := createDBSession("key1", "net", "#chan", "nick", "chat")
+	insertDBMessage(sid1, "system", "sys", nil, nil, nil)
+	insertDBMessage(sid1, "user", "hello", nil, nil, nil)
+
+	sid2, _ := createDBSession("key2", "net", "#chan", "nick", "chat")
+	insertDBMessage(sid2, "system", "sys", nil, nil, nil)
+
+	sessionCount, messageCount, err := getUserDBStats("net", "#chan", "nick")
+	if err != nil {
+		t.Fatalf("getUserDBStats failed: %v", err)
+	}
+	if sessionCount != 2 {
+		t.Errorf("expected 2 sessions, got %d", sessionCount)
+	}
+	if messageCount != 3 {
+		t.Errorf("expected 3 messages, got %d", messageCount)
+	}
+}
+
+func TestDBDeleteUserSessions(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+	_ = db
+
+	createDBSession("key1", "net", "#chan", "nick", "chat")
+	createDBSession("key2", "net", "#chan", "nick", "chat")
+	createDBSession("key3", "net", "#chan", "other", "chat")
+
+	affected, err := deleteUserDBSessions("net", "#chan", "nick")
+	if err != nil {
+		t.Fatalf("deleteUserDBSessions failed: %v", err)
+	}
+	if affected != 2 {
+		t.Errorf("expected 2 sessions deleted, got %d", affected)
+	}
+
+	sessions, _ := getUserDBSessions("net", "#chan", "nick", 10)
+	if len(sessions) != 0 {
+		t.Errorf("expected 0 sessions for nick after delete, got %d", len(sessions))
+	}
+}
+
+func TestDatabaseConfigDefaults(t *testing.T) {
+	cfg := DatabaseConfig{}
 	cfg.SetDefaults()
 
-	if cfg.MaxAgeDays != 7 {
-		t.Errorf("expected MaxAgeDays 7, got %d", cfg.MaxAgeDays)
+	if cfg.Path != "data/dave.db" {
+		t.Errorf("expected default path 'data/dave.db', got %s", cfg.Path)
 	}
-
-	if cfg.MaxContexts != 100 {
-		t.Errorf("expected MaxContexts 100, got %d", cfg.MaxContexts)
+	if cfg.MaxAgeDays != 90 {
+		t.Errorf("expected default MaxAgeDays 90, got %d", cfg.MaxAgeDays)
 	}
 }
 
-func TestPersistConfigSetDefaultsNoOverwrite(t *testing.T) {
-	cfg := PersistConfig{
-		MaxAgeDays:  30,
-		MaxContexts: 50,
+func TestDatabaseConfigNoOverwrite(t *testing.T) {
+	cfg := DatabaseConfig{
+		Path:       "custom/path.db",
+		MaxAgeDays: 30,
 	}
 	cfg.SetDefaults()
 
+	if cfg.Path != "custom/path.db" {
+		t.Errorf("expected path 'custom/path.db', got %s", cfg.Path)
+	}
 	if cfg.MaxAgeDays != 30 {
 		t.Errorf("expected MaxAgeDays 30, got %d", cfg.MaxAgeDays)
 	}
+}
 
-	if cfg.MaxContexts != 50 {
-		t.Errorf("expected MaxContexts 50, got %d", cfg.MaxContexts)
+func TestDBToolCalls(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+	_ = db
+
+	sid, _ := createDBSession("testkey", "net", "#chan", "nick", "chat")
+
+	toolCalls := []gogpt.ToolCall{
+		{ID: "tc1", Type: "function", Function: gogpt.FunctionCall{Name: "get_weather", Arguments: `{"city":"sf"}`}},
+	}
+	tcData, _ := json.Marshal(toolCalls)
+	tcJSON := string(tcData)
+	toolCallID := "tc1"
+
+	err := insertDBMessage(sid, "assistant", "", &tcJSON, &toolCallID, nil)
+	if err != nil {
+		t.Fatalf("insertDBMessage with tool calls failed: %v", err)
+	}
+
+	msgs, err := loadDBSessionMessages(sid)
+	if err != nil {
+		t.Fatalf("loadDBSessionMessages failed: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(msgs))
+	}
+	if msgs[0].ToolCalls == nil || *msgs[0].ToolCalls != tcJSON {
+		t.Error("tool_calls mismatch")
+	}
+	if msgs[0].ToolCallID == nil || *msgs[0].ToolCallID != "tc1" {
+		t.Error("tool_call_id mismatch")
 	}
 }
 
-type mockFileStore struct {
-	data         map[string][]byte
-	statErr      map[string]error
-	renameErr    error
-	writeErr     map[string]error
-	readErr      map[string]error
-	statCalled   int
-	writeCalled  int
-	renameCalled int
-}
+func TestClearContextCompletesSession(t *testing.T) {
+	_, cleanup := setupTestDB(t)
+	defer cleanup()
 
-func newMockFileStore() *mockFileStore {
-	return &mockFileStore{
-		data:     make(map[string][]byte),
-		statErr:  make(map[string]error),
-		writeErr: make(map[string]error),
-		readErr:  make(map[string]error),
+	oldChats := config.Commands.Chats
+	config.Commands.Chats = map[string]AIConfig{
+		"testcmd": {Name: "testcmd", MaxHistory: 5},
 	}
-}
+	defer func() { config.Commands.Chats = oldChats }()
 
-func (m *mockFileStore) Read(path string) ([]byte, error) {
-	if err := m.readErr[path]; err != nil {
-		return nil, err
-	}
-	if data, ok := m.data[path]; ok {
-		return data, nil
-	}
-	return nil, os.ErrNotExist
-}
-
-func (m *mockFileStore) Write(path string, data []byte) error {
-	if err := m.writeErr[path]; err != nil {
-		return err
-	}
-	m.writeCalled++
-	m.data[path] = data
-	return nil
-}
-
-func (m *mockFileStore) Rename(old, new string) error {
-	if m.renameErr != nil {
-		return m.renameErr
-	}
-	m.renameCalled++
-	if data, ok := m.data[old]; ok {
-		delete(m.data, old)
-		m.data[new] = data
-	}
-	return nil
-}
-
-func (m *mockFileStore) Stat(path string) (os.FileInfo, error) {
-	m.statCalled++
-	if err := m.statErr[path]; err != nil {
-		return nil, err
-	}
-	if _, ok := m.data[path]; ok {
-		return nil, nil
-	}
-	return nil, os.ErrNotExist
-}
-
-func TestMarkContextsDirty_SetsFlag(t *testing.T) {
-	oldDelay := persistCfg.SaveDelay
-	persistCfg.SaveDelay = 10 * time.Millisecond
-	defer func() { persistCfg.SaveDelay = oldDelay }()
-
-	contextStoreMutex.Lock()
-	contextsModified = false
-	contextStoreMutex.Unlock()
-
-	MarkContextsDirty()
-
-	contextStoreMutex.Lock()
-	if !contextsModified {
-		t.Error("expected contextsModified to be true")
-	}
-	contextStoreMutex.Unlock()
-}
-
-func TestStartSaveTimer_SavesWhenDirty(t *testing.T) {
-	tmpDir := t.TempDir()
-	oldPath := persistCfg.FilePath
-	persistCfg.FilePath = filepath.Join(tmpDir, "save_dirty_test.json")
-	defer func() { persistCfg.FilePath = oldPath }()
-
-	mock := newMockFileStore()
-	original := GetFileStore()
-	SetFileStore(mock)
-	defer SetFileStore(original)
+	ctxKey := "net#chanuser"
+	AddContext(AIConfig{Name: "testcmd", MaxHistory: 5}, ctxKey,
+		gogpt.ChatCompletionMessage{Role: "user", Content: "hello"},
+		"net", "#chan", "user")
 
 	chatContextsMutex.Lock()
-	chatContextsMap["test"] = ChatContext{
-		Messages: []gogpt.ChatCompletionMessage{{Role: "user", Content: "hi"}},
-		Config:   AIConfig{MaxHistory: 5},
-	}
+	sid := chatContextsMap[ctxKey].SessionID
 	chatContextsMutex.Unlock()
-	contextLastActive["test"] = time.Now().Unix()
+	if sid == 0 {
+		t.Fatal("expected session to be created")
+	}
 
-	oldDelay := persistCfg.SaveDelay
-	persistCfg.SaveDelay = 10 * time.Millisecond
-	defer func() { persistCfg.SaveDelay = oldDelay }()
+	ClearContext(ctxKey)
 
-	contextStoreMutex.Lock()
-	contextsModified = true
-	contextStoreMutex.Unlock()
+	session, err := getDBSessionByID(sid)
+	if err != nil {
+		t.Fatalf("getDBSessionByID failed: %v", err)
+	}
+	if session.Status != "completed" {
+		t.Errorf("expected session status 'completed' after ClearContext, got %s", session.Status)
+	}
 
-	StartSaveTimer()
-
-	time.Sleep(50 * time.Millisecond)
-
-	if mock.writeCalled != 1 {
-		t.Errorf("expected 1 write when dirty, got %d", mock.writeCalled)
+	if ContextExists(ctxKey) {
+		t.Error("expected context to be cleared")
 	}
 }
 
-func TestStartSaveTimer_NoSaveWhenClean(t *testing.T) {
-	tmpDir := t.TempDir()
-	oldPath := persistCfg.FilePath
-	persistCfg.FilePath = filepath.Join(tmpDir, "save_clean_test.json")
-	defer func() { persistCfg.FilePath = oldPath }()
-
-	mock := newMockFileStore()
-	original := GetFileStore()
-	SetFileStore(mock)
-	defer SetFileStore(original)
-
-	chatContextsMutex.Lock()
-	chatContextsMap["test"] = ChatContext{
-		Messages: []gogpt.ChatCompletionMessage{{Role: "user", Content: "hi"}},
-		Config:   AIConfig{MaxHistory: 5},
-	}
-	chatContextsMutex.Unlock()
-	contextLastActive["test"] = time.Now().Unix()
-
-	oldDelay := persistCfg.SaveDelay
-	persistCfg.SaveDelay = 10 * time.Millisecond
-	defer func() { persistCfg.SaveDelay = oldDelay }()
-
-	contextStoreMutex.Lock()
-	contextsModified = false
-	contextStoreMutex.Unlock()
-
-	StartSaveTimer()
-
-	time.Sleep(50 * time.Millisecond)
-
-	if mock.writeCalled != 0 {
-		t.Errorf("expected 0 writes when clean, got %d", mock.writeCalled)
-	}
-}
-
-func TestClearContext_RemovesTimestamp(t *testing.T) {
+func TestContextLastActive(t *testing.T) {
+	contextLastActive = make(map[string]int64)
 	key := "testkey"
 
-	contextLastActive[key] = time.Now().Unix()
+	before := time.Now().Unix()
+	SetContextLastActive(key)
+	after := time.Now().Unix()
 
-	ClearContext(key)
+	active := GetContextLastActive(key)
+	if active < before || active > after {
+		t.Errorf("GetContextLastActive = %d, want between %d and %d", active, before, after)
+	}
 
+	DeleteContextLastActive(key)
 	if _, ok := contextLastActive[key]; ok {
-		t.Error("expected timestamp to be deleted after ClearContext")
-	}
-}
-
-func TestSaveContextStore_WritesTempThenRename(t *testing.T) {
-	tmpDir := t.TempDir()
-	oldPath := persistCfg.FilePath
-	persistCfg.FilePath = filepath.Join(tmpDir, "atomic_test.json")
-	defer func() { persistCfg.FilePath = oldPath }()
-
-	mock := newMockFileStore()
-	original := GetFileStore()
-	SetFileStore(mock)
-	defer SetFileStore(original)
-
-	chatContextsMutex.Lock()
-	chatContextsMap["test"] = ChatContext{
-		Messages: []gogpt.ChatCompletionMessage{{Role: "user", Content: "hi"}},
-		Config:   AIConfig{MaxHistory: 5},
-	}
-	chatContextsMutex.Unlock()
-	contextLastActive["test"] = time.Now().Unix()
-
-	SaveContextStore()
-
-	if mock.writeCalled != 1 {
-		t.Errorf("expected 1 write to temp file, got %d", mock.writeCalled)
-	}
-
-	if mock.renameCalled != 1 {
-		t.Errorf("expected 1 rename, got %d", mock.renameCalled)
-	}
-
-	expectedTemp := persistCfg.FilePath + ".tmp"
-	if _, ok := mock.data[expectedTemp]; ok {
-		t.Error("temp file should be removed after rename")
-	}
-}
-
-func TestCleanupContexts_SortsByRecentFirst(t *testing.T) {
-	tmpDir := t.TempDir()
-	oldPath := persistCfg.FilePath
-	persistCfg.FilePath = filepath.Join(tmpDir, "sort_test.json")
-	defer func() { persistCfg.FilePath = oldPath }()
-
-	now := time.Now().Unix()
-
-	chatContextsMutex.Lock()
-	chatContextsMap = map[string]ChatContext{
-		"recent1": {Messages: []gogpt.ChatCompletionMessage{{Role: "user", Content: "a"}}, Config: AIConfig{MaxHistory: 5}},
-		"recent2": {Messages: []gogpt.ChatCompletionMessage{{Role: "user", Content: "b"}}, Config: AIConfig{MaxHistory: 5}},
-		"recent3": {Messages: []gogpt.ChatCompletionMessage{{Role: "user", Content: "c"}}, Config: AIConfig{MaxHistory: 5}},
-		"old1":    {Messages: []gogpt.ChatCompletionMessage{{Role: "user", Content: "d"}}, Config: AIConfig{MaxHistory: 5}},
-		"old2":    {Messages: []gogpt.ChatCompletionMessage{{Role: "user", Content: "e"}}, Config: AIConfig{MaxHistory: 5}},
-	}
-	chatContextsMutex.Unlock()
-
-	contextLastActive = map[string]int64{
-		"recent1": now,
-		"recent2": now - 1,
-		"recent3": now - 2,
-		"old1":    now - 100,
-		"old2":    now - 200,
-	}
-
-	oldMaxContexts := persistCfg.MaxContexts
-	persistCfg.MaxContexts = 3
-	defer func() { persistCfg.MaxContexts = oldMaxContexts }()
-
-	CleanupContexts()
-
-	chatContextsMutex.Lock()
-	defer chatContextsMutex.Unlock()
-
-	if _, ok := chatContextsMap["recent1"]; !ok {
-		t.Error("recent1 (most recent) should remain")
-	}
-	if _, ok := chatContextsMap["recent2"]; !ok {
-		t.Error("recent2 should remain")
-	}
-	if _, ok := chatContextsMap["recent3"]; !ok {
-		t.Error("recent3 should remain")
-	}
-	if _, ok := chatContextsMap["old1"]; ok {
-		t.Error("old1 should be deleted")
-	}
-	if _, ok := chatContextsMap["old2"]; ok {
-		t.Error("old2 should be deleted")
-	}
-}
-
-func TestPersistConfigSaveDelay(t *testing.T) {
-	cfg := PersistConfig{}
-	cfg.SetDefaults()
-
-	if cfg.SaveDelay != 30*time.Second {
-		t.Errorf("expected SaveDelay 30s, got %v", cfg.SaveDelay)
-	}
-
-	if cfg.FilePath != "" {
-		t.Errorf("expected FilePath '', got %s", cfg.FilePath)
+		t.Error("expected key to be deleted")
 	}
 }

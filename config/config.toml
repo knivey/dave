@@ -12,12 +12,9 @@ ratemsgs = [
     "whoa!! slow down!!!1~ AHHHHHHHHHHHHHHHH AHhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhA HHHHHHHHHHHHHhhhhhhhhhhhhhhhhhhhAAAAAAAAAAAAAAAAAAHhhhhhhhhhhhhhhhh"
 ]
 
-[persist]
-# Persistent chat contexts (gitignored JSON)
-file_path = "contexts.json"
-max_age_days = 7     # delete old contexts
-max_contexts = 100   # max stored
-save_delay = "30s"   # auto-save interval
+[database]
+path = "data/dave.db"
+max_age_days = 90
 
 [tui]
 scrollback_lines = 5000

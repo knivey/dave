@@ -125,13 +125,16 @@ type chatRunner struct {
 }
 
 func newChatRunner(network Network, client *girc.Client, cfg AIConfig) *chatRunner {
-	aiConfig := gogpt.DefaultConfig(config.Services[cfg.Service].Key)
-	aiConfig.BaseURL = config.Services[cfg.Service].BaseURL
+	svc := config.Services[cfg.Service]
+	aiConfig := gogpt.DefaultConfig(svc.Key)
+	aiConfig.BaseURL = svc.BaseURL
 	extraBody := make(map[string]any, len(cfg.ExtraBody)+1)
 	for k, v := range cfg.ExtraBody {
 		extraBody[k] = v
 	}
-	extraBody["timings_per_token"] = true
+	if svc.Type == "llama" {
+		extraBody["timings_per_token"] = true
+	}
 	transport := newDaveTransport(extraBody)
 	aiConfig.HTTPClient = &http.Client{Transport: transport}
 	aiClient := gogpt.NewClientWithConfig(aiConfig)

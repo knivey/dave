@@ -60,6 +60,12 @@ func AddContext(config AIConfig, key string, message gogpt.ChatCompletionMessage
 		}
 
 		if sid != 0 {
+			if message.Role == "user" {
+				if err := updateDBSessionFirstMessage(sid, message.Content); err != nil {
+					loggerCS.Error("Failed to update first message", "session", sid, "error", err)
+				}
+			}
+
 			var toolCallsJSON *string
 			if len(message.ToolCalls) > 0 {
 				if tcData, err := json.Marshal(message.ToolCalls); err == nil {

@@ -352,6 +352,57 @@ func TestDBToolCalls(t *testing.T) {
 	}
 }
 
+func TestDBFirstMessage(t *testing.T) {
+	_, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctxKey := "net#chanuser"
+	cfg := AIConfig{Name: "testcmd", MaxHistory: 5}
+
+	AddContext(cfg, ctxKey,
+		gogpt.ChatCompletionMessage{Role: "system", Content: "you are helpful"},
+		"net", "#chan", "user")
+
+	chatContextsMutex.Lock()
+	sid := chatContextsMap[ctxKey].SessionID
+	chatContextsMutex.Unlock()
+	if sid == 0 {
+		t.Fatal("expected session to be created")
+	}
+
+	session, err := getDBSessionByID(sid)
+	if err != nil {
+		t.Fatalf("getDBSessionByID failed: %v", err)
+	}
+	if session.FirstMessage != "" {
+		t.Errorf("expected empty first_message after system prompt, got %q", session.FirstMessage)
+	}
+
+	AddContext(cfg, ctxKey,
+		gogpt.ChatCompletionMessage{Role: "user", Content: "hello world this is my first message"},
+		"net", "#chan", "user")
+
+	session, err = getDBSessionByID(sid)
+	if err != nil {
+		t.Fatalf("getDBSessionByID failed: %v", err)
+	}
+	if session.FirstMessage != "hello world this is my first message" {
+		t.Errorf("expected first_message to be saved, got %q", session.FirstMessage)
+	}
+
+	AddContext(cfg, ctxKey,
+		gogpt.ChatCompletionMessage{Role: "user", Content: "this should not overwrite"},
+		"net", "#chan", "user")
+
+	session, err = getDBSessionByID(sid)
+	if err != nil {
+		t.Fatalf("getDBSessionByID failed: %v", err)
+	}
+	if session.FirstMessage != "hello world this is my first message" {
+		t.Errorf("expected first_message to remain unchanged, got %q", session.FirstMessage)
+	}
+}
+
 func TestClearContextCompletesSession(t *testing.T) {
 	_, cleanup := setupTestDB(t)
 	defer cleanup()

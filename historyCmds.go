@@ -6,12 +6,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/lrstanley/girc"
 	gogpt "github.com/sashabaranov/go-openai"
 )
-
-const historyPageSize = 10
 
 func historySessions(network Network, c *girc.Client, e girc.Event, args ...string) {
 	if theDB == nil {
@@ -22,7 +21,7 @@ func historySessions(network Network, c *girc.Client, e girc.Event, args ...stri
 	startedRunning(network.Name, e.Params[0], e.Source.Name)
 	defer stoppedRunning(network.Name, e.Params[0], e.Source.Name)
 
-	sessions, err := getUserDBSessions(network.Name, e.Params[0], e.Source.Name, 20)
+	sessions, err := getUserDBSessions(network.Name, e.Params[0], e.Source.Name, config.MaxSessionHistory)
 	if err != nil {
 		c.Cmd.Reply(e, errorMsg("failed to query sessions: "+err.Error()))
 		return
@@ -34,18 +33,64 @@ func historySessions(network Network, c *girc.Client, e girc.Event, args ...stri
 	}
 
 	c.Cmd.Reply(e, fmt.Sprintf("\x02Session History (%s on %s):\x02", e.Source.Name, network.Name))
-	for _, s := range sessions {
-		statusIcon := "\x0303●\x0F"
+
+	type sessionLine struct {
+		icon        string
+		idStr       string
+		msgStr      string
+		timeStr     string
+		cmd         string
+		preview     string
+	}
+
+	lines := make([]sessionLine, len(sessions))
+	maxID := 0
+	maxMsg := 0
+	maxTime := 0
+
+	for i, s := range sessions {
+		icon := "\x0303●\x0F"
 		if s.Status != "active" {
-			statusIcon = "\x0304○\x0F"
+			icon = "\x0304○\x0F"
 		}
 
 		var msgCount int
 		theDB.Get(&msgCount, "SELECT COUNT(*) FROM messages WHERE session_id = ?", s.ID)
 
-		lastActive := formatTimeAgo(s.LastActive)
-		line := fmt.Sprintf("  %s #%d [\x02%s\x02] %d msgs, %s ago",
-			statusIcon, s.ID, s.ChatCommand, msgCount, lastActive)
+		idStr := fmt.Sprintf("#%d", s.ID)
+		msgStr := fmt.Sprintf("%d msgs", msgCount)
+		timeStr := formatTimeAgo(s.LastActive)
+
+		preview := strings.ReplaceAll(s.FirstMessage, "\n", " ")
+		if len(preview) > 80 {
+			preview = preview[:77] + "..."
+		}
+
+		lines[i] = sessionLine{icon, idStr, msgStr, timeStr, s.ChatCommand, preview}
+
+		if l := utf8.RuneCountInString(idStr); l > maxID {
+			maxID = l
+		}
+		if l := utf8.RuneCountInString(msgStr); l > maxMsg {
+			maxMsg = l
+		}
+		if l := utf8.RuneCountInString(timeStr); l > maxTime {
+			maxTime = l
+		}
+	}
+
+	for _, l := range lines {
+		line := fmt.Sprintf("  %s %s  %s  %s  %s%s",
+			l.icon,
+			l.idStr+strings.Repeat(" ", maxID-utf8.RuneCountInString(l.idStr)),
+			l.msgStr+strings.Repeat(" ", maxMsg-utf8.RuneCountInString(l.msgStr)),
+			l.timeStr+strings.Repeat(" ", maxTime-utf8.RuneCountInString(l.timeStr)),
+			network.Trigger,
+			l.cmd,
+		)
+		if l.preview != "" {
+			line += " " + l.preview
+		}
 
 		for _, wrapped := range wrapLine(line) {
 			c.Cmd.Reply(e, "\x02\x02"+wrapped)

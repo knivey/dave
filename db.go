@@ -76,15 +76,16 @@ func closeDB(db *sqlx.DB) {
 }
 
 type dbSession struct {
-	ID          int64  `db:"id"`
-	ContextKey  string `db:"context_key"`
-	Network     string `db:"network"`
-	Channel     string `db:"channel"`
-	Nick        string `db:"nick"`
-	ChatCommand string `db:"chat_command"`
-	Status      string `db:"status"`
-	CreatedAt   string `db:"created_at"`
-	LastActive  string `db:"last_active"`
+	ID           int64  `db:"id"`
+	ContextKey   string `db:"context_key"`
+	Network      string `db:"network"`
+	Channel      string `db:"channel"`
+	Nick         string `db:"nick"`
+	ChatCommand  string `db:"chat_command"`
+	FirstMessage string `db:"first_message"`
+	Status       string `db:"status"`
+	CreatedAt    string `db:"created_at"`
+	LastActive   string `db:"last_active"`
 }
 
 type dbMessage struct {
@@ -108,6 +109,14 @@ func createDBSession(contextKey, network, channel, nick, chatCommand string) (in
 		return 0, err
 	}
 	return result.LastInsertId()
+}
+
+func updateDBSessionFirstMessage(sessionID int64, firstMessage string) error {
+	_, err := theDB.Exec(
+		"UPDATE sessions SET first_message = ? WHERE id = ? AND first_message = ''",
+		firstMessage, sessionID,
+	)
+	return err
 }
 
 func insertDBMessage(sessionID int64, role, content string, toolCallsJSON *string, toolCallID *string, reasoningContent *string) error {

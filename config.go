@@ -14,19 +14,20 @@ import (
 )
 
 type Config struct {
-	Trigger      string
-	Quitmsg      string
-	Networks     map[string]Network
-	Services     map[string]Service
-	Commands     Commands
-	Busymsgs     []string
-	Ratemsgs     []string
-	UploadURL    string `toml:"uploadurl"`
-	Database     DatabaseConfig
-	MCPs         map[string]MCPConfig `toml:"mcps"`
-	TUI          TUIConfig
-	APILog       APILogConfig      `toml:"api_log"`
-	TemplateVars map[string]string `toml:"-"`
+	Trigger            string
+	Quitmsg            string
+	Networks           map[string]Network
+	Services           map[string]Service
+	Commands           Commands
+	Busymsgs           []string
+	Ratemsgs           []string
+	UploadURL          string `toml:"uploadurl"`
+	Database           DatabaseConfig
+	MCPs               map[string]MCPConfig `toml:"mcps"`
+	TUI                TUIConfig
+	APILog             APILogConfig      `toml:"api_log"`
+	TemplateVars       map[string]string `toml:"-"`
+	MaxSessionHistory  int               `toml:"max_session_history"`
 }
 
 type TUIConfig struct {
@@ -120,6 +121,7 @@ type AIConfig struct {
 
 type Service struct {
 	Key                 string
+	Type                string // "openai" (default) or "llama"
 	MaxTokens           int `toml:"maxtokens"`
 	MaxCompletionTokens int `toml:"maxcompletiontokens"`
 	BaseURL             string
@@ -325,6 +327,10 @@ func loadConfigDir(dir string) (Config, error) {
 	}
 
 	config.Database.SetDefaults()
+
+	if config.MaxSessionHistory == 0 {
+		config.MaxSessionHistory = 10
+	}
 
 	return config, nil
 }

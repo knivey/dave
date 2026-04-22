@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
+	"github.com/lrstanley/girc"
 	logxi "github.com/mgutz/logxi/v1"
 	gogpt "github.com/sashabaranov/go-openai"
 )
@@ -34,6 +36,19 @@ var jobMgr struct {
 func init() {
 	loggerJM.SetLevel(logxi.LevelAll)
 	jobMgr.jobs = make(map[string]*asyncJob)
+}
+
+type chatRunnerInterface interface {
+	setChannel(channel, nick string)
+	runTurn(messages []gogpt.ChatCompletionMessage) ([]gogpt.ChatCompletionMessage, bool)
+}
+
+var newChatRunnerFn = func(network Network, client *girc.Client, cfg AIConfig) chatRunnerInterface {
+	return newChatRunner(network, client, cfg)
+}
+
+var getBotFn = func(network string) *Bot {
+	return bots[network]
 }
 
 func startJobManager() {
@@ -108,10 +123,24 @@ func onAsyncJobCompleted(job *asyncJob, resultText string) {
 	}
 
 	if getRunning(job.Network, job.Channel, job.Nick) {
-		loggerJM.Info("user is running, result queued for next turn", "job_id", job.JobID)
+		loggerJM.Info("user is running, will deliver when idle", "job_id", job.JobID)
+		go func() {
+			ctx, cancel := context.WithTimeout(jobMgr.ctx, 10*time.Minute)
+			defer cancel()
+			if !waitForIdleAndClaim(job.Network, job.Channel, job.Nick, ctx) {
+				loggerJM.Warn("timed out waiting for idle", "job_id", job.JobID)
+				return
+			}
+			defer stoppedRunning(job.Network, job.Channel, job.Nick)
+			deliverAsyncResult(job)
+		}()
 		return
 	}
 
+	deliverAsyncResult(job)
+}
+
+func deliverAsyncResult(job *asyncJob) {
 	chatContextsMutex.Lock()
 	currentCtx := chatContextsMap[job.CtxKey]
 	currentSessionID := currentCtx.SessionID
@@ -121,8 +150,8 @@ func onAsyncJobCompleted(job *asyncJob, resultText string) {
 		switchToSession(job)
 	}
 
-	bot, ok := bots[job.Network]
-	if !ok || bot == nil || bot.Client == nil {
+	bot := getBotFn(job.Network)
+	if bot == nil || bot.Client == nil {
 		loggerJM.Error("no IRC client for network", "network", job.Network)
 		return
 	}
@@ -136,7 +165,7 @@ func onAsyncJobCompleted(job *asyncJob, resultText string) {
 		return
 	}
 
-	runner := newChatRunner(bot.Network, bot.Client, ctx.Config)
+	runner := newChatRunnerFn(bot.Network, bot.Client, ctx.Config)
 	runner.setChannel(job.Channel, job.Nick)
 
 	startedRunning(job.Network, job.Channel, job.Nick)
@@ -227,8 +256,8 @@ func switchToSession(job *asyncJob) {
 		theDB.Exec("UPDATE sessions SET status = 'active' WHERE id = ?", job.SessionID)
 	}
 
-	bot, ok := bots[job.Network]
-	if ok && bot != nil && bot.Client != nil {
+	bot := getBotFn(job.Network)
+	if bot != nil && bot.Client != nil {
 		var oldID int64
 		if currentCtx.SessionID != 0 {
 			oldID = currentCtx.SessionID

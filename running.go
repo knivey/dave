@@ -1,12 +1,24 @@
 package main
 
-import "sync"
+import (
+	"context"
+	"sync"
+)
 
 var runningPrompts map[string]int
 var runningMutex sync.Mutex
+var runningChanged chan struct{}
 
 func init() {
 	runningPrompts = make(map[string]int)
+	runningChanged = make(chan struct{}, 1)
+}
+
+func notifyRunningChanged() {
+	select {
+	case runningChanged <- struct{}{}:
+	default:
+	}
 }
 
 func runningKey(network, channel, nick string) string {
@@ -34,6 +46,7 @@ func stoppedRunning(network, channel, nick string) {
 		runningPrompts[key]--
 	}
 	runningMutex.Unlock()
+	notifyRunningChanged()
 }
 
 func forceStopRunning(network, channel, nick string) {
@@ -41,4 +54,23 @@ func forceStopRunning(network, channel, nick string) {
 	runningMutex.Lock()
 	runningPrompts[key] = 0
 	runningMutex.Unlock()
+	notifyRunningChanged()
+}
+
+func waitForIdleAndClaim(network, channel, nick string, ctx context.Context) bool {
+	key := runningKey(network, channel, nick)
+	for {
+		runningMutex.Lock()
+		if runningPrompts[key] == 0 {
+			runningPrompts[key] = 1
+			runningMutex.Unlock()
+			return true
+		}
+		runningMutex.Unlock()
+		select {
+		case <-ctx.Done():
+			return false
+		case <-runningChanged:
+		}
+	}
 }

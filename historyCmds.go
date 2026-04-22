@@ -35,12 +35,12 @@ func historySessions(network Network, c *girc.Client, e girc.Event, args ...stri
 	c.Cmd.Reply(e, fmt.Sprintf("\x02Session History (%s on %s):\x02", e.Source.Name, network.Name))
 
 	type sessionLine struct {
-		icon        string
-		idStr       string
-		msgStr      string
-		timeStr     string
-		cmd         string
-		preview     string
+		icon    string
+		idStr   string
+		msgStr  string
+		timeStr string
+		cmd     string
+		preview string
 	}
 
 	lines := make([]sessionLine, len(sessions))

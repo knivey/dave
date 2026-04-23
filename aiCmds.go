@@ -190,7 +190,11 @@ func (cr *chatRunner) runTurn(messages []gogpt.ChatCompletionMessage) ([]gogpt.C
 	req.Tools = mcpTools
 	if len(mcpTools) > 0 {
 		req.ToolChoice = "auto"
-		req.ParallelToolCalls = cr.cfg.ParallelToolCalls
+		parallelCalls := true
+		if cr.cfg.ParallelToolCalls != nil {
+			parallelCalls = *cr.cfg.ParallelToolCalls
+		}
+		req.ParallelToolCalls = parallelCalls
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), cr.cfg.Timeout)

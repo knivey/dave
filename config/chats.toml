@@ -8,7 +8,7 @@
 # stop = ["STOP", "END"]      # Stop sequences where generation stops
 # presencepenalty = 0.0       # -2.0 to 2.0 (default: 0) - penalize new topics
 # frequencypenalty = 0.0      # -2.0 to 2.0 (default: 0) - penalize repetition
-# paralleltoolcalls = true    # Enable parallel MCP tool calls (default: true)
+# paralleltoolcalls = true    # Enable parallel MCP tool calls (cascades from service, default: true)
 # reasoningeffort = "medium"  # For o1/o3 models: "low", "medium", "high"
 # servicetier = "auto"        # Processing tier: "auto", "default", "flex", "priority"
 # verbosity = "medium"        # Output token count for gpt-5 models: "low", "medium", "high"

@@ -7,6 +7,7 @@ imageformat = "jpg"      # default image format for chat commands
 imagequality = 75
 maximagesize = "1024x1024"
 # toolverbose = false  # hide 🔧 tool call notifications in IRC (default: true)
+# paralleltoolcalls = true  # Enable parallel MCP tool calls (default: true, cascades to commands)
 
 [local]
 maxtokens = 500

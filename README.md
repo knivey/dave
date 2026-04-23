@@ -476,10 +476,10 @@ Give a chat command access to MCP tools:
 service = "openai"
 model = "gpt-4o"
 mcps = ["filesystem", "github"]
-paralleltoolcalls = true
+# paralleltoolcalls = true  # Enable parallel MCP tool calls (cascades from service, default: true)
 ```
 
-The LLM will automatically use available MCP tools when relevant.
+The LLM will automatically use available MCP tools when relevant. The `paralleltoolcalls` setting can be configured at the service level and will cascade to individual commands. Commands can override the service setting if needed.
 
 ### Provider-Specific Parameters
 

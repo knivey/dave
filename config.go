@@ -108,7 +108,7 @@ type AIConfig struct {
 	Stop                []string       `toml:"stop"`
 	PresencePenalty     float32        `toml:"presencepenalty"`
 	FrequencyPenalty    float32        `toml:"frequencypenalty"`
-	ParallelToolCalls   bool           `toml:"paralleltoolcalls"`
+	ParallelToolCalls   *bool          `toml:"paralleltoolcalls"`
 	ReasoningEffort     string         `toml:"reasoningeffort"`
 	ServiceTier         string         `toml:"servicetier"`
 	Verbosity           string         `toml:"verbosity"`
@@ -133,6 +133,7 @@ type Service struct {
 	Timeout             time.Duration `toml:"timeout"`
 	StreamTimeout       time.Duration `toml:"streamtimeout"`
 	ToolVerbose         *bool         `toml:"toolverbose"`
+	ParallelToolCalls   *bool         `toml:"paralleltoolcalls"`
 }
 
 type MCPConfig struct {
@@ -218,6 +219,13 @@ func (cfg *AIConfig) ApplyDefaults(service Service) {
 	}
 	if cfg.ToolVerbose == nil {
 		cfg.ToolVerbose = service.ToolVerbose
+	}
+	if cfg.ParallelToolCalls == nil {
+		cfg.ParallelToolCalls = service.ParallelToolCalls
+	}
+	if cfg.ParallelToolCalls == nil {
+		defaultTrue := true
+		cfg.ParallelToolCalls = &defaultTrue
 	}
 }
 

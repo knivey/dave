@@ -463,3 +463,77 @@ maxtokens = 100
 		})
 	}
 }
+
+func TestParallelToolCallsCascading(t *testing.T) {
+	tests := []struct {
+		name   string
+		cfg    AIConfig
+		svc    Service
+		expect bool
+	}{
+		{
+			name:   "not set in either defaults to true",
+			cfg:    AIConfig{},
+			svc:    Service{},
+			expect: true,
+		},
+		{
+			name: "set only in service cascades to command",
+			cfg:  AIConfig{},
+			svc: Service{
+				ParallelToolCalls: func() *bool { b := false; return &b }(),
+			},
+			expect: false,
+		},
+		{
+			name: "set only in command uses command value",
+			cfg: AIConfig{
+				ParallelToolCalls: func() *bool { b := false; return &b }(),
+			},
+			svc:    Service{},
+			expect: false,
+		},
+		{
+			name: "set in both command overrides service",
+			cfg: AIConfig{
+				ParallelToolCalls: func() *bool { b := true; return &b }(),
+			},
+			svc: Service{
+				ParallelToolCalls: func() *bool { b := false; return &b }(),
+			},
+			expect: true,
+		},
+		{
+			name: "explicit true in service cascades to command",
+			cfg:  AIConfig{},
+			svc: Service{
+				ParallelToolCalls: func() *bool { b := true; return &b }(),
+			},
+			expect: true,
+		},
+		{
+			name: "explicit false in command overrides service true",
+			cfg: AIConfig{
+				ParallelToolCalls: func() *bool { b := false; return &b }(),
+			},
+			svc: Service{
+				ParallelToolCalls: func() *bool { b := true; return &b }(),
+			},
+			expect: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := tt.cfg
+			cfg.ApplyDefaults(tt.svc)
+			got := true
+			if cfg.ParallelToolCalls != nil {
+				got = *cfg.ParallelToolCalls
+			}
+			if got != tt.expect {
+				t.Errorf("ParallelToolCalls = %v, want %v", got, tt.expect)
+			}
+		})
+	}
+}

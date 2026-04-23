@@ -138,9 +138,13 @@ func historyShow(network Network, c *girc.Client, e girc.Event, args ...string) 
 
 	var visible []dbMessage
 	for _, m := range messages {
-		if m.Role != "system" && m.Role != "tool" {
-			visible = append(visible, m)
+		if m.Role == "system" || m.Role == "tool" {
+			continue
 		}
+		if m.Role == "assistant" && strings.TrimSpace(m.Content) == "" && m.ToolCalls != nil {
+			continue
+		}
+		visible = append(visible, m)
 	}
 
 	c.Cmd.Reply(e, fmt.Sprintf("\x02Session #%d (%s) — %d messages:\x02", sessionID, session.ChatCommand, len(visible)))

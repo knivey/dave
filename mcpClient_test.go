@@ -414,6 +414,57 @@ func TestMCPToolConversionWithNilSchema(t *testing.T) {
 	if tools[0].Function.Name != "no_schema" {
 		t.Errorf("expected name 'no_schema', got %q", tools[0].Function.Name)
 	}
+
+	params, ok := tools[0].Function.Parameters.(map[string]any)
+	if !ok {
+		t.Fatal("expected parameters to be map[string]any")
+	}
+	if params["type"] != "object" {
+		t.Errorf("expected params type 'object', got %v", params["type"])
+	}
+	if _, hasProps := params["properties"]; !hasProps {
+		t.Error("expected params to have 'properties' key for nil schema")
+	}
+}
+
+func TestMCPToolConversionObjectWithoutProperties(t *testing.T) {
+	mcpServers = make(map[string]*MCPServer)
+	mcpToolToServer = make(map[string]string)
+
+	mcpServers["test"] = &MCPServer{
+		Tools: []*mcp.Tool{
+			{
+				Name:        "list_enhancements",
+				Description: "List available prompt enhancement profiles",
+				InputSchema: map[string]any{
+					"type": "object",
+				},
+			},
+		},
+	}
+
+	tools := getMCPTools([]string{"test"})
+	if len(tools) != 1 {
+		t.Fatalf("expected 1 tool, got %d", len(tools))
+	}
+
+	params, ok := tools[0].Function.Parameters.(map[string]any)
+	if !ok {
+		t.Fatal("expected parameters to be map[string]any")
+	}
+	if params["type"] != "object" {
+		t.Errorf("expected params type 'object', got %v", params["type"])
+	}
+	if _, hasProps := params["properties"]; !hasProps {
+		t.Error("expected params to have 'properties' key added for object schema without one")
+	}
+	props, ok := params["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("expected properties to be map[string]any")
+	}
+	if len(props) != 0 {
+		t.Errorf("expected empty properties map, got %v", props)
+	}
 }
 
 func TestBuildChatRequestWithMCPTools(t *testing.T) {

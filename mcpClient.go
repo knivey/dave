@@ -341,6 +341,15 @@ func getMCPTools(serverNames []string) []gogpt.Tool {
 				}
 			}
 
+			if typ, ok := params["type"]; ok && typ == "object" {
+				if _, hasProps := params["properties"]; !hasProps {
+					params["properties"] = map[string]any{}
+				}
+			} else if len(params) == 0 {
+				params["type"] = "object"
+				params["properties"] = map[string]any{}
+			}
+
 			tools = append(tools, gogpt.Tool{
 				Type: "function",
 				Function: &gogpt.FunctionDefinition{

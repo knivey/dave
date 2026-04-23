@@ -19,9 +19,6 @@ type helpEntry struct {
 }
 
 func help(network Network, client *girc.Client, event girc.Event, args ...string) {
-	startedRunning(network.Name, event.Params[0], event.Source.Name)
-	defer stoppedRunning(network.Name, event.Params[0], event.Source.Name)
-
 	botnick := client.GetNick()
 	var lines []string
 
@@ -59,7 +56,7 @@ func help(network Network, client *girc.Client, event girc.Event, args ...string
 		lines = append(lines, fmt.Sprintf("  %sresume <id> \u2014 Resume a previous session", network.Trigger))
 		lines = append(lines, fmt.Sprintf("  %sdelete <id> \u2014 Delete a session", network.Trigger))
 		lines = append(lines, fmt.Sprintf("  %smystats \u2014 Show your session/message stats", network.Trigger))
-		lines = append(lines, fmt.Sprintf("  %sjobs \u2014 List your background jobs", network.Trigger))
+		lines = append(lines, fmt.Sprintf("  %sjobs \u2014 List your chat queue and background jobs", network.Trigger))
 	}
 
 	if len(config.Commands.Completions) > 0 {
@@ -136,13 +133,7 @@ func help(network Network, client *girc.Client, event girc.Event, args ...string
 	}
 
 	for _, line := range lines {
-		if !getRunning(network.Name, event.Params[0], event.Source.Name) {
-			return
-		}
 		for _, wrapped := range wrapLine(line) {
-			if !getRunning(network.Name, event.Params[0], event.Source.Name) {
-				return
-			}
 			client.Cmd.Reply(event, "\x02\x02"+wrapped)
 			time.Sleep(time.Millisecond * network.Throttle)
 		}
@@ -262,7 +253,7 @@ func findCommandHelp(network Network, cmdName string) (helpEntry, bool) {
 	if cmdName == "jobs" {
 		return helpEntry{
 			cmd:  network.Trigger + "jobs",
-			desc: "List your pending, running, and recently completed background jobs",
+			desc: "List your chat queue status and pending/running/completed background jobs",
 		}, true
 	}
 	return helpEntry{}, false

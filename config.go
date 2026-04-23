@@ -13,13 +13,17 @@ import (
 	"golang.org/x/exp/rand"
 )
 
+var globalRand = rand.New(rand.NewSource(uint64(time.Now().UnixNano())))
+
 type Config struct {
 	Trigger           string
 	Quitmsg           string
 	Networks          map[string]Network
 	Services          map[string]Service
 	Commands          Commands
-	Busymsgs          []string
+	QueueMsgs         []string `toml:"queue_msgs"`
+	StartedMsg        string   `toml:"started_msg"`
+	MaxQueueDepth     int      `toml:"max_queue_depth"`
 	Ratemsgs          []string
 	UploadURL         string `toml:"uploadurl"`
 	Database          DatabaseConfig
@@ -134,6 +138,7 @@ type Service struct {
 	StreamTimeout       time.Duration `toml:"streamtimeout"`
 	ToolVerbose         *bool         `toml:"toolverbose"`
 	ParallelToolCalls   *bool         `toml:"paralleltoolcalls"`
+	Parallel            int           `toml:"parallel"`
 }
 
 type MCPConfig struct {
@@ -160,12 +165,8 @@ func validateSystemPromptTemplate(tmpl *template.Template) error {
 	return tmpl.Execute(&buf, dummy)
 }
 
-func (config *Config) Busymsg() string {
-	return config.Busymsgs[rand.Intn(len(config.Busymsgs))]
-}
-
-func (config *Config) Ratemsg() string {
-	return config.Ratemsgs[rand.Intn(len(config.Ratemsgs))]
+func (c *Config) Ratemsg() string {
+	return c.Ratemsgs[globalRand.Intn(len(c.Ratemsgs))]
 }
 
 func (cfg *AIConfig) ApplyDefaults(service Service) {
@@ -286,8 +287,14 @@ func loadConfigDir(dir string) (Config, error) {
 		return config, fmt.Errorf("loading %s: %w", mainFile, err)
 	}
 
-	if len(config.Busymsgs) == 0 {
-		config.Busymsgs = []string{"hold on i'm already busy"}
+	if len(config.QueueMsgs) == 0 {
+		config.QueueMsgs = []string{"queued (position {position})"}
+	}
+	if config.StartedMsg == "" {
+		config.StartedMsg = "\x0306\u25b6 {nick}: Processing your request (waited {wait})...\x0f"
+	}
+	if config.MaxQueueDepth <= 0 {
+		config.MaxQueueDepth = 5
 	}
 	if len(config.Ratemsgs) == 0 {
 		config.Ratemsgs = []string{"hold on you're going to fast"}
@@ -353,6 +360,9 @@ func loadServicesFile(dir string, config *Config) error {
 	for name, service := range config.Services {
 		if service.MaxHistory == 0 {
 			service.MaxHistory = 8
+		}
+		if service.Parallel <= 0 {
+			service.Parallel = 1
 		}
 		config.Services[name] = service
 	}

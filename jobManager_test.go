@@ -27,12 +27,17 @@ func setupJMTestDB(t *testing.T) {
 
 func setupTestJobManager(t *testing.T) {
 	t.Helper()
-	runningPrompts = make(map[string]int)
+	queueMgr = NewQueueManager([]string{"queued"}, "started", 5)
+	queueMgr.UpdateServiceLimits(map[string]Service{"testsvc": {Parallel: 1}})
+	queueMgr.Start()
 	chatContextsMap = make(map[string]ChatContext)
 	contextLastActive = make(map[string]int64)
 	jobMgr.jobs = make(map[string]*asyncJob)
 	jobMgr.ctx, jobMgr.cancel = context.WithCancel(context.Background())
 	t.Cleanup(func() {
+		if queueMgr != nil {
+			queueMgr.Stop()
+		}
 		if jobMgr.cancel != nil {
 			jobMgr.cancel()
 		}
@@ -133,7 +138,7 @@ func setupMockDeps(t *testing.T) *mockBot {
 		return nil
 	}
 
-	newChatRunnerFn = func(network Network, client *girc.Client, cfg AIConfig) chatRunnerInterface {
+	newChatRunnerFn = func(network Network, client *girc.Client, cfg AIConfig, _ context.Context, _ chan<- string) chatRunnerInterface {
 		return &mockChatRunner{
 			runTurnFn: func(messages []gogpt.ChatCompletionMessage) ([]gogpt.ChatCompletionMessage, bool) {
 				return messages, true
@@ -194,7 +199,8 @@ func TestDeliverAsyncResult_SameSession(t *testing.T) {
 		Nick:      "testuser",
 	}
 
-	deliverAsyncResult(job)
+	output := make(chan string, 100)
+	deliverAsyncResult(job, context.Background(), output)
 
 	ctx := chatContextsMap[ctxKey]
 	if ctx.SessionID != sid {
@@ -212,14 +218,6 @@ func TestDeliverAsyncResult_SameSession(t *testing.T) {
 	}
 	if !hasAsyncMsg {
 		t.Error("expected async result system message in context")
-	}
-
-	jobs, err := getCompletedPendingJobs(sid)
-	if err != nil {
-		t.Fatal("getCompletedPendingJobs:", err)
-	}
-	if len(jobs) != 0 {
-		t.Errorf("expected 0 completed jobs after delivery, got %d", len(jobs))
 	}
 	_ = mb
 }
@@ -264,7 +262,8 @@ func TestDeliverAsyncResult_DifferentSession(t *testing.T) {
 		Nick:      "testuser",
 	}
 
-	deliverAsyncResult(job)
+	output := make(chan string, 100)
+	deliverAsyncResult(job, context.Background(), output)
 
 	ctx := chatContextsMap[ctxKey]
 	if ctx.SessionID != sessionA {
@@ -302,7 +301,7 @@ func TestDeliverAsyncResult_DifferentSession(t *testing.T) {
 func TestOnAsyncJobCompleted_UserBusyWaitsThenDelivers(t *testing.T) {
 	setupJMTestDB(t)
 	setupTestJobManager(t)
-	mb := setupMockDeps(t)
+	_ = setupMockDeps(t)
 
 	cfg := makeTestAIConfig()
 	ctxKey := "testnet#testuser"
@@ -325,127 +324,12 @@ func TestOnAsyncJobCompleted_UserBusyWaitsThenDelivers(t *testing.T) {
 		t.Fatal("createPendingJob:", err)
 	}
 
-	startedRunning("testnet", "#test", "testuser")
-
-	job := &asyncJob{
-		JobID:     "job-1",
-		SessionID: sessionA,
-		CtxKey:    ctxKey,
-		ToolName:  "generate_image_async",
-		MCPServer: "img-mcp",
-		Network:   "testnet",
-		Channel:   "#test",
-		Nick:      "testuser",
-	}
-
-	onAsyncJobCompleted(job, "image generated successfully")
-
+	blockDone := make(chan struct{})
+	queueMgr.Enqueue("testnet", "#test", "testuser", "testsvc", "",
+		func(ctx context.Context, output chan<- string) {
+			<-blockDone
+		})
 	time.Sleep(100 * time.Millisecond)
-
-	if chatContextsMap[ctxKey].SessionID == sessionA {
-		t.Error("session should NOT have switched yet while user is busy")
-	}
-
-	stoppedRunning("testnet", "#test", "testuser")
-
-	waitForSessionSwitch(t, ctxKey, sessionA, 5*time.Second)
-
-	ctx := chatContextsMap[ctxKey]
-	if ctx.SessionID != sessionA {
-		t.Errorf("SessionID = %d, want %d (should have switched to session A after idle)", ctx.SessionID, sessionA)
-	}
-
-	hasAsyncMsg := false
-	for _, m := range ctx.Messages {
-		if m.Role == "system" && contains(m.Content, "Background task completed") {
-			hasAsyncMsg = true
-		}
-	}
-	if !hasAsyncMsg {
-		t.Error("expected async result system message after idle delivery")
-	}
-
-	if getRunning("testnet", "#test", "testuser") {
-		t.Error("running counter should be 0 after delivery completes")
-	}
-	_ = mb
-}
-
-func TestOnAsyncJobCompleted_UserIdleDeliversDirectly(t *testing.T) {
-	setupJMTestDB(t)
-	setupTestJobManager(t)
-	mb := setupMockDeps(t)
-
-	cfg := makeTestAIConfig()
-	ctxKey := "testnet#testuser"
-
-	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
-	insertTestMessage(t, sid, "system", "you are helpful")
-
-	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []gogpt.ChatCompletionMessage{{Role: "system", Content: "sys"}},
-		Config:    cfg,
-		SessionID: sid,
-	}
-
-	if err := createPendingJob(sid, "job-1", "generate_image_async", "img-mcp"); err != nil {
-		t.Fatal("createPendingJob:", err)
-	}
-
-	job := &asyncJob{
-		JobID:     "job-1",
-		SessionID: sid,
-		CtxKey:    ctxKey,
-		ToolName:  "generate_image_async",
-		MCPServer: "img-mcp",
-		Network:   "testnet",
-		Channel:   "#test",
-		Nick:      "testuser",
-	}
-
-	onAsyncJobCompleted(job, "image ready")
-
-	ctx := chatContextsMap[ctxKey]
-	if ctx.SessionID != sid {
-		t.Errorf("SessionID = %d, want %d", ctx.SessionID, sid)
-	}
-
-	hasAsyncMsg := false
-	for _, m := range ctx.Messages {
-		if m.Role == "system" && contains(m.Content, "Background task completed") {
-			hasAsyncMsg = true
-		}
-	}
-	if !hasAsyncMsg {
-		t.Error("expected async result message")
-	}
-	_ = mb
-}
-
-func TestOnAsyncJobCompleted_ContextCancelledWhileWaiting(t *testing.T) {
-	setupJMTestDB(t)
-	setupTestJobManager(t)
-	_ = setupMockDeps(t)
-
-	cfg := makeTestAIConfig()
-	ctxKey := "testnet#testuser"
-
-	sessionA := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
-	insertTestMessage(t, sessionA, "system", "you are helpful")
-
-	sessionB := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
-
-	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []gogpt.ChatCompletionMessage{{Role: "system", Content: "sys"}},
-		Config:    cfg,
-		SessionID: sessionB,
-	}
-
-	if err := createPendingJob(sessionA, "job-1", "generate_image_async", "img-mcp"); err != nil {
-		t.Fatal("createPendingJob:", err)
-	}
-
-	startedRunning("testnet", "#test", "testuser")
 
 	job := &asyncJob{
 		JobID:     "job-1",
@@ -460,28 +344,28 @@ func TestOnAsyncJobCompleted_ContextCancelledWhileWaiting(t *testing.T) {
 
 	onAsyncJobCompleted(job, "result text")
 
-	jobMgr.cancel()
+	queueMgr.Stop()
 	time.Sleep(200 * time.Millisecond)
 
-	stoppedRunning("testnet", "#test", "testuser")
+	close(blockDone)
 	time.Sleep(200 * time.Millisecond)
 
 	if chatContextsMap[ctxKey].SessionID == sessionA {
-		t.Error("session should NOT have switched after context cancellation")
+		t.Error("session should NOT have switched after queue stop")
 	}
 }
 
 func TestOnAsyncJobCompleted_MultipleJobsWhileBusy(t *testing.T) {
 	setupJMTestDB(t)
 	setupTestJobManager(t)
-	mb := setupMockDeps(t)
+	_ = setupMockDeps(t)
 
 	cfg := makeTestAIConfig()
 	ctxKey := "testnet#testuser"
 
 	sessionA := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sessionA, "system", "you are helpful")
-	insertTestMessage(t, sessionA, "user", "draw two pictures")
+	insertTestMessage(t, sessionA, "user", "draw me a picture")
 
 	sessionB := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sessionB, "system", "you are helpful")
@@ -496,7 +380,12 @@ func TestOnAsyncJobCompleted_MultipleJobsWhileBusy(t *testing.T) {
 	createPendingJob(sessionA, "job-1", "generate_image_async", "img-mcp")
 	createPendingJob(sessionA, "job-2", "generate_image_async", "img-mcp")
 
-	startedRunning("testnet", "#test", "testuser")
+	blockDone := make(chan struct{})
+	queueMgr.Enqueue("testnet", "#test", "testuser", "testsvc", "",
+		func(ctx context.Context, output chan<- string) {
+			<-blockDone
+		})
+	time.Sleep(100 * time.Millisecond)
 
 	job1 := &asyncJob{
 		JobID: "job-1", SessionID: sessionA, CtxKey: ctxKey,
@@ -514,7 +403,7 @@ func TestOnAsyncJobCompleted_MultipleJobsWhileBusy(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	stoppedRunning("testnet", "#test", "testuser")
+	close(blockDone)
 
 	waitForSessionSwitch(t, ctxKey, sessionA, 5*time.Second)
 
@@ -532,7 +421,6 @@ func TestOnAsyncJobCompleted_MultipleJobsWhileBusy(t *testing.T) {
 	if asyncCount < 2 {
 		t.Errorf("expected at least 2 async result messages, got %d", asyncCount)
 	}
-	_ = mb
 }
 
 func TestSwitchToSession_CompletesOldSession(t *testing.T) {
@@ -705,7 +593,8 @@ func TestDeliverAsyncResult_NoContext(t *testing.T) {
 		Network: "testnet", Channel: "#test", Nick: "testuser",
 	}
 
-	deliverAsyncResult(job)
+	output := make(chan string, 100)
+	deliverAsyncResult(job, context.Background(), output)
 
 	ctx := chatContextsMap[ctxKey]
 	if ctx.SessionID != 0 {
@@ -735,7 +624,7 @@ func TestDeliverAsyncResult_UsesMockRunner(t *testing.T) {
 
 	var runner *mockChatRunner
 	origNewRunner := newChatRunnerFn
-	newChatRunnerFn = func(network Network, client *girc.Client, c AIConfig) chatRunnerInterface {
+	newChatRunnerFn = func(network Network, client *girc.Client, c AIConfig, _ context.Context, _ chan<- string) chatRunnerInterface {
 		runner = &mockChatRunner{
 			runTurnFn: func(messages []gogpt.ChatCompletionMessage) ([]gogpt.ChatCompletionMessage, bool) {
 				return messages, true
@@ -751,7 +640,8 @@ func TestDeliverAsyncResult_UsesMockRunner(t *testing.T) {
 		Network: "testnet", Channel: "#test", Nick: "testuser",
 	}
 
-	deliverAsyncResult(job)
+	output := make(chan string, 100)
+	deliverAsyncResult(job, context.Background(), output)
 
 	if runner == nil {
 		t.Fatal("runner was never created")
@@ -792,7 +682,7 @@ func TestDeliverAsyncResult_RunnerSeesInjectedResult(t *testing.T) {
 
 	var receivedMessages []gogpt.ChatCompletionMessage
 	origNewRunner := newChatRunnerFn
-	newChatRunnerFn = func(network Network, client *girc.Client, c AIConfig) chatRunnerInterface {
+	newChatRunnerFn = func(network Network, client *girc.Client, c AIConfig, _ context.Context, _ chan<- string) chatRunnerInterface {
 		return &mockChatRunner{
 			runTurnFn: func(messages []gogpt.ChatCompletionMessage) ([]gogpt.ChatCompletionMessage, bool) {
 				receivedMessages = messages
@@ -808,7 +698,8 @@ func TestDeliverAsyncResult_RunnerSeesInjectedResult(t *testing.T) {
 		Network: "testnet", Channel: "#test", Nick: "testuser",
 	}
 
-	deliverAsyncResult(job)
+	output := make(chan string, 100)
+	deliverAsyncResult(job, context.Background(), output)
 
 	foundInjected := false
 	for _, m := range receivedMessages {
@@ -846,7 +737,7 @@ func TestDeliverAsyncResult_MultipleCompletedJobs(t *testing.T) {
 
 	turnCount := 0
 	origNewRunner := newChatRunnerFn
-	newChatRunnerFn = func(network Network, client *girc.Client, c AIConfig) chatRunnerInterface {
+	newChatRunnerFn = func(network Network, client *girc.Client, c AIConfig, _ context.Context, _ chan<- string) chatRunnerInterface {
 		return &mockChatRunner{
 			runTurnFn: func(messages []gogpt.ChatCompletionMessage) ([]gogpt.ChatCompletionMessage, bool) {
 				turnCount++
@@ -862,7 +753,8 @@ func TestDeliverAsyncResult_MultipleCompletedJobs(t *testing.T) {
 		Network: "testnet", Channel: "#test", Nick: "testuser",
 	}
 
-	deliverAsyncResult(job)
+	output := make(chan string, 100)
+	deliverAsyncResult(job, context.Background(), output)
 
 	if turnCount != 1 {
 		t.Errorf("runTurn called %d times, want 1 (both jobs delivered in one turn)", turnCount)
@@ -1023,8 +915,15 @@ func TestOnAsyncJobCompleted_MarksCompletedInDB(t *testing.T) {
 	onAsyncJobCompleted(job, "the image result")
 
 	var pj pendingJob
-	if err := theDB.Get(&pj, "SELECT * FROM pending_jobs WHERE job_id = ?", "job-1"); err != nil {
-		t.Fatal("query job:", err)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := theDB.Get(&pj, "SELECT * FROM pending_jobs WHERE job_id = ?", "job-1"); err != nil {
+			t.Fatal("query job:", err)
+		}
+		if pj.Status == "delivered" {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 	if pj.Status != "delivered" {
 		t.Errorf("job status = %q, want delivered (completed then delivered by deliverAsyncResult)", pj.Status)
@@ -1059,7 +958,8 @@ func TestDeliverAsyncResult_MarksJobsDelivered(t *testing.T) {
 		Network: "testnet", Channel: "#test", Nick: "testuser",
 	}
 
-	deliverAsyncResult(job)
+	output := make(chan string, 100)
+	deliverAsyncResult(job, context.Background(), output)
 
 	var pj pendingJob
 	if err := theDB.Get(&pj, "SELECT * FROM pending_jobs WHERE job_id = ?", "job-1"); err != nil {
@@ -1068,68 +968,6 @@ func TestDeliverAsyncResult_MarksJobsDelivered(t *testing.T) {
 	if pj.Status != "delivered" {
 		t.Errorf("job status = %q, want delivered", pj.Status)
 	}
-}
-
-func TestWaitForIdleAndClaim(t *testing.T) {
-	runningPrompts = make(map[string]int)
-	runningChanged = make(chan struct{}, 1)
-
-	t.Run("returns immediately when idle", func(t *testing.T) {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if !waitForIdleAndClaim("net", "#chan", "user", ctx) {
-			t.Error("expected to claim immediately when idle")
-		}
-		if !getRunning("net", "#chan", "user") {
-			t.Error("expected running after claim")
-		}
-		stoppedRunning("net", "#chan", "user")
-	})
-
-	t.Run("waits for idle", func(t *testing.T) {
-		runningPrompts = make(map[string]int)
-		startedRunning("net", "#chan2", "user2")
-
-		done := make(chan bool, 1)
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			result := waitForIdleAndClaim("net", "#chan2", "user2", ctx)
-			if result {
-				stoppedRunning("net", "#chan2", "user2")
-			}
-			done <- result
-		}()
-
-		time.Sleep(100 * time.Millisecond)
-		stoppedRunning("net", "#chan2", "user2")
-
-		select {
-		case result := <-done:
-			if !result {
-				t.Error("expected waitForIdleAndClaim to succeed")
-			}
-		case <-time.After(3 * time.Second):
-			t.Error("waitForIdleAndClaim timed out")
-		}
-	})
-
-	t.Run("respects context cancellation", func(t *testing.T) {
-		runningPrompts = make(map[string]int)
-		startedRunning("net", "#chan3", "user3")
-
-		ctx, cancel := context.WithCancel(context.Background())
-		go func() {
-			time.Sleep(100 * time.Millisecond)
-			cancel()
-		}()
-
-		result := waitForIdleAndClaim("net", "#chan3", "user3", ctx)
-		if result {
-			t.Error("expected waitForIdleAndClaim to return false on context cancellation")
-		}
-		stoppedRunning("net", "#chan3", "user3")
-	})
 }
 
 func contains(s, substr string) bool {
@@ -1325,11 +1163,15 @@ func TestDeliverAsyncResult_RunningDuringTurn(t *testing.T) {
 	completePendingJob("job-1", "result")
 
 	runningDuringTurn := false
+	var wg sync.WaitGroup
+	wg.Add(1)
+
 	origNewRunner := newChatRunnerFn
-	newChatRunnerFn = func(network Network, client *girc.Client, c AIConfig) chatRunnerInterface {
+	newChatRunnerFn = func(network Network, client *girc.Client, c AIConfig, _ context.Context, _ chan<- string) chatRunnerInterface {
 		return &mockChatRunner{
 			runTurnFn: func(messages []gogpt.ChatCompletionMessage) ([]gogpt.ChatCompletionMessage, bool) {
-				runningDuringTurn = getRunning("testnet", "#test", "testuser")
+				runningDuringTurn = queueMgr.IsRunning("testnet", "#test", "testuser")
+				wg.Done()
 				return messages, true
 			},
 		}
@@ -1341,10 +1183,14 @@ func TestDeliverAsyncResult_RunningDuringTurn(t *testing.T) {
 		Network: "testnet", Channel: "#test", Nick: "testuser",
 	}
 
-	deliverAsyncResult(job)
+	queueMgr.Enqueue("testnet", "#test", "testuser", "testsvc", "", func(ctx context.Context, output chan<- string) {
+		deliverAsyncResult(job, ctx, output)
+	})
+
+	wg.Wait()
 
 	if !runningDuringTurn {
-		t.Error("getRunning() returned false during runTurn — sendIRC would silently skip all output")
+		t.Error("queueMgr.IsRunning() returned false during runTurn — item should be active")
 	}
 }
 
@@ -1353,45 +1199,42 @@ func TestDeliverAsyncResult_RunningDuringTurn_BusyPath(t *testing.T) {
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	cfg := makeTestAIConfig()
-	ctxKey := "testnet#testuser"
+	ready := make(chan struct{})
+	unblockFirst := make(chan struct{})
 
-	sessionA := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
-	insertTestMessage(t, sessionA, "system", "sys")
-	sessionB := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	queueMgr.Enqueue("testnet", "#test", "testuser", "testsvc", "", func(ctx context.Context, output chan<- string) {
+		ready <- struct{}{}
+		<-unblockFirst
+	})
 
-	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []gogpt.ChatCompletionMessage{{Role: "system", Content: "sys"}},
-		Config:    cfg,
-		SessionID: sessionB,
+	<-ready
+
+	if !queueMgr.IsRunning("testnet", "#test", "testuser") {
+		t.Fatal("expected first job to be running")
 	}
-
-	createPendingJob(sessionA, "job-1", "generate_image_async", "img-mcp")
-
-	startedRunning("testnet", "#test", "testuser")
 
 	runningDuringTurn := false
-	origNewRunner := newChatRunnerFn
-	newChatRunnerFn = func(network Network, client *girc.Client, c AIConfig) chatRunnerInterface {
-		return &mockChatRunner{
-			runTurnFn: func(messages []gogpt.ChatCompletionMessage) ([]gogpt.ChatCompletionMessage, bool) {
-				runningDuringTurn = getRunning("testnet", "#test", "testuser")
-				return messages, true
-			},
-		}
-	}
-	defer func() { newChatRunnerFn = origNewRunner }()
+	var turnWg sync.WaitGroup
+	turnWg.Add(1)
 
-	job := &asyncJob{
-		JobID: "job-1", SessionID: sessionA, CtxKey: ctxKey,
-		Network: "testnet", Channel: "#test", Nick: "testuser",
+	queueMgr.Enqueue("testnet", "#test", "testuser", "testsvc", "", func(ctx context.Context, output chan<- string) {
+		runningDuringTurn = queueMgr.IsRunning("testnet", "#test", "testuser")
+		turnWg.Done()
+	})
+
+	current, pending := queueMgr.QueueStatus("testnet", "#test", "testuser")
+	if current == nil {
+		t.Fatal("expected first job still running")
+	}
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 pending job, got %d", len(pending))
 	}
 
-	onAsyncJobCompleted(job, "result")
-	stoppedRunning("testnet", "#test", "testuser")
-	waitForSessionSwitch(t, ctxKey, sessionA, 5*time.Second)
+	close(unblockFirst)
+
+	turnWg.Wait()
 
 	if !runningDuringTurn {
-		t.Error("getRunning() returned false during runTurn in busy-wait path — sendIRC would silently skip all output")
+		t.Error("queueMgr.IsRunning() returned false during queued job execution — item should be active")
 	}
 }

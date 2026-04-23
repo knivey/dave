@@ -455,6 +455,10 @@ func requestShutdown() {
 		if apiLogger != nil {
 			apiLogger.CloseAll()
 		}
+		if queueMgr != nil {
+			queueMgr.Stop()
+		}
+		stopJobManager()
 		closeMCPClients()
 		closeDB(theDB)
 		closeLogFile()

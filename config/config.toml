@@ -4,10 +4,11 @@ trigger = "-"
 quitmsg = "unplugged"
 uploadurl = "https://upload.beer"
 
-#one is chosen at random if the bot is already busy on a prompt
-busymsgs = [
-    "WHOAOaooooooooooHORhoo HOLD on thar IM ALREADY DOING something WIat YEr Turn!!"
+queue_msgs = [
+    "queued (position {position})"
 ]
+started_msg = "\x0306\u25b6 {nick}: Processing your request (waited {wait})...\x0f"
+max_queue_depth = 5
 ratemsgs = [
     "whoa!! slow down!!!1~ AHHHHHHHHHHHHHHHH AHhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhA HHHHHHHHHHHHHhhhhhhhhhhhhhhhhhhhAAAAAAAAAAAAAAAAAAHhhhhhhhhhhhhhhhh"
 ]

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -21,17 +22,17 @@ type mcpImageData struct {
 	MIMEType string `json:"mime_type"`
 }
 
-func mcpCmd(network Network, c *girc.Client, e girc.Event, cfg MCPCommandConfig, args ...string) {
+func mcpCmd(network Network, c *girc.Client, e girc.Event, cfg MCPCommandConfig, ctx context.Context, output chan<- string, args ...string) {
 	log := logxi.New(network.Name + ".mcp." + cfg.Name)
 	log.SetLevel(logxi.LevelAll)
 
 	if cfg.Arg != "" && len(args) == 0 {
-		c.Cmd.Reply(e, "Usage: <"+cfg.Arg+">")
+		select {
+		case output <- "Usage: <" + cfg.Arg + ">":
+		case <-ctx.Done():
+		}
 		return
 	}
-
-	startedRunning(network.Name, e.Params[0], e.Source.Name)
-	defer stoppedRunning(network.Name, e.Params[0], e.Source.Name)
 
 	toolArgs := make(map[string]any)
 	for k, v := range cfg.Args {
@@ -43,31 +44,47 @@ func mcpCmd(network Network, c *girc.Client, e girc.Event, cfg MCPCommandConfig,
 
 	log.Debug("calling MCP tool", "tool", cfg.Tool, "mcp", cfg.MCP, "timeout", cfg.Timeout.String())
 
-	result, err := callMCPToolWithTimeout(cfg.Tool, toolArgs, cfg.Timeout)
+	result, err := callMCPToolWithTimeoutContext(ctx, cfg.Tool, toolArgs, cfg.Timeout)
 	if err != nil {
-		c.Cmd.Reply(e, errorMsg(fmt.Sprintf("MCP tool call failed: %s", err)))
+		select {
+		case output <- errorMsg(fmt.Sprintf("MCP tool call failed: %s", err)):
+		case <-ctx.Done():
+		}
 		log.Error("MCP tool call failed", "error", err.Error())
 		return
 	}
 
 	text := mcpToolResultToText(result)
 	if result.IsError {
-		c.Cmd.Reply(e, errorMsg(text))
+		select {
+		case output <- errorMsg(text):
+		case <-ctx.Done():
+		}
 		return
 	}
 
 	var imgResult mcpImageResult
 	if err := json.Unmarshal([]byte(text), &imgResult); err == nil && len(imgResult.Images) > 0 {
 		if imgResult.Error != "" {
-			c.Cmd.Reply(e, errorMsg(imgResult.Error))
+			select {
+			case output <- errorMsg(imgResult.Error):
+			case <-ctx.Done():
+			}
 			return
 		}
 		for _, img := range imgResult.Images {
 			if img.URL != "" {
-				c.Cmd.Reply(e, img.URL)
+				select {
+				case output <- img.URL:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}
-		c.Cmd.Reply(e, "All done ;)")
+		select {
+		case output <- "All done ;)":
+		case <-ctx.Done():
+		}
 		return
 	}
 
@@ -75,7 +92,11 @@ func mcpCmd(network Network, c *girc.Client, e girc.Event, cfg MCPCommandConfig,
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line != "" {
-			c.Cmd.Reply(e, line)
+			select {
+			case output <- line:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}
 }

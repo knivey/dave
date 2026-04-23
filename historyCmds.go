@@ -13,13 +13,6 @@ import (
 )
 
 func historySessions(network Network, c *girc.Client, e girc.Event, args ...string) {
-	if theDB == nil {
-		c.Cmd.Reply(e, errorMsg("database not available"))
-		return
-	}
-
-	startedRunning(network.Name, e.Params[0], e.Source.Name)
-	defer stoppedRunning(network.Name, e.Params[0], e.Source.Name)
 
 	sessions, err := getUserDBSessions(network.Name, e.Params[0], e.Source.Name, config.MaxSessionHistory)
 	if err != nil {
@@ -116,9 +109,6 @@ func historyShow(network Network, c *girc.Client, e girc.Event, args ...string) 
 		return
 	}
 
-	startedRunning(network.Name, e.Params[0], e.Source.Name)
-	defer stoppedRunning(network.Name, e.Params[0], e.Source.Name)
-
 	session, err := getDBSessionByID(sessionID)
 	if err != nil {
 		c.Cmd.Reply(e, errorMsg("session not found"))
@@ -175,9 +165,6 @@ func historyShow(network Network, c *girc.Client, e girc.Event, args ...string) 
 
 		line := fmt.Sprintf("  %s %s", roleIcon, content)
 		for _, wrapped := range wrapLine(line) {
-			if !getRunning(network.Name, e.Params[0], e.Source.Name) {
-				return
-			}
 			c.Cmd.Reply(e, "\x02\x02"+wrapped)
 			time.Sleep(time.Millisecond * network.Throttle)
 		}
@@ -191,9 +178,6 @@ func historyShow(network Network, c *girc.Client, e girc.Event, args ...string) 
 		sendHistoryMsg(shown[3])
 	} else {
 		for _, m := range shown {
-			if !getRunning(network.Name, e.Params[0], e.Source.Name) {
-				return
-			}
 			sendHistoryMsg(m)
 		}
 	}
@@ -204,9 +188,6 @@ func historyStats(network Network, c *girc.Client, e girc.Event, args ...string)
 		c.Cmd.Reply(e, errorMsg("database not available"))
 		return
 	}
-
-	startedRunning(network.Name, e.Params[0], e.Source.Name)
-	defer stoppedRunning(network.Name, e.Params[0], e.Source.Name)
 
 	sessionCount, messageCount, err := getUserDBStats(network.Name, e.Params[0], e.Source.Name)
 	if err != nil {
@@ -234,9 +215,6 @@ func historyDelete(network Network, c *girc.Client, e girc.Event, args ...string
 		c.Cmd.Reply(e, errorMsg("invalid session id"))
 		return
 	}
-
-	startedRunning(network.Name, e.Params[0], e.Source.Name)
-	defer stoppedRunning(network.Name, e.Params[0], e.Source.Name)
 
 	session, err := getDBSessionByID(sessionID)
 	if err != nil {
@@ -279,9 +257,6 @@ func historyResume(network Network, c *girc.Client, e girc.Event, args ...string
 		c.Cmd.Reply(e, errorMsg("invalid session id"))
 		return
 	}
-
-	startedRunning(network.Name, e.Params[0], e.Source.Name)
-	defer stoppedRunning(network.Name, e.Params[0], e.Source.Name)
 
 	session, err := getDBSessionByID(sessionID)
 	if err != nil {
@@ -384,26 +359,65 @@ func formatTimeAgo(dbTime string) string {
 }
 
 func historyJobs(network Network, c *girc.Client, e girc.Event, args ...string) {
+	nick := e.Source.Name
+	channel := e.Params[0]
+	hasOutput := false
+
+	if queueMgr != nil {
+		current, pending := queueMgr.QueueStatus(network.Name, channel, nick)
+		if current != nil || len(pending) > 0 {
+			hasOutput = true
+			c.Cmd.Reply(e, "\x02Queue:\x02")
+			if current != nil {
+				elapsed := time.Since(current.Enqueued).Truncate(time.Second)
+				desc := current.Description
+				if desc == "" {
+					desc = "processing"
+				}
+				line := fmt.Sprintf("  \x0303▶\x0F %s (%s elapsed)", desc, elapsed)
+				for _, wrapped := range wrapLine(line) {
+					c.Cmd.Reply(e, "\x02\x02"+wrapped)
+					time.Sleep(time.Millisecond * network.Throttle)
+				}
+			}
+			if len(pending) > 0 {
+				for i, item := range pending {
+					wait := time.Since(item.Enqueued).Truncate(time.Second)
+					desc := item.Description
+					if desc == "" {
+						desc = "queued"
+					}
+					line := fmt.Sprintf("  \x0308%d.\x0F %s (waiting %s)", i+1, desc, wait)
+					for _, wrapped := range wrapLine(line) {
+						c.Cmd.Reply(e, "\x02\x02"+wrapped)
+						time.Sleep(time.Millisecond * network.Throttle)
+					}
+				}
+			}
+		}
+	}
+
 	if theDB == nil {
-		c.Cmd.Reply(e, errorMsg("database not available"))
+		if !hasOutput {
+			c.Cmd.Reply(e, "No active jobs or queue items.")
+		}
 		return
 	}
 
-	startedRunning(network.Name, e.Params[0], e.Source.Name)
-	defer stoppedRunning(network.Name, e.Params[0], e.Source.Name)
-
-	jobs, err := getPendingJobsForUser(network.Name, e.Params[0], e.Source.Name)
+	jobs, err := getPendingJobsForUser(network.Name, channel, nick)
 	if err != nil {
 		c.Cmd.Reply(e, errorMsg("failed to query jobs: "+err.Error()))
 		return
 	}
 
 	if len(jobs) == 0 {
-		c.Cmd.Reply(e, "No background jobs found.")
+		if !hasOutput {
+			c.Cmd.Reply(e, "No active jobs or queue items.")
+		}
 		return
 	}
 
-	c.Cmd.Reply(e, fmt.Sprintf("\x02Your background jobs:\x02"))
+	c.Cmd.Reply(e, "\x02Background jobs:\x02")
 	for _, j := range jobs {
 		var statusIcon string
 		switch j.Status {

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/lrstanley/girc"
 	logxi "github.com/mgutz/logxi/v1"
@@ -43,8 +42,11 @@ type chatRunnerInterface interface {
 	runTurn(messages []gogpt.ChatCompletionMessage) ([]gogpt.ChatCompletionMessage, bool)
 }
 
-var newChatRunnerFn = func(network Network, client *girc.Client, cfg AIConfig) chatRunnerInterface {
-	return newChatRunner(network, client, cfg)
+var newChatRunnerFn = func(network Network, client *girc.Client, cfg AIConfig, ctx context.Context, output chan<- string) chatRunnerInterface {
+	r := newChatRunner(network, client, cfg)
+	r.ctx = ctx
+	r.outputCh = output
+	return r
 }
 
 var getBotFn = func(network string) *Bot {
@@ -91,7 +93,7 @@ func registerAsyncJob(jobID string, sessionID int64, ctxKey, toolName, mcpServer
 }
 
 func waitForAsyncJob(ctx context.Context, job *asyncJob) {
-	result, err := callMCPTool("wait_for_job", map[string]any{
+	result, err := callMCPToolWithContext(ctx, "wait_for_job", map[string]any{
 		"job_id": job.JobID,
 	})
 
@@ -122,32 +124,26 @@ func onAsyncJobCompleted(job *asyncJob, resultText string) {
 		return
 	}
 
-	if getRunning(job.Network, job.Channel, job.Nick) {
-		loggerJM.Info("user is running, will deliver when idle", "job_id", job.JobID)
-		go func() {
-			ctx, cancel := context.WithTimeout(jobMgr.ctx, 10*time.Minute)
-			defer cancel()
-			if !waitForIdleAndClaim(job.Network, job.Channel, job.Nick, ctx) {
-				loggerJM.Warn("timed out waiting for idle", "job_id", job.JobID)
-				return
-			}
-			defer stoppedRunning(job.Network, job.Channel, job.Nick)
-			deliverAsyncResult(job)
-		}()
-		return
-	}
-
-	deliverAsyncResult(job)
+	queueMgr.Enqueue(job.Network, job.Channel, job.Nick, "", job.ToolName,
+		func(ctx context.Context, output chan<- string) {
+			deliverAsyncResult(job, ctx, output)
+		})
 }
 
-func deliverAsyncResult(job *asyncJob) {
+func deliverAsyncResult(job *asyncJob, ctx context.Context, output chan<- string) {
 	chatContextsMutex.Lock()
 	currentCtx := chatContextsMap[job.CtxKey]
 	currentSessionID := currentCtx.SessionID
 	chatContextsMutex.Unlock()
 
 	if currentSessionID != 0 && currentSessionID != job.SessionID {
-		switchToSession(job)
+		if msg := switchToSession(job); msg != "" {
+			select {
+			case output <- msg:
+			case <-ctx.Done():
+				return
+			}
+		}
 	}
 
 	bot := getBotFn(job.Network)
@@ -157,27 +153,27 @@ func deliverAsyncResult(job *asyncJob) {
 	}
 
 	chatContextsMutex.Lock()
-	ctx := chatContextsMap[job.CtxKey]
+	ctx2 := chatContextsMap[job.CtxKey]
 	chatContextsMutex.Unlock()
 
-	if ctx.SessionID == 0 || len(ctx.Messages) == 0 {
+	if ctx2.SessionID == 0 || len(ctx2.Messages) == 0 {
 		loggerJM.Warn("no context, skipping LLM turn", "job_id", job.JobID)
 		return
 	}
 
-	runner := newChatRunnerFn(bot.Network, bot.Client, ctx.Config)
+	runner := newChatRunnerFn(bot.Network, bot.Client, ctx2.Config, ctx, output)
 	runner.setChannel(job.Channel, job.Nick)
 
-	startedRunning(job.Network, job.Channel, job.Nick)
-	defer stoppedRunning(job.Network, job.Channel, job.Nick)
-
 	for {
-		completedJobs, err := getCompletedPendingJobs(ctx.SessionID)
+		if ctx.Err() != nil {
+			return
+		}
+		completedJobs, err := getCompletedPendingJobs(ctx2.SessionID)
 		if err != nil || len(completedJobs) == 0 {
 			break
 		}
 		for _, cj := range completedJobs {
-			injectAsyncResultFromDB(job.CtxKey, ctx, cj, job.Network, job.Channel, job.Nick)
+			injectAsyncResultFromDB(job.CtxKey, ctx2, cj, job.Network, job.Channel, job.Nick)
 			markPendingJobDelivered(cj.JobID)
 		}
 		chatContextsMutex.Lock()
@@ -191,13 +187,13 @@ func deliverAsyncResult(job *asyncJob) {
 	}
 }
 
-func switchToSession(job *asyncJob) {
+func switchToSession(job *asyncJob) string {
 	chatContextsMutex.Lock()
 	defer chatContextsMutex.Unlock()
 
 	currentCtx := chatContextsMap[job.CtxKey]
 	if currentCtx.SessionID == job.SessionID {
-		return
+		return ""
 	}
 
 	if currentCtx.SessionID != 0 {
@@ -209,19 +205,19 @@ func switchToSession(job *asyncJob) {
 	session, err := getDBSessionByID(job.SessionID)
 	if err != nil {
 		loggerJM.Error("failed to load session for switch", "id", job.SessionID, "error", err)
-		return
+		return ""
 	}
 
 	currentCfg, ok := config.Commands.Chats[session.ChatCommand]
 	if !ok {
 		loggerJM.Error("chat command not found for session", "command", session.ChatCommand)
-		return
+		return ""
 	}
 
 	dbMsgs, err := loadDBSessionMessages(job.SessionID)
 	if err != nil {
 		loggerJM.Error("failed to load session messages", "id", job.SessionID, "error", err)
-		return
+		return ""
 	}
 
 	var messages []gogpt.ChatCompletionMessage
@@ -256,18 +252,19 @@ func switchToSession(job *asyncJob) {
 		theDB.Exec("UPDATE sessions SET status = 'active' WHERE id = ?", job.SessionID)
 	}
 
+	var switchMsg string
 	bot := getBotFn(job.Network)
 	if bot != nil && bot.Client != nil {
 		var oldID int64
 		if currentCtx.SessionID != 0 {
 			oldID = currentCtx.SessionID
 		}
-		msg := fmt.Sprintf("\x02Switched to session #%d\x02. Use %sresume %d to go back.",
+		switchMsg = fmt.Sprintf("\x02Switched to session #%d\x02. Use %sresume %d to go back.",
 			job.SessionID, bot.Network.Trigger, oldID)
-		bot.Client.Cmd.Message(job.Channel, msg)
 	}
 
 	loggerJM.Info("switched sessions", "from", currentCtx.SessionID, "to", job.SessionID, "nick", job.Nick)
+	return switchMsg
 }
 
 func injectAsyncResultFromDB(ctxKey string, ctx ChatContext, job pendingJob, network, channel, nick string) {

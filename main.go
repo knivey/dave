@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"fmt"
 	"os"
@@ -43,7 +44,7 @@ func init() {
 	bots = make(map[string]*Bot)
 }
 
-type CmdFunc func(Network, *girc.Client, girc.Event, ...string)
+type CmdFunc func(Network, *girc.Client, girc.Event, context.Context, chan<- string, ...string)
 
 var stop_re = regexp.MustCompile("^stop$")
 var help_re = regexp.MustCompile("^help(?:\\s+(.+))?$")
@@ -65,14 +66,30 @@ func warnMsg(msg string) string {
 }
 
 var builtInCmds = CmdMap{
-	stop_re:     func(n Network, c *girc.Client, e girc.Event, s ...string) { stop(n, c, e, nil, s...) },
-	help_re:     func(n Network, c *girc.Client, e girc.Event, s ...string) { help(n, c, e, s...) },
-	sessions_re: func(n Network, c *girc.Client, e girc.Event, s ...string) { historySessions(n, c, e, s...) },
-	history_re:  func(n Network, c *girc.Client, e girc.Event, s ...string) { historyShow(n, c, e, s...) },
-	stats_re:    func(n Network, c *girc.Client, e girc.Event, s ...string) { historyStats(n, c, e, s...) },
-	delete_re:   func(n Network, c *girc.Client, e girc.Event, s ...string) { historyDelete(n, c, e, s...) },
-	resume_re:   func(n Network, c *girc.Client, e girc.Event, s ...string) { historyResume(n, c, e, s...) },
-	jobs_re:     func(n Network, c *girc.Client, e girc.Event, s ...string) { historyJobs(n, c, e, s...) },
+	stop_re: func(n Network, c *girc.Client, e girc.Event, _ context.Context, _ chan<- string, s ...string) {
+		stop(n, c, e, nil, s...)
+	},
+	help_re: func(n Network, c *girc.Client, e girc.Event, _ context.Context, _ chan<- string, s ...string) {
+		help(n, c, e, s...)
+	},
+	sessions_re: func(n Network, c *girc.Client, e girc.Event, _ context.Context, _ chan<- string, s ...string) {
+		historySessions(n, c, e, s...)
+	},
+	history_re: func(n Network, c *girc.Client, e girc.Event, _ context.Context, _ chan<- string, s ...string) {
+		historyShow(n, c, e, s...)
+	},
+	stats_re: func(n Network, c *girc.Client, e girc.Event, _ context.Context, _ chan<- string, s ...string) {
+		historyStats(n, c, e, s...)
+	},
+	delete_re: func(n Network, c *girc.Client, e girc.Event, _ context.Context, _ chan<- string, s ...string) {
+		historyDelete(n, c, e, s...)
+	},
+	resume_re: func(n Network, c *girc.Client, e girc.Event, _ context.Context, _ chan<- string, s ...string) {
+		historyResume(n, c, e, s...)
+	},
+	jobs_re: func(n Network, c *girc.Client, e girc.Event, _ context.Context, _ chan<- string, s ...string) {
+		historyJobs(n, c, e, s...)
+	},
 }
 var configCmds CmdMap
 var rateExemptCmds map[*regexp.Regexp]bool
@@ -92,15 +109,15 @@ func registerCommandsLocked(cmds Commands) {
 	for _, c := range cmds.Completions {
 		logger.Debug("added Completions command", c)
 		re := regexp.MustCompile("^" + c.Regex + " (.+)$")
-		newConfigCmds[re] = func(network Network, client *girc.Client, e girc.Event, args ...string) {
-			completion(network, client, e, c, args...)
+		newConfigCmds[re] = func(network Network, client *girc.Client, e girc.Event, ctx context.Context, output chan<- string, args ...string) {
+			completion(network, client, e, c, ctx, output, args...)
 		}
 	}
 	for _, c := range cmds.Chats {
 		logger.Debug("added Chats command", c)
 		re := regexp.MustCompile("^" + c.Regex + " (.+)$")
-		newConfigCmds[re] = func(network Network, client *girc.Client, e girc.Event, args ...string) {
-			chat(network, client, e, c, args...)
+		newConfigCmds[re] = func(network Network, client *girc.Client, e girc.Event, ctx context.Context, output chan<- string, args ...string) {
+			chat(network, client, e, c, ctx, output, args...)
 		}
 		newChatCmds[re] = true
 	}
@@ -111,8 +128,8 @@ func registerCommandsLocked(cmds Commands) {
 			pattern = "^" + c.Regex + " (.+)$"
 		}
 		re := regexp.MustCompile(pattern)
-		newConfigCmds[re] = func(network Network, client *girc.Client, e girc.Event, args ...string) {
-			mcpCmd(network, client, e, c, args...)
+		newConfigCmds[re] = func(network Network, client *girc.Client, e girc.Event, ctx context.Context, output chan<- string, args ...string) {
+			mcpCmd(network, client, e, c, ctx, output, args...)
 		}
 		if c.SkipBusy {
 			newExemptCmds[re] = true
@@ -136,6 +153,9 @@ func reloadAll() error {
 	initAPILogger(config, configDir)
 	reloadMCPClients(config.MCPs)
 	registerCommandsLocked(config.Commands)
+	if queueMgr != nil {
+		queueMgr.UpdateServiceLimits(config.Services)
+	}
 	return nil
 }
 
@@ -178,6 +198,9 @@ func main() {
 	LoadContextStore()
 	CleanupContexts()
 	initMCPClients()
+	queueMgr = NewQueueManager(config.QueueMsgs, config.StartedMsg, config.MaxQueueDepth)
+	queueMgr.UpdateServiceLimits(config.Services)
+	queueMgr.Start()
 	startJobManager()
 	recoverPendingJobs()
 	registerCommands(config.Commands)
@@ -209,6 +232,9 @@ func main() {
 		SaveContextStore()
 		if apiLogger != nil {
 			apiLogger.CloseAll()
+		}
+		if queueMgr != nil {
+			queueMgr.Stop()
 		}
 		closeMCPClients()
 		stopJobManager()
@@ -249,23 +275,22 @@ func wrapForIRC(out string) []string {
 	return lines
 }
 
-func sendLoop(out string, network Network, c *girc.Client, e girc.Event) {
+func sendToOutput(out string, output chan<- string, ctx context.Context) {
 	for _, line := range wrapForIRC(out) {
-		if !getRunning(network.Name, e.Params[0], e.Source.Name) {
-			break
-		}
 		if len(line) <= 0 {
 			continue
 		}
-		// We prepend lines with a \x02\x02 here to try and prevent our bot from triggering commands on other IRC bots by accident
-		c.Cmd.Reply(e, "\x02\x02"+line)
-		time.Sleep(time.Millisecond * network.Throttle)
+		select {
+		case output <- line:
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 
 func stop(network Network, _ *girc.Client, m girc.Event, _ interface{}, _ ...string) {
 	logger.Info("stop requested")
-	forceStopRunning(network.Name, m.Params[0], m.Source.Name)
+	queueMgr.StopCurrent(network.Name, m.Params[0], m.Source.Name)
 }
 
 func isIgnored(host string) bool {
@@ -312,14 +337,18 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 			client.Cmd.Reply(event, warnMsg(config.Ratemsg()))
 			return
 		}
-		if getRunning(network.Name, event.Params[0], event.Source.Name) {
-			client.Cmd.Reply(event, warnMsg(config.Busymsg()))
-			return
-		}
 		msg = msg[len(botnick+", "):]
 		ctx := GetContext(ctx_key)
 		logger.Info("Running chat completion with existing context")
-		go chat(network, client, event, ctx.Config, msg)
+
+		position := queueMgr.Enqueue(network.Name, event.Params[0], event.Source.Name,
+			ctx.Config.Service, "chat",
+			func(cx context.Context, output chan<- string) {
+				chat(network, client, event, ctx.Config, cx, output, msg)
+			})
+		if position > 0 {
+			client.Cmd.Reply(event, config.QueueMsg(position, 0))
+		}
 		return
 	}
 	if isIgnored(host) {
@@ -340,15 +369,19 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 			commandsMutex.RUnlock()
 
 			if r == stop_re {
-				cmd(network, client, event, args...)
+				cmd(network, client, event, context.Background(), nil, args...)
 				return
 			}
 			if r == help_re {
-				cmd(network, client, event, args...)
+				cmd(network, client, event, context.Background(), nil, args...)
 				return
 			}
 			if r == jobs_re {
-				cmd(network, client, event, args...)
+				cmd(network, client, event, context.Background(), nil, args...)
+				return
+			}
+			if r == sessions_re || r == history_re || r == stats_re || r == delete_re || r == resume_re {
+				cmd(network, client, event, context.Background(), nil, args...)
 				return
 			}
 
@@ -356,11 +389,14 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 				client.Cmd.Reply(event, warnMsg(config.Ratemsg()))
 				return
 			}
-			if getRunning(network.Name, event.Params[0], event.Source.Name) {
-				client.Cmd.Reply(event, warnMsg(config.Busymsg()))
-				return
+
+			position := queueMgr.Enqueue(network.Name, event.Params[0], event.Source.Name, "", msg,
+				func(cx context.Context, output chan<- string) {
+					cmd(network, client, event, cx, output, args...)
+				})
+			if position > 0 {
+				client.Cmd.Reply(event, config.QueueMsg(position, 0))
 			}
-			go cmd(network, client, event, args...)
 			return
 		}
 	}
@@ -379,19 +415,60 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 				client.Cmd.Reply(event, warnMsg(config.Ratemsg()))
 				return
 			}
-			if !rateExemptCmds[r] && getRunning(network.Name, event.Params[0], event.Source.Name) {
-				client.Cmd.Reply(event, warnMsg(config.Busymsg()))
+
+			if rateExemptCmds[r] {
+				if chatCmds[r] {
+					ClearContext(ctx_key)
+				}
+				outCh := make(chan string, 200)
+				go func() {
+					defer close(outCh)
+					cmd(network, client, event, context.Background(), outCh, args...)
+				}()
+				go func() {
+					for msg := range outCh {
+						client.Cmd.Message(event.Params[0], "\x02\x02"+msg)
+						time.Sleep(time.Millisecond * time.Duration(network.Throttle))
+					}
+				}()
 				return
 			}
+
 			if chatCmds[r] {
 				ClearContext(ctx_key)
 			}
-			go cmd(network, client, event, args...)
+
+			svc := getServiceForConfigCmd(r)
+			position := queueMgr.Enqueue(network.Name, event.Params[0], event.Source.Name, svc, msg,
+				func(cx context.Context, output chan<- string) {
+					cmd(network, client, event, cx, output, args...)
+				})
+			if position > 0 {
+				client.Cmd.Reply(event, config.QueueMsg(position, 0))
+			}
 			return
 		}
 	}
 
 	commandsMutex.RUnlock()
+}
+
+func getServiceForConfigCmd(r *regexp.Regexp) string {
+	commandsMutex.RLock()
+	defer commandsMutex.RUnlock()
+	for _, c := range config.Commands.Completions {
+		re := regexp.MustCompile("^" + c.Regex + " (.+)$")
+		if re.String() == r.String() {
+			return c.Service
+		}
+	}
+	for _, c := range config.Commands.Chats {
+		re := regexp.MustCompile("^" + c.Regex + " (.+)$")
+		if re.String() == r.String() {
+			return c.Service
+		}
+	}
+	return ""
 }
 
 func startClient(network Network) {

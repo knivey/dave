@@ -17,16 +17,13 @@ import (
 	gogpt "github.com/sashabaranov/go-openai"
 )
 
-func completion(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...string) {
+func completion(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx context.Context, output chan<- string, args ...string) {
 	aiConfig := gogpt.DefaultConfig(config.Services[cfg.Service].Key)
 	aiConfig.BaseURL = config.Services[cfg.Service].BaseURL
 	aiClient := gogpt.NewClientWithConfig(aiConfig)
 
 	logger := logxi.New(network.Name + ".completion." + cfg.Name)
 	logger.SetLevel(logxi.LevelAll)
-
-	startedRunning(network.Name, e.Params[0], e.Source.Name)
-	defer stoppedRunning(network.Name, e.Params[0], e.Source.Name)
 
 	req := gogpt.CompletionRequest{
 		Model:       cfg.Model,
@@ -35,18 +32,21 @@ func completion(network Network, c *girc.Client, e girc.Event, cfg AIConfig, arg
 		Temperature: cfg.Temperature,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	apiCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
-	resp, err := aiClient.CreateCompletion(ctx, req)
+	resp, err := aiClient.CreateCompletion(apiCtx, req)
 	if err != nil {
-		c.Cmd.Reply(e, errorMsg(err.Error()))
+		select {
+		case output <- errorMsg(err.Error()):
+		case <-ctx.Done():
+		}
 		logger.Error(err.Error())
 		return
 	}
 
 	logger.Info(resp.Choices[0].Text)
-	sendLoop(resp.Choices[0].Text, network, c, e)
+	sendToOutput(resp.Choices[0].Text, output, ctx)
 }
 
 type Timings struct {
@@ -122,6 +122,8 @@ type chatRunner struct {
 	nick      string
 	ctxKey    string
 	logger    logxi.Logger
+	ctx       context.Context
+	outputCh  chan<- string
 }
 
 func newChatRunner(network Network, client *girc.Client, cfg AIConfig) *chatRunner {
@@ -163,23 +165,29 @@ func (cr *chatRunner) setChannel(channel, nick string) {
 
 func (cr *chatRunner) sendIRC(out string) {
 	for _, line := range wrapForIRC(out) {
-		if !getRunning(cr.network.Name, cr.channel, cr.nick) {
-			break
-		}
 		if len(line) <= 0 {
 			continue
 		}
-		cr.client.Cmd.Message(cr.channel, "\x02\x02"+line)
-		time.Sleep(time.Millisecond * cr.network.Throttle)
+		select {
+		case cr.outputCh <- line:
+		case <-cr.ctx.Done():
+			return
+		}
 	}
 }
 
 func (cr *chatRunner) sendError(msg string) {
-	cr.client.Cmd.Message(cr.channel, errorMsg(msg))
+	select {
+	case cr.outputCh <- errorMsg(msg):
+	case <-cr.ctx.Done():
+	}
 }
 
 func (cr *chatRunner) sendWarning(msg string) {
-	cr.client.Cmd.Message(cr.channel, warnMsg(msg))
+	select {
+	case cr.outputCh <- warnMsg(msg):
+	case <-cr.ctx.Done():
+	}
 }
 
 func (cr *chatRunner) runTurn(messages []gogpt.ChatCompletionMessage) ([]gogpt.ChatCompletionMessage, bool) {
@@ -197,7 +205,7 @@ func (cr *chatRunner) runTurn(messages []gogpt.ChatCompletionMessage) ([]gogpt.C
 		req.ParallelToolCalls = parallelCalls
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), cr.cfg.Timeout)
+	ctx, cancel := context.WithTimeout(cr.ctx, cr.cfg.Timeout)
 	defer cancel()
 
 	const maxToolIterations = 20
@@ -250,7 +258,7 @@ func (cr *chatRunner) runTurn(messages []gogpt.ChatCompletionMessage) ([]gogpt.C
 
 		StreamLoop:
 			for {
-				if !getRunning(cr.network.Name, cr.channel, cr.nick) {
+				if cr.ctx.Err() != nil {
 					cr.logger.Info("Closing stream")
 					stream.Close()
 					return messages, true
@@ -531,7 +539,7 @@ func (cr *chatRunner) executeToolCalls(messages []gogpt.ChatCompletionMessage, t
 		}
 		var toolArgs map[string]any
 		json.Unmarshal([]byte(tc.Function.Arguments), &toolArgs)
-		result, err := callMCPTool(tc.Function.Name, toolArgs)
+		result, err := callMCPToolWithContext(cr.ctx, tc.Function.Name, toolArgs)
 		if err != nil {
 			toolMsg := gogpt.ChatCompletionMessage{
 				Role:       gogpt.ChatMessageRoleTool,
@@ -639,14 +647,11 @@ func (cr *chatRunner) handleRegisterBackgroundJob(messages []gogpt.ChatCompletio
 	return messages
 }
 
-func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...string) {
-	runner := newChatRunner(network, c, cfg)
+func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx context.Context, output chan<- string, args ...string) {
+	runner := newChatRunnerFn(network, c, cfg, ctx, output).(*chatRunner)
 	runner.setChannel(e.Params[0], e.Source.Name)
 
 	ctx_key := runner.ctxKey
-
-	startedRunning(network.Name, e.Params[0], e.Source.Name)
-	defer stoppedRunning(network.Name, e.Params[0], e.Source.Name)
 
 	var messages []gogpt.ChatCompletionMessage
 	if !ContextExists(ctx_key) {
@@ -733,16 +738,21 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, args ...s
 
 	if theDB != nil {
 		chatContextsMutex.Lock()
-		ctx := chatContextsMap[ctx_key]
+		chatCtx := chatContextsMap[ctx_key]
 		chatContextsMutex.Unlock()
-		if ctx.SessionID != 0 {
+		if chatCtx.SessionID != 0 {
 			for {
-				completedJobs, err := getCompletedPendingJobs(ctx.SessionID)
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				completedJobs, err := getCompletedPendingJobs(chatCtx.SessionID)
 				if err != nil || len(completedJobs) == 0 {
 					break
 				}
 				for _, cj := range completedJobs {
-					injectAsyncResultFromDB(ctx_key, ctx, cj, network.Name, e.Params[0], e.Source.Name)
+					injectAsyncResultFromDB(ctx_key, chatCtx, cj, network.Name, e.Params[0], e.Source.Name)
 					markPendingJobDelivered(cj.JobID)
 				}
 				chatContextsMutex.Lock()

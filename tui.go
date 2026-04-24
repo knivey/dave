@@ -124,7 +124,21 @@ func initTUI() (*tview.Application, error) {
 	logContainer := tview.NewBox()
 	logContainer.SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
 		logView.SetRect(x, y, width-sbWidth, height)
+
+		var savedRow int
+		if !autoScroll {
+			savedRow, _ = logView.GetScrollOffset()
+		}
+
 		logView.Draw(screen)
+
+		if !autoScroll && savedRow > 0 {
+			newRow, _ := logView.GetScrollOffset()
+			if newRow < savedRow {
+				logView.ScrollTo(savedRow, 0)
+			}
+		}
+
 		totalLines := logView.GetWrappedLineCount()
 		row, _ := logView.GetScrollOffset()
 		if scrollbar.ShouldDraw(totalLines, height) {

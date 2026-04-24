@@ -521,11 +521,20 @@ func ircClient(network Network) {
 	client.Handlers.Add(girc.RPL_WELCOME, func(client *girc.Client, event girc.Event) {
 		bot.mu.Lock()
 		throttle := bot.Network.Throttle
-		channels := make([]string, len(bot.Network.Channels))
-		copy(channels, bot.Network.Channels)
+		channels := bot.Network.Channels
 		bot.mu.Unlock()
 		time.Sleep(time.Microsecond * throttle)
-		client.Cmd.Join(strings.Join(channels, ","))
+		var noKey []string
+		for name, cfg := range channels {
+			if cfg.Key != "" {
+				client.Cmd.JoinKey(name, cfg.Key)
+			} else {
+				noKey = append(noKey, name)
+			}
+		}
+		if len(noKey) > 0 {
+			client.Cmd.Join(noKey...)
+		}
 	})
 
 	client.Handlers.AddBg(girc.PRIVMSG, func(client *girc.Client, event girc.Event) {

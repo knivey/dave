@@ -381,19 +381,16 @@ func handleTUICommand(text string) {
 			break
 		}
 		bot.mu.Lock()
-		alreadyJoined := false
-		for _, ch := range bot.Network.Channels {
-			if ch == channel {
-				alreadyJoined = true
-				break
-			}
+		if bot.Network.Channels == nil {
+			bot.Network.Channels = make(map[string]ChannelConfig)
 		}
+		_, alreadyJoined := bot.Network.Channels[channel]
 		if alreadyJoined {
 			bot.mu.Unlock()
 			fmt.Fprintf(logView, "[yellow]Already in %s on %s[white]\n", channel, network)
 			break
 		}
-		bot.Network.Channels = append(bot.Network.Channels, channel)
+		bot.Network.Channels[channel] = ChannelConfig{}
 		bot.mu.Unlock()
 		bot.Client.Cmd.Join(channel)
 		fmt.Fprintf(logView, "[green]Joined %s on %s[white]\n", channel, network)
@@ -409,13 +406,12 @@ func handleTUICommand(text string) {
 			break
 		}
 		bot.mu.Lock()
-		found := false
-		for i, ch := range bot.Network.Channels {
-			if ch == channel {
-				bot.Network.Channels = append(bot.Network.Channels[:i], bot.Network.Channels[i+1:]...)
-				found = true
-				break
-			}
+		if bot.Network.Channels == nil {
+			bot.Network.Channels = make(map[string]ChannelConfig)
+		}
+		_, found := bot.Network.Channels[channel]
+		if found {
+			delete(bot.Network.Channels, channel)
 		}
 		bot.mu.Unlock()
 		if !found {

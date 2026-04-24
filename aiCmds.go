@@ -487,8 +487,30 @@ func (cr *chatRunner) runTurn(messages []gogpt.ChatCompletionMessage) ([]gogpt.C
 			}
 
 			if text != "" && text != "..." {
+				rawText := text
 				if cr.cfg.RenderMarkdown {
 					text = markdowntoirc.MarkdownToIRC(text)
+				}
+				chCfg := cr.network.GetChannelConfig(cr.channel)
+				if chCfg.Pastebin {
+					lines := wrapForIRC(text)
+					if len(lines) >= chCfg.GetMaxLines() {
+						url, err := uploadToTermbin(rawText)
+						if err != nil {
+							cr.sendIRC("pastebin error: " + err.Error())
+							cr.sendIRC(text)
+						} else {
+							preview := 3
+							if preview > len(lines) {
+								preview = len(lines)
+							}
+							for i := 0; i < preview; i++ {
+								cr.sendIRC(lines[i])
+							}
+							cr.sendIRC(fmt.Sprintf("... (full output: %s)", url))
+						}
+						return messages, true
+					}
 				}
 				cr.sendIRC(text)
 			}

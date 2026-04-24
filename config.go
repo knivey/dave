@@ -48,16 +48,36 @@ type TUIScrollbarConfig struct {
 	Width           int    `toml:"width"`
 }
 
+type ChannelConfig struct {
+	Key string `toml:"key"`
+	Pastebin bool   `toml:"pastebin"`
+	MaxLines int    `toml:"max_lines"`
+}
+
+func (c ChannelConfig) GetMaxLines() int {
+	if c.MaxLines <= 0 {
+		return 5
+	}
+	return c.MaxLines
+}
+
 type Network struct {
 	Name       string
 	Nick       string
 	Servers    []Server
 	nextServer int
-	Channels   []string
+	Channels   map[string]ChannelConfig
 	Enabled    bool
 	Throttle   time.Duration
 	Trigger    string
 	Quitmsg    string
+}
+
+func (n *Network) GetChannelConfig(channel string) ChannelConfig {
+	if n.Channels == nil {
+		return ChannelConfig{}
+	}
+	return n.Channels[channel]
 }
 
 type Server struct {

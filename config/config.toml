@@ -37,8 +37,8 @@ dir = "api_logs"
 enabled = true
 nick = "dave"
 throttle = 20
-channels = ["#knivey"]
 quitmsg = "Went for a smoke break"
+[networks.birdnest.channels."#knivey"]
 [[networks.birdnest.servers]]
 host = "irc.birdnest.live"
 ssl = true
@@ -53,5 +53,5 @@ port = 6697
 enabled = false
 nick = "daave"
 throttle = 750
-channels = ["##"]
+[networks.libera.channels."##"]
 servers = [{host = "irc.libera.chat", ssl = true}]

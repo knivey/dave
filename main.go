@@ -583,7 +583,11 @@ func ircClient(network Network) {
 	log := logxi.New(network.Name)
 	log.SetLevel(logxi.LevelAll)
 
-	ircServer := network.getNextServer()
+	ircServer, err := network.getNextServer()
+	if err != nil {
+		log.Error(err.Error())
+		return
+	}
 
 	sslConfig := &tls.Config{
 		InsecureSkipVerify: ircServer.InsecureSkipVerify,
@@ -652,7 +656,11 @@ func ircClient(network Network) {
 		}
 		log.Info("Reconnecting in 60s")
 		time.Sleep(60 * time.Second)
-		ircServer := bot.Network.getNextServer()
+		ircServer, err := bot.Network.getNextServer()
+		if err != nil {
+			log.Error(err.Error())
+			break
+		}
 		client.Config.Server = ircServer.Host
 		client.Config.Port = ircServer.GetPort()
 		client.Config.ServerPass = ircServer.Pass

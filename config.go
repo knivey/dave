@@ -271,14 +271,16 @@ func (cfg *AIConfig) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func (n *Network) getNextServer() Server {
-	defer func() {
-		n.nextServer++
-		if n.nextServer > len(n.Servers)-1 {
-			n.nextServer = 0
-		}
-	}()
-	return n.Servers[n.nextServer]
+func (n *Network) getNextServer() (Server, error) {
+	if len(n.Servers) == 0 {
+		return Server{}, fmt.Errorf("network %q has no servers configured", n.Name)
+	}
+	s := n.Servers[n.nextServer]
+	n.nextServer++
+	if n.nextServer > len(n.Servers)-1 {
+		n.nextServer = 0
+	}
+	return s, nil
 }
 
 func (s *Server) GetPort() int {

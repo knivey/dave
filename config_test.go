@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"text/template"
 )
@@ -242,7 +243,10 @@ func TestNetworkGetNextServer(t *testing.T) {
 
 		want := []string{"a", "b", "c", "a", "b"}
 		for _, w := range want {
-			got := n.getNextServer()
+			got, err := n.getNextServer()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
 			if got.Host != w {
 				t.Errorf("getNextServer() = %q, want %q", got.Host, w)
 			}
@@ -256,10 +260,24 @@ func TestNetworkGetNextServer(t *testing.T) {
 		}
 
 		for i := 0; i < 5; i++ {
-			got := n.getNextServer()
+			got, err := n.getNextServer()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
 			if got.Host != "single" {
 				t.Errorf("getNextServer() = %q, want %q", got.Host, "single")
 			}
+		}
+	})
+
+	t.Run("returns error for empty servers", func(t *testing.T) {
+		n := Network{Name: "testnet"}
+		_, err := n.getNextServer()
+		if err == nil {
+			t.Fatal("expected error for empty servers")
+		}
+		if !strings.Contains(err.Error(), "no servers") {
+			t.Errorf("error = %q, want mention of no servers", err.Error())
 		}
 	})
 }

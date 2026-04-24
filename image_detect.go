@@ -41,7 +41,7 @@ func formatSize(b int) string {
 
 var urlRegex = regexp.MustCompile(`(?i)https?://\S+`)
 
-func detectImageURLs(text string) (cleanText string, urls []string) {
+func detectImageURLs(text string) (originalText string, urls []string) {
 	matches := urlRegex.FindAllString(text, -1)
 	seen := make(map[string]bool)
 	for _, u := range matches {
@@ -51,16 +51,13 @@ func detectImageURLs(text string) (cleanText string, urls []string) {
 			urls = append(urls, u)
 		}
 	}
-	cleanText = text
-	for _, u := range matches {
-		cleanText = strings.ReplaceAll(cleanText, u, "")
-	}
-	cleanText = strings.Join(strings.Fields(cleanText), " ")
-	return cleanText, urls
+	return text, urls
 }
 
 func downloadImage(url string) ([]byte, string, error) {
-	logger.Debug("downloading image", "url", url)
+	if logger != nil {
+		logger.Debug("downloading image", "url", url)
+	}
 	client := &http.Client{
 		Timeout: 30 * time.Second,
 	}
@@ -99,7 +96,9 @@ func downloadImage(url string) ([]byte, string, error) {
 		return nil, "", fmt.Errorf("image too large (%d bytes, max %d)", len(data), maxImageSize)
 	}
 
-	logger.Debug("image downloaded", "url", url, "size", formatSize(len(data)), "content_type", contentType)
+	if logger != nil {
+		logger.Debug("image downloaded", "url", url, "size", formatSize(len(data)), "content_type", contentType)
+	}
 	return data, contentType, nil
 }
 
@@ -245,30 +244,40 @@ func sanitizeMessages(messages []gogpt.ChatCompletionMessage) []gogpt.ChatComple
 	return out
 }
 
+func stripSuccessfulURLs(text string, successfulURLs []string) string {
+	for _, url := range successfulURLs {
+		for _, raw := range urlRegex.FindAllString(text, -1) {
+			if strings.TrimRight(raw, ".,;:)") == url {
+				text = strings.Replace(text, raw, "", 1)
+				break
+			}
+		}
+	}
+	return strings.Join(strings.Fields(text), " ")
+}
+
 func buildImageMessage(text string, imageUrls []string, maxImages int, format string, quality, maxW, maxH int) (gogpt.ChatCompletionMessage, error) {
 	if len(imageUrls) > maxImages {
 		imageUrls = imageUrls[:maxImages]
 	}
 
 	var parts []gogpt.ChatMessagePart
-
-	if text != "" {
-		parts = append(parts, gogpt.ChatMessagePart{
-			Type: gogpt.ChatMessagePartTypeText,
-			Text: text,
-		})
-	}
+	var successfulURLs []string
 
 	for _, url := range imageUrls {
 		imgData, mimeType, err := downloadImage(url)
 		if err != nil {
-			logger.Warn("skipping image URL", "url", url, "error", err.Error())
+			if logger != nil {
+				logger.Warn("skipping image URL", "url", url, "error", err.Error())
+			}
 			continue
 		}
 
 		imgData, dataURI, err := convertImage(imgData, mimeType, format, quality, maxW, maxH)
 		if err != nil {
-			logger.Warn("failed to convert image", "url", url, "error", err.Error())
+			if logger != nil {
+				logger.Warn("failed to convert image", "url", url, "error", err.Error())
+			}
 			continue
 		}
 
@@ -282,6 +291,16 @@ func buildImageMessage(text string, imageUrls []string, maxImages int, format st
 				Detail: gogpt.ImageURLDetailAuto,
 			},
 		})
+		successfulURLs = append(successfulURLs, url)
+	}
+
+	text = stripSuccessfulURLs(text, successfulURLs)
+
+	if text != "" {
+		parts = append([]gogpt.ChatMessagePart{{
+			Type: gogpt.ChatMessagePartTypeText,
+			Text: text,
+		}}, parts...)
 	}
 
 	if len(parts) == 0 {

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"image"
 	"image/jpeg"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	gogpt "github.com/sashabaranov/go-openai"
@@ -55,85 +57,85 @@ func TestDetectImageURLs(t *testing.T) {
 			name:      "single jpg URL",
 			text:      "check out https://example.com/image.jpg",
 			wantUrls:  []string{"https://example.com/image.jpg"},
-			wantClean: "check out",
+			wantClean: "check out https://example.com/image.jpg",
 		},
 		{
 			name:      "single png URL",
 			text:      "image: http://site.org/photo.png",
 			wantUrls:  []string{"http://site.org/photo.png"},
-			wantClean: "image:",
+			wantClean: "image: http://site.org/photo.png",
 		},
 		{
 			name:      "gif URL",
 			text:      "fun https://anim.com/anim.gif?q=1",
 			wantUrls:  []string{"https://anim.com/anim.gif?q=1"},
-			wantClean: "fun",
+			wantClean: "fun https://anim.com/anim.gif?q=1",
 		},
 		{
 			name:      "webp URL",
 			text:      "see https://img.webp",
 			wantUrls:  []string{"https://img.webp"},
-			wantClean: "see",
+			wantClean: "see https://img.webp",
 		},
 		{
 			name:      "bmp URL",
 			text:      "bmp https://x.com/pic.bmp",
 			wantUrls:  []string{"https://x.com/pic.bmp"},
-			wantClean: "bmp",
+			wantClean: "bmp https://x.com/pic.bmp",
 		},
 		{
 			name:      "URL with trailing punctuation",
 			text:      "look at https://a.com/pic.jpg, it's cool!",
 			wantUrls:  []string{"https://a.com/pic.jpg"},
-			wantClean: "look at it's cool!",
+			wantClean: "look at https://a.com/pic.jpg, it's cool!",
 		},
 		{
 			name:      "URL with trailing semicolon",
 			text:      "check https://a.com/img.png; and this",
 			wantUrls:  []string{"https://a.com/img.png"},
-			wantClean: "check and this",
+			wantClean: "check https://a.com/img.png; and this",
 		},
 		{
 			name:      "URL with trailing parenthesis",
 			text:      "(see https://a.com/img.jpg)",
 			wantUrls:  []string{"https://a.com/img.jpg"},
-			wantClean: "(see",
+			wantClean: "(see https://a.com/img.jpg)",
 		},
 		{
 			name:      "URL with colon",
 			text:      "https://a.com/pic.png: extra",
 			wantUrls:  []string{"https://a.com/pic.png"},
-			wantClean: "extra",
+			wantClean: "https://a.com/pic.png: extra",
 		},
 		{
 			name:      "multiple URLs",
 			text:      "images https://a.com/1.jpg and https://b.com/2.png here",
 			wantUrls:  []string{"https://a.com/1.jpg", "https://b.com/2.png"},
-			wantClean: "images and here",
+			wantClean: "images https://a.com/1.jpg and https://b.com/2.png here",
 		},
 		{
 			name:      "duplicate URLs deduplicated",
 			text:      "same https://a.com/pic.jpg and again https://a.com/pic.jpg",
 			wantUrls:  []string{"https://a.com/pic.jpg"},
-			wantClean: "same and again",
+			wantClean: "same https://a.com/pic.jpg and again https://a.com/pic.jpg",
 		},
 		{
 			name:      "case insensitive http",
 			text:      "HTTP://example.com/pic.jpg",
 			wantUrls:  []string{"HTTP://example.com/pic.jpg"},
-			wantClean: "",
+			wantClean: "HTTP://example.com/pic.jpg",
 		},
 		{
 			name:      "jpeg extension",
 			text:      "see https://a.com/pic.jpeg",
 			wantUrls:  []string{"https://a.com/pic.jpeg"},
-			wantClean: "see",
+			wantClean: "see https://a.com/pic.jpeg",
 		},
 		{
 			name:      "URL with query params",
 			text:      "see https://a.com/pic.jpg?w=100&h=200",
 			wantUrls:  []string{"https://a.com/pic.jpg?w=100&h=200"},
-			wantClean: "see",
+			wantClean: "see https://a.com/pic.jpg?w=100&h=200",
 		},
 		{
 			name:      "empty string",
@@ -145,37 +147,37 @@ func TestDetectImageURLs(t *testing.T) {
 			name:      "only URL",
 			text:      "https://a.com/pic.jpg",
 			wantUrls:  []string{"https://a.com/pic.jpg"},
-			wantClean: "",
+			wantClean: "https://a.com/pic.jpg",
 		},
 		{
 			name:      "jpeg capitalized",
 			text:      "see https://a.com/pic.JPEG",
 			wantUrls:  []string{"https://a.com/pic.JPEG"},
-			wantClean: "see",
+			wantClean: "see https://a.com/pic.JPEG",
 		},
 		{
-			name:      "non-image URL detected (validation happens later)",
+			name:      "non-image URL detected",
 			text:      "visit https://example.com/page.html",
 			wantUrls:  []string{"https://example.com/page.html"},
-			wantClean: "visit",
+			wantClean: "visit https://example.com/page.html",
 		},
 		{
-			name:      "text file URL detected (validation happens later)",
+			name:      "text file URL detected",
 			text:      "read https://example.com/file.txt",
 			wantUrls:  []string{"https://example.com/file.txt"},
-			wantClean: "read",
+			wantClean: "read https://example.com/file.txt",
 		},
 		{
-			name:      "multiple spaces collapsed",
+			name:      "multiple spaces preserved",
 			text:      "see   https://a.com/pic.jpg   now",
 			wantUrls:  []string{"https://a.com/pic.jpg"},
-			wantClean: "see now",
+			wantClean: "see   https://a.com/pic.jpg   now",
 		},
 		{
 			name:      "real world twitter image URL with query params",
 			text:      "check this https://pbs.twimg.com/media/HF4OV9JWsAAAAbX?format=jpg&name=900x900",
 			wantUrls:  []string{"https://pbs.twimg.com/media/HF4OV9JWsAAAAbX?format=jpg&name=900x900"},
-			wantClean: "check this",
+			wantClean: "check this https://pbs.twimg.com/media/HF4OV9JWsAAAAbX?format=jpg&name=900x900",
 		},
 	}
 
@@ -603,4 +605,207 @@ func containsStr(s, substr string) bool {
 		}
 		return false
 	}())
+}
+
+func TestStripSuccessfulURLs(t *testing.T) {
+	tests := []struct {
+		name           string
+		text           string
+		successfulURLs []string
+		want           string
+	}{
+		{
+			name:           "no URLs to strip",
+			text:           "hello world",
+			successfulURLs: nil,
+			want:           "hello world",
+		},
+		{
+			name:           "strip single URL",
+			text:           "see https://a.com/pic.jpg now",
+			successfulURLs: []string{"https://a.com/pic.jpg"},
+			want:           "see now",
+		},
+		{
+			name:           "strip URL with trailing comma",
+			text:           "look at https://a.com/pic.jpg, it's cool",
+			successfulURLs: []string{"https://a.com/pic.jpg"},
+			want:           "look at it's cool",
+		},
+		{
+			name:           "strip URL with trailing semicolon",
+			text:           "check https://a.com/img.png; and this",
+			successfulURLs: []string{"https://a.com/img.png"},
+			want:           "check and this",
+		},
+		{
+			name:           "strip URL with trailing paren",
+			text:           "(see https://a.com/img.jpg)",
+			successfulURLs: []string{"https://a.com/img.jpg"},
+			want:           "(see",
+		},
+		{
+			name:           "strip multiple URLs",
+			text:           "images https://a.com/1.jpg and https://b.com/2.png here",
+			successfulURLs: []string{"https://a.com/1.jpg", "https://b.com/2.png"},
+			want:           "images and here",
+		},
+		{
+			name:           "strip one leave one",
+			text:           "see https://a.com/page.html and https://b.com/pic.jpg here",
+			successfulURLs: []string{"https://b.com/pic.jpg"},
+			want:           "see https://a.com/page.html and here",
+		},
+		{
+			name:           "URL not in text is no-op",
+			text:           "no urls here",
+			successfulURLs: []string{"https://ghost.com/img.jpg"},
+			want:           "no urls here",
+		},
+		{
+			name:           "URL with colon stripped",
+			text:           "https://a.com/pic.png: extra",
+			successfulURLs: []string{"https://a.com/pic.png"},
+			want:           "extra",
+		},
+		{
+			name:           "only URL stripped",
+			text:           "https://a.com/pic.jpg",
+			successfulURLs: []string{"https://a.com/pic.jpg"},
+			want:           "",
+		},
+		{
+			name:           "multiple spaces collapsed after strip",
+			text:           "see   https://a.com/pic.jpg   now",
+			successfulURLs: []string{"https://a.com/pic.jpg"},
+			want:           "see now",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripSuccessfulURLs(tt.text, tt.successfulURLs)
+			if got != tt.want {
+				t.Errorf("stripSuccessfulURLs() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func createTestJPEG(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 10, 10))
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 75}); err != nil {
+		t.Fatalf("createTestJPEG: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func TestBuildImageMessageNonImageURLPreserved(t *testing.T) {
+	jpegData := createTestJPEG(t)
+
+	imgServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Write(jpegData)
+	}))
+	defer imgServer.Close()
+
+	htmlServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Write([]byte("<html>not an image</html>"))
+	}))
+	defer htmlServer.Close()
+
+	t.Run("non-image URL preserved in text", func(t *testing.T) {
+		text := "check " + htmlServer.URL + "/page.html and " + imgServer.URL + "/pic.jpg here"
+		urls := []string{htmlServer.URL + "/page.html", imgServer.URL + "/pic.jpg"}
+
+		msg, err := buildImageMessage(text, urls, 5, "jpg", 75, 1024, 1024)
+		if err != nil {
+			t.Fatalf("buildImageMessage() error = %v", err)
+		}
+
+		if len(msg.MultiContent) < 2 {
+			t.Fatalf("expected at least 2 parts, got %d", len(msg.MultiContent))
+		}
+
+		var textPart string
+		var imageCount int
+		for _, part := range msg.MultiContent {
+			if part.Type == gogpt.ChatMessagePartTypeText {
+				textPart = part.Text
+			}
+			if part.Type == gogpt.ChatMessagePartTypeImageURL {
+				imageCount++
+			}
+		}
+
+		if imageCount != 1 {
+			t.Errorf("expected 1 image part, got %d", imageCount)
+		}
+
+		if !containsStr(textPart, htmlServer.URL+"/page.html") {
+			t.Errorf("non-image URL missing from text: %q", textPart)
+		}
+		if containsStr(textPart, imgServer.URL+"/pic.jpg") {
+			t.Errorf("image URL should have been stripped from text: %q", textPart)
+		}
+	})
+
+	t.Run("all non-image URLs preserved", func(t *testing.T) {
+		text := "visit " + htmlServer.URL + "/a and " + htmlServer.URL + "/b"
+		urls := []string{htmlServer.URL + "/a", htmlServer.URL + "/b"}
+
+		msg, err := buildImageMessage(text, urls, 5, "jpg", 75, 1024, 1024)
+		if err != nil {
+			t.Fatalf("buildImageMessage() error = %v", err)
+		}
+
+		var textPart string
+		var imageCount int
+		for _, part := range msg.MultiContent {
+			if part.Type == gogpt.ChatMessagePartTypeText {
+				textPart = part.Text
+			}
+			if part.Type == gogpt.ChatMessagePartTypeImageURL {
+				imageCount++
+			}
+		}
+
+		if imageCount != 0 {
+			t.Errorf("expected 0 image parts, got %d", imageCount)
+		}
+
+		if !containsStr(textPart, htmlServer.URL+"/a") {
+			t.Errorf("first non-image URL missing from text: %q", textPart)
+		}
+		if !containsStr(textPart, htmlServer.URL+"/b") {
+			t.Errorf("second non-image URL missing from text: %q", textPart)
+		}
+	})
+
+	t.Run("successful image URL stripped from text", func(t *testing.T) {
+		text := "see " + imgServer.URL + "/pic.jpg now"
+		urls := []string{imgServer.URL + "/pic.jpg"}
+
+		msg, err := buildImageMessage(text, urls, 5, "jpg", 75, 1024, 1024)
+		if err != nil {
+			t.Fatalf("buildImageMessage() error = %v", err)
+		}
+
+		var textPart string
+		for _, part := range msg.MultiContent {
+			if part.Type == gogpt.ChatMessagePartTypeText {
+				textPart = part.Text
+			}
+		}
+
+		if containsStr(textPart, imgServer.URL) {
+			t.Errorf("image URL should have been stripped from text: %q", textPart)
+		}
+		if !containsStr(textPart, "see") || !containsStr(textPart, "now") {
+			t.Errorf("surrounding text should be preserved: %q", textPart)
+		}
+	})
 }

@@ -55,7 +55,7 @@
 - **Chat API** with persistent per-user context history (SQLite-backed sessions)
 - **Completion API** for one-shot prompts
 - **Streaming** — watch responses arrive in real-time
-- **System prompt templates** with `{{.Nick}}`, `{{.Channel}}`, `{{.Network}}`, `{{.ChanNicks}}`, `{{.Vars.*}}` (custom vars via TOML)
+- **System prompt templates** using Go's `text/template` with `{{.Nick}}`, `{{.Channel}}`, `{{.Network}}`, `{{.ChanNicks}}`, `{{.Vars.*}}` (custom vars via TOML); supports conditionals, comparisons, and basic logic
 - Markdown → IRC formatting (bold, color, underline, tables, code blocks)
 - Multiple services: OpenAI, Grok/xAI, local vLLM, OpenRouter, any OpenAI-compatible API
 
@@ -395,9 +395,45 @@ Users: {{.ChanNicks}}
 | `{{.Nick}}` | Caller's nickname |
 | `{{.BotNick}}` | Bot's nickname |
 | `{{.Channel}}` | Channel name |
-| `{{.Network}}` | Network name |
+| `{{.Network}}` | Network name (exactly as defined in `config.toml` under `[networks.*]`) |
 | `{{.ChanNicks}}` | JSON array of all users in the channel |
 | `{{.Vars.*}}` | Any custom key from `templatevars.toml` |
+
+Templates use Go's `text/template` syntax and support conditionals (`{{if}}`, `{{else}}`), comparisons (`eq`, `ne`, `lt`, `gt`), and logical operators (`and`, `or`, `not`).
+
+Example: Network-specific behavior
+```toml
+[conditional-chat]
+service = "openai"
+model = "gpt-4o"
+system = """\
+{{if eq .Network "libera"}}You are on Libera Chat. Be professional.
+{{else if eq .Network "efnet"}}You are on EFNet. Be casual.
+{{else}}You are on {{.Network}}. Be friendly.{{end}}
+"""
+```
+
+Example: Exclude specific networks
+```toml
+[restricted-chat]
+service = "openai"
+model = "gpt-4o"
+system = """\
+{{if ne .Network "private-net"}}You are chatting in a public channel. Be helpful and friendly.
+{{else}}You are in a private network. Follow strict confidentiality rules.{{end}}
+"""
+```
+
+Example: Multiple conditions with `and` / `or`
+```toml
+[complex-conditional]
+service = "openai"
+model = "gpt-4o"
+system = """\
+{{if and (eq .Network "libera") (eq .Channel "#programming")}}You are in the Libera #programming channel. Be technical and precise.
+{{else if or (eq .Network "private") (eq .Channel "#admin")}}You are in a restricted area. Follow strict protocols.{{end}}
+"""
+```
 
 Custom variables are **hot-reloadable** — edit `templatevars.toml` and type `/reload` to update without restart. Missing file = empty map (not fatal).
 

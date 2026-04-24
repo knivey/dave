@@ -1,6 +1,7 @@
-# Chat commands support templating in the system prompt.
-# Available variables: {{.Nick}} (caller's nickname), {{.BotNick}} (bot's nickname), {{.Channel}} (channel name), {{.Network}} (network name), {{.ChanNicks}} (JSON array of ALL nicknames in {{.Channel}}), {{.Vars.*}} (custom variables from templatevars.toml)
+# Chat commands support templating in the system prompt using Go's text/template.
+# Available variables: {{.Nick}} (caller's nickname), {{.BotNick}} (bot's nickname), {{.Channel}} (channel name), {{.Network}} (network name - exactly as defined in config.toml under [networks.*]), {{.ChanNicks}} (JSON array of ALL nicknames in {{.Channel}}), {{.Vars.*}} (custom variables from templatevars.toml)
 # Templates are processed when starting a new chat context. Invalid templates will cause the bot to fail at startup.
+# Template logic supported: conditionals ({{if}} {{else}}), comparisons (eq, ne, lt, gt), logical operators (and, or, not)
 # Example: system = "You are {{.BotNick}} chatting with {{.Nick}} in {{.Channel}} on {{.Network}}."
 
 # OpenAI Chat Completion Parameters (optional):
@@ -98,6 +99,49 @@ maximagesize = "1024x1024"
 system = """You are dave, chatting with {{.Nick}}={{.BotNick}} in {{.Channel}} on {{.Network}}.
 Chan users: {{.ChanNicks}}
 Use IRC formatting/colors as needed.
+"""
+
+# Example: Conditional logic based on network (matches [networks.*] keys in config.toml)
+[conditional]
+description = "Network-aware chat with conditional behavior"
+service = "openai"
+model = "gpt-4o"
+renderMarkdown = true
+system = """\
+{{if eq .Network "libera"}}You are chatting on Libera Chat. Be professional, technical, and helpful.
+{{else if eq .Network "efnet"}}You are chatting on EFNet. Be casual, friendly, and fun.
+{{else if eq .Network "oftc"}}You are chatting on OFTC. Be direct and concise.
+{{else}}You are chatting on {{.Network}}. Be friendly and helpful.{{end}}
+
+Users in this channel: {{.ChanNicks}}
+You are {{.BotNick}} speaking with {{.Nick}}.
+"""
+
+# Example: Using not-equal (ne) to exclude specific networks
+[public-only]
+description = "Chat that restricts behavior on private networks"
+service = "openai"
+model = "gpt-4o"
+renderMarkdown = true
+system = """\
+{{if ne .Network "private"}}You are in a public channel. Be helpful, friendly, and informative.
+{{else}}You are in a private network. Follow strict confidentiality rules and limit information sharing.{{end}}
+
+Channel: {{.Channel}} | Network: {{.Network}} | Users: {{.ChanNicks}}
+"""
+
+# Example: Multiple conditions using and/or
+[complex]
+description = "Chat with complex conditional logic combining network and channel checks"
+service = "openai"
+model = "gpt-4o"
+renderMarkdown = true
+system = """\
+{{if and (eq .Network "libera") (eq .Channel "#programming")}}You are in the Libera #programming channel. Be technical, precise, and code-focused.
+{{else if or (eq .Network "private") (eq .Channel "#admin")}}You are in a restricted area. Follow strict security protocols. Do not share sensitive information.
+{{else if and (ne .Network "private") (contains .Channel "#help")}}You are in a public help channel. Be patient and guide users clearly.{{end}}
+
+You are {{.BotNick}} speaking with {{.Nick}} in {{.Channel}} on {{.Network}}.
 """
 
 # Example: More creative chat with adjusted parameters

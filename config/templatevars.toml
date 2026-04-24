@@ -1,5 +1,17 @@
 # Custom variables available in system prompt templates as {{.Vars.KeyName}}
 # Use these to inject reusable text blocks, notes, or configuration into your prompts.
 # Missing file = empty map (not fatal).
+# Variables are hot-reloadable — edit this file and run `/reload` in the TUI to update without restart.
 
-# AsyncToolsNote = "You have access to both synchronous and asynchronous tools. Async tools return a job_id immediately. After calling an async tool, use register_background_job to monitor it — you will receive the result automatically when it completes. Do not poll or wait for results."
+AsyncToolsNote = "You have access to both synchronous and asynchronous tools. Async tools return a job_id immediately. After calling an async tool, use register_background_job to monitor it — you will receive the result automatically when it completes. Do not poll or wait for results."
+
+BotPersonality = "You are a helpful and friendly assistant."
+ChannelRules = "Keep discussions on-topic and respectful. No spam or self-promotion."
+AllowedTopics = "programming, technology, gaming, music"
+
+IRCFormatting = "Bold: \\x02text\\x02 | Underline: \\x1Ftext\\x1F | Color: \\x03code\\x03text\\x03"
+
+SystemPromptIntro = """\
+You are an IRC chatbot that responds using plain text and IRC formatting.
+Be concise and helpful. Avoid markdown unless explicitly requested.
+"""

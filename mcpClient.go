@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -56,6 +57,9 @@ func connectMCPServer(name string, mcpCfg MCPConfig) (*MCPServer, error) {
 	var transport mcp.Transport
 	if mcpCfg.Transport == "stdio" {
 		cmd := exec.Command(mcpCfg.Command, mcpCfg.Args...)
+		if len(mcpCfg.Env) > 0 {
+			cmd.Env = append(os.Environ(), mcpCfg.Env...)
+		}
 		transport = &mcp.CommandTransport{Command: cmd}
 	} else {
 		transport = &mcp.StreamableClientTransport{Endpoint: mcpCfg.URL}

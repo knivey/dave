@@ -8,6 +8,7 @@
 # transport = "stdio"
 # command = "npx"
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/docs"]
+# env = ["API_KEY=secret123"]
 # timeout = "30s"
 #
 # [github]

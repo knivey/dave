@@ -145,6 +145,7 @@ type MCPConfig struct {
 	Transport string        `toml:"transport"` // "stdio" or "http"
 	Command   string        `toml:"command"`
 	Args      []string      `toml:"args"`
+	Env       []string      `toml:"env"`
 	URL       string        `toml:"url"`
 	Timeout   time.Duration `toml:"timeout"`
 	KeepAlive time.Duration `toml:"keepalive"` // ping interval for liveness; default 30s for http, 0 for stdio

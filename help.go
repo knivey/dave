@@ -1,11 +1,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"sort"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	"github.com/lrstanley/girc"
@@ -18,15 +18,37 @@ type helpEntry struct {
 	mcpInfo string
 }
 
-func help(network Network, client *girc.Client, event girc.Event, args ...string) {
+func help(network Network, client *girc.Client, event girc.Event, ctx context.Context, output chan<- string, args ...string) {
 	botnick := client.GetNick()
+
+	var completions map[string]AIConfig
+	var chats map[string]AIConfig
+	var tools map[string]MCPCommandConfig
+	readConfig(func() {
+		completions = make(map[string]AIConfig, len(config.Commands.Completions))
+		for k, v := range config.Commands.Completions {
+			completions[k] = v
+		}
+		chats = make(map[string]AIConfig, len(config.Commands.Chats))
+		for k, v := range config.Commands.Chats {
+			chats[k] = v
+		}
+		tools = make(map[string]MCPCommandConfig, len(config.Commands.Tools))
+		for k, v := range config.Commands.Tools {
+			tools[k] = v
+		}
+	})
+
 	var lines []string
 
 	if len(args) > 0 && args[0] != "" {
 		cmdName := args[0]
 		entry, found := findCommandHelp(network, cmdName)
 		if !found {
-			client.Cmd.Reply(event, fmt.Sprintf("\x0304❗ Command '%s' not found. Use %shelp to see all commands.", cmdName, network.Trigger))
+			select {
+			case output <- fmt.Sprintf("\x0304❗ Command '%s' not found. Use %shelp to see all commands.", cmdName, network.Trigger):
+			case <-ctx.Done():
+			}
 			return
 		}
 		lines = append(lines, fmt.Sprintf("Help for %s:", entry.cmd))
@@ -38,8 +60,11 @@ func help(network Network, client *girc.Client, event girc.Event, args ...string
 			lines = append(lines, "  "+entry.mcpInfo)
 		}
 		for _, line := range lines {
-			client.Cmd.Reply(event, "\x02\x02"+line)
-			time.Sleep(time.Millisecond * network.Throttle)
+			select {
+			case output <- line:
+			case <-ctx.Done():
+				return
+			}
 		}
 		return
 	}
@@ -59,19 +84,19 @@ func help(network Network, client *girc.Client, event girc.Event, args ...string
 		lines = append(lines, fmt.Sprintf("  %sjobs \u2014 List your chat queue and background jobs", network.Trigger))
 	}
 
-	if len(config.Commands.Completions) > 0 {
+	if len(completions) > 0 {
 		var entries []helpEntry
-		completionKeys := make([]string, 0, len(config.Commands.Completions))
-		for k := range config.Commands.Completions {
+		completionKeys := make([]string, 0, len(completions))
+		for k := range completions {
 			completionKeys = append(completionKeys, k)
 		}
 		sort.Slice(completionKeys, func(i, j int) bool {
-			iInfo := formatModelInfo(config.Commands.Completions[completionKeys[i]].Service, config.Commands.Completions[completionKeys[i]].Model, config.Commands.Completions[completionKeys[i]].DetectImages)
-			jInfo := formatModelInfo(config.Commands.Completions[completionKeys[j]].Service, config.Commands.Completions[completionKeys[j]].Model, config.Commands.Completions[completionKeys[j]].DetectImages)
+			iInfo := formatModelInfo(completions[completionKeys[i]].Service, completions[completionKeys[i]].Model, completions[completionKeys[i]].DetectImages)
+			jInfo := formatModelInfo(completions[completionKeys[j]].Service, completions[completionKeys[j]].Model, completions[completionKeys[j]].DetectImages)
 			return iInfo < jInfo
 		})
 		for _, k := range completionKeys {
-			c := config.Commands.Completions[k]
+			c := completions[k]
 			entries = append(entries, helpEntry{
 				cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
 				info: formatModelInfo(c.Service, c.Model, c.DetectImages),
@@ -84,19 +109,19 @@ func help(network Network, client *girc.Client, event girc.Event, args ...string
 		}
 	}
 
-	if len(config.Commands.Chats) > 0 {
+	if len(chats) > 0 {
 		var entries []helpEntry
-		chatKeys := make([]string, 0, len(config.Commands.Chats))
-		for k := range config.Commands.Chats {
+		chatKeys := make([]string, 0, len(chats))
+		for k := range chats {
 			chatKeys = append(chatKeys, k)
 		}
 		sort.Slice(chatKeys, func(i, j int) bool {
-			iInfo := formatModelInfo(config.Commands.Chats[chatKeys[i]].Service, config.Commands.Chats[chatKeys[i]].Model, config.Commands.Chats[chatKeys[i]].DetectImages)
-			jInfo := formatModelInfo(config.Commands.Chats[chatKeys[j]].Service, config.Commands.Chats[chatKeys[j]].Model, config.Commands.Chats[chatKeys[j]].DetectImages)
+			iInfo := formatModelInfo(chats[chatKeys[i]].Service, chats[chatKeys[i]].Model, chats[chatKeys[i]].DetectImages)
+			jInfo := formatModelInfo(chats[chatKeys[j]].Service, chats[chatKeys[j]].Model, chats[chatKeys[j]].DetectImages)
 			return iInfo < jInfo
 		})
 		for _, k := range chatKeys {
-			c := config.Commands.Chats[k]
+			c := chats[k]
 			entries = append(entries, helpEntry{
 				cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
 				info: formatModelInfo(c.Service, c.Model, c.DetectImages),
@@ -109,17 +134,17 @@ func help(network Network, client *girc.Client, event girc.Event, args ...string
 		}
 	}
 
-	if len(config.Commands.Tools) > 0 {
+	if len(tools) > 0 {
 		var entries []helpEntry
-		toolKeys := make([]string, 0, len(config.Commands.Tools))
-		for k := range config.Commands.Tools {
+		toolKeys := make([]string, 0, len(tools))
+		for k := range tools {
 			toolKeys = append(toolKeys, k)
 		}
 		sort.Slice(toolKeys, func(i, j int) bool {
 			return toolKeys[i] < toolKeys[j]
 		})
 		for _, k := range toolKeys {
-			c := config.Commands.Tools[k]
+			c := tools[k]
 			entries = append(entries, helpEntry{
 				cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
 				info: formatToolInfo(c.MCP, c.Tool),
@@ -134,8 +159,11 @@ func help(network Network, client *girc.Client, event girc.Event, args ...string
 
 	for _, line := range lines {
 		for _, wrapped := range wrapLine(line) {
-			client.Cmd.Reply(event, "\x02\x02"+wrapped)
-			time.Sleep(time.Millisecond * network.Throttle)
+			select {
+			case output <- wrapped:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}
 }
@@ -152,7 +180,15 @@ func formatModelInfo(service, model string, detectImages bool) string {
 }
 
 func findCommandHelp(network Network, cmdName string) (helpEntry, bool) {
-	for _, c := range config.Commands.Completions {
+	var completions map[string]AIConfig
+	var chats map[string]AIConfig
+	var tools map[string]MCPCommandConfig
+	readConfig(func() {
+		completions = config.Commands.Completions
+		chats = config.Commands.Chats
+		tools = config.Commands.Tools
+	})
+	for _, c := range completions {
 		if c.Name == cmdName || c.Regex == cmdName {
 			return helpEntry{
 				cmd:     formatCmd(network.Trigger, c.Regex, c.Name),
@@ -173,7 +209,7 @@ func findCommandHelp(network Network, cmdName string) (helpEntry, bool) {
 			}
 		}
 	}
-	for _, c := range config.Commands.Chats {
+	for _, c := range chats {
 		if c.Name == cmdName || c.Regex == cmdName {
 			return helpEntry{
 				cmd:     formatCmd(network.Trigger, c.Regex, c.Name),
@@ -194,7 +230,7 @@ func findCommandHelp(network Network, cmdName string) (helpEntry, bool) {
 			}
 		}
 	}
-	for _, c := range config.Commands.Tools {
+	for _, c := range tools {
 		if c.Name == cmdName || c.Regex == cmdName {
 			return helpEntry{
 				cmd:  formatCmd(network.Trigger, c.Regex, c.Name),

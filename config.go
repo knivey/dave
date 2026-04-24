@@ -49,7 +49,7 @@ type TUIScrollbarConfig struct {
 }
 
 type ChannelConfig struct {
-	Key string `toml:"key"`
+	Key      string `toml:"key"`
 	Pastebin bool   `toml:"pastebin"`
 	MaxLines int    `toml:"max_lines"`
 }
@@ -81,10 +81,11 @@ func (n *Network) GetChannelConfig(channel string) ChannelConfig {
 }
 
 type Server struct {
-	Host string
-	Port int
-	Pass string
-	Ssl  bool
+	Host               string `toml:"host"`
+	Port               int    `toml:"port"`
+	Pass               string `toml:"pass"`
+	Ssl                bool   `toml:"ssl"`
+	InsecureSkipVerify bool   `toml:"insecure_skip_verify"`
 }
 
 type Commands struct {
@@ -194,7 +195,7 @@ func (cfg *AIConfig) ApplyDefaults(service Service) {
 	if cfg.MaxTokens == 0 {
 		cfg.MaxTokens = service.MaxTokens
 	}
-	if cfg.MaxTokens == 0 {
+	if cfg.MaxCompletionTokens == 0 {
 		cfg.MaxCompletionTokens = service.MaxCompletionTokens
 	}
 	if cfg.Temperature == 0 {

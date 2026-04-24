@@ -18,8 +18,13 @@ import (
 )
 
 func completion(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx context.Context, output chan<- string, args ...string) {
-	aiConfig := gogpt.DefaultConfig(config.Services[cfg.Service].Key)
-	aiConfig.BaseURL = config.Services[cfg.Service].BaseURL
+	var svcKey, svcBaseURL string
+	readConfig(func() {
+		svcKey = config.Services[cfg.Service].Key
+		svcBaseURL = config.Services[cfg.Service].BaseURL
+	})
+	aiConfig := gogpt.DefaultConfig(svcKey)
+	aiConfig.BaseURL = svcBaseURL
 	aiClient := gogpt.NewClientWithConfig(aiConfig)
 
 	logger := logxi.New(network.Name + ".completion." + cfg.Name)
@@ -127,7 +132,8 @@ type chatRunner struct {
 }
 
 func newChatRunner(network Network, client *girc.Client, cfg AIConfig) *chatRunner {
-	svc := config.Services[cfg.Service]
+	var svc Service
+	readConfig(func() { svc = config.Services[cfg.Service] })
 	aiConfig := gogpt.DefaultConfig(svc.Key)
 	aiConfig.BaseURL = svc.BaseURL
 	extraBody := make(map[string]any, len(cfg.ExtraBody)+1)
@@ -679,13 +685,20 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 	if !ContextExists(ctx_key) {
 		var systemContent string
 		if cfg.SystemTmpl != nil {
+			var templateVars map[string]string
+			readConfig(func() {
+				templateVars = make(map[string]string, len(config.TemplateVars))
+				for k, v := range config.TemplateVars {
+					templateVars[k] = v
+				}
+			})
 			data := SystemPromptData{
 				Nick:      e.Source.Name,
 				BotNick:   c.GetNick(),
 				Channel:   e.Params[0],
 				Network:   network.Name,
 				ChanNicks: "",
-				Vars:      config.TemplateVars,
+				Vars:      templateVars,
 			}
 
 			ch := c.LookupChannel(data.Channel)

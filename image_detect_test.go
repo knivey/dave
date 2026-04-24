@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	gogpt "github.com/sashabaranov/go-openai"
 )
@@ -703,6 +704,10 @@ func createTestJPEG(t *testing.T) []byte {
 }
 
 func TestBuildImageMessageNonImageURLPreserved(t *testing.T) {
+	origClient := imageHTTPClient
+	imageHTTPClient = &http.Client{Timeout: 30 * time.Second}
+	defer func() { imageHTTPClient = origClient }()
+
 	jpegData := createTestJPEG(t)
 
 	imgServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

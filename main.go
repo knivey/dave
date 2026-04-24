@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -14,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/knivey/dave/MarkdownToIRC/irc"
 	"github.com/lrstanley/girc"
 	logxi "github.com/mgutz/logxi/v1"
@@ -25,6 +27,12 @@ var configDir string
 var wg sync.WaitGroup
 var logger logxi.Logger
 var commandsMutex sync.RWMutex
+var configMu sync.RWMutex
+
+var ignorePatterns []string
+var ignoreMu sync.RWMutex
+var ignoreWatcher *fsnotify.Watcher
+var ignoreFile string
 
 type Bot struct {
 	Client    *girc.Client
@@ -42,6 +50,12 @@ var bots map[string]*Bot
 
 func init() {
 	bots = make(map[string]*Bot)
+}
+
+func readConfig(f func()) {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	f()
 }
 
 type CmdFunc func(Network, *girc.Client, girc.Event, context.Context, chan<- string, ...string)
@@ -69,14 +83,14 @@ var builtInCmds = CmdMap{
 	stop_re: func(n Network, c *girc.Client, e girc.Event, _ context.Context, _ chan<- string, s ...string) {
 		stop(n, c, e, nil, s...)
 	},
-	help_re: func(n Network, c *girc.Client, e girc.Event, _ context.Context, _ chan<- string, s ...string) {
-		help(n, c, e, s...)
+	help_re: func(n Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, s ...string) {
+		help(n, c, e, ctx, output, s...)
 	},
-	sessions_re: func(n Network, c *girc.Client, e girc.Event, _ context.Context, _ chan<- string, s ...string) {
-		historySessions(n, c, e, s...)
+	sessions_re: func(n Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, s ...string) {
+		historySessions(n, c, e, ctx, output, s...)
 	},
-	history_re: func(n Network, c *girc.Client, e girc.Event, _ context.Context, _ chan<- string, s ...string) {
-		historyShow(n, c, e, s...)
+	history_re: func(n Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, s ...string) {
+		historyShow(n, c, e, ctx, output, s...)
 	},
 	stats_re: func(n Network, c *girc.Client, e girc.Event, _ context.Context, _ chan<- string, s ...string) {
 		historyStats(n, c, e, s...)
@@ -87,8 +101,8 @@ var builtInCmds = CmdMap{
 	resume_re: func(n Network, c *girc.Client, e girc.Event, _ context.Context, _ chan<- string, s ...string) {
 		historyResume(n, c, e, s...)
 	},
-	jobs_re: func(n Network, c *girc.Client, e girc.Event, _ context.Context, _ chan<- string, s ...string) {
-		historyJobs(n, c, e, s...)
+	jobs_re: func(n Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, s ...string) {
+		historyJobs(n, c, e, ctx, output, s...)
 	},
 }
 var configCmds CmdMap
@@ -144,6 +158,8 @@ func registerCommandsLocked(cmds Commands) {
 func reloadAll() error {
 	commandsMutex.Lock()
 	defer commandsMutex.Unlock()
+	configMu.Lock()
+	defer configMu.Unlock()
 	if err := loadReloadableDir(configDir, &config); err != nil {
 		return err
 	}
@@ -156,6 +172,7 @@ func reloadAll() error {
 	if queueMgr != nil {
 		queueMgr.UpdateServiceLimits(config.Services)
 	}
+	loadIgnores(filepath.Join(configDir, "ignores.txt"))
 	return nil
 }
 
@@ -205,6 +222,11 @@ func main() {
 	recoverPendingJobs()
 	registerCommands(config.Commands)
 
+	ignorePath := filepath.Join(configDir, "ignores.txt")
+	loadIgnores(ignorePath)
+	watchIgnores(ignorePath)
+	startRateLimitGC()
+
 	if !noTUI {
 		for _, network := range config.Networks {
 			if network.Enabled {
@@ -230,6 +252,9 @@ func main() {
 
 		StopPendingSave()
 		SaveContextStore()
+		if ignoreWatcher != nil {
+			ignoreWatcher.Close()
+		}
 		if apiLogger != nil {
 			apiLogger.CloseAll()
 		}
@@ -293,24 +318,86 @@ func stop(network Network, _ *girc.Client, m girc.Event, _ interface{}, _ ...str
 	queueMgr.StopCurrent(network.Name, m.Params[0], m.Source.Name)
 }
 
-func isIgnored(host string) bool {
-	file, err := os.Open("ignores.txt")
+func loadIgnores(path string) {
+	file, err := os.Open(path)
 	if err != nil {
-		logger.Info("ignores.txt failed to open", err.Error())
-		return false
+		if !os.IsNotExist(err) {
+			logger.Info("ignores.txt failed to open", err.Error())
+		}
+		ignoreMu.Lock()
+		ignorePatterns = nil
+		ignoreMu.Unlock()
+		return
 	}
 	defer file.Close()
 
-	matcher := wildcard.NewMatcher()
+	var patterns []string
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
-		if m, _ := matcher.Match(scanner.Text(), host); m {
-			return true
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" && !strings.HasPrefix(line, "#") {
+			patterns = append(patterns, line)
 		}
 	}
-
 	if err := scanner.Err(); err != nil {
 		logger.Error(err.Error())
+	}
+	ignoreMu.Lock()
+	ignorePatterns = patterns
+	ignoreMu.Unlock()
+	logger.Info("loaded ignore patterns", "count", len(patterns))
+}
+
+func watchIgnores(path string) {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		logger.Warn("failed to create ignores watcher", err.Error())
+		return
+	}
+	ignoreWatcher = watcher
+	ignoreFile = path
+
+	dir := filepath.Dir(path)
+	if err := watcher.Add(dir); err != nil {
+		logger.Warn("failed to watch ignores directory", err.Error())
+		return
+	}
+
+	go func() {
+		for {
+			select {
+			case event, ok := <-watcher.Events:
+				if !ok {
+					return
+				}
+				if event.Name == path && (event.Has(fsnotify.Write) || event.Has(fsnotify.Create) || event.Has(fsnotify.Remove)) {
+					logger.Info("ignores.txt changed, reloading")
+					loadIgnores(path)
+				}
+			case err, ok := <-watcher.Errors:
+				if !ok {
+					return
+				}
+				logger.Error("ignores watcher error", err.Error())
+			}
+		}
+	}()
+}
+
+func isIgnored(host string) bool {
+	ignoreMu.RLock()
+	patterns := ignorePatterns
+	ignoreMu.RUnlock()
+
+	if len(patterns) == 0 {
+		return false
+	}
+
+	matcher := wildcard.NewMatcher()
+	for _, p := range patterns {
+		if m, _ := matcher.Match(p, host); m {
+			return true
+		}
 	}
 	return false
 }
@@ -334,7 +421,9 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 			return
 		}
 		if !checkRate(network, event.Params[0]) {
-			client.Cmd.Reply(event, warnMsg(config.Ratemsg()))
+			var rateMsg string
+			readConfig(func() { rateMsg = config.Ratemsg() })
+			client.Cmd.Reply(event, warnMsg(rateMsg))
 			return
 		}
 		msg = msg[len(botnick+", "):]
@@ -347,7 +436,9 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 				chat(network, client, event, ctx.Config, cx, output, msg)
 			})
 		if position > 0 {
-			client.Cmd.Reply(event, config.QueueMsg(position, 0))
+			var queueMsg string
+			readConfig(func() { queueMsg = config.QueueMsg(position, 0) })
+			client.Cmd.Reply(event, queueMsg)
 		}
 		return
 	}
@@ -372,21 +463,16 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 				cmd(network, client, event, context.Background(), nil, args...)
 				return
 			}
-			if r == help_re {
-				cmd(network, client, event, context.Background(), nil, args...)
-				return
-			}
-			if r == jobs_re {
-				cmd(network, client, event, context.Background(), nil, args...)
-				return
-			}
-			if r == sessions_re || r == history_re || r == stats_re || r == delete_re || r == resume_re {
-				cmd(network, client, event, context.Background(), nil, args...)
+
+			if !checkRate(network, event.Params[0]) {
+				var rateMsg string
+				readConfig(func() { rateMsg = config.Ratemsg() })
+				client.Cmd.Reply(event, warnMsg(rateMsg))
 				return
 			}
 
-			if !checkRate(network, event.Params[0]) {
-				client.Cmd.Reply(event, warnMsg(config.Ratemsg()))
+			if r == stats_re || r == delete_re || r == resume_re {
+				cmd(network, client, event, context.Background(), nil, args...)
 				return
 			}
 
@@ -395,7 +481,9 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 					cmd(network, client, event, cx, output, args...)
 				})
 			if position > 0 {
-				client.Cmd.Reply(event, config.QueueMsg(position, 0))
+				var queueMsg string
+				readConfig(func() { queueMsg = config.QueueMsg(position, 0) })
+				client.Cmd.Reply(event, queueMsg)
 			}
 			return
 		}
@@ -412,7 +500,9 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 			commandsMutex.RUnlock()
 
 			if !checkRate(network, event.Params[0]) {
-				client.Cmd.Reply(event, warnMsg(config.Ratemsg()))
+				var rateMsg string
+				readConfig(func() { rateMsg = config.Ratemsg() })
+				client.Cmd.Reply(event, warnMsg(rateMsg))
 				return
 			}
 
@@ -444,7 +534,9 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 					cmd(network, client, event, cx, output, args...)
 				})
 			if position > 0 {
-				client.Cmd.Reply(event, config.QueueMsg(position, 0))
+				var queueMsg string
+				readConfig(func() { queueMsg = config.QueueMsg(position, 0) })
+				client.Cmd.Reply(event, queueMsg)
 			}
 			return
 		}
@@ -456,19 +548,24 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 func getServiceForConfigCmd(r *regexp.Regexp) string {
 	commandsMutex.RLock()
 	defer commandsMutex.RUnlock()
-	for _, c := range config.Commands.Completions {
-		re := regexp.MustCompile("^" + c.Regex + " (.+)$")
-		if re.String() == r.String() {
-			return c.Service
+	var svc string
+	readConfig(func() {
+		for _, c := range config.Commands.Completions {
+			re := regexp.MustCompile("^" + c.Regex + " (.+)$")
+			if re.String() == r.String() {
+				svc = c.Service
+				return
+			}
 		}
-	}
-	for _, c := range config.Commands.Chats {
-		re := regexp.MustCompile("^" + c.Regex + " (.+)$")
-		if re.String() == r.String() {
-			return c.Service
+		for _, c := range config.Commands.Chats {
+			re := regexp.MustCompile("^" + c.Regex + " (.+)$")
+			if re.String() == r.String() {
+				svc = c.Service
+				return
+			}
 		}
-	}
-	return ""
+	})
+	return svc
 }
 
 func startClient(network Network) {
@@ -486,11 +583,12 @@ func ircClient(network Network) {
 	log := logxi.New(network.Name)
 	log.SetLevel(logxi.LevelAll)
 
+	ircServer := network.getNextServer()
+
 	sslConfig := &tls.Config{
-		InsecureSkipVerify: true,
+		InsecureSkipVerify: ircServer.InsecureSkipVerify,
 	}
 
-	ircServer := network.getNextServer()
 	log.Info("dialing server", "host", ircServer.Host, "port", ircServer.GetPort())
 
 	client := girc.New(girc.Config{
@@ -523,7 +621,7 @@ func ircClient(network Network) {
 		throttle := bot.Network.Throttle
 		channels := bot.Network.Channels
 		bot.mu.Unlock()
-		time.Sleep(time.Microsecond * throttle)
+		time.Sleep(time.Millisecond * time.Duration(throttle))
 		var noKey []string
 		for name, cfg := range channels {
 			if cfg.Key != "" {
@@ -559,6 +657,7 @@ func ircClient(network Network) {
 		client.Config.Port = ircServer.GetPort()
 		client.Config.ServerPass = ircServer.Pass
 		client.Config.SSL = ircServer.Ssl
+		sslConfig.InsecureSkipVerify = ircServer.InsecureSkipVerify
 	}
 	log.Info("Finished quitting")
 

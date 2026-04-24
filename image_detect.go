@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"fmt"
 	"image"
@@ -9,6 +10,7 @@ import (
 	"image/jpeg"
 	"image/png"
 	"io"
+	"net"
 	"net/http"
 	"regexp"
 	"strings"
@@ -54,13 +56,62 @@ func detectImageURLs(text string) (originalText string, urls []string) {
 	return text, urls
 }
 
+func isBlockedIP(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	if ip.IsUnspecified() {
+		return true
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		switch {
+		case ip4[0] == 10:
+			return true
+		case ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31:
+			return true
+		case ip4[0] == 192 && ip4[1] == 168:
+			return true
+		case ip4[0] == 169 && ip4[1] == 254:
+			return true
+		case ip4[0] == 0:
+			return true
+		case ip4[0] == 127:
+			return true
+		}
+	}
+	return false
+}
+
+var ssrfSafeTransport = &http.Transport{
+	DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dialer := &net.Dialer{Timeout: 10 * time.Second}
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, fmt.Errorf("invalid address: %w", err)
+		}
+		ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve host: %w", err)
+		}
+		for _, ipAddr := range ips {
+			if isBlockedIP(ipAddr.IP) {
+				return nil, fmt.Errorf("blocked IP address: %s", ipAddr.IP)
+			}
+		}
+		return dialer.DialContext(ctx, network, net.JoinHostPort(host, port))
+	},
+}
+
+var imageHTTPClient = &http.Client{
+	Timeout:   30 * time.Second,
+	Transport: ssrfSafeTransport,
+}
+
 func downloadImage(url string) ([]byte, string, error) {
 	if logger != nil {
 		logger.Debug("downloading image", "url", url)
 	}
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
+	client := imageHTTPClient
 
 	resp, err := client.Get(url)
 	if err != nil {

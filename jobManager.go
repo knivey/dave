@@ -208,8 +208,12 @@ func switchToSession(job *asyncJob) string {
 		return ""
 	}
 
-	currentCfg, ok := config.Commands.Chats[session.ChatCommand]
-	if !ok {
+	var currentCfg AIConfig
+	var cfgOk bool
+	readConfig(func() {
+		currentCfg, cfgOk = config.Commands.Chats[session.ChatCommand]
+	})
+	if !cfgOk {
 		loggerJM.Error("chat command not found for session", "command", session.ChatCommand)
 		return ""
 	}

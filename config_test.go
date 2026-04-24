@@ -45,6 +45,7 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 			},
 			expect: func(cfg AIConfig) AIConfig {
 				cfg.MaxTokens = 100
+				cfg.MaxCompletionTokens = 200
 				cfg.Temperature = 0.7
 				cfg.MaxHistory = 10
 				cfg.MaxImages = 5
@@ -90,6 +91,26 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 			},
 			expect: func(cfg AIConfig) AIConfig {
 				cfg.MaxTokens = 0
+				cfg.MaxCompletionTokens = 300
+				cfg.MaxImages = 5
+				cfg.MaxContextImages = 5
+				cfg.ImageFormat = "jpg"
+				cfg.ImageQuality = 75
+				cfg.MaxImageSize = "1024x1024"
+				return cfg
+			},
+		},
+		{
+			name: "maxTokens set but maxCompletionTokens zero uses service default",
+			cfg: AIConfig{
+				MaxTokens: 500,
+			},
+			svc: Service{
+				MaxTokens:           100,
+				MaxCompletionTokens: 300,
+			},
+			expect: func(cfg AIConfig) AIConfig {
+				cfg.MaxTokens = 500
 				cfg.MaxCompletionTokens = 300
 				cfg.MaxImages = 5
 				cfg.MaxContextImages = 5

@@ -88,9 +88,13 @@ func (r *globalRateLimiter) Allow(networkName, key string) bool {
 	defer rateMutex.Unlock()
 
 	rateKey := networkName + key
-	if val, ok := rateLimits[rateKey]; ok {
-		return val.Allow()
+	if entry, ok := rateLimits[rateKey]; ok {
+		entry.lastUsed = time.Now()
+		return entry.limiter.Allow()
 	}
-	rateLimits[rateKey] = rate.NewLimiter(rate.Every(time.Second), 2)
-	return rateLimits[rateKey].Allow()
+	rateLimits[rateKey] = &rateEntry{
+		limiter:  rate.NewLimiter(rate.Every(time.Second), 2),
+		lastUsed: time.Now(),
+	}
+	return rateLimits[rateKey].limiter.Allow()
 }

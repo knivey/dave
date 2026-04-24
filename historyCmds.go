@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -12,20 +13,31 @@ import (
 	gogpt "github.com/sashabaranov/go-openai"
 )
 
-func historySessions(network Network, c *girc.Client, e girc.Event, args ...string) {
-
-	sessions, err := getUserDBSessions(network.Name, e.Params[0], e.Source.Name, config.MaxSessionHistory)
+func historySessions(network Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, args ...string) {
+	var maxHistory int
+	readConfig(func() { maxHistory = config.MaxSessionHistory })
+	sessions, err := getUserDBSessions(network.Name, e.Params[0], e.Source.Name, maxHistory)
 	if err != nil {
-		c.Cmd.Reply(e, errorMsg("failed to query sessions: "+err.Error()))
+		select {
+		case output <- errorMsg("failed to query sessions: " + err.Error()):
+		case <-ctx.Done():
+		}
 		return
 	}
 
 	if len(sessions) == 0 {
-		c.Cmd.Reply(e, "No session history found.")
+		select {
+		case output <- "No session history found.":
+		case <-ctx.Done():
+		}
 		return
 	}
 
-	c.Cmd.Reply(e, fmt.Sprintf("\x02Session History (%s on %s):\x02", e.Source.Name, network.Name))
+	select {
+	case output <- fmt.Sprintf("\x02Session History (%s on %s):\x02", e.Source.Name, network.Name):
+	case <-ctx.Done():
+		return
+	}
 
 	type sessionLine struct {
 		icon    string
@@ -86,43 +98,52 @@ func historySessions(network Network, c *girc.Client, e girc.Event, args ...stri
 		}
 
 		for _, wrapped := range wrapLine(line) {
-			c.Cmd.Reply(e, "\x02\x02"+wrapped)
-			time.Sleep(time.Millisecond * network.Throttle)
+			select {
+			case output <- wrapped:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}
 }
 
-func historyShow(network Network, c *girc.Client, e girc.Event, args ...string) {
+func historyShow(network Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, args ...string) {
+	sendErr := func(msg string) {
+		select {
+		case output <- msg:
+		case <-ctx.Done():
+		}
+	}
 	if theDB == nil {
-		c.Cmd.Reply(e, errorMsg("database not available"))
+		sendErr(errorMsg("database not available"))
 		return
 	}
 
 	if len(args) == 0 || args[0] == "" {
-		c.Cmd.Reply(e, errorMsg("usage: "+network.Trigger+"history <session-id>"))
+		sendErr(errorMsg("usage: " + network.Trigger + "history <session-id>"))
 		return
 	}
 
 	sessionID, err := strconv.ParseInt(args[0], 10, 64)
 	if err != nil {
-		c.Cmd.Reply(e, errorMsg("invalid session id"))
+		sendErr(errorMsg("invalid session id"))
 		return
 	}
 
 	session, err := getDBSessionByID(sessionID)
 	if err != nil {
-		c.Cmd.Reply(e, errorMsg("session not found"))
+		sendErr(errorMsg("session not found"))
 		return
 	}
 
 	if session.Network != network.Name || session.Channel != e.Params[0] || session.Nick != e.Source.Name {
-		c.Cmd.Reply(e, errorMsg("that session doesn't belong to you"))
+		sendErr(errorMsg("that session doesn't belong to you"))
 		return
 	}
 
 	messages, err := loadDBSessionMessages(sessionID)
 	if err != nil {
-		c.Cmd.Reply(e, errorMsg("failed to load messages: "+err.Error()))
+		sendErr(errorMsg("failed to load messages: " + err.Error()))
 		return
 	}
 
@@ -137,13 +158,19 @@ func historyShow(network Network, c *girc.Client, e girc.Event, args ...string) 
 		visible = append(visible, m)
 	}
 
-	c.Cmd.Reply(e, fmt.Sprintf("\x02Session #%d (%s) — %d messages:\x02", sessionID, session.ChatCommand, len(visible)))
+	select {
+	case output <- fmt.Sprintf("\x02Session #%d (%s) — %d messages:\x02", sessionID, session.ChatCommand, len(visible)):
+	case <-ctx.Done():
+		return
+	}
 
 	var shown []dbMessage
 	if len(visible) <= 4 {
 		shown = visible
 	} else {
-		shown = append(visible[:2], visible[len(visible)-2:]...)
+		shown = make([]dbMessage, 4)
+		copy(shown[:2], visible[:2])
+		copy(shown[2:], visible[len(visible)-2:])
 	}
 
 	sendHistoryMsg := func(m dbMessage) {
@@ -165,15 +192,22 @@ func historyShow(network Network, c *girc.Client, e girc.Event, args ...string) 
 
 		line := fmt.Sprintf("  %s %s", roleIcon, content)
 		for _, wrapped := range wrapLine(line) {
-			c.Cmd.Reply(e, "\x02\x02"+wrapped)
-			time.Sleep(time.Millisecond * network.Throttle)
+			select {
+			case output <- wrapped:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}
 
 	if len(visible) > 4 {
 		sendHistoryMsg(shown[0])
 		sendHistoryMsg(shown[1])
-		c.Cmd.Reply(e, fmt.Sprintf("  \x0314... (%d more) ...\x0F", len(visible)-4))
+		select {
+		case output <- fmt.Sprintf("  \x0314... (%d more) ...\x0F", len(visible)-4):
+		case <-ctx.Done():
+			return
+		}
 		sendHistoryMsg(shown[2])
 		sendHistoryMsg(shown[3])
 	} else {
@@ -269,8 +303,12 @@ func historyResume(network Network, c *girc.Client, e girc.Event, args ...string
 		return
 	}
 
-	currentCfg, ok := config.Commands.Chats[session.ChatCommand]
-	if !ok {
+	var currentCfg AIConfig
+	var cfgOk bool
+	readConfig(func() {
+		currentCfg, cfgOk = config.Commands.Chats[session.ChatCommand]
+	})
+	if !cfgOk {
 		c.Cmd.Reply(e, errorMsg(fmt.Sprintf("chat command %q no longer exists, cannot resume", session.ChatCommand)))
 		return
 	}
@@ -358,16 +396,29 @@ func formatTimeAgo(dbTime string) string {
 	return dbTime
 }
 
-func historyJobs(network Network, c *girc.Client, e girc.Event, args ...string) {
+func historyJobs(network Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, args ...string) {
 	nick := e.Source.Name
 	channel := e.Params[0]
 	hasOutput := false
+
+	sendLine := func(line string) bool {
+		for _, wrapped := range wrapLine(line) {
+			select {
+			case output <- wrapped:
+			case <-ctx.Done():
+				return false
+			}
+		}
+		return true
+	}
 
 	if queueMgr != nil {
 		current, pending := queueMgr.QueueStatus(network.Name, channel, nick)
 		if current != nil || len(pending) > 0 {
 			hasOutput = true
-			c.Cmd.Reply(e, "\x02Queue:\x02")
+			if !sendLine("\x02Queue:\x02") {
+				return
+			}
 			if current != nil {
 				elapsed := time.Since(current.Enqueued).Truncate(time.Second)
 				desc := current.Description
@@ -375,9 +426,8 @@ func historyJobs(network Network, c *girc.Client, e girc.Event, args ...string) 
 					desc = "processing"
 				}
 				line := fmt.Sprintf("  \x0303▶\x0F %s (%s elapsed)", desc, elapsed)
-				for _, wrapped := range wrapLine(line) {
-					c.Cmd.Reply(e, "\x02\x02"+wrapped)
-					time.Sleep(time.Millisecond * network.Throttle)
+				if !sendLine(line) {
+					return
 				}
 			}
 			if len(pending) > 0 {
@@ -388,9 +438,8 @@ func historyJobs(network Network, c *girc.Client, e girc.Event, args ...string) 
 						desc = "queued"
 					}
 					line := fmt.Sprintf("  \x0308%d.\x0F %s (waiting %s)", i+1, desc, wait)
-					for _, wrapped := range wrapLine(line) {
-						c.Cmd.Reply(e, "\x02\x02"+wrapped)
-						time.Sleep(time.Millisecond * network.Throttle)
+					if !sendLine(line) {
+						return
 					}
 				}
 			}
@@ -399,25 +448,36 @@ func historyJobs(network Network, c *girc.Client, e girc.Event, args ...string) 
 
 	if theDB == nil {
 		if !hasOutput {
-			c.Cmd.Reply(e, "No active jobs or queue items.")
+			select {
+			case output <- "No active jobs or queue items.":
+			case <-ctx.Done():
+			}
 		}
 		return
 	}
 
 	jobs, err := getPendingJobsForUser(network.Name, channel, nick)
 	if err != nil {
-		c.Cmd.Reply(e, errorMsg("failed to query jobs: "+err.Error()))
+		select {
+		case output <- errorMsg("failed to query jobs: " + err.Error()):
+		case <-ctx.Done():
+		}
 		return
 	}
 
 	if len(jobs) == 0 {
 		if !hasOutput {
-			c.Cmd.Reply(e, "No active jobs or queue items.")
+			select {
+			case output <- "No active jobs or queue items.":
+			case <-ctx.Done():
+			}
 		}
 		return
 	}
 
-	c.Cmd.Reply(e, "\x02Background jobs:\x02")
+	if !sendLine("\x02Background jobs:\x02") {
+		return
+	}
 	for _, j := range jobs {
 		var statusIcon string
 		switch j.Status {
@@ -430,9 +490,8 @@ func historyJobs(network Network, c *girc.Client, e girc.Event, args ...string) 
 		}
 		elapsed := formatTimeAgo(j.CreatedAt)
 		line := fmt.Sprintf("  %s %s [%s/%s] %s, %s ago", statusIcon, j.JobID, j.ToolName, j.MCPServer, j.Status, elapsed)
-		for _, wrapped := range wrapLine(line) {
-			c.Cmd.Reply(e, "\x02\x02"+wrapped)
-			time.Sleep(time.Millisecond * network.Throttle)
+		if !sendLine(line) {
+			return
 		}
 	}
 }

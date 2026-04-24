@@ -590,6 +590,7 @@ func ircClient(network Network) {
 	}
 
 	sslConfig := &tls.Config{
+		ServerName:         ircServer.Host,
 		InsecureSkipVerify: ircServer.InsecureSkipVerify,
 	}
 

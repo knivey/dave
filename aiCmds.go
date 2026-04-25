@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -143,7 +144,11 @@ func newChatRunner(network Network, client *girc.Client, cfg AIConfig) *chatRunn
 	if svc.Type == "llama" {
 		extraBody["timings_per_token"] = true
 	}
-	transport := newDaveTransport(extraBody)
+	var extraHeaders map[string]string
+	if isGrokService(svc.BaseURL) {
+		extraHeaders = make(map[string]string)
+	}
+	transport := newDaveTransport(extraBody, extraHeaders)
 	aiConfig.HTTPClient = &http.Client{Transport: transport}
 	aiClient := gogpt.NewClientWithConfig(aiConfig)
 
@@ -162,11 +167,27 @@ func newChatRunner(network Network, client *girc.Client, cfg AIConfig) *chatRunn
 	}
 }
 
+func isGrokService(baseURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil {
+		return false
+	}
+	return strings.HasSuffix(strings.ToLower(u.Hostname()), ".x.ai")
+}
+
 func (cr *chatRunner) setChannel(channel, nick string) {
 	cr.channel = channel
 	cr.nick = nick
 	cr.ctxKey = cr.network.Name + channel + nick
 	cr.transport.setAPILogger(apiLogger, cr.ctxKey)
+	cr.syncConvID()
+}
+
+func (cr *chatRunner) syncConvID() {
+	ctx := GetContext(cr.ctxKey)
+	if ctx.ConvID != "" {
+		cr.transport.setExtraHeaders(map[string]string{"x-grok-conv-id": ctx.ConvID})
+	}
 }
 
 func (cr *chatRunner) sendIRC(out string) {
@@ -768,6 +789,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 
 	messages = AddContext(cfg, ctx_key, userMsg, network.Name, e.Params[0], e.Source.Name)
 	runner.logger.Debug("running completion with messages:", "messages", sanitizeMessages(messages))
+	runner.syncConvID()
 
 	messages, _ = runner.runTurn(messages)
 

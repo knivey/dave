@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"sync"
 	"time"
 
@@ -12,6 +14,7 @@ type ChatContext struct {
 	Messages  []gogpt.ChatCompletionMessage
 	Config    AIConfig
 	SessionID int64
+	ConvID    string
 }
 
 type ChatContextStore interface {
@@ -37,6 +40,9 @@ func (s *globalContextStore) Add(key string, config AIConfig, message gogpt.Chat
 	defer chatContextsMutex.Unlock()
 	context := chatContextsMap[key]
 	context.Config = config
+	if context.ConvID == "" {
+		context.ConvID = generateConvID()
+	}
 	context.Messages = append(context.Messages, message)
 	if len(context.Messages) > config.MaxHistory+1 {
 		newMsgs := []gogpt.ChatCompletionMessage{context.Messages[0]}
@@ -73,6 +79,12 @@ func TruncateHistory(msgs []gogpt.ChatCompletionMessage, maxHistory int) []gogpt
 		return append(newMsgs, msgs[len(msgs)-maxHistory:]...)
 	}
 	return msgs
+}
+
+func generateConvID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 type RateLimiter interface {

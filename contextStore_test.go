@@ -59,7 +59,7 @@ func TestDBSessionRoundtrip(t *testing.T) {
 	chatContextsMutex.Unlock()
 
 	ctxKey := "net#chanuser"
-	sid, err := createDBSession(ctxKey, "net", "#chan", "user", "testcmd")
+	sid, err := createDBSession(ctxKey, "net", "#chan", "user", "testcmd", "")
 	if err != nil {
 		t.Fatalf("failed to create session: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestDBCleanupByAge(t *testing.T) {
 	defer cleanup()
 	_ = db
 
-	sid, err := createDBSession("oldkey", "net", "#chan", "user", "testcmd")
+	sid, err := createDBSession("oldkey", "net", "#chan", "user", "testcmd", "")
 	if err != nil {
 		t.Fatalf("failed to create session: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestDBSessionCreateAndMessage(t *testing.T) {
 	defer cleanup()
 	_ = db
 
-	sid, err := createDBSession("testkey", "net", "#chan", "nick", "chat")
+	sid, err := createDBSession("testkey", "net", "#chan", "nick", "chat", "")
 	if err != nil {
 		t.Fatalf("createDBSession failed: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestDBSessionComplete(t *testing.T) {
 	defer cleanup()
 	_ = db
 
-	sid, _ := createDBSession("testkey", "net", "#chan", "nick", "chat")
+	sid, _ := createDBSession("testkey", "net", "#chan", "nick", "chat", "")
 
 	err := completeDBSession(sid)
 	if err != nil {
@@ -211,7 +211,7 @@ func TestDBDeleteSession(t *testing.T) {
 	defer cleanup()
 	_ = db
 
-	sid, _ := createDBSession("testkey", "net", "#chan", "nick", "chat")
+	sid, _ := createDBSession("testkey", "net", "#chan", "nick", "chat", "")
 	insertDBMessage(sid, "user", "hello", nil, nil, nil)
 
 	err := deleteDBSession(sid)
@@ -231,9 +231,9 @@ func TestDBUserSessions(t *testing.T) {
 	_ = db
 
 	for i := 0; i < 3; i++ {
-		createDBSession("key"+string(rune('a'+i)), "net", "#chan", "nick", "chat")
+		createDBSession("key"+string(rune('a'+i)), "net", "#chan", "nick", "chat", "")
 	}
-	createDBSession("other", "net", "#chan", "other", "chat")
+	createDBSession("other", "net", "#chan", "other", "chat", "")
 
 	sessions, err := getUserDBSessions("net", "#chan", "nick", 10)
 	if err != nil {
@@ -249,11 +249,11 @@ func TestDBUserStats(t *testing.T) {
 	defer cleanup()
 	_ = db
 
-	sid1, _ := createDBSession("key1", "net", "#chan", "nick", "chat")
+	sid1, _ := createDBSession("key1", "net", "#chan", "nick", "chat", "")
 	insertDBMessage(sid1, "system", "sys", nil, nil, nil)
 	insertDBMessage(sid1, "user", "hello", nil, nil, nil)
 
-	sid2, _ := createDBSession("key2", "net", "#chan", "nick", "chat")
+	sid2, _ := createDBSession("key2", "net", "#chan", "nick", "chat", "")
 	insertDBMessage(sid2, "system", "sys", nil, nil, nil)
 
 	sessionCount, messageCount, err := getUserDBStats("net", "#chan", "nick")
@@ -273,9 +273,9 @@ func TestDBDeleteUserSessions(t *testing.T) {
 	defer cleanup()
 	_ = db
 
-	createDBSession("key1", "net", "#chan", "nick", "chat")
-	createDBSession("key2", "net", "#chan", "nick", "chat")
-	createDBSession("key3", "net", "#chan", "other", "chat")
+	createDBSession("key1", "net", "#chan", "nick", "chat", "")
+	createDBSession("key2", "net", "#chan", "nick", "chat", "")
+	createDBSession("key3", "net", "#chan", "other", "chat", "")
 
 	affected, err := deleteUserDBSessions("net", "#chan", "nick")
 	if err != nil {
@@ -323,7 +323,7 @@ func TestDBToolCalls(t *testing.T) {
 	defer cleanup()
 	_ = db
 
-	sid, _ := createDBSession("testkey", "net", "#chan", "nick", "chat")
+	sid, _ := createDBSession("testkey", "net", "#chan", "nick", "chat", "")
 
 	toolCalls := []gogpt.ToolCall{
 		{ID: "tc1", Type: "function", Function: gogpt.FunctionCall{Name: "get_weather", Arguments: `{"city":"sf"}`}},

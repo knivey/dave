@@ -46,7 +46,7 @@ func AddContext(config AIConfig, key string, message gogpt.ChatCompletionMessage
 
 		if sid == 0 {
 			var err error
-			sid, err = createDBSession(key, network, channel, nick, config.Name)
+			sid, err = createDBSession(key, network, channel, nick, config.Name, ctx.ConvID)
 			if err != nil {
 				loggerCS.Error("Failed to create session", "error", err)
 			} else {
@@ -56,6 +56,10 @@ func AddContext(config AIConfig, key string, message gogpt.ChatCompletionMessage
 					chatContextsMap[key] = c
 				}
 				chatContextsMutex.Unlock()
+			}
+		} else if ctx.ConvID != "" {
+			if err := updateDBSessionConvID(sid, ctx.ConvID); err != nil {
+				loggerCS.Error("Failed to update conv_id", "session", sid, "error", err)
 			}
 		}
 

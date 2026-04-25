@@ -12,6 +12,8 @@ type daveTransport struct {
 	base      http.RoundTripper
 	extraBody map[string]any
 
+	extraHeaders map[string]string
+
 	mu           sync.Mutex
 	captureBody  bool
 	capturedBody []byte
@@ -21,19 +23,24 @@ type daveTransport struct {
 	isStream  bool
 }
 
-func newDaveTransport(extraBody map[string]any) *daveTransport {
+func newDaveTransport(extraBody map[string]any, extraHeaders map[string]string) *daveTransport {
 	if extraBody == nil {
 		extraBody = make(map[string]any)
 	}
 	return &daveTransport{
-		base:      http.DefaultTransport,
-		extraBody: extraBody,
+		base:         http.DefaultTransport,
+		extraBody:    extraBody,
+		extraHeaders: extraHeaders,
 	}
 }
 
 func (t *daveTransport) setAPILogger(logger *APILogger, ctxKey string) {
 	t.apiLogger = logger
 	t.ctxKey = ctxKey
+}
+
+func (t *daveTransport) setExtraHeaders(headers map[string]string) {
+	t.extraHeaders = headers
 }
 
 func (t *daveTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -76,6 +83,10 @@ func (t *daveTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	if len(finalBody) > 0 && t.apiLogger != nil {
 		t.apiLogger.LogRequest(t.ctxKey, finalBody)
+	}
+
+	for k, v := range t.extraHeaders {
+		req.Header.Set(k, v)
 	}
 
 	resp, err := t.base.RoundTrip(req)

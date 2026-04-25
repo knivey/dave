@@ -75,6 +75,7 @@ func LoadContextStore() {
 				Messages:  messages,
 				Config:    currentCfg,
 				SessionID: s.ID,
+				ConvID:    s.ConvID,
 			}
 			contextLastActive[s.ContextKey] = time.Now().Unix()
 			loggerCS.Info("Loaded session", "id", s.ID, "key", s.ContextKey, "command", s.ChatCommand, "messages", len(messages))

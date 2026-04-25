@@ -83,6 +83,7 @@ type dbSession struct {
 	Nick         string `db:"nick"`
 	ChatCommand  string `db:"chat_command"`
 	FirstMessage string `db:"first_message"`
+	ConvID       string `db:"conv_id"`
 	Status       string `db:"status"`
 	CreatedAt    string `db:"created_at"`
 	LastActive   string `db:"last_active"`
@@ -100,10 +101,10 @@ type dbMessage struct {
 	CreatedAt        string  `db:"created_at"`
 }
 
-func createDBSession(contextKey, network, channel, nick, chatCommand string) (int64, error) {
+func createDBSession(contextKey, network, channel, nick, chatCommand, convID string) (int64, error) {
 	result, err := theDB.Exec(
-		"INSERT INTO sessions (context_key, network, channel, nick, chat_command, status) VALUES (?, ?, ?, ?, ?, 'active')",
-		contextKey, network, channel, nick, chatCommand,
+		"INSERT INTO sessions (context_key, network, channel, nick, chat_command, conv_id, status) VALUES (?, ?, ?, ?, ?, ?, 'active')",
+		contextKey, network, channel, nick, chatCommand, convID,
 	)
 	if err != nil {
 		return 0, err
@@ -115,6 +116,14 @@ func updateDBSessionFirstMessage(sessionID int64, firstMessage string) error {
 	_, err := theDB.Exec(
 		"UPDATE sessions SET first_message = ? WHERE id = ? AND first_message = ''",
 		firstMessage, sessionID,
+	)
+	return err
+}
+
+func updateDBSessionConvID(sessionID int64, convID string) error {
+	_, err := theDB.Exec(
+		"UPDATE sessions SET conv_id = ? WHERE id = ? AND (conv_id IS NULL OR conv_id = '')",
+		convID, sessionID,
 	)
 	return err
 }

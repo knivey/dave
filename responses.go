@@ -111,9 +111,28 @@ func messagesToResponsesInput(messages []gogpt.ChatCompletionMessage) []json.Raw
 
 		case gogpt.ChatMessageRoleUser:
 			if len(msg.MultiContent) > 0 {
+				content := make([]map[string]any, 0, len(msg.MultiContent))
+				for _, part := range msg.MultiContent {
+					switch part.Type {
+					case gogpt.ChatMessagePartTypeText:
+						content = append(content, map[string]any{
+							"type": "input_text",
+							"text": part.Text,
+						})
+					case gogpt.ChatMessagePartTypeImageURL:
+						entry := map[string]any{
+							"type":      "input_image",
+							"image_url": part.ImageURL.URL,
+						}
+						if part.ImageURL.Detail != "" {
+							entry["detail"] = string(part.ImageURL.Detail)
+						}
+						content = append(content, entry)
+					}
+				}
 				b, _ := json.Marshal(map[string]any{
 					"role":    "user",
-					"content": msg.MultiContent,
+					"content": content,
 				})
 				input = append(input, b)
 			} else {

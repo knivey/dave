@@ -30,6 +30,12 @@ func LoadContextStore() {
 		loggerCS.Info("Completed orphaned sessions", "count", affected)
 	}
 
+	if affected, err := reactivateDBStrandedSessions(); err != nil {
+		loggerCS.Error("Failed to reactivate stranded sessions", "error", err)
+	} else if affected > 0 {
+		loggerCS.Info("Reactivated stranded sessions", "count", affected)
+	}
+
 	sessions, err := loadActiveDBSessions()
 	if err != nil {
 		loggerCS.Error("Failed to load active sessions", "error", err)

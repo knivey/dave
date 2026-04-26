@@ -175,6 +175,21 @@ func completeDBOrphanedSessions() (int64, error) {
 	return result.RowsAffected()
 }
 
+func reactivateDBStrandedSessions() (int64, error) {
+	result, err := theDB.Exec(`
+		UPDATE sessions SET status = 'active'
+		WHERE id IN (
+			SELECT MAX(id) FROM sessions GROUP BY context_key
+		) AND status = 'completed'
+		AND context_key IN (
+			SELECT context_key FROM sessions GROUP BY context_key HAVING SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) = 0
+		)`)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 func loadActiveDBSessions() ([]dbSession, error) {
 	var sessions []dbSession
 	err := theDB.Select(&sessions, "SELECT * FROM sessions WHERE status = 'active' ORDER BY last_active DESC")

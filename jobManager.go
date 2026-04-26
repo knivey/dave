@@ -263,8 +263,8 @@ func switchToSession(job *asyncJob) string {
 		if currentCtx.SessionID != 0 {
 			oldID = currentCtx.SessionID
 		}
-		switchMsg = fmt.Sprintf("\x02Switched to session #%d\x02. Use %sresume %d to go back.",
-			job.SessionID, bot.Network.Trigger, oldID)
+		switchMsg = fmt.Sprintf("\x02Switched %s's session to #%d\x02. Use %sresume %d to go back.",
+			job.Nick, job.SessionID, bot.Network.Trigger, oldID)
 	}
 
 	loggerJM.Info("switched sessions", "from", currentCtx.SessionID, "to", job.SessionID, "nick", job.Nick)

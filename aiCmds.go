@@ -230,7 +230,9 @@ func (cr *chatRunner) runTurn(messages []gogpt.ChatCompletionMessage) ([]gogpt.C
 		return cr.runTurnResponses(messages)
 	}
 	mcpTools := getMCPTools(cr.cfg.MCPs)
-	mcpTools = append(mcpTools, registerBackgroundJobTool())
+	if len(mcpTools) > 0 {
+		mcpTools = append(mcpTools, registerBackgroundJobTool())
+	}
 
 	req := BuildChatRequest(cr.cfg, messages)
 	req.Tools = mcpTools
@@ -709,7 +711,9 @@ func (cr *chatRunner) handleRegisterBackgroundJob(messages []gogpt.ChatCompletio
 
 func (cr *chatRunner) runTurnResponses(messages []gogpt.ChatCompletionMessage) ([]gogpt.ChatCompletionMessage, bool) {
 	mcpTools := getMCPTools(cr.cfg.MCPs)
-	mcpTools = append(mcpTools, registerBackgroundJobTool())
+	if len(mcpTools) > 0 {
+		mcpTools = append(mcpTools, registerBackgroundJobTool())
+	}
 	responseTools := gogptToolsToResponseTools(mcpTools)
 
 	ctx, cancel := context.WithTimeout(cr.ctx, cr.cfg.Timeout)

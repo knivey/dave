@@ -75,7 +75,7 @@ func LoadContextStore() {
 				Messages:   messages,
 				Config:     currentCfg,
 				SessionID:  s.ID,
-				ConvID:     s.ConvID,
+				ConvID:     func() string { if s.ConvID != nil { return *s.ConvID }; return "" }(),
 				ResponseID: func() string { if s.ResponseID != nil { return *s.ResponseID }; return "" }(),
 			}
 			contextLastActive[s.ContextKey] = time.Now().Unix()

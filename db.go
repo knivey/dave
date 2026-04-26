@@ -83,7 +83,7 @@ type dbSession struct {
 	Nick         string `db:"nick"`
 	ChatCommand  string `db:"chat_command"`
 	FirstMessage string `db:"first_message"`
-	ConvID       string `db:"conv_id"`
+	ConvID       *string `db:"conv_id"`
 	ResponseID   *string `db:"response_id"`
 	Status       string `db:"status"`
 	CreatedAt    string `db:"created_at"`

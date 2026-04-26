@@ -24,6 +24,12 @@ func LoadContextStore() {
 		return
 	}
 
+	if affected, err := completeDBOrphanedSessions(); err != nil {
+		loggerCS.Error("Failed to cleanup orphaned sessions", "error", err)
+	} else if affected > 0 {
+		loggerCS.Info("Completed orphaned sessions", "count", affected)
+	}
+
 	sessions, err := loadActiveDBSessions()
 	if err != nil {
 		loggerCS.Error("Failed to load active sessions", "error", err)

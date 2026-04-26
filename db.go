@@ -162,6 +162,19 @@ func completeDBSession(sessionID int64) error {
 	return err
 }
 
+func completeDBOrphanedSessions() (int64, error) {
+	result, err := theDB.Exec(`
+		UPDATE sessions SET status = 'completed'
+		WHERE status = 'active'
+		AND id NOT IN (
+			SELECT MAX(id) FROM sessions WHERE status = 'active' GROUP BY context_key
+		)`)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 func loadActiveDBSessions() ([]dbSession, error) {
 	var sessions []dbSession
 	err := theDB.Select(&sessions, "SELECT * FROM sessions WHERE status = 'active' ORDER BY last_active DESC")

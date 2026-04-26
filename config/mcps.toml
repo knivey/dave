@@ -2,16 +2,30 @@
 # Tools are automatically injected into the LLM request when a command opts-in via mcps = [...].
 # Resources and prompts are available via bridge functions for explicit use.
 # Supported transports: "stdio" (spawn a local process) and "http" (streamable HTTP endpoint).
-# Each MCP server has its own timeout for tool calls (defaults to 30s).
 #
+# Available options (per [section]):
+#   transport  (string, required)  "stdio" or "http"
+#   command    (string)            Executable to spawn (required for stdio)
+#   args       (string array)      Arguments passed to command
+#   env        (string array)      Environment variables in "KEY=value" format (stdio only)
+#   url        (string)            HTTP endpoint URL (required for http)
+#   timeout    (duration, default: 30s)  Tool call timeout
+#   keepalive  (duration)          Ping interval for liveness detection. Default: 30s for http, 0 (disabled) for stdio
+#
+# Duration values: TOML strings like "30s", "2m", "1m30s".
+#
+# Example — stdio transport with all options:
 # [filesystem]
 # transport = "stdio"
 # command = "npx"
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/docs"]
 # env = ["API_KEY=secret123"]
 # timeout = "30s"
+# keepalive = "0s"
 #
+# Example — http transport with all options:
 # [github]
 # transport = "http"
 # url = "http://localhost:3001/mcp"
 # timeout = "30s"
+# keepalive = "30s"

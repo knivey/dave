@@ -73,4 +73,12 @@ No Makefile, no linter config. Use `go fmt` + `go vet`.
 - Struct fields use TOML snake_case tags.
 - Error: `log.Fatalln` at startup only. TUI `/reload` uses error-returning `loadReloadableDir`.
 
+## Config Documentation Convention
+- All TOML config files in `config/` MUST have a **reference section** at the top listing every available option with type and default value.
+- A **commented-out `[section]` block** with all fields set to example/default values must follow the reference list, directly copy-pasteable.
+- When adding a new config field (Go struct `toml` tag), update the corresponding config file's reference list AND commented example block.
+- Duration fields use TOML string format: `"30s"`, `"2m"`, `"1m30s"`, `"750ms"`.
+- Keep all existing live config sections untouched below the documentation blocks.
+- The `ignores.txt.example` file should document the wildcard pattern format.
+
 Preserve this file. Update only verified facts.

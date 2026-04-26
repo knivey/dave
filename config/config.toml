@@ -1,3 +1,105 @@
+# Main configuration file. All settings can be overriden in network sections.
+#
+# Root options:
+#   trigger             (string)              Command trigger prefix (e.g. "." for .chat, "-" for -chat)
+#   quitmsg             (string)              Default quit message
+#   uploadurl           (string)              URL prefix for paste uploads
+#   queue_msgs          (string array)        Messages shown while queued. Supports {position} placeholder
+#   started_msg         (string)              Message shown when processing starts. Supports {nick}, {wait}
+#   max_queue_depth     (int, default: 5)     Max queued requests per network
+#   ratemsgs            (string array)        Random messages shown when rate-limited
+#   max_session_history (int, default: 10)    Max stored sessions per command per channel
+#
+# [database] options:
+#   path                (string, default: "data/dave.db")  SQLite database path
+#   max_age_days        (int, default: 90)                 Max age for context history
+#
+# [tui] options:
+#   scrollback_lines    (int, default: 5000)  Lines kept in TUI scroll buffer
+#
+# [tui.scrollbar] options:
+#   visible            (bool, default: true)   Show scrollbar
+#   show_always        (bool, default: true)   Show even when content fits
+#   color              (string, default: "gray")           Scrollbar thumb color
+#   background_color   (string, default: "black")          Scrollbar background
+#   track_color        (string, default: "darkgray")       Scrollbar track color
+#   width              (int, default: 1)      Scrollbar width in cells
+#
+# [api_log] options:
+#   enabled            (bool, default: false)  Enable API request/response logging
+#   dir                (string, default: "api_logs")  Directory for log files
+#   log_raw_stream     (bool, default: false)  Log individual SSE chunks
+#
+# [networks.<name>] options:
+#   enabled            (bool, default: true)   Enable this network
+#   nick               (string)                Bot nickname
+#   throttle           (duration)              Minimum time between messages (e.g. "750ms")
+#   quitmsg            (string, inherits root) Network-specific quit message
+#   trigger            (string, inherits root) Network-specific command trigger
+#
+# [networks.<name>.channels."<#channel>"] options:
+#   key                (string)                Channel key/password for +k channels
+#   pastebin           (bool, default: false)  Auto-paste long messages
+#   max_lines          (int, default: 5)       Max lines before truncating/pasting
+#
+# [[networks.<name>.servers]] options:
+#   host               (string)                Server hostname
+#   ssl                (bool, default: false)  Use TLS
+#   port               (int, default: 6697 ssl / 6667 plain)
+#   pass               (string)                SASL or server password
+#   insecure_skip_verify (bool, default: false) Skip TLS certificate verification
+#
+# Duration values: TOML strings like "30s", "2m", "1m30s", "750ms".
+#
+# Example with all root + nested options:
+# trigger = "."
+# quitmsg = "goodbye"
+# uploadurl = "https://upload.example.com"
+# queue_msgs = ["queued (position {position})"]
+# started_msg = "\x0306\u25b6 {nick}: Processing your request (waited {wait})...\x0f"
+# max_queue_depth = 5
+# ratemsgs = ["slow down!"]
+# max_session_history = 10
+#
+# [database]
+# path = "data/dave.db"
+# max_age_days = 90
+#
+# [tui]
+# scrollback_lines = 5000
+#
+# [tui.scrollbar]
+# visible = true
+# show_always = true
+# color = "gray"
+# background_color = "black"
+# track_color = "darkgray"
+# width = 1
+#
+# [api_log]
+# enabled = true
+# dir = "api_logs"
+# log_raw_stream = false
+#
+# [networks.example]
+# enabled = true
+# nick = "mybot"
+# throttle = "750ms"
+# quitmsg = "bye"
+# trigger = "."
+#
+# [networks.example.channels."#mychannel"]
+# key = "channelkey"
+# pastebin = true
+# max_lines = 10
+#
+# [[networks.example.servers]]
+# host = "irc.example.com"
+# ssl = true
+# port = 6697
+# pass = "sasl-password"
+# insecure_skip_verify = false
+
 #these default settings can be overriden in the networks sections
 #this is the default trigger for commands Ex: set to . for .chat or - for -chat
 trigger = "-"

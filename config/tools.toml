@@ -1,3 +1,29 @@
+# Tool commands call a single MCP tool and return the result directly (no LLM involved).
+# Each section name becomes the command trigger (overridable with `regex`).
+#
+# Available options (per [section]):
+#   mcp          (string, required)  MCP server name from mcps.toml
+#   tool         (string, required)  Tool name on the MCP server
+#   arg          (string)            Map user input to this tool argument name
+#   args         (map)               Static key=value arguments passed to the tool
+#   timeout      (duration)          Tool call timeout. Default: MCP server timeout from mcps.toml (30s)
+#   skipbusy     (bool, default: false)  Skip queue check, allow running when queue is full
+#   description  (string)            Short description for help listings
+#   regex        (string, default: section name)  Regex for command trigger (no ^$ anchors)
+#
+# Duration values: TOML strings like "30s", "2m", "1m30s".
+#
+# Example with all options:
+# [example-tool]
+# description = "Example tool command"
+# mcp = "my-mcp-server"
+# tool = "my_tool"
+# arg = "input"
+# args = { format = "json", verbose = true }
+# timeout = "1m"
+# skipbusy = false
+# regex = "example"
+
 [qwen]
 description = "Qwen enhanced image generation"
 mcp = "img-mcp"

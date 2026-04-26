@@ -1,1 +1,8 @@
+# One hostmask pattern per line. Supports * wildcards. Lines starting with # are comments.
+# Patterns match against the full nick!user@host string.
+# Place this file at <config-dir>/ignores.txt (e.g. config/ignores.txt).
+#
+# Example patterns:
+# spambot*
+# *!*@*.malicious.net
 #knivey*

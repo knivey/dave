@@ -1,3 +1,45 @@
+# Completions use the legacy completions API (not chat). Good for simple prompt-in, text-out commands.
+# Each section name becomes the command trigger (overridable with `regex`).
+#
+# Available options (per [section]):
+#   service              (string, required)              Service name from services.toml
+#   model                (string)                        Model name (e.g. "gpt-3.5-turbo-instruct")
+#   regex                (string, default: section name) Regex for command trigger (no ^$ anchors)
+#   description          (string)                        Short description for help listings
+#   mcps                 (string array)                  Opt-in MCP server names for tool access
+#   maxtokens            (int, cascades from service)    Max tokens per response
+#   maxcompletiontokens  (int, cascades from service)    Max completion tokens per response
+#   temperature          (float, cascades from service)  Sampling temperature
+#   topp                 (float, default: 1)             Nucleus sampling (0-1)
+#   stop                 (string array)                  Stop sequences
+#   presencepenalty      (float, default: 0)             -2.0 to 2.0, penalize new topics
+#   frequencypenalty     (float, default: 0)             -2.0 to 2.0, penalize repetition
+#   timeout              (duration, default: 60s)        Overall API call timeout. Cascade: command > service > 60s
+#   streamtimeout        (duration, default: timeout)    Max idle time between stream chunks. Cascade: command > service > timeout
+#   toolverbose          (bool, default: true)           Show 🔧 tool call notifications (cascades from service)
+#   paralleltoolcalls    (bool, default: true)           Enable parallel MCP tool calls (cascades from service)
+#
+# Duration values: TOML strings like "30s", "2m", "1m30s".
+#
+# Example with all options:
+# [example-completion]
+# service = "openai"
+# model = "gpt-3.5-turbo-instruct"
+# regex = "example"
+# description = "Example completion command"
+# mcps = ["filesystem"]
+# maxtokens = 500
+# maxcompletiontokens = 600
+# temperature = 0.7
+# topp = 0.9
+# stop = ["\n"]
+# presencepenalty = 0.0
+# frequencypenalty = 0.0
+# timeout = "60s"
+# streamtimeout = "30s"
+# toolverbose = true
+# paralleltoolcalls = true
+
 [dave]
 service = "openai"
 model = "gpt-3.5-turbo-instruct"

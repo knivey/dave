@@ -1,3 +1,44 @@
+# Services define API endpoints and shared defaults for chat/completion commands.
+# Each service is a [section] referenced by name from commands via `service = "name"`.
+# Command-level settings cascade: command override > service default > hardcoded default.
+#
+# Available options (per [section]):
+#   key                  (string)          API key (not required for local/unauthed endpoints)
+#   type                 (string)          "openai" (default) or "llama"
+#   baseurl              (string)          API base URL (e.g. "https://api.openai.com/v1/")
+#   maxtokens            (int)             Max tokens per response (legacy, prefer maxcompletiontokens)
+#   maxcompletiontokens  (int)             Max completion tokens per response
+#   temperature          (float)           Sampling temperature (0=deterministic, default: 0)
+#   maxhistory           (int, default: 8) Max conversation turns sent as context
+#   imageformat          (string, default: "jpg")  Image format: "jpg", "jpeg", or "webp"
+#   imagequality         (int 1-100, default: 75)   Image quality percentage
+#   maximagesize         (string, default: "1024x1024") Max image dimensions "WxH"
+#   timeout              (duration, default: 60s)    Overall API call timeout (cascades to commands)
+#   streamtimeout        (duration, default: timeout) Max idle time between stream chunks
+#   toolverbose          (bool, default: true)       Show 🔧 tool call notifications in IRC
+#   paralleltoolcalls    (bool, default: true)       Enable parallel MCP tool calls
+#   parallel             (int, default: 1)           Max concurrent requests per command
+#
+# Duration values: TOML strings like "30s", "2m", "1m30s".
+#
+# Example with all options:
+# [example-service]
+# key = "sk-..."
+# type = "openai"
+# baseurl = "https://api.openai.com/v1/"
+# maxtokens = 500
+# maxcompletiontokens = 600
+# temperature = 0.7
+# maxhistory = 8
+# imageformat = "jpg"
+# imagequality = 75
+# maximagesize = "1024x1024"
+# timeout = "90s"
+# streamtimeout = "45s"
+# toolverbose = true
+# paralleltoolcalls = true
+# parallel = 1
+
 [openai]
 key = "UR KEY HERE :P"
 maxcompletiontokens = 600

@@ -1,24 +1,81 @@
 # Chat commands support templating in the system prompt using Go's text/template.
-# Available variables: {{.Nick}} (caller's nickname), {{.BotNick}} (bot's nickname), {{.Channel}} (channel name), {{.Network}} (network name - exactly as defined in config.toml under [networks.*]), {{.ChanNicks}} (JSON array of ALL nicknames in {{.Channel}}), {{.Vars.*}} (custom variables from templatevars.toml)
+# Available variables: {{.Nick}} (caller's nickname), {{.BotNick}} (bot's nickname), {{.Channel}} (channel name),
+#   {{.Network}} (network name - exactly as defined in config.toml under [networks.*]),
+#   {{.ChanNicks}} (JSON array of ALL nicknames in {{.Channel}}), {{.Vars.*}} (custom variables from templatevars.toml)
 # Templates are processed when starting a new chat context. Invalid templates will cause the bot to fail at startup.
 # Template logic supported: conditionals ({{if}} {{else}}), comparisons (eq, ne, lt, gt), logical operators (and, or, not)
 # Example: system = "You are {{.BotNick}} chatting with {{.Nick}} in {{.Channel}} on {{.Network}}."
-
-# OpenAI Chat Completion Parameters (optional):
-# topp = 1.0                  # Nucleus sampling (0-1, default: 1)
-# stop = ["STOP", "END"]      # Stop sequences where generation stops
-# presencepenalty = 0.0       # -2.0 to 2.0 (default: 0) - penalize new topics
-# frequencypenalty = 0.0      # -2.0 to 2.0 (default: 0) - penalize repetition
-# paralleltoolcalls = true    # Enable parallel MCP tool calls (cascades from service, default: true)
-# reasoningeffort = "medium"  # For o1/o3 models: "low", "medium", "high"
-# servicetier = "auto"        # Processing tier: "auto", "default", "flex", "priority"
-# verbosity = "medium"        # Output token count for gpt-5 models: "low", "medium", "high"
-# toolverbose = false         # Hide 🔧 tool call notifications in IRC (default: true, cascades from service)
-# chat_template_kwargs = {}   # Provider-specific parameters (see examples below)
-# responses_api = false       # Use the Responses API (POST /v1/responses) instead of Chat Completions.
-#                              # Supported by OpenAI and xAI/Grok. Uses same message format but different endpoint.
-# previous_response_id = false# Chain responses using server-side context storage (requires responses_api = true).
-#                              # Only sends new messages instead of full history. Falls back gracefully if ID expires.
+#
+# Available options (per [section]):
+#   service              (string, required)         Service name from services.toml
+#   model                (string)                    Model name (e.g. "gpt-4o")
+#   regex                (string, default: section name)  Regex for command trigger (no ^$ anchors)
+#   system               (string)                    System prompt (supports Go templates)
+#   description          (string)                    Short description for help listings
+#   streaming            (bool, default: false)      Stream responses to IRC as they generate
+#   rendermarkdown       (bool, default: false)      Convert markdown to IRC formatting
+#   detectimages         (bool, default: false)      Detect image URLs in messages and send to API
+#   maximages            (int, default: 5)           Max images per message (when detectimages=true)
+#   maxcontextimages     (int, default: 5)           Max images in context history
+#   imageformat          (string, default: "jpg")    Image format: "jpg", "jpeg", or "webp"
+#   imagequality         (int 1-100, default: 75)    Image quality percentage
+#   maximagesize         (string, default: "1024x1024")  Max image dimensions "WxH"
+#   mcps                 (string array)              Opt-in MCP server names for tool access
+#   maxtokens            (int, cascades from service)     Max tokens per response
+#   maxcompletiontokens  (int, cascades from service)     Max completion tokens per response
+#   temperature          (float, cascades from service)   Sampling temperature
+#   topp                 (float, default: 1)         Nucleus sampling (0-1)
+#   stop                 (string array)              Stop sequences
+#   presencepenalty      (float, default: 0)         -2.0 to 2.0, penalize new topics
+#   frequencypenalty     (float, default: 0)         -2.0 to 2.0, penalize repetition
+#   timeout              (duration, default: 60s)    Overall API call timeout. Cascade: command > service > 60s
+#   streamtimeout        (duration, default: timeout) Max idle time between stream chunks. Cascade: command > service > timeout
+#   toolverbose          (bool, default: true)       Show 🔧 tool call notifications in IRC (cascades from service)
+#   paralleltoolcalls    (bool, default: true)       Enable parallel MCP tool calls (cascades from service)
+#   reasoningeffort      (string)                    For o1/o3 models: "low", "medium", "high"
+#   servicetier          (string)                    Processing tier: "auto", "default", "flex", "priority"
+#   verbosity            (string)                    Output token count for gpt-5: "low", "medium", "high"
+#   chat_template_kwargs (map)                       Provider-specific parameters (nested in request body)
+#   extra_body           (map)                       Provider-specific parameters (top-level in request body)
+#   responses_api        (bool, default: false)      Use POST /v1/responses instead of Chat Completions
+#   previous_response_id (bool, default: false)      Chain responses via server-side context (requires responses_api)
+#
+# Duration values: TOML strings like "30s", "2m", "1m30s".
+#
+# Example with all options:
+# [example-chat]
+# service = "openai"
+# model = "gpt-4o"
+# regex = "chat"
+# description = "Example chat with all options"
+# system = "You are {{.BotNick}} chatting with {{.Nick}} in {{.Channel}} on {{.Network}}."
+# streaming = true
+# rendermarkdown = true
+# detectimages = true
+# maximages = 5
+# maxcontextimages = 5
+# imageformat = "jpg"
+# imagequality = 75
+# maximagesize = "1024x1024"
+# mcps = ["filesystem", "github"]
+# maxtokens = 500
+# maxcompletiontokens = 600
+# temperature = 0.7
+# topp = 0.9
+# stop = ["STOP", "END"]
+# presencepenalty = 0.0
+# frequencypenalty = 0.0
+# timeout = "2m"
+# streamtimeout = "30s"
+# toolverbose = true
+# paralleltoolcalls = true
+# reasoningeffort = "medium"
+# servicetier = "auto"
+# verbosity = "medium"
+# chat_template_kwargs = {enable_thinking = false}
+# extra_body = {reasoning = {effort = "high"}}
+# responses_api = false
+# previous_response_id = false
 
 [chat]
 description = "General IRC-aware chat"

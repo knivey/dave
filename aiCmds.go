@@ -167,9 +167,9 @@ func newChatRunner(network Network, client *girc.Client, cfg AIConfig) *chatRunn
 		httpClient: httpClient,
 		baseURL:    svc.BaseURL,
 		apiKey:     svc.Key,
-		cfg:       cfg,
-		network:   network,
-		client:    client,
+		cfg:        cfg,
+		network:    network,
+		client:     client,
 		logger:     logger,
 		ctxKey:     ctxKey,
 	}

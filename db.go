@@ -76,18 +76,18 @@ func closeDB(db *sqlx.DB) {
 }
 
 type dbSession struct {
-	ID           int64  `db:"id"`
-	ContextKey   string `db:"context_key"`
-	Network      string `db:"network"`
-	Channel      string `db:"channel"`
-	Nick         string `db:"nick"`
-	ChatCommand  string `db:"chat_command"`
-	FirstMessage string `db:"first_message"`
+	ID           int64   `db:"id"`
+	ContextKey   string  `db:"context_key"`
+	Network      string  `db:"network"`
+	Channel      string  `db:"channel"`
+	Nick         string  `db:"nick"`
+	ChatCommand  string  `db:"chat_command"`
+	FirstMessage string  `db:"first_message"`
 	ConvID       *string `db:"conv_id"`
 	ResponseID   *string `db:"response_id"`
-	Status       string `db:"status"`
-	CreatedAt    string `db:"created_at"`
-	LastActive   string `db:"last_active"`
+	Status       string  `db:"status"`
+	CreatedAt    string  `db:"created_at"`
+	LastActive   string  `db:"last_active"`
 }
 
 type dbMessage struct {

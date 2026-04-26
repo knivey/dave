@@ -72,10 +72,11 @@ func LoadContextStore() {
 		if len(messages) > 0 {
 			messages = TruncateHistory(messages, currentCfg.MaxHistory)
 			chatContextsMap[s.ContextKey] = ChatContext{
-				Messages:  messages,
-				Config:    currentCfg,
-				SessionID: s.ID,
-				ConvID:    s.ConvID,
+				Messages:   messages,
+				Config:     currentCfg,
+				SessionID:  s.ID,
+				ConvID:     s.ConvID,
+				ResponseID: func() string { if s.ResponseID != nil { return *s.ResponseID }; return "" }(),
 			}
 			contextLastActive[s.ContextKey] = time.Now().Unix()
 			loggerCS.Info("Loaded session", "id", s.ID, "key", s.ContextKey, "command", s.ChatCommand, "messages", len(messages))

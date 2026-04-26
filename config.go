@@ -142,6 +142,8 @@ type AIConfig struct {
 	Timeout             time.Duration  `toml:"timeout"`
 	StreamTimeout       time.Duration  `toml:"streamtimeout"`
 	ToolVerbose         *bool          `toml:"toolverbose"`
+	ResponsesAPI        bool           `toml:"responses_api"`
+	PreviousResponseID  bool           `toml:"previous_response_id"`
 }
 
 type Service struct {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -119,17 +120,20 @@ func logUsage(logger logxi.Logger, usage *gogpt.Usage) {
 }
 
 type chatRunner struct {
-	aiClient  *gogpt.Client
-	transport *daveTransport
-	cfg       AIConfig
-	network   Network
-	client    *girc.Client
-	channel   string
-	nick      string
-	ctxKey    string
-	logger    logxi.Logger
-	ctx       context.Context
-	outputCh  chan<- string
+	aiClient   *gogpt.Client
+	transport  *daveTransport
+	httpClient *http.Client
+	baseURL    string
+	apiKey     string
+	cfg        AIConfig
+	network    Network
+	client     *girc.Client
+	channel    string
+	nick       string
+	ctxKey     string
+	logger     logxi.Logger
+	ctx        context.Context
+	outputCh   chan<- string
 }
 
 func newChatRunner(network Network, client *girc.Client, cfg AIConfig) *chatRunner {
@@ -149,7 +153,8 @@ func newChatRunner(network Network, client *girc.Client, cfg AIConfig) *chatRunn
 		extraHeaders = make(map[string]string)
 	}
 	transport := newDaveTransport(extraBody, extraHeaders)
-	aiConfig.HTTPClient = &http.Client{Transport: transport}
+	httpClient := &http.Client{Transport: transport}
+	aiConfig.HTTPClient = httpClient
 	aiClient := gogpt.NewClientWithConfig(aiConfig)
 
 	ctxKey := network.Name + client.GetNick()
@@ -157,13 +162,16 @@ func newChatRunner(network Network, client *girc.Client, cfg AIConfig) *chatRunn
 	logger.SetLevel(logxi.LevelAll)
 
 	return &chatRunner{
-		aiClient:  aiClient,
-		transport: transport,
+		aiClient:   aiClient,
+		transport:  transport,
+		httpClient: httpClient,
+		baseURL:    svc.BaseURL,
+		apiKey:     svc.Key,
 		cfg:       cfg,
 		network:   network,
 		client:    client,
-		logger:    logger,
-		ctxKey:    ctxKey,
+		logger:     logger,
+		ctxKey:     ctxKey,
 	}
 }
 
@@ -218,6 +226,9 @@ func (cr *chatRunner) sendWarning(msg string) {
 }
 
 func (cr *chatRunner) runTurn(messages []gogpt.ChatCompletionMessage) ([]gogpt.ChatCompletionMessage, bool) {
+	if cr.cfg.ResponsesAPI {
+		return cr.runTurnResponses(messages)
+	}
 	mcpTools := getMCPTools(cr.cfg.MCPs)
 	mcpTools = append(mcpTools, registerBackgroundJobTool())
 
@@ -694,6 +705,373 @@ func (cr *chatRunner) handleRegisterBackgroundJob(messages []gogpt.ChatCompletio
 	messages = append(messages, toolMsg)
 	AddContext(cr.cfg, cr.ctxKey, toolMsg, cr.network.Name, cr.channel, cr.nick)
 	return messages
+}
+
+func (cr *chatRunner) runTurnResponses(messages []gogpt.ChatCompletionMessage) ([]gogpt.ChatCompletionMessage, bool) {
+	mcpTools := getMCPTools(cr.cfg.MCPs)
+	mcpTools = append(mcpTools, registerBackgroundJobTool())
+	responseTools := gogptToolsToResponseTools(mcpTools)
+
+	ctx, cancel := context.WithTimeout(cr.ctx, cr.cfg.Timeout)
+	defer cancel()
+
+	chatCtx := GetContext(cr.ctxKey)
+	currentResponseID := chatCtx.ResponseID
+	usePrevID := cr.cfg.PreviousResponseID && currentResponseID != ""
+
+	var input []json.RawMessage
+	if usePrevID {
+		if len(messages) > 0 {
+			input = messagesToResponsesInput(messages[len(messages)-1:])
+		}
+	} else {
+		input = messagesToResponsesInput(messages)
+	}
+
+	const maxToolIterations = 20
+
+	for iteration := 1; iteration <= maxToolIterations; iteration++ {
+		req := buildResponsesRequest(cr.cfg, input, responseTools, currentResponseID)
+
+		if cr.cfg.Streaming {
+			req.Stream = true
+			resp, err := cr.callResponsesStream(ctx, req)
+			if err != nil {
+				if usePrevID && isResponseIDError(err) && iteration == 1 {
+					cr.logger.Warn("previous_response_id invalid, retrying without", "response_id", currentResponseID, "error", err)
+					currentResponseID = ""
+					SetContextResponseID(cr.ctxKey, "")
+					usePrevID = false
+					input = messagesToResponsesInput(messages)
+					iteration--
+					continue
+				}
+				cr.sendError(err.Error())
+				cr.logger.Error(err.Error())
+				return messages, true
+			}
+
+			if resp == nil {
+				return messages, true
+			}
+			if resp.ID != "" {
+				currentResponseID = resp.ID
+				SetContextResponseID(cr.ctxKey, resp.ID)
+			}
+			text, reasoning, toolCalls := parseResponseOutput(resp.Output)
+
+			assistantMsg := gogpt.ChatCompletionMessage{
+				Role:             gogpt.ChatMessageRoleAssistant,
+				Content:          text,
+				ReasoningContent: reasoning,
+			}
+
+			if len(toolCalls) == 0 {
+				if text == "" && reasoning == "" {
+					text = "..."
+					assistantMsg.Content = text
+				}
+				messages = append(messages, assistantMsg)
+				AddContext(cr.cfg, cr.ctxKey, assistantMsg, cr.network.Name, cr.channel, cr.nick)
+				cr.logger.Info(FormatOutput(text))
+				logUsage(cr.logger, responsesUsageToGogpt(resp.Usage))
+				if reasoning != "" {
+					cr.logger.Info("reasoning", "content", reasoning)
+				}
+				return messages, true
+			}
+
+			assistantMsg.ToolCalls = toolCalls
+			messages = append(messages, assistantMsg)
+			AddContext(cr.cfg, cr.ctxKey, assistantMsg, cr.network.Name, cr.channel, cr.nick)
+			cr.logger.Info("assistant made tool calls", "count", len(toolCalls))
+			logUsage(cr.logger, responsesUsageToGogpt(resp.Usage))
+
+			var registeredJob bool
+			numToolCalls := len(toolCalls)
+			messages, registeredJob = cr.executeToolCalls(messages, toolCalls)
+			if registeredJob {
+				return messages, true
+			}
+
+			if cr.cfg.PreviousResponseID && currentResponseID != "" {
+				toolResultMsgs := messages[len(messages)-numToolCalls:]
+				input = toolResultMsgsToInput(toolResultMsgs)
+			} else {
+				input = messagesToResponsesInput(messages)
+			}
+			continue
+		}
+
+		cr.transport.setCaptureBody(true)
+		resp, err := callResponsesAPI(ctx, cr.httpClient, cr.baseURL, cr.apiKey, req)
+		cr.transport.setCaptureBody(false)
+		if err != nil {
+			if usePrevID && isResponseIDError(err) && iteration == 1 {
+				cr.logger.Warn("previous_response_id invalid, retrying without", "response_id", currentResponseID, "error", err)
+				currentResponseID = ""
+				SetContextResponseID(cr.ctxKey, "")
+				usePrevID = false
+				input = messagesToResponsesInput(messages)
+				iteration--
+				continue
+			}
+			cr.sendError(err.Error())
+			cr.logger.Error(err.Error())
+			return messages, true
+		}
+
+		if resp.ID != "" {
+			currentResponseID = resp.ID
+			SetContextResponseID(cr.ctxKey, resp.ID)
+		}
+
+		text, reasoning, toolCalls := parseResponseOutput(resp.Output)
+
+		if len(toolCalls) == 0 {
+			content := text
+			if content == "" && reasoning == "" {
+				content = "..."
+			}
+			assistantMsg := gogpt.ChatCompletionMessage{
+				Role:             gogpt.ChatMessageRoleAssistant,
+				Content:          content,
+				ReasoningContent: reasoning,
+			}
+			AddContext(cr.cfg, cr.ctxKey, assistantMsg, cr.network.Name, cr.channel, cr.nick)
+			out := FormatOutput(content)
+			cr.logger.Info(out)
+			textFinal := ExtractFinalText(content)
+
+			logUsage(cr.logger, responsesUsageToGogpt(resp.Usage))
+			if reasoning != "" {
+				cr.logger.Info("reasoning", "content", reasoning)
+			}
+
+			if textFinal != "" && textFinal != "..." {
+				rawText := textFinal
+				if cr.cfg.RenderMarkdown {
+					textFinal = markdowntoirc.MarkdownToIRC(textFinal)
+				}
+				chCfg := cr.network.GetChannelConfig(cr.channel)
+				if chCfg.Pastebin {
+					lines := wrapForIRC(textFinal)
+					if len(lines) >= chCfg.GetMaxLines() {
+						url, err := uploadToTermbin(rawText)
+						if err != nil {
+							cr.sendIRC("pastebin error: " + err.Error())
+							cr.sendIRC(textFinal)
+						} else {
+							preview := 3
+							if preview > len(lines) {
+								preview = len(lines)
+							}
+							for i := 0; i < preview; i++ {
+								cr.sendIRC(lines[i])
+							}
+							cr.sendIRC(fmt.Sprintf("... (full output: %s)", url))
+						}
+						return messages, true
+					}
+				}
+				cr.sendIRC(textFinal)
+			}
+			return messages, true
+		}
+
+		cr.logger.Info("assistant made tool calls", "count", len(toolCalls))
+		logUsage(cr.logger, responsesUsageToGogpt(resp.Usage))
+		assistantMsg := gogpt.ChatCompletionMessage{
+			Role:             gogpt.ChatMessageRoleAssistant,
+			Content:          text,
+			ReasoningContent: reasoning,
+			ToolCalls:        toolCalls,
+		}
+		messages = append(messages, assistantMsg)
+		AddContext(cr.cfg, cr.ctxKey, assistantMsg, cr.network.Name, cr.channel, cr.nick)
+		if text != "" {
+			t := ExtractFinalText(text)
+			if cr.cfg.RenderMarkdown {
+				t = markdowntoirc.MarkdownToIRC(t)
+			}
+			cr.sendIRC(t)
+		}
+		if reasoning != "" {
+			cr.logger.Info("reasoning", "content", reasoning)
+		}
+
+		var registeredJob bool
+		numToolCalls := len(toolCalls)
+		messages, registeredJob = cr.executeToolCalls(messages, toolCalls)
+		if registeredJob {
+			return messages, true
+		}
+
+		if cr.cfg.PreviousResponseID && currentResponseID != "" {
+			toolResultMsgs := messages[len(messages)-numToolCalls:]
+			input = toolResultMsgsToInput(toolResultMsgs)
+		} else {
+			input = messagesToResponsesInput(messages)
+		}
+	}
+
+	cr.sendIRC("\x0308⚠️ Tool call limit reached, stopping.\x0F")
+	cr.logger.Warn("max tool iterations reached")
+	return messages, true
+}
+
+func (cr *chatRunner) callResponsesStream(ctx context.Context, req ResponsesRequest) (*ResponsesResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling responses request: %w", err)
+	}
+	apiURL := strings.TrimRight(cr.baseURL, "/") + "/responses"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("creating responses stream request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+cr.apiKey)
+
+	resp, err := cr.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("responses API stream call: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return nil, fmt.Errorf("responses API stream error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	reader := newResponsesStreamReader(resp.Body)
+
+	type recvResult struct {
+		event ResponseStreamEvent
+		raw   []byte
+		err   error
+	}
+
+	var fullText string
+	var reasoningBuffer string
+	var completedResponse *ResponsesResponse
+	var streamingRenderer *markdowntoirc.StreamingRenderer
+	if cr.cfg.RenderMarkdown {
+		streamingRenderer = markdowntoirc.NewStreamingRenderer()
+	}
+	bufferb := ""
+	logBuf := strings.Builder{}
+
+	idleTimer := time.NewTimer(cr.cfg.StreamTimeout)
+	defer idleTimer.Stop()
+
+	for {
+		if cr.ctx.Err() != nil {
+			resp.Body.Close()
+			return completedResponse, nil
+		}
+
+		ch := make(chan recvResult, 1)
+		go func() {
+			event, err := reader.recv()
+			raw, _ := json.Marshal(event)
+			ch <- recvResult{event: event, raw: raw, err: err}
+		}()
+
+		select {
+		case res := <-ch:
+			if errors.Is(res.err, io.EOF) {
+				cr.logger.Info("Responses stream completed")
+				resp.Body.Close()
+				goto streamDone
+			}
+			if res.err != nil {
+				resp.Body.Close()
+				return nil, res.err
+			}
+			idleTimer.Reset(cr.cfg.StreamTimeout)
+
+			if apiLogger != nil {
+				apiLogger.LogStreamChunk(cr.ctxKey, res.raw)
+			}
+
+			event := res.event
+			switch event.Type {
+			case "response.output_text.delta":
+				textDelta := event.Delta
+				bufferb += textDelta
+				fullText += textDelta
+				if streamingRenderer != nil {
+					for _, line := range streamingRenderer.Process(textDelta) {
+						logBuf.WriteString(line)
+						logBuf.WriteString("\n")
+						cr.sendIRC(line)
+					}
+				} else {
+					if strings.Contains(bufferb, "\n") {
+						logBuf.WriteString(bufferb)
+						cr.sendIRC(bufferb)
+						bufferb = ""
+					}
+				}
+
+			case "response.reasoning_summary_text.delta":
+				reasoningBuffer += event.Delta
+
+			case "response.function_call_arguments.delta":
+				// accumulated via response.completed
+
+			case "response.output_item.done":
+				if event.Item != nil {
+					var item ResponseOutputItem
+					if json.Unmarshal(event.Item, &item) == nil {
+						if item.Type == "function_call" && cr.cfg.ToolVerbose != nil && *cr.cfg.ToolVerbose {
+							serverName := getMCPServerForTool(item.Name)
+							cr.sendIRC(fmt.Sprintf("\x0315🔧 ToolCall: %s > %s", serverName, item.Name))
+						}
+					}
+				}
+
+			case "response.completed":
+				if event.Response != nil {
+					var r ResponsesResponse
+					if json.Unmarshal(event.Response, &r) == nil {
+						completedResponse = &r
+					}
+				}
+			}
+
+		case <-idleTimer.C:
+			resp.Body.Close()
+			return nil, fmt.Errorf("responses stream timed out (no data received)")
+		}
+	}
+
+streamDone:
+	if completedResponse == nil {
+		return nil, fmt.Errorf("responses stream ended without response.completed event")
+	}
+
+	logStreamCompletion(cr.ctxKey, cr.cfg.Model, fullText, reasoningBuffer, nil, responsesUsageToGogpt(completedResponse.Usage), gogpt.ChatMessageRoleAssistant)
+
+	if streamingRenderer != nil {
+		for _, line := range streamingRenderer.Process("") {
+			logBuf.WriteString(line)
+			logBuf.WriteString("\n")
+			cr.sendIRC(line)
+		}
+	} else if bufferb != "" {
+		logBuf.WriteString(bufferb)
+		cr.sendIRC(bufferb)
+	}
+
+	cr.logger.Info("output", "text", logBuf.String())
+	logUsage(cr.logger, responsesUsageToGogpt(completedResponse.Usage))
+	if reasoningBuffer != "" {
+		cr.logger.Info("reasoning", "content", reasoningBuffer)
+	}
+
+	return completedResponse, nil
 }
 
 func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx context.Context, output chan<- string, args ...string) {

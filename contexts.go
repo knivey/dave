@@ -101,3 +101,25 @@ func GetContext(key string) ChatContext {
 func ContextExists(key string) bool {
 	return chatContexts.Exists(key)
 }
+
+func SetContextResponseID(key, responseID string) {
+	chatContextsMutex.Lock()
+	ctx, ok := chatContextsMap[key]
+	if !ok {
+		chatContextsMutex.Unlock()
+		return
+	}
+	ctx.ResponseID = responseID
+	chatContextsMap[key] = ctx
+	sid := ctx.SessionID
+	chatContextsMutex.Unlock()
+	if theDB != nil && sid != 0 {
+		var rid *string
+		if responseID != "" {
+			rid = &responseID
+		}
+		if err := updateDBSessionResponseID(sid, rid); err != nil {
+			loggerCS.Error("Failed to update response_id", "session", sid, "error", err)
+		}
+	}
+}

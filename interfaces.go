@@ -11,10 +11,11 @@ import (
 )
 
 type ChatContext struct {
-	Messages  []gogpt.ChatCompletionMessage
-	Config    AIConfig
-	SessionID int64
-	ConvID    string
+	Messages   []gogpt.ChatCompletionMessage
+	Config     AIConfig
+	SessionID  int64
+	ConvID     string
+	ResponseID string
 }
 
 type ChatContextStore interface {

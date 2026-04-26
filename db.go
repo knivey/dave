@@ -84,6 +84,7 @@ type dbSession struct {
 	ChatCommand  string `db:"chat_command"`
 	FirstMessage string `db:"first_message"`
 	ConvID       string `db:"conv_id"`
+	ResponseID   *string `db:"response_id"`
 	Status       string `db:"status"`
 	CreatedAt    string `db:"created_at"`
 	LastActive   string `db:"last_active"`
@@ -124,6 +125,14 @@ func updateDBSessionConvID(sessionID int64, convID string) error {
 	_, err := theDB.Exec(
 		"UPDATE sessions SET conv_id = ? WHERE id = ? AND (conv_id IS NULL OR conv_id = '')",
 		convID, sessionID,
+	)
+	return err
+}
+
+func updateDBSessionResponseID(sessionID int64, responseID *string) error {
+	_, err := theDB.Exec(
+		"UPDATE sessions SET response_id = ? WHERE id = ?",
+		responseID, sessionID,
 	)
 	return err
 }

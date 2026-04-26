@@ -15,6 +15,10 @@
 # verbosity = "medium"        # Output token count for gpt-5 models: "low", "medium", "high"
 # toolverbose = false         # Hide 🔧 tool call notifications in IRC (default: true, cascades from service)
 # chat_template_kwargs = {}   # Provider-specific parameters (see examples below)
+# responses_api = false       # Use the Responses API (POST /v1/responses) instead of Chat Completions.
+#                              # Supported by OpenAI and xAI/Grok. Uses same message format but different endpoint.
+# previous_response_id = false# Chain responses using server-side context storage (requires responses_api = true).
+#                              # Only sends new messages instead of full history. Falls back gracefully if ID expires.
 
 [chat]
 description = "General IRC-aware chat"
@@ -191,4 +195,23 @@ system = "You are a creative and imaginative assistant."
 # service = "vllm"
 # model = "some-model"
 # chat_template_kwargs = {top_k = 20}
+# system = "You are a helpful assistant."
+
+# Responses API examples (OpenAI / xAI Grok):
+#
+# Basic Responses API (sends full history each request):
+# [grok-chat]
+# description = "Grok chat via Responses API"
+# service = "grok"
+# model = "grok-4"
+# responses_api = true
+# system = "You are a helpful assistant."
+#
+# Responses API with server-side context (only sends new messages):
+# [grok-cached]
+# description = "Grok chat with server-side context storage"
+# service = "grok"
+# model = "grok-4"
+# responses_api = true
+# previous_response_id = true
 # system = "You are a helpful assistant."

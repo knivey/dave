@@ -180,6 +180,10 @@ func initTUI() (*tview.Application, error) {
 	app.SetRoot(flex, true).SetFocus(inputField)
 
 	app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyCtrlC {
+			requestShutdown()
+			return nil
+		}
 		switch event.Key() {
 		case tcell.KeyPgUp:
 			autoScroll = false

@@ -261,13 +261,22 @@ func main() {
 		if queueMgr != nil {
 			queueMgr.Stop()
 		}
-		closeMCPClients()
 		stopJobManager()
-		closeDB(theDB)
-		closeLogFile()
+		closeMCPClients()
+
 		for _, bot := range bots {
 			bot.Quit()
 		}
+		done := make(chan struct{})
+		go func() { wg.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+		}
+		time.Sleep(1 * time.Second) // give IRC connections time to flush the QUIT message
+
+		closeDB(theDB)
+		closeLogFile()
 		tuiApp.QueueUpdateDraw(func() {
 			tuiApp.Stop()
 		})

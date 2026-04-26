@@ -68,6 +68,7 @@ var stats_re = regexp.MustCompile("^mystats$")
 var delete_re = regexp.MustCompile("^delete\\s+(\\d+)$")
 var resume_re = regexp.MustCompile("^resume\\s+(\\d+)$")
 var jobs_re = regexp.MustCompile("^jobs$")
+var support_re = regexp.MustCompile("^support$")
 
 type CmdMap map[*regexp.Regexp]CmdFunc
 
@@ -103,6 +104,9 @@ var builtInCmds = CmdMap{
 	},
 	jobs_re: func(n Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, s ...string) {
 		historyJobs(n, c, e, ctx, output, s...)
+	},
+	support_re: func(n Network, c *girc.Client, e girc.Event, _ context.Context, _ chan<- string, s ...string) {
+		support(n, c, e, s...)
 	},
 }
 var configCmds CmdMap
@@ -480,7 +484,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 				return
 			}
 
-			if r == stats_re || r == delete_re || r == resume_re {
+			if r == stats_re || r == delete_re || r == resume_re || r == support_re {
 				cmd(network, client, event, context.Background(), nil, args...)
 				return
 			}

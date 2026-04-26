@@ -40,6 +40,7 @@
 - [Testing](#%F0%9F%A7%AA-testing)
 - [Advanced](#%F0%9F%94%A7-advanced)
 - [Dependencies](#%F0%9F%93%A6-dependencies)
+- [Support](#%F0%9F%92%96-support)
 - [Contributing](#%F0%9F%A4%9D-contributing)
 - [License](#%F0%9F%93%9D-license)
 
@@ -869,6 +870,12 @@ Create `ignores.txt` with wildcard patterns (one per line):
 | [jmoiron/sqlx](https://github.com/jmoiron/sqlx) | SQLite database |
 | [pressly/goose](https://github.com/pressly/goose) | Database migrations |
 | [modernc.org/sqlite](https://modernc.org/sqlite) | Pure Go SQLite driver |
+
+---
+
+## 💖 Support
+
+If you find dave useful, consider supporting its development on **[Patreon](https://patreon.com/shrew269)**.
 
 ---
 

@@ -73,6 +73,7 @@ func help(network Network, client *girc.Client, event girc.Event, ctx context.Co
 	lines = append(lines, fmt.Sprintf("Only Chat commands start a persistent context. After starting one, reply with my nick (e.g. \"%s, your message here\") to continue that context without using a command.", botnick))
 	lines = append(lines, "Commands marked with (regex) use pattern matching, the trigger can match more than one name.")
 	lines = append(lines, fmt.Sprintf("  %sstop \u2014 Stop text generation (including this help message)", network.Trigger))
+	lines = append(lines, fmt.Sprintf("  %ssupport \u2014 Support dave's development", network.Trigger))
 
 	if theDB != nil {
 		lines = append(lines, "\x02History:\x02")
@@ -290,6 +291,12 @@ func findCommandHelp(network Network, cmdName string) (helpEntry, bool) {
 		return helpEntry{
 			cmd:  network.Trigger + "jobs",
 			desc: "List your chat queue status and pending/running/completed background jobs",
+		}, true
+	}
+	if cmdName == "support" {
+		return helpEntry{
+			cmd:  network.Trigger + "support",
+			desc: "Support dave's development",
 		}, true
 	}
 	return helpEntry{}, false

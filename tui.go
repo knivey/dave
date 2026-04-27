@@ -124,6 +124,7 @@ func initTUI() (*tview.Application, error) {
 	logContainer := tview.NewBox()
 	logContainer.SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
 		logView.SetRect(x, y, width-sbWidth, height)
+		logView.SetSize(0, width-sbWidth)
 
 		var savedRow int
 		if !autoScroll {
@@ -132,7 +133,9 @@ func initTUI() (*tview.Application, error) {
 
 		logView.Draw(screen)
 
-		if !autoScroll && savedRow > 0 {
+		if autoScroll {
+			logView.ScrollToEnd()
+		} else if savedRow > 0 {
 			newRow, _ := logView.GetScrollOffset()
 			if newRow < savedRow {
 				logView.ScrollTo(savedRow, 0)
@@ -141,6 +144,9 @@ func initTUI() (*tview.Application, error) {
 
 		totalLines := logView.GetWrappedLineCount()
 		row, _ := logView.GetScrollOffset()
+		if autoScroll && totalLines > height {
+			row = totalLines - height
+		}
 		if scrollbar.ShouldDraw(totalLines, height) {
 			scrollbar.Draw(screen, x, y, width, height, row, totalLines)
 		}
@@ -150,8 +156,18 @@ func initTUI() (*tview.Application, error) {
 	logContainer.SetMouseCapture(func(action tview.MouseAction, event *tcell.EventMouse) (tview.MouseAction, *tcell.EventMouse) {
 		switch action {
 		case tview.MouseScrollUp:
+			wasAutoScroll := autoScroll
 			autoScroll = false
-			row, _ := logView.GetScrollOffset()
+			var row int
+			if wasAutoScroll {
+				totalLines := logView.GetWrappedLineCount()
+				_, _, _, h := logView.GetInnerRect()
+				if totalLines > h {
+					row = totalLines - h
+				}
+			} else {
+				row, _ = logView.GetScrollOffset()
+			}
 			newRow := row - 3
 			if newRow < 0 {
 				newRow = 0
@@ -159,6 +175,10 @@ func initTUI() (*tview.Application, error) {
 			logView.ScrollTo(newRow, 0)
 			return tview.MouseConsumed, nil
 		case tview.MouseScrollDown:
+			if autoScroll {
+				logView.ScrollToEnd()
+				return tview.MouseConsumed, nil
+			}
 			row, _ := logView.GetScrollOffset()
 			_, _, _, height := logView.GetInnerRect()
 			totalLines := logView.GetWrappedLineCount()
@@ -186,9 +206,18 @@ func initTUI() (*tview.Application, error) {
 		}
 		switch event.Key() {
 		case tcell.KeyPgUp:
+			wasAutoScroll := autoScroll
 			autoScroll = false
-			row, _ := logView.GetScrollOffset()
+			var row int
 			_, _, _, height := logView.GetInnerRect()
+			if wasAutoScroll {
+				totalLines := logView.GetWrappedLineCount()
+				if totalLines > height {
+					row = totalLines - height
+				}
+			} else {
+				row, _ = logView.GetScrollOffset()
+			}
 			newRow := row - height
 			if newRow < 0 {
 				newRow = 0
@@ -196,13 +225,16 @@ func initTUI() (*tview.Application, error) {
 			logView.ScrollTo(newRow, 0)
 			return nil
 		case tcell.KeyPgDn:
+			if autoScroll {
+				logView.ScrollToEnd()
+				return nil
+			}
 			row, _ := logView.GetScrollOffset()
 			_, _, _, height := logView.GetInnerRect()
 			newRow := row + height
 			if newRow+height >= logView.GetWrappedLineCount() {
 				autoScroll = true
 				logView.ScrollToEnd()
-				logView.ScrollTo(logView.GetWrappedLineCount()-height, 0)
 			} else {
 				logView.ScrollTo(newRow, 0)
 			}

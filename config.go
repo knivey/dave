@@ -30,6 +30,7 @@ type Config struct {
 	MCPs              map[string]MCPConfig `toml:"mcps"`
 	TUI               TUIConfig
 	APILog            APILogConfig      `toml:"api_log"`
+	IncidentLog       IncidentConfig    `toml:"incident_log"`
 	TemplateVars      map[string]string `toml:"-"`
 	MaxSessionHistory int               `toml:"max_session_history"`
 }

@@ -26,9 +26,12 @@
 #   width              (int, default: 1)      Scrollbar width in cells
 #
 # [api_log] options:
-#   enabled            (bool, default: false)  Enable API request/response logging
 #   dir                (string, default: "api_logs")  Directory for log files
 #   log_raw_stream     (bool, default: false)  Log individual SSE chunks
+#
+# [incident_log] options:
+#   enabled            (bool, default: true)   Enable incident logging on API errors
+#   dir                (string, default: "incidents")  Directory for incident files
 #
 # [networks.<name>] options:
 #   enabled            (bool, default: true)   Enable this network
@@ -77,9 +80,12 @@
 # width = 1
 #
 # [api_log]
-# enabled = true
 # dir = "api_logs"
 # log_raw_stream = false
+#
+# [incident_log]
+# enabled = true
+# dir = "incidents"
 #
 # [networks.example]
 # enabled = true
@@ -131,7 +137,6 @@ track_color = "darkgray"
 width = 1
 
 [api_log]
-enabled = true
 dir = "api_logs"
 # log_raw_stream = false  # set true to also log individual SSE chunks
 

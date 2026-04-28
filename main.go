@@ -171,6 +171,7 @@ func reloadAll() error {
 		apiLogger.CloseAll()
 	}
 	initAPILogger(config, configDir)
+	initIncidentLogger(config)
 	reloadMCPClients(config.MCPs)
 	registerCommandsLocked(config.Commands)
 	if queueMgr != nil {
@@ -208,6 +209,7 @@ func main() {
 	logger.SetLevel(logxi.LevelAll)
 	logger.Info("Config loaded", "networks", len(config.Networks))
 	initAPILogger(config, configDir)
+	initIncidentLogger(config)
 
 	var dbErr error
 	theDB, dbErr = initDB(config.Database)

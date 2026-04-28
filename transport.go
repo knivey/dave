@@ -14,9 +14,10 @@ type daveTransport struct {
 
 	extraHeaders map[string]string
 
-	mu           sync.Mutex
-	captureBody  bool
-	capturedBody []byte
+	mu              sync.Mutex
+	captureBody     bool
+	capturedBody    []byte
+	lastRequestBody []byte
 
 	apiLogger *APILogger
 	ctxKey    string
@@ -81,8 +82,13 @@ func (t *daveTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		req.ContentLength = int64(len(finalBody))
 	}
 
-	if len(finalBody) > 0 && t.apiLogger != nil {
-		t.apiLogger.LogRequest(t.ctxKey, finalBody)
+	if len(finalBody) > 0 {
+		t.mu.Lock()
+		t.lastRequestBody = finalBody
+		t.mu.Unlock()
+		if t.apiLogger != nil {
+			t.apiLogger.LogRequest(t.ctxKey, finalBody)
+		}
 	}
 
 	for k, v := range t.extraHeaders {
@@ -129,4 +135,10 @@ func (t *daveTransport) setCaptureBody(capture bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.captureBody = capture
+}
+
+func (t *daveTransport) getLastRequestBody() []byte {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.lastRequestBody
 }

@@ -218,6 +218,12 @@ func (cr *chatRunner) sendError(msg string) {
 	}
 }
 
+func (cr *chatRunner) logAPIIncident(err error, messages []gogpt.ChatCompletionMessage, iteration int, apiPath string) {
+	if incidentLogger != nil {
+		incidentLogger.logIncident(cr, err, messages, iteration, apiPath)
+	}
+}
+
 func (cr *chatRunner) sendWarning(msg string) {
 	select {
 	case cr.outputCh <- warnMsg(msg):
@@ -269,6 +275,7 @@ func (cr *chatRunner) runTurn(messages []gogpt.ChatCompletionMessage) ([]gogpt.C
 			if err != nil {
 				cr.sendError(err.Error())
 				cr.logger.Error(err.Error())
+				cr.logAPIIncident(err, messages, iterations, "chat_completions_stream")
 				return messages, true
 			}
 
@@ -322,6 +329,7 @@ func (cr *chatRunner) runTurn(messages []gogpt.ChatCompletionMessage) ([]gogpt.C
 						stream.Close()
 						cr.sendError(res.err.Error())
 						cr.logger.Error(res.err.Error())
+						cr.logAPIIncident(res.err, messages, iterations, "chat_completions_stream")
 						return messages, true
 					}
 					idleTimer.Reset(cr.cfg.StreamTimeout)
@@ -408,8 +416,10 @@ func (cr *chatRunner) runTurn(messages []gogpt.ChatCompletionMessage) ([]gogpt.C
 
 				case <-idleTimer.C:
 					stream.Close()
-					cr.sendError("stream timed out (no data received)")
+					timeoutErr := fmt.Errorf("stream timed out (no data received): timeout=%s", cr.cfg.StreamTimeout)
+					cr.sendError(timeoutErr.Error())
 					cr.logger.Error("stream idle timeout exceeded", "timeout", cr.cfg.StreamTimeout)
+					cr.logAPIIncident(timeoutErr, messages, iterations, "chat_completions_stream")
 					return messages, true
 				}
 			}
@@ -490,6 +500,7 @@ func (cr *chatRunner) runTurn(messages []gogpt.ChatCompletionMessage) ([]gogpt.C
 		if err != nil {
 			cr.sendError(err.Error())
 			cr.logger.Error(err.Error())
+			cr.logAPIIncident(err, messages, iterations, "chat_completions")
 			return messages, true
 		}
 
@@ -752,6 +763,7 @@ func (cr *chatRunner) runTurnResponses(messages []gogpt.ChatCompletionMessage) (
 				}
 				cr.sendError(err.Error())
 				cr.logger.Error(err.Error())
+				cr.logAPIIncident(err, messages, iteration, "responses_stream")
 				return messages, true
 			}
 
@@ -822,6 +834,7 @@ func (cr *chatRunner) runTurnResponses(messages []gogpt.ChatCompletionMessage) (
 			}
 			cr.sendError(err.Error())
 			cr.logger.Error(err.Error())
+			cr.logAPIIncident(err, messages, iteration, "responses")
 			return messages, true
 		}
 

@@ -11,7 +11,6 @@ import (
 )
 
 type APILogConfig struct {
-	Enabled      bool   `toml:"enabled"`
 	Dir          string `toml:"dir"`
 	LogRawStream bool   `toml:"log_raw_stream"`
 }
@@ -37,9 +36,6 @@ type APILogger struct {
 var apiLogger *APILogger
 
 func NewAPILogger(cfg APILogConfig, configDir string) (*APILogger, error) {
-	if !cfg.Enabled {
-		return nil, nil
-	}
 	dir := cfg.Dir
 	if dir == "" {
 		dir = "api_logs"
@@ -158,6 +154,32 @@ func (l *APILogger) CloseAll() {
 		s.file.Close()
 		delete(l.sessions, key)
 	}
+}
+
+func (l *APILogger) GetSessionFilePath(ctxKey string) string {
+	if l == nil {
+		return ""
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	s, ok := l.sessions[ctxKey]
+	if !ok {
+		return ""
+	}
+	return s.file.Name()
+}
+
+func (l *APILogger) SyncSession(ctxKey string) {
+	if l == nil {
+		return
+	}
+	s, err := l.getSession(ctxKey)
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.file.Sync()
 }
 
 func initAPILogger(cfg Config, dir string) {

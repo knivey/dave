@@ -299,6 +299,8 @@ func (r *Renderer) renderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 			tag := strings.ToLower(string(seg.Value(r.source)))
 			if tag == "<br>" || tag == "<br/>" || tag == "<br />" {
 				writes(w, node, "\n")
+			} else {
+				writes(w, node, string(seg.Value(r.source)))
 			}
 		}
 	case extast.KindTable:
@@ -465,6 +467,8 @@ func (r *Renderer) renderNodeTo(w io.Writer, node ast.Node) {
 			tag := strings.ToLower(string(seg.Value(r.source)))
 			if tag == "<br>" || tag == "<br/>" || tag == "<br />" {
 				fmt.Fprint(w, "\n")
+			} else {
+				fmt.Fprint(w, string(seg.Value(r.source)))
 			}
 		}
 	default:

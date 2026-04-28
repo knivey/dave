@@ -263,6 +263,35 @@ func TestBreaks(t *testing.T) {
 	})
 }
 
+func TestAngleBracketText(t *testing.T) {
+	runTests(t, []mdTest{
+		{
+			name:       "AngleBracketNickNotDoubled",
+			input:      "<sylar> hello world",
+			contain:    []string{"<sylar> hello world"},
+			notContain: []string{"<sylar><sylar>"},
+		},
+		{
+			name:       "InlineAngleBracketNotDoubled",
+			input:      "Hello <sylar> world",
+			contain:    []string{"Hello <sylar> world"},
+			notContain: []string{"<sylar><sylar>"},
+		},
+		{
+			name:       "MultipleAngleBracketNicks",
+			input:      "<sylar> line one\n<alice> line two",
+			contain:    []string{"<sylar> line one", "<alice> line two"},
+			notContain: []string{"<sylar><sylar>", "<alice><alice>"},
+		},
+		{
+			name:       "AngleBracketWithFormatting",
+			input:      "<sylar> hello *world*",
+			contain:    []string{"<sylar> hello \x1Dworld\x1D"},
+			notContain: []string{"<sylar><sylar>"},
+		},
+	})
+}
+
 func TestEdgeCases(t *testing.T) {
 	runTests(t, []mdTest{
 		{

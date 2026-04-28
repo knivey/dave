@@ -293,14 +293,16 @@ func (r *Renderer) renderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 			writes(w, node, strings.TrimRight(txt, "\n"))
 		}
 	case ast.KindRawHTML:
-		html := node.(*ast.RawHTML)
-		for i := 0; i < html.Segments.Len(); i++ {
-			seg := html.Segments.At(i)
-			tag := strings.ToLower(string(seg.Value(r.source)))
-			if tag == "<br>" || tag == "<br/>" || tag == "<br />" {
-				writes(w, node, "\n")
-			} else {
-				writes(w, node, string(seg.Value(r.source)))
+		if entering {
+			html := node.(*ast.RawHTML)
+			for i := 0; i < html.Segments.Len(); i++ {
+				seg := html.Segments.At(i)
+				tag := strings.ToLower(string(seg.Value(r.source)))
+				if tag == "<br>" || tag == "<br/>" || tag == "<br />" {
+					writes(w, node, "\n")
+				} else {
+					writes(w, node, string(seg.Value(r.source)))
+				}
 			}
 		}
 	case extast.KindTable:
@@ -343,6 +345,7 @@ func (r *Renderer) renderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 			}
 			writes(w, node, strings.TrimSpace(buf.String()))
 		}
+		return ast.WalkSkipChildren
 	}
 	return ast.WalkContinue
 }

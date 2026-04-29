@@ -565,7 +565,7 @@ func (cr *chatRunner) runTurn(messages []gogpt.ChatCompletionMessage) ([]gogpt.C
 							for i := 0; i < preview; i++ {
 								cr.sendIRC(lines[i])
 							}
-							cr.sendIRC(fmt.Sprintf("... (full output: %s)", url))
+							cr.sendIRC(fmt.Sprintf("... ( full output: %s )", url))
 						}
 						return messages, true
 					}
@@ -900,7 +900,7 @@ func (cr *chatRunner) runTurnResponses(messages []gogpt.ChatCompletionMessage) (
 							for i := 0; i < preview; i++ {
 								cr.sendIRC(lines[i])
 							}
-							cr.sendIRC(fmt.Sprintf("... (full output: %s)", url))
+							cr.sendIRC(fmt.Sprintf("... ( full output: %s )", url))
 						}
 						return messages, true
 					}

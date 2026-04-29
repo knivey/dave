@@ -70,5 +70,9 @@ func uploadToPastebin(text string) (string, error) {
 		return "", fmt.Errorf("pastebin: parsing response: %w", err)
 	}
 
-	return result.URL, nil
+	if result.Slug == "" {
+		return "", fmt.Errorf("pastebin: empty slug in response")
+	}
+
+	return strings.TrimRight(config.Pastebin.URL, "/") + "/p/" + result.Slug, nil
 }

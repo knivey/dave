@@ -546,7 +546,7 @@ func (cr *chatRunner) runTurn(messages []gogpt.ChatCompletionMessage) ([]gogpt.C
 				if chCfg.Pastebin {
 					lines := wrapForIRC(text)
 					if len(lines) >= chCfg.GetMaxLines() {
-						url, err := uploadToTermbin(rawText)
+						url, err := uploadToPastebin(rawText)
 						if err != nil {
 							cr.sendIRC(errorMsg("pastebin: " + err.Error()))
 							preview := chCfg.GetMaxLines()
@@ -881,7 +881,7 @@ func (cr *chatRunner) runTurnResponses(messages []gogpt.ChatCompletionMessage) (
 				if chCfg.Pastebin {
 					lines := wrapForIRC(textFinal)
 					if len(lines) >= chCfg.GetMaxLines() {
-						url, err := uploadToTermbin(rawText)
+						url, err := uploadToPastebin(rawText)
 						if err != nil {
 							cr.sendIRC(errorMsg("pastebin: " + err.Error()))
 							preview := chCfg.GetMaxLines()

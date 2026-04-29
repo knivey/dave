@@ -1,39 +1,74 @@
 package main
 
 import (
-	"bufio"
+	"bytes"
+	"encoding/json"
 	"fmt"
-	"net"
+	"io"
+	"net/http"
 	"strings"
 	"time"
 )
 
-const termbinAddr = "termbin.com:9999"
+var pastebinHTTPClient = &http.Client{Timeout: 15 * time.Second}
 
-func uploadToTermbin(text string) (string, error) {
-	conn, err := net.DialTimeout("tcp", termbinAddr, 10*time.Second)
+type pastebinCreateRequest struct {
+	Content string `json:"content"`
+}
+
+type pastebinCreateResponse struct {
+	Slug string `json:"slug"`
+	URL  string `json:"url"`
+}
+
+type pastebinErrorResponse struct {
+	Error string `json:"error"`
+}
+
+func uploadToPastebin(text string) (string, error) {
+	if config.Pastebin.URL == "" {
+		return "", fmt.Errorf("pastebin: no url configured")
+	}
+	if config.Pastebin.APIKey == "" {
+		return "", fmt.Errorf("pastebin: no api_key configured")
+	}
+
+	body, err := json.Marshal(pastebinCreateRequest{Content: text})
 	if err != nil {
-		return "", fmt.Errorf("connecting to termbin: %w", err)
+		return "", fmt.Errorf("pastebin: encoding request: %w", err)
 	}
-	defer conn.Close()
 
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		fmt.Fprint(conn, text)
-		if tc, ok := conn.(*net.TCPConn); ok {
-			tc.CloseWrite()
-		} else {
-			conn.Close()
+	url := strings.TrimRight(config.Pastebin.URL, "/") + "/api/pastes"
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("pastebin: creating request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", config.Pastebin.APIKey)
+
+	resp, err := pastebinHTTPClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("pastebin: request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("pastebin: reading response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusCreated {
+		var errResp pastebinErrorResponse
+		if json.Unmarshal(respBody, &errResp) == nil && errResp.Error != "" {
+			return "", fmt.Errorf("pastebin: %s", errResp.Error)
 		}
-	}()
-
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	scanner := bufio.NewScanner(conn)
-	if scanner.Scan() {
-		<-done
-		return strings.TrimSpace(scanner.Text()), nil
+		return "", fmt.Errorf("pastebin: unexpected status %d: %s", resp.StatusCode, string(respBody))
 	}
-	<-done
-	return "", fmt.Errorf("no response from termbin")
+
+	var result pastebinCreateResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("pastebin: parsing response: %w", err)
+	}
+
+	return result.URL, nil
 }

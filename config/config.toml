@@ -33,6 +33,10 @@
 #   enabled            (bool, default: true)   Enable incident logging on API errors
 #   dir                (string, default: "incidents")  Directory for incident files
 #
+# [pastebin] options:
+#   url                (string)               Pastebin API base URL (e.g. "http://localhost:8181")
+#   api_key            (string)               API key for authentication
+#
 # [networks.<name>] options:
 #   enabled            (bool, default: true)   Enable this network
 #   nick               (string)                Bot nickname
@@ -87,6 +91,10 @@
 # enabled = true
 # dir = "incidents"
 #
+# [pastebin]
+# url = "http://localhost:8181"
+# api_key = "dave_YOUR_KEY_HERE"
+#
 # [networks.example]
 # enabled = true
 # nick = "mybot"
@@ -139,6 +147,10 @@ width = 1
 [api_log]
 dir = "api_logs"
 # log_raw_stream = false  # set true to also log individual SSE chunks
+
+[pastebin]
+url = "http://localhost:8181"
+api_key = "dave_bff05d0dd28c3ef25b19e45ae0fc420ac3522ed89c2449f59fd86ffb77d5ee03"
 
 [networks.birdnest]
 enabled = true

@@ -31,8 +31,14 @@ type Config struct {
 	TUI               TUIConfig
 	APILog            APILogConfig      `toml:"api_log"`
 	IncidentLog       IncidentConfig    `toml:"incident_log"`
+	Pastebin          PastebinConfig    `toml:"pastebin"`
 	TemplateVars      map[string]string `toml:"-"`
 	MaxSessionHistory int               `toml:"max_session_history"`
+}
+
+type PastebinConfig struct {
+	URL    string `toml:"url"`
+	APIKey string `toml:"api_key"`
 }
 
 type TUIConfig struct {

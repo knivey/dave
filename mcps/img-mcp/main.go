@@ -43,7 +43,6 @@ func main() {
 	defer queue.Stop()
 
 	handlers := NewToolHandlers(cfg, queue)
-	server := createServer(cfg, handlers)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -56,8 +55,9 @@ func main() {
 	}()
 
 	if *httpMode {
-		serveHTTP(ctx, cfg, server)
+		serveHTTP(ctx, cfg, handlers)
 	} else {
+		server := createFullServer(cfg, handlers)
 		serveStdio(ctx, server)
 	}
 }
@@ -72,14 +72,25 @@ func serveStdio(ctx context.Context, server *mcp.Server) {
 	}
 }
 
-func serveHTTP(ctx context.Context, cfg Config, server *mcp.Server) {
-	handler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
-		return server
+func serveHTTP(ctx context.Context, cfg Config, handlers *ToolHandlers) {
+	syncServer := createSyncServer(cfg, handlers)
+	asyncServer := createAsyncServer(cfg, handlers)
+
+	syncHandler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
+		return syncServer
 	}, &mcp.StreamableHTTPOptions{JSONResponse: true})
+
+	asyncHandler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
+		return asyncServer
+	}, &mcp.StreamableHTTPOptions{JSONResponse: true})
+
+	mux := http.NewServeMux()
+	mux.Handle(cfg.Server.SyncPath, syncHandler)
+	mux.Handle(cfg.Server.AsyncPath, asyncHandler)
 
 	httpServer := &http.Server{
 		Addr:    cfg.Server.Addr,
-		Handler: handler,
+		Handler: mux,
 	}
 
 	go func() {
@@ -87,7 +98,7 @@ func serveHTTP(ctx context.Context, cfg Config, server *mcp.Server) {
 		httpServer.Shutdown(context.Background())
 	}()
 
-	log.Printf("img-mcp HTTP server listening on %s", cfg.Server.Addr)
+	log.Printf("img-mcp HTTP server listening on %s (sync=%s, async=%s)", cfg.Server.Addr, cfg.Server.SyncPath, cfg.Server.AsyncPath)
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fmt.Fprintf(os.Stderr, "HTTP server error: %v\n", err)
 		os.Exit(1)

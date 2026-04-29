@@ -15,9 +15,9 @@ go build -o mcps/img-mcp/img-mcp ./mcps/img-mcp
 ./dave prod         # prod/ directory
 ./dave test         # test/ directory
 
-./mcps/img-mcp/img-mcp              # uses mcps/img-mcp/config.toml
+./mcps/img-mcp/img-mcp              # uses mcps/img-mcp/config.toml (stdio, all tools)
 ./mcps/img-mcp/img-mcp prod.toml    # uses specified config (relative to binary dir)
-./mcps/img-mcp/img-mcp --http       # HTTP mode
+./mcps/img-mcp/img-mcp --http       # HTTP mode (dual paths: /sync + /async)
 
 go test ./...                    # all tests
 go test ./MarkdownToIRC/...      # markdown tests only
@@ -48,6 +48,9 @@ No Makefile, no linter config. Use `go fmt` + `go vet`.
     - Workflows: `mcps/img-mcp/workflows/*.json`
     - Config path is relative to binary directory by default
     - Built via: `go build -o mcps/img-mcp/img-mcp ./mcps/img-mcp`
+    - **HTTP mode**: serves two MCP servers on one port with path routing (`/sync` and `/async`, configurable). Both share the same `JobQueue`. Sync path exposes blocking tools (`generate_image`, `enhance_and_generate`). Async path exposes non-blocking tools (`generate_image_async`, `wait_for_job`, `cancel_job`, etc.). Stdio mode exposes all tools (backward compatible).
+    - `server.go`: three server builders — `createSyncServer`, `createAsyncServer`, `createFullServer` (stdio).
+    - Dave connects via two MCP entries in `mcps.toml`: `[img-mcp]` (sync path) and `[img-mcp-async]` (async path).
   - MCPs are referenced in dave's config via `mcps.toml` (transport: stdio/http, command path, timeout) and `tools.toml` (mcp server name, tool name, args).
 
 ## High-Signal Gotchas

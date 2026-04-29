@@ -29,3 +29,16 @@
 # url = "http://localhost:3001/mcp"
 # timeout = "30s"
 # keepalive = "30s"
+#
+# Example — img-mcp with sync/async dual paths (single binary, shared queue):
+# [img-mcp]
+# transport = "http"
+# url = "http://localhost:8080/sync"
+# timeout = "2m"
+# keepalive = "30s"
+#
+# [img-mcp-async]
+# transport = "http"
+# url = "http://localhost:8080/async"
+# timeout = "2m"
+# keepalive = "30s"

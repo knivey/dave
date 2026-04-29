@@ -19,9 +19,11 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Name    string `toml:"name"`
-	Version string `toml:"version"`
-	Addr    string `toml:"addr"`
+	Name      string `toml:"name"`
+	Version   string `toml:"version"`
+	Addr      string `toml:"addr"`
+	SyncPath  string `toml:"sync_path"`
+	AsyncPath string `toml:"async_path"`
 }
 
 type ComfyServiceConfig struct {
@@ -75,6 +77,15 @@ func loadConfig(configFile string) (Config, error) {
 	cfg.Server.Name = defaultString(cfg.Server.Name, "img-mcp")
 	cfg.Server.Version = defaultString(cfg.Server.Version, "0.1.0")
 	cfg.Server.Addr = defaultString(cfg.Server.Addr, ":8080")
+	cfg.Server.SyncPath = defaultString(cfg.Server.SyncPath, "/sync")
+	cfg.Server.AsyncPath = defaultString(cfg.Server.AsyncPath, "/async")
+
+	if cfg.Server.SyncPath == cfg.Server.AsyncPath {
+		return cfg, fmt.Errorf("server.sync_path and server.async_path must differ")
+	}
+	if cfg.Server.SyncPath[0] != '/' || cfg.Server.AsyncPath[0] != '/' {
+		return cfg, fmt.Errorf("server paths must start with '/'")
+	}
 
 	if cfg.Comfy.BaseURL == "" {
 		return cfg, fmt.Errorf("comfy.baseurl is required")

@@ -7,6 +7,10 @@ name = "img-mcp"
 version = "0.1.0"
 # HTTP server address (only used in HTTP mode)
 addr = ":8080"
+# HTTP path for the sync MCP server (default: "/sync")
+# sync_path = "/sync"
+# HTTP path for the async MCP server (default: "/async")
+# async_path = "/async"
 
 [comfy]
 # ComfyUI server URL

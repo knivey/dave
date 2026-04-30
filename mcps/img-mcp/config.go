@@ -11,6 +11,7 @@ import (
 
 type Config struct {
 	Server       ServerConfig                 `toml:"server"`
+	Database     DatabaseConfig               `toml:"database"`
 	Comfy        ComfyServiceConfig           `toml:"comfy"`
 	Upload       UploadConfig                 `toml:"upload"`
 	Queue        QueueConfig                  `toml:"queue"`
@@ -24,6 +25,11 @@ type ServerConfig struct {
 	Addr      string `toml:"addr"`
 	SyncPath  string `toml:"sync_path"`
 	AsyncPath string `toml:"async_path"`
+}
+
+type DatabaseConfig struct {
+	Path     string `toml:"path"`
+	Resolved string `toml:"-"`
 }
 
 type ComfyServiceConfig struct {
@@ -73,6 +79,8 @@ func loadConfig(configFile string) (Config, error) {
 	}
 
 	configDir := filepath.Dir(configFile)
+
+	cfg.Database.Path = defaultString(cfg.Database.Path, "data/img-mcp.db")
 
 	cfg.Server.Name = defaultString(cfg.Server.Name, "img-mcp")
 	cfg.Server.Version = defaultString(cfg.Server.Version, "0.1.0")

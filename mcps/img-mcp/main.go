@@ -39,7 +39,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	queue := NewJobQueue(cfg)
+	dbPath := cfg.Database.Path
+	if !filepath.IsAbs(dbPath) {
+		dbPath = filepath.Join(exeDir, dbPath)
+	}
+	cfg.Database.Resolved = dbPath
+
+	db, err := initDB(dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "database error: %v\n", err)
+		os.Exit(1)
+	}
+	defer closeDB(db)
+
+	queue := NewJobQueue(cfg, db)
 	defer queue.Stop()
 
 	handlers := NewToolHandlers(cfg, queue)

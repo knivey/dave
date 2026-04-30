@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
 )
 
 type JobStatus string
@@ -63,6 +65,7 @@ type ImageData struct {
 
 type JobQueue struct {
 	cfg Config
+	db  *sqlx.DB
 
 	pending chan *Job
 	results map[string]*Job
@@ -79,13 +82,18 @@ type JobQueue struct {
 	cancel context.CancelFunc
 }
 
-func NewJobQueue(cfg Config) *JobQueue {
+func NewJobQueue(cfg Config, db *sqlx.DB) *JobQueue {
 	ctx, cancel := context.WithCancel(context.Background())
 	q := &JobQueue{
 		cfg:     cfg,
+		db:      db,
 		pending: make(chan *Job, cfg.Queue.MaxDepth),
 		results: make(map[string]*Job),
 		cancel:  cancel,
+	}
+
+	if db != nil {
+		q.recoverJobs(ctx)
 	}
 
 	for i := 0; i < cfg.Queue.MaxWorkers; i++ {
@@ -120,6 +128,12 @@ func (q *JobQueue) Submit(jobType JobType, workflow string, input JobInput) (*Jo
 		cancel:    make(chan struct{}),
 	}
 
+	if q.db != nil {
+		if err := dbInsertJob(q.db, job); err != nil {
+			return nil, fmt.Errorf("persisting job: %w", err)
+		}
+	}
+
 	select {
 	case q.pending <- job:
 		q.mu.Lock()
@@ -139,9 +153,30 @@ func (q *JobQueue) Submit(jobType JobType, workflow string, input JobInput) (*Jo
 
 func (q *JobQueue) Get(jobID string) (*Job, bool) {
 	q.mu.RLock()
-	defer q.mu.RUnlock()
 	job, ok := q.results[jobID]
-	return job, ok
+	q.mu.RUnlock()
+
+	if ok {
+		return job, true
+	}
+
+	if q.db != nil {
+		dbJob, err := dbGetJob(q.db, jobID)
+		if err != nil {
+			return nil, false
+		}
+		recovered := jobFromDBJob(dbJob)
+		if recovered.Status == StatusCompleted {
+			result, comfyImgs, err := buildJobResultFromDB(q.db, jobID)
+			if err == nil && result != nil {
+				recovered.Result = result
+				_ = comfyImgs
+			}
+		}
+		return recovered, true
+	}
+
+	return nil, false
 }
 
 func (q *JobQueue) Cancel(jobID string) bool {
@@ -167,6 +202,12 @@ func (q *JobQueue) Cancel(jobID string) bool {
 	job.CompletedAt = &now
 	close(job.done)
 
+	if q.db != nil {
+		if err := dbCancelJob(q.db, jobID); err != nil {
+			log.Printf("error cancelling job %s in DB: %v", jobID, err)
+		}
+	}
+
 	q.orderMu.Lock()
 	for i, j := range q.queuedOrder {
 		if j.ID == jobID {
@@ -185,10 +226,23 @@ func (q *JobQueue) WaitForJob(jobID string, timeout time.Duration) *Job {
 	q.mu.RUnlock()
 
 	if !ok {
+		if q.db != nil {
+			dbJob, err := dbGetJob(q.db, jobID)
+			if err == nil && isTerminalStatus(JobStatus(dbJob.Status)) {
+				recovered := jobFromDBJob(dbJob)
+				if JobStatus(dbJob.Status) == StatusCompleted {
+					result, _, err := buildJobResultFromDB(q.db, jobID)
+					if err == nil {
+						recovered.Result = result
+					}
+				}
+				return recovered
+			}
+		}
 		return nil
 	}
 
-	if job.Status == StatusCompleted || job.Status == StatusFailed || job.Status == StatusCancelled {
+	if isTerminalStatus(job.Status) {
 		return job
 	}
 
@@ -278,17 +332,6 @@ func (q *JobQueue) Status() QueueStatusResult {
 			ElapsedSeconds: elapsed,
 			ETASeconds:     eta,
 		})
-	}
-
-	runningETA := time.Duration(0)
-	for _, job := range runningJobs {
-		wc := q.cfg.Workflows[job.Workflow]
-		if wc.TypicalTime > 0 && job.StartedAt != nil {
-			remaining := wc.TypicalTime - now.Sub(*job.StartedAt)
-			if remaining > 0 {
-				runningETA += remaining
-			}
-		}
 	}
 
 	for i, job := range queuedJobs {
@@ -384,6 +427,12 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 	job.Status = StatusRunning
 	job.StartedAt = &now
 
+	if q.db != nil {
+		if err := dbUpdateJobRunning(q.db, job.ID); err != nil {
+			log.Printf("error updating job %s to running in DB: %v", job.ID, err)
+		}
+	}
+
 	defer func() {
 		job.CompletedAt = ptrTime(time.Now().UTC())
 		close(job.done)
@@ -410,8 +459,7 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 
 		result, err := enhancePrompt(ctx, q.cfg, enhancementName, job.Input.Prompt)
 		if err != nil {
-			job.Status = StatusFailed
-			job.Error = fmt.Sprintf("prompt enhancement failed: %v", err)
+			q.failJob(job, fmt.Sprintf("prompt enhancement failed: %v", err))
 			return
 		}
 		prompt = result.EnhancedPrompt
@@ -420,10 +468,27 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 		}
 	}
 
-	comfyResult, err := submitComfyGeneration(ctx, q.cfg, job.Workflow, prompt, negativePrompt, job.Input.Seed)
+	workflow, err := prepareComfyWorkflow(q.cfg, job.Workflow, prompt, negativePrompt, job.Input.Seed)
 	if err != nil {
-		job.Status = StatusFailed
-		job.Error = fmt.Sprintf("generation failed: %v", err)
+		q.failJob(job, fmt.Sprintf("workflow preparation failed: %v", err))
+		return
+	}
+
+	promptID, err := submitComfyPrompt(ctx, q.cfg, job.Workflow, workflow)
+	if err != nil {
+		q.failJob(job, fmt.Sprintf("prompt submission failed: %v", err))
+		return
+	}
+
+	if q.db != nil {
+		if err := dbUpdateJobComfyPromptID(q.db, job.ID, promptID); err != nil {
+			log.Printf("error saving comfy_prompt_id for job %s: %v", job.ID, err)
+		}
+	}
+
+	comfyResult, err := monitorComfyGeneration(ctx, q.cfg, job.Workflow, promptID)
+	if err != nil {
+		q.failJob(job, fmt.Sprintf("generation failed: %v", err))
 		return
 	}
 
@@ -433,17 +498,21 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 	}
 
 	jobResult := &JobResult{}
-	for _, img := range comfyResult.Images {
+	var comfyImgs []ComfyImage
+	for i, img := range comfyResult.Images {
 		imgData := ImageData{
 			MIMEType: guessMIMEType(img.Filename, "image/png"),
+		}
+
+		if i < len(comfyResult.ComfyImages) {
+			comfyImgs = append(comfyImgs, comfyResult.ComfyImages[i])
 		}
 
 		switch outputFormat {
 		case "url":
 			url, err := uploadImage(q.cfg, img.Data, img.Filename)
 			if err != nil {
-				job.Status = StatusFailed
-				job.Error = fmt.Sprintf("upload failed: %v", err)
+				q.failJob(job, fmt.Sprintf("upload failed: %v", err))
 				return
 			}
 			imgData.URL = url
@@ -452,8 +521,7 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 		case "both":
 			url, err := uploadImage(q.cfg, img.Data, img.Filename)
 			if err != nil {
-				job.Status = StatusFailed
-				job.Error = fmt.Sprintf("upload failed: %v", err)
+				q.failJob(job, fmt.Sprintf("upload failed: %v", err))
 				return
 			}
 			imgData.URL = url
@@ -465,6 +533,22 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 
 	job.Result = jobResult
 	job.Status = StatusCompleted
+
+	if q.db != nil {
+		if err := dbCompleteJob(q.db, job.ID, jobResult, comfyImgs); err != nil {
+			log.Printf("error completing job %s in DB: %v", job.ID, err)
+		}
+	}
+}
+
+func (q *JobQueue) failJob(job *Job, errMsg string) {
+	job.Status = StatusFailed
+	job.Error = errMsg
+	if q.db != nil {
+		if err := dbFailJob(q.db, job.ID, errMsg); err != nil {
+			log.Printf("error failing job %s in DB: %v", job.ID, err)
+		}
+	}
 }
 
 func (q *JobQueue) cleanupLoop(ctx context.Context) {
@@ -491,6 +575,195 @@ func (q *JobQueue) cleanup() {
 			delete(q.results, id)
 		}
 	}
+
+	if q.db != nil {
+		if _, err := dbCleanupExpiredJobs(q.db, q.cfg.Queue.ResultTTL); err != nil {
+			log.Printf("error cleaning up expired jobs from DB: %v", err)
+		}
+	}
+}
+
+func (q *JobQueue) recoverJobs(ctx context.Context) {
+	recoverable, err := dbLoadRecoverableJobs(q.db)
+	if err != nil {
+		log.Printf("error loading recoverable jobs: %v", err)
+		return
+	}
+
+	for _, dbj := range recoverable {
+		job := jobFromDBJob(&dbj)
+		job.done = make(chan struct{})
+		job.cancel = make(chan struct{})
+
+		q.mu.Lock()
+		q.results[job.ID] = job
+		q.mu.Unlock()
+
+		switch job.Status {
+		case StatusQueued:
+			log.Printf("recovering queued job %s", job.ID)
+			select {
+			case q.pending <- job:
+				q.orderMu.Lock()
+				job.QueuedIndex = len(q.queuedOrder)
+				q.queuedOrder = append(q.queuedOrder, job)
+				q.orderMu.Unlock()
+			default:
+				log.Printf("queue full during recovery, dropping job %s", job.ID)
+				q.mu.Lock()
+				q.failJob(job, "queue full during recovery")
+				job.CompletedAt = ptrTime(time.Now().UTC())
+				close(job.done)
+				q.mu.Unlock()
+			}
+
+		case StatusRunning:
+			if dbj.ComfyPromptID != "" {
+				log.Printf("recovering running job %s with comfy_prompt_id %s", job.ID, dbj.ComfyPromptID)
+				q.wg.Add(1)
+				go q.recoverRunningJob(ctx, job, dbj.ComfyPromptID)
+			} else {
+				log.Printf("recovering running job %s without comfy_prompt_id, re-queueing", job.ID)
+				job.Status = StatusQueued
+				if q.db != nil {
+					if err := dbUpdateJobStatus(q.db, job.ID, StatusQueued); err != nil {
+						log.Printf("error re-queueing job %s in DB: %v", job.ID, err)
+					}
+				}
+				select {
+				case q.pending <- job:
+				default:
+					log.Printf("queue full during recovery, dropping job %s", job.ID)
+					q.mu.Lock()
+					q.failJob(job, "queue full during recovery")
+					job.CompletedAt = ptrTime(time.Now().UTC())
+					close(job.done)
+					q.mu.Unlock()
+				}
+				q.orderMu.Lock()
+				job.QueuedIndex = len(q.queuedOrder)
+				q.queuedOrder = append(q.queuedOrder, job)
+				q.orderMu.Unlock()
+			}
+		}
+	}
+
+	completed, err := dbLoadRecentCompletedJobs(q.db, q.cfg.Queue.ResultTTL)
+	if err != nil {
+		log.Printf("error loading recent completed jobs: %v", err)
+		return
+	}
+
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, dbj := range completed {
+		if _, exists := q.results[dbj.JobID]; exists {
+			continue
+		}
+		job := jobFromDBJob(&dbj)
+		result, _, err := buildJobResultFromDB(q.db, dbj.JobID)
+		if err == nil {
+			job.Result = result
+		}
+		q.results[job.ID] = job
+	}
+
+	queuedCount := 0
+	runningCount := 0
+	for _, dbj := range recoverable {
+		if JobStatus(dbj.Status) == StatusQueued {
+			queuedCount++
+		} else if JobStatus(dbj.Status) == StatusRunning {
+			runningCount++
+		}
+	}
+
+	log.Printf("recovery complete: %d queued, %d running, %d completed loaded",
+		queuedCount, runningCount, len(completed))
+}
+
+func (q *JobQueue) recoverRunningJob(ctx context.Context, job *Job, comfyPromptID string) {
+	defer q.wg.Done()
+
+	comfyResult, err := resumeComfyGeneration(ctx, q.cfg, job.Workflow, comfyPromptID)
+	if err != nil {
+		log.Printf("failed to recover job %s: %v", job.ID, err)
+		q.mu.Lock()
+		q.failJob(job, fmt.Sprintf("recovery failed: %v", err))
+		job.CompletedAt = ptrTime(time.Now().UTC())
+		close(job.done)
+		q.statsMu.Lock()
+		q.failedCount++
+		q.statsMu.Unlock()
+		q.mu.Unlock()
+		return
+	}
+
+	outputFormat := job.Input.OutputFormat
+	if outputFormat == "" {
+		outputFormat = "url"
+	}
+
+	jobResult := &JobResult{}
+	var comfyImgs []ComfyImage
+	for i, img := range comfyResult.Images {
+		imgData := ImageData{
+			MIMEType: guessMIMEType(img.Filename, "image/png"),
+		}
+
+		if i < len(comfyResult.ComfyImages) {
+			comfyImgs = append(comfyImgs, comfyResult.ComfyImages[i])
+		}
+
+		switch outputFormat {
+		case "url":
+			url, err := uploadImage(q.cfg, img.Data, img.Filename)
+			if err != nil {
+				q.mu.Lock()
+				q.failJob(job, fmt.Sprintf("upload failed during recovery: %v", err))
+				q.mu.Unlock()
+				return
+			}
+			imgData.URL = url
+		case "base64":
+			imgData.Base64 = encodeBase64(img.Data)
+		case "both":
+			url, err := uploadImage(q.cfg, img.Data, img.Filename)
+			if err != nil {
+				q.mu.Lock()
+				q.failJob(job, fmt.Sprintf("upload failed during recovery: %v", err))
+				q.mu.Unlock()
+				return
+			}
+			imgData.URL = url
+			imgData.Base64 = encodeBase64(img.Data)
+		}
+
+		jobResult.Images = append(jobResult.Images, imgData)
+	}
+
+	q.mu.Lock()
+	job.Result = jobResult
+	job.Status = StatusCompleted
+	job.CompletedAt = ptrTime(time.Now().UTC())
+	close(job.done)
+	q.mu.Unlock()
+
+	q.statsMu.Lock()
+	q.completedCount++
+	q.statsMu.Unlock()
+
+	if q.db != nil {
+		if err := dbCompleteJob(q.db, job.ID, jobResult, comfyImgs); err != nil {
+			log.Printf("error completing recovered job %s in DB: %v", job.ID, err)
+		}
+	}
+
+	log.Printf("successfully recovered job %s", job.ID)
+}
+
+func isTerminalStatus(status JobStatus) bool {
+	return status == StatusCompleted || status == StatusFailed || status == StatusCancelled
 }
 
 func ptrTime(t time.Time) *time.Time {

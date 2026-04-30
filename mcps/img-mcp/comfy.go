@@ -53,7 +53,8 @@ type ComfyImage struct {
 }
 
 type ComfyResult struct {
-	Images []ComfyImageData
+	Images      []ComfyImageData
+	ComfyImages []ComfyImage
 }
 
 type ComfyImageData struct {
@@ -77,15 +78,15 @@ func randSeed() int64 {
 	return rand.Int63()
 }
 
-func submitComfyGeneration(ctx context.Context, cfg Config, workflowName, prompt, negativePrompt string, seedOverride *int64) (ComfyResult, error) {
+func prepareComfyWorkflow(cfg Config, workflowName, prompt, negativePrompt string, seedOverride *int64) (ComfyWorkflow, error) {
 	wc, ok := cfg.Workflows[workflowName]
 	if !ok {
-		return ComfyResult{}, fmt.Errorf("workflow %q not found", workflowName)
+		return nil, fmt.Errorf("workflow %q not found", workflowName)
 	}
 
 	workflow, err := loadComfyWorkflow(wc.WorkflowPath)
 	if err != nil {
-		return ComfyResult{}, fmt.Errorf("loading workflow: %w", err)
+		return nil, fmt.Errorf("loading workflow: %w", err)
 	}
 
 	workflow[wc.PromptNode].Inputs["text"] = prompt
@@ -106,6 +107,37 @@ func submitComfyGeneration(ctx context.Context, cfg Config, workflowName, prompt
 		}
 	}
 
+	return workflow, nil
+}
+
+func submitComfyPrompt(ctx context.Context, cfg Config, workflowName string, workflow ComfyWorkflow) (string, error) {
+	wc := cfg.Workflows[workflowName]
+
+	promptReq := ComfyPromptRequest{
+		Prompt:   workflow,
+		ClientID: wc.ClientID,
+	}
+	jsonData, err := json.Marshal(promptReq)
+	if err != nil {
+		return "", fmt.Errorf("marshaling prompt: %w", err)
+	}
+
+	resp, err := http.Post(cfg.Comfy.BaseURL+"/prompt", "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return "", fmt.Errorf("submitting prompt: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var promptResp ComfyPromptResponse
+	if err := json.NewDecoder(resp.Body).Decode(&promptResp); err != nil {
+		return "", fmt.Errorf("decoding prompt response: %w", err)
+	}
+
+	return promptResp.PromptID, nil
+}
+
+func monitorComfyGeneration(ctx context.Context, cfg Config, workflowName, promptID string) (ComfyResult, error) {
+	wc := cfg.Workflows[workflowName]
 	baseURL := cfg.Comfy.BaseURL
 
 	wsURL := "ws://" + comfySchemeRegex.ReplaceAllString(baseURL, "") + "/ws?clientId=" + wc.ClientID
@@ -115,33 +147,13 @@ func submitComfyGeneration(ctx context.Context, cfg Config, workflowName, prompt
 	}
 	defer wsConn.Close()
 
-	promptReq := ComfyPromptRequest{
-		Prompt:   workflow,
-		ClientID: wc.ClientID,
-	}
-	jsonData, err := json.Marshal(promptReq)
-	if err != nil {
-		return ComfyResult{}, fmt.Errorf("marshaling prompt: %w", err)
-	}
-
-	resp, err := http.Post(baseURL+"/prompt", "application/json", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return ComfyResult{}, fmt.Errorf("submitting prompt: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var promptResp ComfyPromptResponse
-	if err := json.NewDecoder(resp.Body).Decode(&promptResp); err != nil {
-		return ComfyResult{}, fmt.Errorf("decoding prompt response: %w", err)
-	}
-
 	timeout := time.Duration(wc.Timeout) * time.Second
 	wsConn.SetReadDeadline(time.Now().Add(timeout))
 
 	for {
 		if _, _, err := wsConn.ReadMessage(); err != nil {
 			checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			result, found := checkComfyOutput(checkCtx, cfg, wc, baseURL, promptResp.PromptID)
+			result, found := checkComfyOutput(checkCtx, cfg, wc, baseURL, promptID)
 			cancel()
 			if found {
 				return result, nil
@@ -149,10 +161,38 @@ func submitComfyGeneration(ctx context.Context, cfg Config, workflowName, prompt
 			return ComfyResult{}, fmt.Errorf("websocket read error: %w", err)
 		}
 
-		if result, found := checkComfyOutput(ctx, cfg, wc, baseURL, promptResp.PromptID); found {
+		if result, found := checkComfyOutput(ctx, cfg, wc, baseURL, promptID); found {
 			return result, nil
 		}
 	}
+}
+
+func resumeComfyGeneration(ctx context.Context, cfg Config, workflowName, promptID string) (ComfyResult, error) {
+	wc := cfg.Workflows[workflowName]
+	baseURL := cfg.Comfy.BaseURL
+
+	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	result, found := checkComfyOutput(checkCtx, cfg, wc, baseURL, promptID)
+	cancel()
+	if found {
+		return result, nil
+	}
+
+	return monitorComfyGeneration(ctx, cfg, workflowName, promptID)
+}
+
+func submitComfyGeneration(ctx context.Context, cfg Config, workflowName, prompt, negativePrompt string, seedOverride *int64) (ComfyResult, error) {
+	workflow, err := prepareComfyWorkflow(cfg, workflowName, prompt, negativePrompt, seedOverride)
+	if err != nil {
+		return ComfyResult{}, err
+	}
+
+	promptID, err := submitComfyPrompt(ctx, cfg, workflowName, workflow)
+	if err != nil {
+		return ComfyResult{}, err
+	}
+
+	return monitorComfyGeneration(ctx, cfg, workflowName, promptID)
 }
 
 func checkComfyOutput(ctx context.Context, cfg Config, wc WorkflowConfig, baseURL, promptID string) (ComfyResult, bool) {
@@ -181,6 +221,7 @@ func checkComfyOutput(ctx context.Context, cfg Config, wc WorkflowConfig, baseUR
 			Data:     data,
 			Filename: img.Filename,
 		})
+		result.ComfyImages = append(result.ComfyImages, img)
 	}
 
 	if len(result.Images) == 0 {

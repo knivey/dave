@@ -12,6 +12,10 @@ addr = ":8080"
 # HTTP path for the async MCP server (default: "/async")
 # async_path = "/async"
 
+[database]
+# Database path for job persistence (relative to binary directory)
+# path = "data/img-mcp.db"
+
 [comfy]
 # ComfyUI server URL
 baseurl = "http://localhost:8188"

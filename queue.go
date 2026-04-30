@@ -182,6 +182,10 @@ func (qm *QueueManager) getOrCreateChannelQueue(key string) *ChannelQueue {
 }
 
 func (qm *QueueManager) Enqueue(network, channel, nick, service, desc string, fn func(ctx context.Context, output chan<- string)) int {
+	return qm.EnqueueAt(network, channel, nick, service, desc, time.Now(), fn)
+}
+
+func (qm *QueueManager) EnqueueAt(network, channel, nick, service, desc string, enqueuedAt time.Time, fn func(ctx context.Context, output chan<- string)) int {
 	if !qm.running.Load() {
 		return -1
 	}
@@ -206,7 +210,7 @@ func (qm *QueueManager) Enqueue(network, channel, nick, service, desc string, fn
 		Nick:        nick,
 		Service:     service,
 		Description: desc,
-		Enqueued:    time.Now(),
+		Enqueued:    enqueuedAt,
 		Execute:     fn,
 		outputCh:    make(chan string, 200),
 		ctx:         ctx,

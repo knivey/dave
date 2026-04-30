@@ -316,13 +316,14 @@ func recoverPendingJobs() {
 }
 
 type toolAsyncJob struct {
-	JobID     string
-	ToolName  string
-	MCPServer string
-	Network   string
-	Channel   string
-	Nick      string
-	Prompt    string
+	JobID        string
+	ToolName     string
+	MCPServer    string
+	Network      string
+	Channel      string
+	Nick         string
+	Prompt       string
+	SubmittedAt  time.Time
 	cancel    context.CancelFunc
 }
 
@@ -376,14 +377,15 @@ func registerToolAsyncJobMem(jobID, toolName, mcpServer, network, channel, nick,
 
 	ctx, cancel := context.WithCancel(toolJobMgr.ctx)
 	job := &toolAsyncJob{
-		JobID:     jobID,
-		ToolName:  toolName,
-		MCPServer: mcpServer,
-		Network:   network,
-		Channel:   channel,
-		Nick:      nick,
-		Prompt:    prompt,
-		cancel:    cancel,
+		JobID:       jobID,
+		ToolName:    toolName,
+		MCPServer:   mcpServer,
+		Network:     network,
+		Channel:     channel,
+		Nick:        nick,
+		Prompt:      prompt,
+		SubmittedAt: time.Now(),
+		cancel:      cancel,
 	}
 	toolJobMgr.jobs[jobID] = job
 
@@ -425,7 +427,7 @@ func onToolAsyncJobCompleted(job *toolAsyncJob, resultText string) {
 		}
 	}
 
-	queueMgr.Enqueue(job.Network, job.Channel, job.Nick, "", job.ToolName,
+	queueMgr.EnqueueAt(job.Network, job.Channel, job.Nick, "", job.ToolName, job.SubmittedAt,
 		func(ctx context.Context, output chan<- string) {
 			deliverToolAsyncResult(job, resultText, ctx, output)
 		})
@@ -541,7 +543,11 @@ func recoverToolPendingJobs() {
 		}
 
 		if j.Result != nil {
-			queueMgr.Enqueue(network, channel, nick, "", j.ToolName,
+			submittedAt := time.Now()
+			if t, err := time.Parse("2006-01-02 15:04:05", j.CreatedAt); err == nil {
+				submittedAt = t
+			}
+			queueMgr.EnqueueAt(network, channel, nick, "", j.ToolName, submittedAt,
 				func(ctx context.Context, output chan<- string) {
 					job := &toolAsyncJob{
 						JobID:     j.JobID,

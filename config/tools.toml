@@ -10,6 +10,15 @@
 #   skipbusy     (bool, default: false)  Skip queue check, allow running when queue is full
 #   description  (string)            Short description for help listings
 #   regex        (string, default: section name)  Regex for command trigger (no ^$ anchors)
+#   sync         (bool, default: false)  Run synchronously (blocks queue). Default: async mode
+#   async_tool   (string)            Async variant tool name. Default: tool + "_async"
+#
+# By default, tool commands run asynchronously:
+#   - Calls async_tool instead of tool (default: <tool>_async)
+#   - The MCP server must expose the async tool (auto-discovered, routes via tool name)
+#   - Returns immediately with a feedback message, delivers result when job completes
+#   - Works with both stdio (same server has all tools) and HTTP (separate async endpoint)
+#   - Set sync = true to use blocking mode instead
 #
 # Duration values: TOML strings like "30s", "2m", "1m30s".
 #
@@ -23,6 +32,8 @@
 # timeout = "1m"
 # skipbusy = false
 # regex = "example"
+# sync = false
+# async_tool = "my_tool_async"
 
 [qwen]
 description = "Qwen enhanced image generation"
@@ -33,7 +44,7 @@ timeout = "2m"
 args = { workflow = "qwen", output_format = "url" }
 
 [qwenHD]
-description = "Qwen enhanced image generation"
+description = "Qwen HD enhanced image generation"
 mcp = "img-mcp"
 tool = "enhance_and_generate"
 arg = "prompt"
@@ -41,7 +52,7 @@ timeout = "2m"
 args = { workflow = "qwenHD", output_format = "url" }
 
 [zimage]
-description = "Qwen enhanced image generation"
+description = "Zimage enhanced image generation"
 mcp = "img-mcp"
 tool = "enhance_and_generate"
 arg = "prompt"
@@ -53,3 +64,4 @@ description = "View generation queue status"
 mcp = "img-mcp"
 tool = "queue_status"
 skipbusy = true
+sync = true

@@ -786,7 +786,7 @@ func TestInjectAsyncResultFromDB(t *testing.T) {
 
 	result := "image url: http://example.com/test.png"
 	pj := pendingJob{
-		SessionID: sid,
+		SessionID: &sid,
 		JobID:     "job-1",
 		ToolName:  "generate_image_async",
 		MCPServer: "img-mcp",
@@ -842,7 +842,7 @@ func TestInjectAsyncResultFromDB_NilResult(t *testing.T) {
 	}
 
 	pj := pendingJob{
-		SessionID: sid,
+		SessionID: &sid,
 		JobID:     "job-1",
 		ToolName:  "generate_image_async",
 		Status:    "completed",

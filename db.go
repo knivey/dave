@@ -266,12 +266,15 @@ func getUserDBStats(network, channel, nick string) (sessionCount int, messageCou
 
 type pendingJob struct {
 	ID          int64   `db:"id"`
-	SessionID   int64   `db:"session_id"`
+	SessionID   *int64  `db:"session_id"`
 	JobID       string  `db:"job_id"`
 	ToolName    string  `db:"tool_name"`
 	MCPServer   string  `db:"mcp_server"`
 	Status      string  `db:"status"`
 	Result      *string `db:"result"`
+	Network     *string `db:"network"`
+	Channel     *string `db:"channel"`
+	Nick        *string `db:"nick"`
 	CreatedAt   string  `db:"created_at"`
 	CompletedAt *string `db:"completed_at"`
 }
@@ -325,7 +328,31 @@ func getPendingJobsForUser(network, channel, nick string) ([]pendingJob, error) 
 func getPendingJobsForRecovery() ([]pendingJob, error) {
 	var jobs []pendingJob
 	err := theDB.Select(&jobs,
-		"SELECT * FROM pending_jobs WHERE status IN ('pending', 'running')",
+		"SELECT * FROM pending_jobs WHERE status IN ('pending', 'running') AND session_id IS NOT NULL",
+	)
+	return jobs, err
+}
+
+func createToolPendingJob(jobID, toolName, mcpServer, network, channel, nick string) error {
+	_, err := theDB.Exec(
+		"INSERT INTO pending_jobs (session_id, job_id, tool_name, mcp_server, status, network, channel, nick) VALUES (NULL, ?, ?, ?, 'pending', ?, ?, ?)",
+		jobID, toolName, mcpServer, network, channel, nick,
+	)
+	return err
+}
+
+func completeToolPendingJob(jobID, resultText string) error {
+	_, err := theDB.Exec(
+		"UPDATE pending_jobs SET status = 'completed', result = ?, completed_at = CURRENT_TIMESTAMP WHERE job_id = ?",
+		resultText, jobID,
+	)
+	return err
+}
+
+func getToolPendingJobsForRecovery() ([]pendingJob, error) {
+	var jobs []pendingJob
+	err := theDB.Select(&jobs,
+		"SELECT * FROM pending_jobs WHERE status IN ('pending', 'running') AND session_id IS NULL",
 	)
 	return jobs, err
 }

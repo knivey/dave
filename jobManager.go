@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/lrstanley/girc"
 	logxi "github.com/mgutz/logxi/v1"
@@ -296,16 +297,271 @@ func recoverPendingJobs() {
 	}
 
 	for _, j := range jobs {
-		session, err := getDBSessionByID(j.SessionID)
+		if j.SessionID == nil {
+			loggerJM.Warn("skipping tool job in session recovery", "job_id", j.JobID)
+			continue
+		}
+		session, err := getDBSessionByID(*j.SessionID)
 		if err != nil {
 			loggerJM.Warn("skipping orphaned job", "job_id", j.JobID, "error", err)
 			continue
 		}
-		registerAsyncJob(j.JobID, j.SessionID, session.ContextKey, j.ToolName, j.MCPServer, session.Network, session.Channel, session.Nick)
+		registerAsyncJob(j.JobID, *j.SessionID, session.ContextKey, j.ToolName, j.MCPServer, session.Network, session.Channel, session.Nick)
 		loggerJM.Info("recovered pending job", "job_id", j.JobID)
 	}
 
 	if len(jobs) > 0 {
 		loggerJM.Info("recovered pending jobs", "count", len(jobs))
+	}
+}
+
+type toolAsyncJob struct {
+	JobID     string
+	ToolName  string
+	MCPServer string
+	Network   string
+	Channel   string
+	Nick      string
+	Prompt    string
+	cancel    context.CancelFunc
+}
+
+var toolJobMgr struct {
+	mu     sync.Mutex
+	jobs   map[string]*toolAsyncJob
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+func init() {
+	toolJobMgr.jobs = make(map[string]*toolAsyncJob)
+}
+
+func startToolJobManager() {
+	toolJobMgr.ctx, toolJobMgr.cancel = context.WithCancel(context.Background())
+	loggerJM.Info("Tool job manager started")
+}
+
+func stopToolJobManager() {
+	if toolJobMgr.cancel != nil {
+		toolJobMgr.cancel()
+		loggerJM.Info("Tool job manager stopped")
+	}
+}
+
+func registerToolAsyncJob(jobID, toolName, mcpServer, network, channel, nick, prompt string) {
+	if !registerToolAsyncJobMem(jobID, toolName, mcpServer, network, channel, nick, prompt) {
+		return
+	}
+
+	if theDB != nil {
+		if err := createToolPendingJob(jobID, toolName, mcpServer, network, channel, nick); err != nil {
+			loggerJM.Error("failed to persist tool job in DB", "job_id", jobID, "error", err)
+		}
+	}
+}
+
+func recoverToolAsyncJob(jobID, toolName, mcpServer, network, channel, nick, prompt string) {
+	registerToolAsyncJobMem(jobID, toolName, mcpServer, network, channel, nick, prompt)
+}
+
+func registerToolAsyncJobMem(jobID, toolName, mcpServer, network, channel, nick, prompt string) bool {
+	toolJobMgr.mu.Lock()
+	defer toolJobMgr.mu.Unlock()
+
+	if _, exists := toolJobMgr.jobs[jobID]; exists {
+		loggerJM.Warn("tool job already registered", "job_id", jobID)
+		return false
+	}
+
+	ctx, cancel := context.WithCancel(toolJobMgr.ctx)
+	job := &toolAsyncJob{
+		JobID:     jobID,
+		ToolName:  toolName,
+		MCPServer: mcpServer,
+		Network:   network,
+		Channel:   channel,
+		Nick:      nick,
+		Prompt:    prompt,
+		cancel:    cancel,
+	}
+	toolJobMgr.jobs[jobID] = job
+
+	go waitForToolAsyncJob(ctx, job)
+	loggerJM.Info("registered tool async job", "job_id", jobID, "tool", toolName)
+	return true
+}
+
+func waitForToolAsyncJob(ctx context.Context, job *toolAsyncJob) {
+	result, err := callMCPToolWithContext(ctx, "wait_for_job", map[string]any{
+		"job_id": job.JobID,
+	})
+
+	if ctx.Err() != nil {
+		loggerJM.Info("tool job wait cancelled", "job_id", job.JobID)
+		return
+	}
+
+	var resultText string
+	if err != nil {
+		resultText = fmt.Sprintf("error waiting for job: %s", err.Error())
+		loggerJM.Error("tool job wait failed", "job_id", job.JobID, "error", err)
+	} else {
+		resultText = mcpToolResultToText(result)
+		loggerJM.Info("tool job completed", "job_id", job.JobID, "result_len", len(resultText))
+	}
+
+	onToolAsyncJobCompleted(job, resultText)
+}
+
+func onToolAsyncJobCompleted(job *toolAsyncJob, resultText string) {
+	toolJobMgr.mu.Lock()
+	delete(toolJobMgr.jobs, job.JobID)
+	toolJobMgr.mu.Unlock()
+
+	if theDB != nil {
+		if err := completeToolPendingJob(job.JobID, resultText); err != nil {
+			loggerJM.Error("failed to mark tool job completed in DB", "job_id", job.JobID, "error", err)
+		}
+	}
+
+	queueMgr.Enqueue(job.Network, job.Channel, job.Nick, "", job.ToolName,
+		func(ctx context.Context, output chan<- string) {
+			deliverToolAsyncResult(job, resultText, ctx, output)
+		})
+}
+
+type waitForJobResult struct {
+	JobID  string           `json:"job_id"`
+	Status string           `json:"status"`
+	Result *waitForJobInner `json:"result,omitempty"`
+	Error  string           `json:"error,omitempty"`
+}
+
+type waitForJobInner struct {
+	Images []mcpImageData `json:"images"`
+}
+
+func deliverToolAsyncResult(job *toolAsyncJob, resultText string, ctx context.Context, output chan<- string) {
+	var waitResult waitForJobResult
+	if err := json.Unmarshal([]byte(resultText), &waitResult); err == nil {
+		if waitResult.Error != "" {
+			select {
+			case output <- errorMsg(waitResult.Error):
+			case <-ctx.Done():
+			}
+			return
+		}
+		if waitResult.Result != nil && len(waitResult.Result.Images) > 0 {
+			header := fmt.Sprintf("\x02%s\x02's image", job.Nick)
+			if job.Prompt != "" {
+				promptDisplay := job.Prompt
+				if len(promptDisplay) > 80 {
+					promptDisplay = promptDisplay[:77] + "..."
+				}
+				header += fmt.Sprintf(" (\x0310%s\x0F)", promptDisplay)
+			}
+			header += ":"
+			select {
+			case output <- header:
+			case <-ctx.Done():
+				return
+			}
+			for _, img := range waitResult.Result.Images {
+				if img.URL != "" {
+					select {
+					case output <- img.URL:
+					case <-ctx.Done():
+						return
+					}
+				}
+			}
+		} else if waitResult.Status == "completed" {
+			select {
+			case output <- fmt.Sprintf("\x02%s\x02's image job completed but returned no images.", job.Nick):
+			case <-ctx.Done():
+			}
+		} else {
+			select {
+			case output <- fmt.Sprintf("\x02%s\x02's image job %s: %s", job.Nick, waitResult.Status, waitResult.Error):
+			case <-ctx.Done():
+			}
+		}
+	} else {
+		sendImageOrTextResult(resultText, ctx, output)
+	}
+
+	if theDB != nil {
+		if err := markPendingJobDelivered(job.JobID); err != nil {
+			loggerJM.Error("failed to mark tool job delivered in DB", "job_id", job.JobID, "error", err)
+		}
+	}
+}
+
+func cancelToolAsyncJobsForChannel(network, channel string) {
+	toolJobMgr.mu.Lock()
+	defer toolJobMgr.mu.Unlock()
+
+	for _, job := range toolJobMgr.jobs {
+		if job.Network == network && job.Channel == channel {
+			loggerJM.Info("cancelling tool async job", "job_id", job.JobID, "channel", channel)
+			job.cancel()
+			if _, err := callMCPToolWithTimeout("cancel_job", map[string]any{
+				"job_id": job.JobID,
+			}, 10*time.Second); err != nil {
+				loggerJM.Warn("failed to cancel job in MCP server", "job_id", job.JobID, "error", err)
+			}
+		}
+	}
+}
+
+func recoverToolPendingJobs() {
+	if theDB == nil {
+		return
+	}
+
+	jobs, err := getToolPendingJobsForRecovery()
+	if err != nil {
+		loggerJM.Error("failed to query tool pending jobs for recovery", "error", err)
+		return
+	}
+
+	for _, j := range jobs {
+		network := ""
+		channel := ""
+		nick := ""
+		if j.Network != nil {
+			network = *j.Network
+		}
+		if j.Channel != nil {
+			channel = *j.Channel
+		}
+		if j.Nick != nil {
+			nick = *j.Nick
+		}
+
+		if j.Result != nil {
+			queueMgr.Enqueue(network, channel, nick, "", j.ToolName,
+				func(ctx context.Context, output chan<- string) {
+					job := &toolAsyncJob{
+						JobID:     j.JobID,
+						ToolName:  j.ToolName,
+						MCPServer: j.MCPServer,
+						Network:   network,
+						Channel:   channel,
+						Nick:      nick,
+					}
+					deliverToolAsyncResult(job, *j.Result, ctx, output)
+				})
+			loggerJM.Info("recovered completed tool job, enqueuing delivery", "job_id", j.JobID)
+			continue
+		}
+
+		recoverToolAsyncJob(j.JobID, j.ToolName, j.MCPServer, network, channel, nick, "")
+		loggerJM.Info("recovered pending tool job", "job_id", j.JobID)
+	}
+
+	if len(jobs) > 0 {
+		loggerJM.Info("recovered tool pending jobs", "count", len(jobs))
 	}
 }

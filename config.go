@@ -111,6 +111,15 @@ type MCPCommandConfig struct {
 	Timeout     time.Duration  `toml:"timeout"`
 	SkipBusy    bool           `toml:"skipbusy"`
 	Description string
+	Sync        bool   `toml:"sync"`
+	AsyncTool   string `toml:"async_tool"`
+}
+
+func (c MCPCommandConfig) GetAsyncTool() string {
+	if c.AsyncTool != "" {
+		return c.AsyncTool
+	}
+	return c.Tool + "_async"
 }
 
 type AIConfig struct {

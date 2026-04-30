@@ -225,7 +225,9 @@ func main() {
 	queueMgr.UpdateServiceLimits(config.Services)
 	queueMgr.Start()
 	startJobManager()
+	startToolJobManager()
 	recoverPendingJobs()
+	recoverToolPendingJobs()
 	registerCommands(config.Commands)
 
 	ignorePath := filepath.Join(configDir, "ignores.txt")
@@ -268,6 +270,7 @@ func main() {
 			queueMgr.Stop()
 		}
 		stopJobManager()
+		stopToolJobManager()
 		closeMCPClients()
 
 		for _, bot := range bots {
@@ -328,6 +331,7 @@ func sendToOutput(out string, output chan<- string, ctx context.Context) {
 	}
 }
 
+// DO NOT DELETE — stop is only for stopping the current text output, not for cancelling async jobs
 func stop(network Network, _ *girc.Client, m girc.Event, _ interface{}, _ ...string) {
 	logger.Info("stop requested")
 	queueMgr.StopCurrent(network.Name, m.Params[0])

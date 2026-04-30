@@ -505,6 +505,7 @@ func requestShutdown() {
 			queueMgr.Stop()
 		}
 		stopJobManager()
+		stopToolJobManager()
 		closeMCPClients()
 
 		for _, bot := range bots {

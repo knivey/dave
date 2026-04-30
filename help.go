@@ -158,6 +158,56 @@ func help(network Network, client *girc.Client, event girc.Event, ctx context.Co
 		}
 	}
 
+	chCfg := network.GetChannelConfig(event.Params[0])
+	if chCfg.Pastebin {
+		rawText := strings.Join(lines, "\n")
+		wrappedLines := wrapForIRC(rawText)
+		if len(wrappedLines) >= chCfg.GetMaxLines() {
+			url, err := uploadToPastebin("```\n" + rawText + "\n```")
+			if err != nil {
+				select {
+				case output <- errorMsg("pastebin: " + err.Error()):
+				case <-ctx.Done():
+					return
+				}
+				preview := chCfg.GetMaxLines()
+				if preview > len(wrappedLines) {
+					preview = len(wrappedLines)
+				}
+				for i := 0; i < preview; i++ {
+					select {
+					case output <- wrappedLines[i]:
+					case <-ctx.Done():
+						return
+					}
+				}
+				select {
+				case output <- "... (full output could not be pasted)":
+				case <-ctx.Done():
+					return
+				}
+				return
+			}
+			preview := 3
+			if preview > len(wrappedLines) {
+				preview = len(wrappedLines)
+			}
+			for i := 0; i < preview; i++ {
+				select {
+				case output <- wrappedLines[i]:
+				case <-ctx.Done():
+					return
+				}
+			}
+			select {
+			case output <- fmt.Sprintf("... ( full output: %s )", url):
+			case <-ctx.Done():
+				return
+			}
+			return
+		}
+	}
+
 	for _, line := range lines {
 		for _, wrapped := range wrapLine(line) {
 			select {

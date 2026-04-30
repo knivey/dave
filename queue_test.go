@@ -151,14 +151,14 @@ func TestQueueManager_StopCurrent(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	if !qm.StopCurrent("net", "#chan", "user") {
+	if !qm.StopCurrent("net", "#chan") {
 		t.Error("StopCurrent should return true for running job")
 	}
 
 	wg.Wait()
 
 	waitForNotRunning(t, qm, "net", "#chan", "user")
-	if qm.StopCurrent("net", "#chan", "user") {
+	if qm.StopCurrent("net", "#chan") {
 		t.Error("StopCurrent should return false when no job running")
 	}
 }
@@ -187,7 +187,7 @@ func TestQueueManager_StopCurrentStartsNext(t *testing.T) {
 		wg.Done()
 	})
 
-	qm.StopCurrent("net", "#chan", "user")
+	qm.StopCurrent("net", "#chan")
 
 	wg.Wait()
 
@@ -199,36 +199,36 @@ func TestQueueManager_StopCurrentStartsNext(t *testing.T) {
 	}
 }
 
-func TestQueueManager_DifferentUsersParallel(t *testing.T) {
+func TestQueueManager_DifferentChannelsParallel(t *testing.T) {
 	qm := NewQueueManager([]string{"queued"}, "started", 5)
 	qm.UpdateServiceLimits(map[string]Service{"svc": {Parallel: 2}})
 	qm.Start()
 	t.Cleanup(func() { qm.Stop() })
 
-	var user1Ran, user2Ran atomic.Bool
+	var ch1Ran, ch2Ran atomic.Bool
 	var wg sync.WaitGroup
 	wg.Add(2)
 
 	unblock := make(chan struct{})
 
-	qm.Enqueue("net", "#chan", "user1", "svc", "", func(ctx context.Context, output chan<- string) {
-		user1Ran.Store(true)
+	qm.Enqueue("net", "#chan1", "user1", "svc", "", func(ctx context.Context, output chan<- string) {
+		ch1Ran.Store(true)
 		<-unblock
 		wg.Done()
 	})
 
-	qm.Enqueue("net", "#chan", "user2", "svc", "", func(ctx context.Context, output chan<- string) {
-		user2Ran.Store(true)
+	qm.Enqueue("net", "#chan2", "user2", "svc", "", func(ctx context.Context, output chan<- string) {
+		ch2Ran.Store(true)
 		wg.Done()
 	})
 
 	time.Sleep(100 * time.Millisecond)
 
-	if !user1Ran.Load() {
-		t.Error("user1 job should have started")
+	if !ch1Ran.Load() {
+		t.Error("chan1 job should have started")
 	}
-	if !user2Ran.Load() {
-		t.Error("user2 job should start in parallel (different user)")
+	if !ch2Ran.Load() {
+		t.Error("chan2 job should start in parallel (different channel)")
 	}
 
 	close(unblock)
@@ -315,7 +315,7 @@ func TestQueueManager_UpdateServiceLimits(t *testing.T) {
 		t.Error("user1 should have started")
 	}
 	if !user2Started.Load() {
-		t.Error("user2 should start with parallel=2")
+		t.Error("user2 should start with parallel=2 (same channel)")
 	}
 
 	close(unblock)
@@ -418,6 +418,96 @@ func TestQueueManager_FIFOOrder(t *testing.T) {
 	}
 }
 
+func TestQueueManager_CrossUserFIFOOrder(t *testing.T) {
+	qm := newTestQM(t)
+
+	unblock := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(3)
+
+	var order []string
+	var orderMu sync.Mutex
+
+	qm.Enqueue("net", "#chan", "user1", "svc", "", func(ctx context.Context, output chan<- string) {
+		<-unblock
+		orderMu.Lock()
+		order = append(order, "user1")
+		orderMu.Unlock()
+		wg.Done()
+	})
+
+	time.Sleep(50 * time.Millisecond)
+
+	qm.Enqueue("net", "#chan", "user2", "svc", "", func(ctx context.Context, output chan<- string) {
+		orderMu.Lock()
+		order = append(order, "user2")
+		orderMu.Unlock()
+		wg.Done()
+	})
+
+	qm.Enqueue("net", "#chan", "user3", "svc", "", func(ctx context.Context, output chan<- string) {
+		orderMu.Lock()
+		order = append(order, "user3")
+		orderMu.Unlock()
+		wg.Done()
+	})
+
+	close(unblock)
+	wg.Wait()
+
+	orderMu.Lock()
+	defer orderMu.Unlock()
+	if len(order) != 3 {
+		t.Fatalf("expected 3 executions, got %d: %v", len(order), order)
+	}
+	want := []string{"user1", "user2", "user3"}
+	for i, w := range want {
+		if order[i] != w {
+			t.Errorf("execution[%d] = %q, want %q", i, order[i], w)
+		}
+	}
+}
+
+func TestQueueManager_ConcurrentExecutionFIFODelivery(t *testing.T) {
+	qm := NewQueueManager([]string{"queued"}, "started", 5)
+	qm.UpdateServiceLimits(map[string]Service{"svc": {Parallel: 2}})
+	qm.Start()
+	t.Cleanup(func() { qm.Stop() })
+
+	unblock := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	var execOrder []string
+	var execMu sync.Mutex
+
+	qm.Enqueue("net", "#chan", "user1", "svc", "", func(ctx context.Context, output chan<- string) {
+		execMu.Lock()
+		execOrder = append(execOrder, "user1")
+		execMu.Unlock()
+		<-unblock
+		wg.Done()
+	})
+
+	qm.Enqueue("net", "#chan", "user2", "svc", "", func(ctx context.Context, output chan<- string) {
+		execMu.Lock()
+		execOrder = append(execOrder, "user2")
+		execMu.Unlock()
+		wg.Done()
+	})
+
+	time.Sleep(100 * time.Millisecond)
+
+	execMu.Lock()
+	if len(execOrder) != 2 {
+		t.Fatalf("expected both jobs to start concurrently, got %d: %v", len(execOrder), execOrder)
+	}
+	execMu.Unlock()
+
+	close(unblock)
+	wg.Wait()
+}
+
 func TestQueueManager_ServiceParallel1(t *testing.T) {
 	qm := newTestQM(t)
 
@@ -504,7 +594,7 @@ func TestQueueManager_CancellationPropagation(t *testing.T) {
 	})
 
 	time.Sleep(50 * time.Millisecond)
-	qm.StopCurrent("net", "#chan", "user")
+	qm.StopCurrent("net", "#chan")
 	wg.Wait()
 
 	if !gotCancelled.Load() {
@@ -563,7 +653,112 @@ func TestQueueManager_SchedulerFairness(t *testing.T) {
 func TestQueueManager_StopEmptyQueue(t *testing.T) {
 	qm := newTestQM(t)
 
-	if qm.StopCurrent("net", "#chan", "nobody") {
+	if qm.StopCurrent("net", "#chan") {
 		t.Error("StopCurrent on empty queue should return false")
 	}
+}
+
+func TestQueueManager_CancelPending(t *testing.T) {
+	qm := newTestQM(t)
+
+	unblock := make(chan struct{})
+	var started sync.WaitGroup
+	started.Add(1)
+
+	qm.Enqueue("net", "#chan", "user", "svc", "", func(ctx context.Context, output chan<- string) {
+		started.Done()
+		<-unblock
+	})
+	started.Wait()
+
+	qm.Enqueue("net", "#chan", "user", "svc", "", func(ctx context.Context, output chan<- string) {})
+
+	_, pending := qm.QueueStatus("net", "#chan", "user")
+	if len(pending) != 1 {
+		t.Fatalf("expected 1 pending, got %d", len(pending))
+	}
+
+	if !qm.CancelPending("net", "#chan", "user") {
+		t.Error("CancelPending should return true when items removed")
+	}
+
+	_, pending = qm.QueueStatus("net", "#chan", "user")
+	if len(pending) != 0 {
+		t.Errorf("expected 0 pending after cancel, got %d", len(pending))
+	}
+
+	if qm.CancelPending("net", "#chan", "nobody") {
+		t.Error("CancelPending should return false when no items match")
+	}
+
+	close(unblock)
+}
+
+func TestQueueManager_CancelPendingOtherUserPreserved(t *testing.T) {
+	qm := newTestQM(t)
+
+	unblock := make(chan struct{})
+	var started sync.WaitGroup
+	started.Add(1)
+
+	qm.Enqueue("net", "#chan", "user1", "svc", "", func(ctx context.Context, output chan<- string) {
+		started.Done()
+		<-unblock
+	})
+	started.Wait()
+
+	var user2Ran atomic.Bool
+	var wg sync.WaitGroup
+	wg.Add(1)
+	qm.Enqueue("net", "#chan", "user2", "svc", "", func(ctx context.Context, output chan<- string) {
+		user2Ran.Store(true)
+		wg.Done()
+	})
+
+	qm.Enqueue("net", "#chan", "user1", "svc", "", func(ctx context.Context, output chan<- string) {})
+
+	qm.CancelPending("net", "#chan", "user1")
+
+	close(unblock)
+	wg.Wait()
+
+	if !user2Ran.Load() {
+		t.Error("user2's pending job should still run after cancelling user1's pending items")
+	}
+}
+
+func TestQueueManager_QueueStatusOtherUser(t *testing.T) {
+	qm := newTestQM(t)
+
+	unblock := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	qm.Enqueue("net", "#chan", "user1", "svc", "", func(ctx context.Context, output chan<- string) {
+		<-unblock
+		wg.Done()
+	})
+
+	time.Sleep(50 * time.Millisecond)
+
+	qm.Enqueue("net", "#chan", "user2", "svc", "", func(ctx context.Context, output chan<- string) {})
+
+	current1, pending1 := qm.QueueStatus("net", "#chan", "user1")
+	if current1 == nil {
+		t.Fatal("user1 should see current item (their running job)")
+	}
+	if len(pending1) != 0 {
+		t.Errorf("user1 should see 0 pending, got %d", len(pending1))
+	}
+
+	current2, pending2 := qm.QueueStatus("net", "#chan", "user2")
+	if current2 != nil {
+		t.Error("user2 should not see current item (user1 is running)")
+	}
+	if len(pending2) != 1 {
+		t.Errorf("user2 should see 1 pending, got %d", len(pending2))
+	}
+
+	close(unblock)
+	wg.Wait()
 }

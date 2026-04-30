@@ -303,6 +303,8 @@ func TestOnAsyncJobCompleted_UserBusyWaitsThenDelivers(t *testing.T) {
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
+	queueMgr.UpdateServiceLimits(map[string]Service{"testsvc": {Parallel: 1}, "": {Parallel: 1}})
+
 	cfg := makeTestAIConfig()
 	ctxKey := "testnet#testuser"
 
@@ -325,7 +327,7 @@ func TestOnAsyncJobCompleted_UserBusyWaitsThenDelivers(t *testing.T) {
 	}
 
 	blockDone := make(chan struct{})
-	queueMgr.Enqueue("testnet", "#test", "testuser", "testsvc", "",
+	queueMgr.Enqueue("testnet", "#test", "testuser", "", "",
 		func(ctx context.Context, output chan<- string) {
 			<-blockDone
 		})
@@ -343,15 +345,17 @@ func TestOnAsyncJobCompleted_UserBusyWaitsThenDelivers(t *testing.T) {
 	}
 
 	onAsyncJobCompleted(job, "result text")
-
-	queueMgr.Stop()
-	time.Sleep(200 * time.Millisecond)
-
-	close(blockDone)
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	if chatContextsMap[ctxKey].SessionID == sessionA {
-		t.Error("session should NOT have switched after queue stop")
+		t.Error("session should NOT have switched while blocking job holds the slot")
+	}
+
+	close(blockDone)
+	time.Sleep(300 * time.Millisecond)
+
+	if chatContextsMap[ctxKey].SessionID != sessionA {
+		t.Error("session should have switched to session A after delivery completed")
 	}
 }
 

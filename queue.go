@@ -27,9 +27,9 @@ type QueueItem struct {
 	cancel      context.CancelFunc
 }
 
-type UserQueue struct {
-	current *QueueItem
+type ChannelQueue struct {
 	pending []*QueueItem
+	running map[int64]*QueueItem
 }
 
 type execSlot struct {
@@ -57,12 +57,50 @@ func (es *execSlot) release() {
 }
 
 type deliverySlot struct {
-	mu sync.Mutex
+	mu      sync.Mutex
+	cond    *sync.Cond
+	queue   []*QueueItem
+	current *QueueItem
+}
+
+func newDeliverySlot() *deliverySlot {
+	ds := &deliverySlot{}
+	ds.cond = sync.NewCond(&ds.mu)
+	return ds
+}
+
+func (ds *deliverySlot) enqueue(item *QueueItem) {
+	ds.mu.Lock()
+	ds.queue = append(ds.queue, item)
+	ds.cond.Broadcast()
+	ds.mu.Unlock()
+}
+
+func (ds *deliverySlot) waitTurn(item *QueueItem) {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+	for ds.current != nil || (len(ds.queue) > 0 && ds.queue[0] != item) {
+		if len(ds.queue) == 0 {
+			return
+		}
+		ds.cond.Wait()
+	}
+	if len(ds.queue) > 0 {
+		ds.queue = ds.queue[1:]
+	}
+	ds.current = item
+}
+
+func (ds *deliverySlot) done() {
+	ds.mu.Lock()
+	ds.current = nil
+	ds.cond.Broadcast()
+	ds.mu.Unlock()
 }
 
 type QueueManager struct {
 	mu           sync.Mutex
-	users        map[string]*UserQueue
+	channels     map[string]*ChannelQueue
 	execSlots    map[string]*execSlot
 	deliveryMu   sync.Mutex
 	deliverySlot map[string]*deliverySlot
@@ -87,7 +125,7 @@ func NewQueueManager(queueMsgs []string, startedMsg string, maxDepth int) *Queue
 		maxDepth = 5
 	}
 	return &QueueManager{
-		users:        make(map[string]*UserQueue),
+		channels:     make(map[string]*ChannelQueue),
 		execSlots:    make(map[string]*execSlot),
 		deliverySlot: make(map[string]*deliverySlot),
 		changed:      make(chan struct{}, 1),
@@ -108,16 +146,18 @@ func (qm *QueueManager) Stop() {
 	qm.notify()
 	qm.mu.Lock()
 	defer qm.mu.Unlock()
-	for _, uq := range qm.users {
-		if uq.current != nil && uq.current.cancel != nil {
-			uq.current.cancel()
-		}
-		for _, item := range uq.pending {
+	for _, cq := range qm.channels {
+		for _, item := range cq.running {
 			if item.cancel != nil {
 				item.cancel()
 			}
 		}
-		uq.pending = nil
+		for _, item := range cq.pending {
+			if item.cancel != nil {
+				item.cancel()
+			}
+		}
+		cq.pending = nil
 	}
 }
 
@@ -128,17 +168,17 @@ func (qm *QueueManager) notify() {
 	}
 }
 
-func itemKey(network, channel, nick string) string {
-	return network + channel + nick
+func channelKey(network, channel string) string {
+	return network + channel
 }
 
-func (qm *QueueManager) getOrCreateUserQueue(key string) *UserQueue {
-	uq, ok := qm.users[key]
+func (qm *QueueManager) getOrCreateChannelQueue(key string) *ChannelQueue {
+	cq, ok := qm.channels[key]
 	if !ok {
-		uq = &UserQueue{}
-		qm.users[key] = uq
+		cq = &ChannelQueue{running: make(map[int64]*QueueItem)}
+		qm.channels[key] = cq
 	}
-	return uq
+	return cq
 }
 
 func (qm *QueueManager) Enqueue(network, channel, nick, service, desc string, fn func(ctx context.Context, output chan<- string)) int {
@@ -149,14 +189,10 @@ func (qm *QueueManager) Enqueue(network, channel, nick, service, desc string, fn
 	qm.mu.Lock()
 	defer qm.mu.Unlock()
 
-	key := itemKey(network, channel, nick)
-	uq := qm.getOrCreateUserQueue(key)
+	key := channelKey(network, channel)
+	cq := qm.getOrCreateChannelQueue(key)
 
-	position := len(uq.pending)
-	if uq.current != nil {
-		position++
-	}
-
+	position := len(cq.pending) + len(cq.running)
 	if position >= qm.maxDepth {
 		return -1
 	}
@@ -177,60 +213,128 @@ func (qm *QueueManager) Enqueue(network, channel, nick, service, desc string, fn
 		cancel:      cancel,
 	}
 
-	if uq.current == nil {
-		slot := qm.execSlots[service]
-		if slot != nil && !slot.tryAcquire() {
-			uq.pending = append(uq.pending, item)
-			qm.notify()
-			return len(uq.pending)
-		}
-		uq.current = item
-		go qm.runJob(item)
-		return 0
+	ds := qm.getDeliverySlot(network, channel)
+	ds.enqueue(item)
+
+	slot := qm.execSlots[service]
+	if slot != nil && !slot.tryAcquire() {
+		cq.pending = append(cq.pending, item)
+		qm.notify()
+		return position
 	}
 
-	uq.pending = append(uq.pending, item)
-	qm.notify()
-	return position
+	cq.running[item.ID] = item
+	go qm.runJob(item)
+	return 0
 }
 
-func (qm *QueueManager) StopCurrent(network, channel, nick string) bool {
+func (qm *QueueManager) StopCurrent(network, channel string) bool {
 	qm.mu.Lock()
-	key := itemKey(network, channel, nick)
-	uq, ok := qm.users[key]
-	if !ok || uq.current == nil {
+	key := channelKey(network, channel)
+	cq, ok := qm.channels[key]
+	if !ok {
 		qm.mu.Unlock()
 		return false
 	}
-	item := uq.current
-	qm.mu.Unlock()
 
-	if item.cancel != nil {
-		item.cancel()
+	ds := qm.getDeliverySlot(network, channel)
+	ds.mu.Lock()
+
+	if ds.current != nil {
+		item := ds.current
+		ds.mu.Unlock()
+		qm.mu.Unlock()
+		if item.cancel != nil {
+			item.cancel()
+		}
+		return true
 	}
-	return true
+
+	for _, qi := range ds.queue {
+		if _, running := cq.running[qi.ID]; running {
+			ds.mu.Unlock()
+			qm.mu.Unlock()
+			if qi.cancel != nil {
+				qi.cancel()
+			}
+			return true
+		}
+	}
+
+	ds.mu.Unlock()
+	qm.mu.Unlock()
+	return false
+}
+
+func (qm *QueueManager) CancelPending(network, channel, nick string) bool {
+	qm.mu.Lock()
+	defer qm.mu.Unlock()
+
+	key := channelKey(network, channel)
+	cq, ok := qm.channels[key]
+	if !ok {
+		return false
+	}
+
+	removed := false
+	newPending := make([]*QueueItem, 0, len(cq.pending))
+	for _, item := range cq.pending {
+		if item.Nick == nick {
+			if item.cancel != nil {
+				item.cancel()
+			}
+			removed = true
+			ds := qm.getDeliverySlot(network, channel)
+			ds.remove(item)
+		} else {
+			newPending = append(newPending, item)
+		}
+	}
+	cq.pending = newPending
+	return removed
 }
 
 func (qm *QueueManager) IsRunning(network, channel, nick string) bool {
 	qm.mu.Lock()
 	defer qm.mu.Unlock()
-	key := itemKey(network, channel, nick)
-	uq, ok := qm.users[key]
+	key := channelKey(network, channel)
+	cq, ok := qm.channels[key]
 	if !ok {
 		return false
 	}
-	return uq.current != nil
+	for _, item := range cq.running {
+		if item.Nick == nick {
+			return true
+		}
+	}
+	return false
 }
 
 func (qm *QueueManager) QueueStatus(network, channel, nick string) (current *QueueItem, pending []*QueueItem) {
 	qm.mu.Lock()
 	defer qm.mu.Unlock()
-	key := itemKey(network, channel, nick)
-	uq, ok := qm.users[key]
+	key := channelKey(network, channel)
+	cq, ok := qm.channels[key]
 	if !ok {
 		return nil, nil
 	}
-	return uq.current, uq.pending
+
+	for _, item := range cq.running {
+		if item.Nick != nick {
+			continue
+		}
+		if current == nil {
+			current = item
+		} else {
+			pending = append(pending, item)
+		}
+	}
+	for _, item := range cq.pending {
+		if item.Nick == nick {
+			pending = append(pending, item)
+		}
+	}
+	return current, pending
 }
 
 func (qm *QueueManager) UpdateServiceLimits(services map[string]Service) {
@@ -277,18 +381,18 @@ func (qm *QueueManager) schedule() {
 	qm.mu.Lock()
 	defer qm.mu.Unlock()
 
-	for _, uq := range qm.users {
-		if uq.current != nil || len(uq.pending) == 0 {
-			continue
+	for _, cq := range qm.channels {
+		var remaining []*QueueItem
+		for _, item := range cq.pending {
+			slot := qm.execSlots[item.Service]
+			if slot != nil && !slot.tryAcquire() {
+				remaining = append(remaining, item)
+				continue
+			}
+			cq.running[item.ID] = item
+			go qm.runJob(item)
 		}
-		item := uq.pending[0]
-		slot := qm.execSlots[item.Service]
-		if slot != nil && !slot.tryAcquire() {
-			continue
-		}
-		uq.pending = uq.pending[1:]
-		uq.current = item
-		go qm.runJob(item)
+		cq.pending = remaining
 	}
 }
 
@@ -306,11 +410,6 @@ func (qm *QueueManager) runJob(item *QueueItem) {
 			qm.notify()
 		})
 	}
-
-	defer func() {
-		releaseSlot()
-		qm.completeItem(item)
-	}()
 
 	execDone := make(chan struct{})
 	go func() {
@@ -331,20 +430,26 @@ func (qm *QueueManager) runJob(item *QueueItem) {
 	go func() {
 		<-execDone
 		releaseSlot()
+		qm.executionComplete(item)
 	}()
 
 	bot := getBotFn(item.Network)
 	if bot == nil || bot.Client == nil {
 		for range item.outputCh {
 		}
+		ds := qm.getDeliverySlot(item.Network, item.Channel)
+		ds.remove(item)
 		return
 	}
 
 	ds := qm.getDeliverySlot(item.Network, item.Channel)
-	ds.mu.Lock()
-	defer ds.mu.Unlock()
+	ds.waitTurn(item)
+
+	defer ds.done()
 
 	if item.ctx.Err() != nil {
+		for range item.outputCh {
+		}
 		return
 	}
 
@@ -357,6 +462,8 @@ func (qm *QueueManager) runJob(item *QueueItem) {
 	throttle := bot.Network.Throttle
 	for line := range item.outputCh {
 		if item.ctx.Err() != nil {
+			for range item.outputCh {
+			}
 			break
 		}
 		bot.Client.Cmd.Message(item.Channel, "\x02\x02"+line)
@@ -364,15 +471,14 @@ func (qm *QueueManager) runJob(item *QueueItem) {
 	}
 }
 
-func (qm *QueueManager) completeItem(item *QueueItem) {
+func (qm *QueueManager) executionComplete(item *QueueItem) {
 	qm.mu.Lock()
-	key := itemKey(item.Network, item.Channel, item.Nick)
-	uq, ok := qm.users[key]
-	if ok && uq.current == item {
-		uq.current = nil
+	key := channelKey(item.Network, item.Channel)
+	cq, ok := qm.channels[key]
+	if ok {
+		delete(cq.running, item.ID)
 	}
 	qm.mu.Unlock()
-	qm.notify()
 }
 
 func (qm *QueueManager) getDeliverySlot(network, channel string) *deliverySlot {
@@ -381,10 +487,22 @@ func (qm *QueueManager) getDeliverySlot(network, channel string) *deliverySlot {
 	defer qm.deliveryMu.Unlock()
 	ds, ok := qm.deliverySlot[key]
 	if !ok {
-		ds = &deliverySlot{}
+		ds = newDeliverySlot()
 		qm.deliverySlot[key] = ds
 	}
 	return ds
+}
+
+func (ds *deliverySlot) remove(item *QueueItem) {
+	ds.mu.Lock()
+	defer ds.mu.Unlock()
+	for i, q := range ds.queue {
+		if q.ID == item.ID {
+			ds.queue = append(ds.queue[:i], ds.queue[i+1:]...)
+			ds.cond.Broadcast()
+			return
+		}
+	}
 }
 
 func (qm *QueueManager) formatStartedMsg(nick string, waitTime time.Duration) string {

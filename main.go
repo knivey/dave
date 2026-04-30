@@ -330,7 +330,7 @@ func sendToOutput(out string, output chan<- string, ctx context.Context) {
 
 func stop(network Network, _ *girc.Client, m girc.Event, _ interface{}, _ ...string) {
 	logger.Info("stop requested")
-	queueMgr.StopCurrent(network.Name, m.Params[0], m.Source.Name)
+	queueMgr.StopCurrent(network.Name, m.Params[0])
 }
 
 func loadIgnores(path string) {

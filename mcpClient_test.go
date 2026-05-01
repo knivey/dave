@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	gogpt "github.com/sashabaranov/go-openai"
 )
 
 var mcpServicesTOML = `
@@ -467,282 +466,130 @@ func TestMCPToolConversionObjectWithoutProperties(t *testing.T) {
 	}
 }
 
-func TestBuildChatRequestWithMCPTools(t *testing.T) {
-	cfg := AIConfig{
-		Model:       "gpt-4",
-		MaxTokens:   100,
-		Temperature: 0.7,
+func TestToolCallAccumulation(t *testing.T) {
+	type chunkDelta struct {
+		role      string
+		content   string
+		toolCalls []ToolCall
 	}
-	msgs := []gogpt.ChatCompletionMessage{
-		{Role: gogpt.ChatMessageRoleUser, Content: "hello"},
-	}
-
-	req := BuildChatRequest(cfg, msgs)
-
-	if req.Model != "gpt-4" {
-		t.Errorf("Model = %q, want %q", req.Model, "gpt-4")
-	}
-	if len(req.Messages) != 1 {
-		t.Errorf("Messages len = %d, want 1", len(req.Messages))
-	}
-	if req.Stream {
-		t.Error("Stream should be false by default")
-	}
-}
-
-func TestBuildChatRequestStreaming(t *testing.T) {
-	cfg := AIConfig{
-		Model:       "gpt-4",
-		MaxTokens:   100,
-		Temperature: 0.7,
-		Streaming:   true,
-	}
-	msgs := []gogpt.ChatCompletionMessage{
-		{Role: gogpt.ChatMessageRoleUser, Content: "hello"},
+	type chunk struct {
+		delta        chunkDelta
+		finishReason string
 	}
 
-	req := BuildChatRequest(cfg, msgs)
-
-	if !req.Stream {
-		t.Error("Stream should be true for streaming config")
+	tests := []struct {
+		name              string
+		chunks            []chunk
+		wantText          string
+		wantToolCallCount int
+		wantToolCalls     []ToolCall
+	}{
+		{
+			name: "multiple tool calls accumulated",
+			chunks: []chunk{
+				{delta: chunkDelta{role: "assistant"}},
+				{delta: chunkDelta{content: "Let me check "}},
+				{delta: chunkDelta{content: "that for you."}},
+				{delta: chunkDelta{toolCalls: []ToolCall{
+					{Index: 0, ID: "call_1", Type: "function", Function: FunctionCall{Name: "search", Arguments: ""}},
+				}}},
+				{delta: chunkDelta{toolCalls: []ToolCall{
+					{Index: 0, Function: FunctionCall{Arguments: `{"query":"test"}`}},
+				}}},
+				{delta: chunkDelta{toolCalls: []ToolCall{
+					{Index: 1, ID: "call_2", Type: "function", Function: FunctionCall{Name: "read_file", Arguments: ""}},
+				}}},
+				{delta: chunkDelta{toolCalls: []ToolCall{
+					{Index: 1, Function: FunctionCall{Arguments: `{"path":"/tmp/test"}`}},
+				}}},
+				{finishReason: "tool_calls"},
+			},
+			wantText:          "Let me check that for you.",
+			wantToolCallCount: 2,
+			wantToolCalls: []ToolCall{
+				{ID: "call_1", Type: "function", Function: FunctionCall{Name: "search", Arguments: `{"query":"test"}`}},
+				{ID: "call_2", Type: "function", Function: FunctionCall{Name: "read_file", Arguments: `{"path":"/tmp/test"}`}},
+			},
+		},
+		{
+			name: "no tool calls",
+			chunks: []chunk{
+				{delta: chunkDelta{role: "assistant", content: "Hello there!"}},
+				{delta: chunkDelta{content: " How can I help?"}},
+				{finishReason: "stop"},
+			},
+			wantText:          "Hello there! How can I help?",
+			wantToolCallCount: 0,
+		},
+		{
+			name: "interleaved text and tools",
+			chunks: []chunk{
+				{delta: chunkDelta{role: "assistant", content: "I'll "}},
+				{delta: chunkDelta{toolCalls: []ToolCall{
+					{Index: 0, ID: "call_1", Type: "function", Function: FunctionCall{Name: "weather", Arguments: `{"city":"NYC"}`}},
+				}}},
+				{delta: chunkDelta{content: "look that up."}},
+				{finishReason: "tool_calls"},
+			},
+			wantText:          "I'll look that up.",
+			wantToolCallCount: 1,
+			wantToolCalls: []ToolCall{
+				{ID: "call_1", Type: "function", Function: FunctionCall{Name: "weather", Arguments: `{"city":"NYC"}`}},
+			},
+		},
 	}
-	if req.StreamOptions == nil {
-		t.Error("StreamOptions should be set for streaming")
-	}
-}
 
-func TestStreamingToolCallAccumulation(t *testing.T) {
-	idx0 := 0
-	idx1 := 1
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var accumulated []ToolCall
+			var bufferb string
 
-	chunks := []gogpt.ChatCompletionStreamResponse{
-		{Choices: []gogpt.ChatCompletionStreamChoice{
-			{Delta: gogpt.ChatCompletionStreamChoiceDelta{Role: "assistant"}},
-		}},
-		{Choices: []gogpt.ChatCompletionStreamChoice{
-			{Delta: gogpt.ChatCompletionStreamChoiceDelta{Content: "Let me check "}},
-		}},
-		{Choices: []gogpt.ChatCompletionStreamChoice{
-			{Delta: gogpt.ChatCompletionStreamChoiceDelta{Content: "that for you."}},
-		}},
-		{Choices: []gogpt.ChatCompletionStreamChoice{
-			{Delta: gogpt.ChatCompletionStreamChoiceDelta{ToolCalls: []gogpt.ToolCall{
-				{Index: &idx0, ID: "call_1", Type: "function", Function: gogpt.FunctionCall{Name: "search", Arguments: ""}},
-			}}},
-		}},
-		{Choices: []gogpt.ChatCompletionStreamChoice{
-			{Delta: gogpt.ChatCompletionStreamChoiceDelta{ToolCalls: []gogpt.ToolCall{
-				{Index: &idx0, Function: gogpt.FunctionCall{Arguments: `{"query":"test"}`}},
-			}}},
-		}},
-		{Choices: []gogpt.ChatCompletionStreamChoice{
-			{Delta: gogpt.ChatCompletionStreamChoiceDelta{ToolCalls: []gogpt.ToolCall{
-				{Index: &idx1, ID: "call_2", Type: "function", Function: gogpt.FunctionCall{Name: "read_file", Arguments: ""}},
-			}}},
-		}},
-		{Choices: []gogpt.ChatCompletionStreamChoice{
-			{Delta: gogpt.ChatCompletionStreamChoiceDelta{ToolCalls: []gogpt.ToolCall{
-				{Index: &idx1, Function: gogpt.FunctionCall{Arguments: `{"path":"/tmp/test"}`}},
-			}}},
-		}},
-		{Choices: []gogpt.ChatCompletionStreamChoice{
-			{FinishReason: gogpt.FinishReasonToolCalls},
-		}},
-	}
+			for _, c := range tt.chunks {
+				bufferb += c.delta.content
 
-	var accumulatedToolCalls []gogpt.ToolCall
-	var assistantRole string
-	var bufferb string
-
-	for _, chunk := range chunks {
-		if len(chunk.Choices) == 0 {
-			continue
-		}
-		delta := chunk.Choices[0].Delta
-
-		if delta.Role != "" {
-			assistantRole = delta.Role
-		}
-
-		for _, tc := range delta.ToolCalls {
-			if tc.Index != nil {
-				idx := *tc.Index
-				for len(accumulatedToolCalls) <= idx {
-					accumulatedToolCalls = append(accumulatedToolCalls, gogpt.ToolCall{})
+				for _, tc := range c.delta.toolCalls {
+					idx := tc.Index
+					for len(accumulated) <= idx {
+						accumulated = append(accumulated, ToolCall{})
+					}
+					if tc.ID != "" {
+						accumulated[idx].ID = tc.ID
+					}
+					if tc.Type != "" {
+						accumulated[idx].Type = tc.Type
+					}
+					accumulated[idx].Function.Name += tc.Function.Name
+					accumulated[idx].Function.Arguments += tc.Function.Arguments
 				}
-				if tc.ID != "" {
-					accumulatedToolCalls[idx].ID = tc.ID
+
+				if c.finishReason == "tool_calls" || c.finishReason == "stop" {
+					break
 				}
-				if tc.Type != "" {
-					accumulatedToolCalls[idx].Type = tc.Type
-				}
-				accumulatedToolCalls[idx].Function.Name += tc.Function.Name
-				accumulatedToolCalls[idx].Function.Arguments += tc.Function.Arguments
 			}
-		}
 
-		bufferb += delta.Content
-
-		if chunk.Choices[0].FinishReason == gogpt.FinishReasonToolCalls {
-			break
-		}
-	}
-
-	if assistantRole != "assistant" {
-		t.Errorf("role = %q, want 'assistant'", assistantRole)
-	}
-
-	wantText := "Let me check that for you."
-	if bufferb != wantText {
-		t.Errorf("text = %q, want %q", bufferb, wantText)
-	}
-
-	if len(accumulatedToolCalls) != 2 {
-		t.Fatalf("expected 2 tool calls, got %d", len(accumulatedToolCalls))
-	}
-
-	if accumulatedToolCalls[0].ID != "call_1" {
-		t.Errorf("tool[0].ID = %q, want 'call_1'", accumulatedToolCalls[0].ID)
-	}
-	if accumulatedToolCalls[0].Function.Name != "search" {
-		t.Errorf("tool[0].Name = %q, want 'search'", accumulatedToolCalls[0].Function.Name)
-	}
-	if accumulatedToolCalls[0].Function.Arguments != `{"query":"test"}` {
-		t.Errorf("tool[0].Args = %q, want {\"query\":\"test\"}", accumulatedToolCalls[0].Function.Arguments)
-	}
-
-	if accumulatedToolCalls[1].ID != "call_2" {
-		t.Errorf("tool[1].ID = %q, want 'call_2'", accumulatedToolCalls[1].ID)
-	}
-	if accumulatedToolCalls[1].Function.Name != "read_file" {
-		t.Errorf("tool[1].Name = %q, want 'read_file'", accumulatedToolCalls[1].Function.Name)
-	}
-	if accumulatedToolCalls[1].Function.Arguments != `{"path":"/tmp/test"}` {
-		t.Errorf("tool[1].Args = %q, want {\"path\":\"/tmp/test\"}", accumulatedToolCalls[1].Function.Arguments)
-	}
-}
-
-func TestStreamingToolCallAccumulationNoToolCalls(t *testing.T) {
-	chunks := []gogpt.ChatCompletionStreamResponse{
-		{Choices: []gogpt.ChatCompletionStreamChoice{
-			{Delta: gogpt.ChatCompletionStreamChoiceDelta{Role: "assistant", Content: "Hello there!"}},
-		}},
-		{Choices: []gogpt.ChatCompletionStreamChoice{
-			{Delta: gogpt.ChatCompletionStreamChoiceDelta{Content: " How can I help?"}},
-		}},
-		{Choices: []gogpt.ChatCompletionStreamChoice{
-			{FinishReason: gogpt.FinishReasonStop},
-		}},
-	}
-
-	var accumulatedToolCalls []gogpt.ToolCall
-	var bufferb string
-
-	for _, chunk := range chunks {
-		if len(chunk.Choices) == 0 {
-			continue
-		}
-		delta := chunk.Choices[0].Delta
-		bufferb += delta.Content
-
-		for _, tc := range delta.ToolCalls {
-			if tc.Index != nil {
-				idx := *tc.Index
-				for len(accumulatedToolCalls) <= idx {
-					accumulatedToolCalls = append(accumulatedToolCalls, gogpt.ToolCall{})
-				}
-				if tc.ID != "" {
-					accumulatedToolCalls[idx].ID = tc.ID
-				}
-				if tc.Type != "" {
-					accumulatedToolCalls[idx].Type = tc.Type
-				}
-				accumulatedToolCalls[idx].Function.Name += tc.Function.Name
-				accumulatedToolCalls[idx].Function.Arguments += tc.Function.Arguments
+			if bufferb != tt.wantText {
+				t.Errorf("text = %q, want %q", bufferb, tt.wantText)
 			}
-		}
 
-		if chunk.Choices[0].FinishReason == gogpt.FinishReasonStop {
-			break
-		}
-	}
-
-	if len(accumulatedToolCalls) != 0 {
-		t.Errorf("expected 0 tool calls, got %d", len(accumulatedToolCalls))
-	}
-
-	wantText := "Hello there! How can I help?"
-	if bufferb != wantText {
-		t.Errorf("text = %q, want %q", bufferb, wantText)
-	}
-}
-
-func TestStreamingToolCallAccumulationInterleavedTextAndTools(t *testing.T) {
-	idx0 := 0
-
-	chunks := []gogpt.ChatCompletionStreamResponse{
-		{Choices: []gogpt.ChatCompletionStreamChoice{
-			{Delta: gogpt.ChatCompletionStreamChoiceDelta{Role: "assistant", Content: "I'll "}},
-		}},
-		{Choices: []gogpt.ChatCompletionStreamChoice{
-			{Delta: gogpt.ChatCompletionStreamChoiceDelta{ToolCalls: []gogpt.ToolCall{
-				{Index: &idx0, ID: "call_1", Type: "function", Function: gogpt.FunctionCall{Name: "weather", Arguments: `{"city":"NYC"}`}},
-			}}},
-		}},
-		{Choices: []gogpt.ChatCompletionStreamChoice{
-			{Delta: gogpt.ChatCompletionStreamChoiceDelta{Content: "look that up."}},
-		}},
-		{Choices: []gogpt.ChatCompletionStreamChoice{
-			{FinishReason: gogpt.FinishReasonToolCalls},
-		}},
-	}
-
-	var accumulatedToolCalls []gogpt.ToolCall
-	var bufferb string
-
-	for _, chunk := range chunks {
-		if len(chunk.Choices) == 0 {
-			continue
-		}
-		delta := chunk.Choices[0].Delta
-		bufferb += delta.Content
-
-		for _, tc := range delta.ToolCalls {
-			if tc.Index != nil {
-				idx := *tc.Index
-				for len(accumulatedToolCalls) <= idx {
-					accumulatedToolCalls = append(accumulatedToolCalls, gogpt.ToolCall{})
-				}
-				if tc.ID != "" {
-					accumulatedToolCalls[idx].ID = tc.ID
-				}
-				if tc.Type != "" {
-					accumulatedToolCalls[idx].Type = tc.Type
-				}
-				accumulatedToolCalls[idx].Function.Name += tc.Function.Name
-				accumulatedToolCalls[idx].Function.Arguments += tc.Function.Arguments
+			if len(accumulated) != tt.wantToolCallCount {
+				t.Fatalf("expected %d tool calls, got %d", tt.wantToolCallCount, len(accumulated))
 			}
-		}
 
-		if chunk.Choices[0].FinishReason == gogpt.FinishReasonToolCalls {
-			break
-		}
-	}
-
-	wantText := "I'll look that up."
-	if bufferb != wantText {
-		t.Errorf("text = %q, want %q", bufferb, wantText)
-	}
-
-	if len(accumulatedToolCalls) != 1 {
-		t.Fatalf("expected 1 tool call, got %d", len(accumulatedToolCalls))
-	}
-
-	if accumulatedToolCalls[0].Function.Name != "weather" {
-		t.Errorf("tool name = %q, want 'weather'", accumulatedToolCalls[0].Function.Name)
-	}
-	if accumulatedToolCalls[0].Function.Arguments != `{"city":"NYC"}` {
-		t.Errorf("tool args = %q, want {\"city\":\"NYC\"}", accumulatedToolCalls[0].Function.Arguments)
+			for i, want := range tt.wantToolCalls {
+				if i >= len(accumulated) {
+					break
+				}
+				if accumulated[i].ID != want.ID {
+					t.Errorf("tool[%d].ID = %q, want %q", i, accumulated[i].ID, want.ID)
+				}
+				if accumulated[i].Function.Name != want.Function.Name {
+					t.Errorf("tool[%d].Name = %q, want %q", i, accumulated[i].Function.Name, want.Function.Name)
+				}
+				if accumulated[i].Function.Arguments != want.Function.Arguments {
+					t.Errorf("tool[%d].Args = %q, want %q", i, accumulated[i].Function.Arguments, want.Function.Arguments)
+				}
+			}
+		})
 	}
 }
 

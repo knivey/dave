@@ -7,8 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"time"
-
-	gogpt "github.com/sashabaranov/go-openai"
 )
 
 type IncidentConfig struct {
@@ -123,7 +121,7 @@ func sanitizeAIConfig(cfg AIConfig) sanitizedAIConfig {
 	return s
 }
 
-func (il *IncidentLogger) logIncident(cr *chatRunner, apiErr error, messages []gogpt.ChatCompletionMessage, iteration int, apiPath string) {
+func (il *IncidentLogger) logIncident(cr *chatRunner, apiErr error, messages []ChatMessage, iteration int, apiPath string) {
 	if il == nil {
 		return
 	}

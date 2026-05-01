@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/jmoiron/sqlx"
-	gogpt "github.com/sashabaranov/go-openai"
 )
 
 func TestMain(m *testing.M) {
@@ -48,7 +47,7 @@ func TestDBSessionRoundtrip(t *testing.T) {
 
 	chatContextsMutex.Lock()
 	chatContextsMap["net#chanuser"] = ChatContext{
-		Messages: []gogpt.ChatCompletionMessage{
+		Messages: []ChatMessage{
 			{Role: "system", Content: "You are a helpful assistant"},
 			{Role: "user", Content: "Hello"},
 			{Role: "assistant", Content: "Hi there!"},
@@ -71,7 +70,7 @@ func TestDBSessionRoundtrip(t *testing.T) {
 	chatContextsMutex.Unlock()
 
 	for _, msg := range chatContextsMap[ctxKey].Messages {
-		toolCallsJSON := func(m gogpt.ChatCompletionMessage) *string {
+		toolCallsJSON := func(m ChatMessage) *string {
 			if len(m.ToolCalls) > 0 {
 				data, _ := json.Marshal(m.ToolCalls)
 				s := string(data)
@@ -325,8 +324,8 @@ func TestDBToolCalls(t *testing.T) {
 
 	sid, _ := createDBSession("testkey", "net", "#chan", "nick", "chat", "")
 
-	toolCalls := []gogpt.ToolCall{
-		{ID: "tc1", Type: "function", Function: gogpt.FunctionCall{Name: "get_weather", Arguments: `{"city":"sf"}`}},
+	toolCalls := []ToolCall{
+		{ID: "tc1", Type: "function", Function: FunctionCall{Name: "get_weather", Arguments: `{"city":"sf"}`}},
 	}
 	tcData, _ := json.Marshal(toolCalls)
 	tcJSON := string(tcData)
@@ -360,7 +359,7 @@ func TestDBFirstMessage(t *testing.T) {
 	cfg := AIConfig{Name: "testcmd", MaxHistory: 5}
 
 	AddContext(cfg, ctxKey,
-		gogpt.ChatCompletionMessage{Role: "system", Content: "you are helpful"},
+		ChatMessage{Role: "system", Content: "you are helpful"},
 		"net", "#chan", "user")
 
 	chatContextsMutex.Lock()
@@ -379,7 +378,7 @@ func TestDBFirstMessage(t *testing.T) {
 	}
 
 	AddContext(cfg, ctxKey,
-		gogpt.ChatCompletionMessage{Role: "user", Content: "hello world this is my first message"},
+		ChatMessage{Role: "user", Content: "hello world this is my first message"},
 		"net", "#chan", "user")
 
 	session, err = getDBSessionByID(sid)
@@ -391,7 +390,7 @@ func TestDBFirstMessage(t *testing.T) {
 	}
 
 	AddContext(cfg, ctxKey,
-		gogpt.ChatCompletionMessage{Role: "user", Content: "this should not overwrite"},
+		ChatMessage{Role: "user", Content: "this should not overwrite"},
 		"net", "#chan", "user")
 
 	session, err = getDBSessionByID(sid)
@@ -415,7 +414,7 @@ func TestClearContextCompletesSession(t *testing.T) {
 
 	ctxKey := "net#chanuser"
 	AddContext(AIConfig{Name: "testcmd", MaxHistory: 5}, ctxKey,
-		gogpt.ChatCompletionMessage{Role: "user", Content: "hello"},
+		ChatMessage{Role: "user", Content: "hello"},
 		"net", "#chan", "user")
 
 	chatContextsMutex.Lock()

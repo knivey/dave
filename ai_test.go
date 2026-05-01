@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	gogpt "github.com/sashabaranov/go-openai"
+	openai "github.com/openai/openai-go/v3"
 )
 
 func TestFormatOutput(t *testing.T) {
@@ -156,8 +156,8 @@ func TestBuildChatRequest(t *testing.T) {
 	tests := []struct {
 		name     string
 		cfg      AIConfig
-		messages []gogpt.ChatCompletionMessage
-		check    func(*testing.T, gogpt.ChatCompletionRequest)
+		messages []ChatMessage
+		check    func(*testing.T, openai.ChatCompletionNewParams)
 	}{
 		{
 			name: "basic fields",
@@ -167,30 +167,24 @@ func TestBuildChatRequest(t *testing.T) {
 				MaxCompletionTokens: 200,
 				Temperature:         0.7,
 			},
-			messages: []gogpt.ChatCompletionMessage{
-				{Role: gogpt.ChatMessageRoleUser, Content: "hi"},
+			messages: []ChatMessage{
+				{Role: RoleUser, Content: "hi"},
 			},
-			check: func(t *testing.T, req gogpt.ChatCompletionRequest) {
+			check: func(t *testing.T, req openai.ChatCompletionNewParams) {
 				if req.Model != "gpt-4" {
 					t.Errorf("Model = %q, want %q", req.Model, "gpt-4")
 				}
-				if req.MaxTokens != 100 {
-					t.Errorf("MaxTokens = %d, want %d", req.MaxTokens, 100)
+				if !req.MaxTokens.Valid() || req.MaxTokens.Value != 100 {
+					t.Errorf("MaxTokens = %v, want 100", req.MaxTokens)
 				}
-				if req.MaxCompletionTokens != 200 {
-					t.Errorf("MaxCompletionTokens = %d, want %d", req.MaxCompletionTokens, 200)
+				if !req.MaxCompletionTokens.Valid() || req.MaxCompletionTokens.Value != 200 {
+					t.Errorf("MaxCompletionTokens = %v, want 200", req.MaxCompletionTokens)
 				}
-				if req.Temperature != 0.7 {
-					t.Errorf("Temperature = %f, want %f", req.Temperature, 0.7)
+				if !req.Temperature.Valid() || req.Temperature.Value < 0.69 || req.Temperature.Value > 0.71 {
+					t.Errorf("Temperature = %v, want ~0.7", req.Temperature)
 				}
 				if len(req.Messages) != 1 {
 					t.Errorf("Messages len = %d, want %d", len(req.Messages), 1)
-				}
-				if req.Stream {
-					t.Error("Stream = true, want false")
-				}
-				if req.StreamOptions != nil {
-					t.Error("StreamOptions should be nil for non-streaming")
 				}
 			},
 		},
@@ -201,15 +195,9 @@ func TestBuildChatRequest(t *testing.T) {
 				Streaming: true,
 			},
 			messages: nil,
-			check: func(t *testing.T, req gogpt.ChatCompletionRequest) {
-				if !req.Stream {
-					t.Error("Stream = false, want true")
-				}
-				if req.StreamOptions == nil {
-					t.Error("StreamOptions = nil, want non-nil")
-				}
-				if !req.StreamOptions.IncludeUsage {
-					t.Error("StreamOptions.IncludeUsage = false, want true")
+			check: func(t *testing.T, req openai.ChatCompletionNewParams) {
+				if !req.StreamOptions.IncludeUsage.Valid() || !req.StreamOptions.IncludeUsage.Value {
+					t.Error("StreamOptions.IncludeUsage should be true for streaming")
 				}
 			},
 		},
@@ -221,16 +209,16 @@ func TestBuildChatRequest(t *testing.T) {
 				MaxCompletionTokens: 0,
 				Temperature:         0,
 			},
-			messages: []gogpt.ChatCompletionMessage{},
-			check: func(t *testing.T, req gogpt.ChatCompletionRequest) {
-				if req.MaxTokens != 0 {
-					t.Errorf("MaxTokens = %d, want 0", req.MaxTokens)
+			messages: []ChatMessage{},
+			check: func(t *testing.T, req openai.ChatCompletionNewParams) {
+				if req.MaxTokens.Valid() {
+					t.Errorf("MaxTokens = %v, want omitted", req.MaxTokens)
 				}
-				if req.MaxCompletionTokens != 0 {
-					t.Errorf("MaxCompletionTokens = %d, want 0", req.MaxCompletionTokens)
+				if req.MaxCompletionTokens.Valid() {
+					t.Errorf("MaxCompletionTokens = %v, want omitted", req.MaxCompletionTokens)
 				}
-				if req.Temperature != 0 {
-					t.Errorf("Temperature = %f, want 0", req.Temperature)
+				if req.Temperature.Valid() {
+					t.Errorf("Temperature = %v, want omitted", req.Temperature)
 				}
 			},
 		},
@@ -239,13 +227,13 @@ func TestBuildChatRequest(t *testing.T) {
 			cfg: AIConfig{
 				Model: "gpt-4",
 			},
-			messages: []gogpt.ChatCompletionMessage{
-				{Role: gogpt.ChatMessageRoleSystem, Content: "you are helpful"},
-				{Role: gogpt.ChatMessageRoleUser, Content: "hello"},
-				{Role: gogpt.ChatMessageRoleAssistant, Content: "hi there"},
-				{Role: gogpt.ChatMessageRoleUser, Content: "how are you"},
+			messages: []ChatMessage{
+				{Role: RoleSystem, Content: "you are helpful"},
+				{Role: RoleUser, Content: "hello"},
+				{Role: RoleAssistant, Content: "hi there"},
+				{Role: RoleUser, Content: "how are you"},
 			},
-			check: func(t *testing.T, req gogpt.ChatCompletionRequest) {
+			check: func(t *testing.T, req openai.ChatCompletionNewParams) {
 				if len(req.Messages) != 4 {
 					t.Errorf("Messages len = %d, want 4", len(req.Messages))
 				}
@@ -255,7 +243,7 @@ func TestBuildChatRequest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := BuildChatRequest(tt.cfg, tt.messages)
+			req := buildChatCompletionParams(tt.cfg, tt.messages, nil)
 			tt.check(t, req)
 		})
 	}
@@ -301,8 +289,8 @@ func TestReasoningContent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msg := gogpt.ChatCompletionMessage{
-				Role:             gogpt.ChatMessageRoleAssistant,
+			msg := ChatMessage{
+				Role:             RoleAssistant,
 				Content:          tt.content,
 				ReasoningContent: tt.reasoningContent,
 			}

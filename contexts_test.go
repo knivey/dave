@@ -3,8 +3,6 @@ package main
 import (
 	"sync"
 	"testing"
-
-	gogpt "github.com/sashabaranov/go-openai"
 )
 
 type mockContextStore struct {
@@ -18,14 +16,14 @@ func newMockContextStore() *mockContextStore {
 	}
 }
 
-func (m *mockContextStore) Add(key string, config AIConfig, message gogpt.ChatCompletionMessage) []gogpt.ChatCompletionMessage {
+func (m *mockContextStore) Add(key string, config AIConfig, message ChatMessage) []ChatMessage {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	ctx := m.context[key]
 	ctx.Config = config
 	ctx.Messages = append(ctx.Messages, message)
 	if len(ctx.Messages) > config.MaxHistory+1 {
-		newMsgs := []gogpt.ChatCompletionMessage{ctx.Messages[0]}
+		newMsgs := []ChatMessage{ctx.Messages[0]}
 		ctx.Messages = append(newMsgs, ctx.Messages[len(ctx.Messages)-config.MaxHistory:]...)
 	}
 	m.context[key] = ctx
@@ -54,48 +52,48 @@ func (m *mockContextStore) Exists(key string) bool {
 func TestTruncateHistory(t *testing.T) {
 	tests := []struct {
 		name        string
-		messages    []gogpt.ChatCompletionMessage
+		messages    []ChatMessage
 		maxHistory  int
 		wantLen     int
-		wantFirstIs []gogpt.ChatCompletionMessage
+		wantFirstIs []ChatMessage
 	}{
 		{
 			name:       "empty messages",
-			messages:   []gogpt.ChatCompletionMessage{},
+			messages:   []ChatMessage{},
 			maxHistory: 10,
 			wantLen:    0,
 		},
 		{
 			name: "under limit",
-			messages: []gogpt.ChatCompletionMessage{
-				{Role: "system", Content: "sys"},
-				{Role: "user", Content: "hello"},
-				{Role: "assistant", Content: "hi"},
+			messages: []ChatMessage{
+				{Role: RoleSystem, Content: "sys"},
+				{Role: RoleUser, Content: "hello"},
+				{Role: RoleAssistant, Content: "hi"},
 			},
 			maxHistory: 10,
 			wantLen:    3,
 		},
 		{
 			name: "exactly at limit",
-			messages: []gogpt.ChatCompletionMessage{
-				{Role: "system", Content: "sys"},
-				{Role: "user", Content: "1"},
-				{Role: "user", Content: "2"},
-				{Role: "user", Content: "3"},
+			messages: []ChatMessage{
+				{Role: RoleSystem, Content: "sys"},
+				{Role: RoleUser, Content: "1"},
+				{Role: RoleUser, Content: "2"},
+				{Role: RoleUser, Content: "3"},
 			},
 			maxHistory: 3,
 			wantLen:    4,
 		},
 		{
 			name: "over limit keeps system prompt and last messages",
-			messages: []gogpt.ChatCompletionMessage{
-				{Role: "system", Content: "sys"},
-				{Role: "user", Content: "1"},
-				{Role: "assistant", Content: "a1"},
-				{Role: "user", Content: "2"},
-				{Role: "assistant", Content: "a2"},
-				{Role: "user", Content: "3"},
-				{Role: "assistant", Content: "a3"},
+			messages: []ChatMessage{
+				{Role: RoleSystem, Content: "sys"},
+				{Role: RoleUser, Content: "1"},
+				{Role: RoleAssistant, Content: "a1"},
+				{Role: RoleUser, Content: "2"},
+				{Role: RoleAssistant, Content: "a2"},
+				{Role: RoleUser, Content: "3"},
+				{Role: RoleAssistant, Content: "a3"},
 			},
 			maxHistory: 3,
 			wantLen:    4,
@@ -108,8 +106,8 @@ func TestTruncateHistory(t *testing.T) {
 			if len(got) != tt.wantLen {
 				t.Errorf("TruncateHistory() len = %d, want %d", len(got), tt.wantLen)
 			}
-			if len(got) > 0 && got[0].Role != "system" {
-				t.Errorf("TruncateHistory()[0].Role = %q, want %q", got[0].Role, "system")
+			if len(got) > 0 && got[0].Role != RoleSystem {
+				t.Errorf("TruncateHistory()[0].Role = %q, want %q", got[0].Role, RoleSystem)
 			}
 		})
 	}
@@ -126,7 +124,7 @@ func TestChatContextStore(t *testing.T) {
 
 	t.Run("Add creates context", func(t *testing.T) {
 		config := AIConfig{MaxHistory: 5}
-		msg := gogpt.ChatCompletionMessage{Role: "user", Content: "hello"}
+		msg := ChatMessage{Role: RoleUser, Content: "hello"}
 		store.Add("key1", config, msg)
 
 		if !store.Exists("key1") {
@@ -147,10 +145,10 @@ func TestChatContextStore(t *testing.T) {
 
 	t.Run("Add truncates history", func(t *testing.T) {
 		config := AIConfig{MaxHistory: 2}
-		msg := gogpt.ChatCompletionMessage{Role: "system", Content: "sys"}
+		msg := ChatMessage{Role: RoleSystem, Content: "sys"}
 		store.Add("key2", config, msg)
 		for i := 0; i < 10; i++ {
-			msg := gogpt.ChatCompletionMessage{Role: "user", Content: string(rune('0' + i))}
+			msg := ChatMessage{Role: RoleUser, Content: string(rune('0' + i))}
 			store.Add("key2", config, msg)
 		}
 
@@ -158,14 +156,14 @@ func TestChatContextStore(t *testing.T) {
 		if len(ctx.Messages) != 3 {
 			t.Errorf("Messages len = %d, want 3 (maxHistory+1)", len(ctx.Messages))
 		}
-		if ctx.Messages[0].Role != "system" {
+		if ctx.Messages[0].Role != RoleSystem {
 			t.Errorf("First message should be system, got %s", ctx.Messages[0].Role)
 		}
 	})
 
 	t.Run("preserves config", func(t *testing.T) {
 		config := AIConfig{MaxHistory: 3, Temperature: 0.7}
-		msg := gogpt.ChatCompletionMessage{Role: "user", Content: "test"}
+		msg := ChatMessage{Role: RoleUser, Content: "test"}
 		store.Add("key3", config, msg)
 
 		ctx := store.Get("key3")
@@ -198,8 +196,8 @@ func TestChatContextStoreConcurrency(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			for j := 0; j < messagesPerGoroutine; j++ {
-				msg := gogpt.ChatCompletionMessage{
-					Role:    "user",
+				msg := ChatMessage{
+					Role:    RoleUser,
 					Content: string(rune('a' + id%26)),
 				}
 				store.Add("shared_key", config, msg)

@@ -2,22 +2,33 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
-	gogpt "github.com/sashabaranov/go-openai"
+	openai "github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/responses"
 )
 
-func TestMessagesToResponsesInput(t *testing.T) {
+func marshalInputItems(items []responses.ResponseInputItemUnionParam) [][]byte {
+	out := make([][]byte, len(items))
+	for i, item := range items {
+		b, _ := json.Marshal(item)
+		out[i] = b
+	}
+	return out
+}
+
+func TestMessagesToResponseInputItems(t *testing.T) {
 	tests := []struct {
 		name      string
-		messages  []gogpt.ChatCompletionMessage
+		messages  []ChatMessage
 		wantParts []map[string]any
 	}{
 		{
 			name: "plain text user message",
-			messages: []gogpt.ChatCompletionMessage{
-				{Role: gogpt.ChatMessageRoleUser, Content: "hello"},
+			messages: []ChatMessage{
+				{Role: RoleUser, Content: "hello"},
 			},
 			wantParts: []map[string]any{
 				{
@@ -28,8 +39,8 @@ func TestMessagesToResponsesInput(t *testing.T) {
 		},
 		{
 			name: "system message",
-			messages: []gogpt.ChatCompletionMessage{
-				{Role: gogpt.ChatMessageRoleSystem, Content: "you are helpful"},
+			messages: []ChatMessage{
+				{Role: RoleSystem, Content: "you are helpful"},
 			},
 			wantParts: []map[string]any{
 				{
@@ -40,14 +51,14 @@ func TestMessagesToResponsesInput(t *testing.T) {
 		},
 		{
 			name: "user message with text and image MultiContent",
-			messages: []gogpt.ChatCompletionMessage{
+			messages: []ChatMessage{
 				{
-					Role: gogpt.ChatMessageRoleUser,
-					MultiContent: []gogpt.ChatMessagePart{
-						{Type: gogpt.ChatMessagePartTypeText, Text: "describe this"},
-						{Type: gogpt.ChatMessagePartTypeImageURL, ImageURL: &gogpt.ChatMessageImageURL{
+					Role: RoleUser,
+					MultiContent: []MessagePart{
+						{Type: PartTypeText, Text: "describe this"},
+						{Type: PartTypeImageURL, ImageURL: &ImageURL{
 							URL:    "data:image/png;base64,abc123",
-							Detail: gogpt.ImageURLDetailAuto,
+							Detail: ImageDetailAuto,
 						}},
 					},
 				},
@@ -64,11 +75,11 @@ func TestMessagesToResponsesInput(t *testing.T) {
 		},
 		{
 			name: "user message with image without detail",
-			messages: []gogpt.ChatCompletionMessage{
+			messages: []ChatMessage{
 				{
-					Role: gogpt.ChatMessageRoleUser,
-					MultiContent: []gogpt.ChatMessagePart{
-						{Type: gogpt.ChatMessagePartTypeImageURL, ImageURL: &gogpt.ChatMessageImageURL{
+					Role: RoleUser,
+					MultiContent: []MessagePart{
+						{Type: PartTypeImageURL, ImageURL: &ImageURL{
 							URL: "https://example.com/img.png",
 						}},
 					},
@@ -85,15 +96,15 @@ func TestMessagesToResponsesInput(t *testing.T) {
 		},
 		{
 			name: "assistant message with tool calls",
-			messages: []gogpt.ChatCompletionMessage{
+			messages: []ChatMessage{
 				{
-					Role:    gogpt.ChatMessageRoleAssistant,
+					Role:    RoleAssistant,
 					Content: "let me check",
-					ToolCalls: []gogpt.ToolCall{
+					ToolCalls: []ToolCall{
 						{
 							ID:   "call_1",
 							Type: "function",
-							Function: gogpt.FunctionCall{
+							Function: FunctionCall{
 								Name:      "get_weather",
 								Arguments: `{"city":"NYC"}`,
 							},
@@ -103,11 +114,8 @@ func TestMessagesToResponsesInput(t *testing.T) {
 			},
 			wantParts: []map[string]any{
 				{
-					"type": "message",
-					"role": "assistant",
-					"content": []map[string]any{
-						{"type": "output_text", "text": "let me check"},
-					},
+					"role":    "assistant",
+					"content": "let me check",
 				},
 				{
 					"type":      "function_call",
@@ -119,9 +127,9 @@ func TestMessagesToResponsesInput(t *testing.T) {
 		},
 		{
 			name: "tool result message",
-			messages: []gogpt.ChatCompletionMessage{
+			messages: []ChatMessage{
 				{
-					Role:       gogpt.ChatMessageRoleTool,
+					Role:       RoleTool,
 					Content:    "sunny, 72F",
 					ToolCallID: "call_1",
 				},
@@ -136,16 +144,13 @@ func TestMessagesToResponsesInput(t *testing.T) {
 		},
 		{
 			name: "assistant message without tool calls",
-			messages: []gogpt.ChatCompletionMessage{
-				{Role: gogpt.ChatMessageRoleAssistant, Content: "hello there"},
+			messages: []ChatMessage{
+				{Role: RoleAssistant, Content: "hello there"},
 			},
 			wantParts: []map[string]any{
 				{
-					"type": "message",
-					"role": "assistant",
-					"content": []map[string]any{
-						{"type": "output_text", "text": "hello there"},
-					},
+					"role":    "assistant",
+					"content": "hello there",
 				},
 			},
 		},
@@ -153,11 +158,12 @@ func TestMessagesToResponsesInput(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := messagesToResponsesInput(tt.messages)
+			result := messagesToResponseInputItems(tt.messages)
 			if len(result) != len(tt.wantParts) {
 				t.Fatalf("got %d input items, want %d", len(result), len(tt.wantParts))
 			}
-			for i, raw := range result {
+			rawItems := marshalInputItems(result)
+			for i, raw := range rawItems {
 				var got map[string]any
 				if err := json.Unmarshal(raw, &got); err != nil {
 					t.Fatalf("item %d: unmarshal error: %v", i, err)
@@ -232,26 +238,27 @@ func assertJSONEqual(t *testing.T, idx int, got, want map[string]any) {
 	}
 }
 
-func TestMessagesToResponsesInput_ImageURLIsString(t *testing.T) {
-	msgs := []gogpt.ChatCompletionMessage{
+func TestMessagesToResponseInputItems_ImageURLIsString(t *testing.T) {
+	msgs := []ChatMessage{
 		{
-			Role: gogpt.ChatMessageRoleUser,
-			MultiContent: []gogpt.ChatMessagePart{
-				{Type: gogpt.ChatMessagePartTypeImageURL, ImageURL: &gogpt.ChatMessageImageURL{
+			Role: RoleUser,
+			MultiContent: []MessagePart{
+				{Type: PartTypeImageURL, ImageURL: &ImageURL{
 					URL:    "data:image/png;base64,abc123",
-					Detail: gogpt.ImageURLDetailAuto,
+					Detail: ImageDetailAuto,
 				}},
 			},
 		},
 	}
 
-	input := messagesToResponsesInput(msgs)
+	input := messagesToResponseInputItems(msgs)
 	if len(input) != 1 {
 		t.Fatalf("expected 1 input item, got %d", len(input))
 	}
 
+	rawItems := marshalInputItems(input)
 	var parsed map[string]any
-	if err := json.Unmarshal(input[0], &parsed); err != nil {
+	if err := json.Unmarshal(rawItems[0], &parsed); err != nil {
 		t.Fatalf("unmarshal error: %v", err)
 	}
 
@@ -283,30 +290,29 @@ func TestMessagesToResponsesInput_ImageURLIsString(t *testing.T) {
 		t.Errorf("detail = %v, want %q", part["detail"], "auto")
 	}
 
-	raw := string(input[0])
+	raw := string(rawItems[0])
 	if strings.Contains(raw, `"image_url":{"url":`) {
 		t.Error("image_url was serialized as an object (chat completions format), expected a plain string (responses API format)")
 	}
 	if !strings.Contains(raw, `"input_image"`) {
 		t.Error("expected type 'input_image' not found in output")
 	}
-	if !strings.Contains(raw, `"input_text"`) {
-	}
 }
 
-func TestMessagesToResponsesInput_TextPartIsInputText(t *testing.T) {
-	msgs := []gogpt.ChatCompletionMessage{
+func TestMessagesToResponseInputItems_TextPartIsInputText(t *testing.T) {
+	msgs := []ChatMessage{
 		{
-			Role: gogpt.ChatMessageRoleUser,
-			MultiContent: []gogpt.ChatMessagePart{
-				{Type: gogpt.ChatMessagePartTypeText, Text: "hello"},
+			Role: RoleUser,
+			MultiContent: []MessagePart{
+				{Type: PartTypeText, Text: "hello"},
 			},
 		},
 	}
 
-	input := messagesToResponsesInput(msgs)
+	input := messagesToResponseInputItems(msgs)
+	rawItems := marshalInputItems(input)
 	var parsed map[string]any
-	json.Unmarshal(input[0], &parsed)
+	json.Unmarshal(rawItems[0], &parsed)
 
 	content, _ := parsed["content"].([]any)
 	part, _ := content[0].(map[string]any)
@@ -318,8 +324,159 @@ func TestMessagesToResponsesInput_TextPartIsInputText(t *testing.T) {
 		t.Errorf("text = %v, want hello", part["text"])
 	}
 
-	raw := string(input[0])
+	raw := string(rawItems[0])
 	if strings.Contains(raw, `"type":"text"`) {
 		t.Error("found chat completions type 'text', expected responses API type 'input_text'")
+	}
+}
+
+func TestGogptToolsToResponseToolParams(t *testing.T) {
+	tools := []Tool{
+		{
+			Type: "function",
+			Function: &FunctionDefinition{
+				Name:        "get_weather",
+				Description: "Get weather",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"city": map[string]any{"type": "string"},
+					},
+				},
+			},
+		},
+	}
+
+	result := toolsToResponseToolParams(tools)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 tool, got %d", len(result))
+	}
+	if result[0].OfFunction == nil {
+		t.Fatal("expected OfFunction to be set")
+	}
+	if result[0].OfFunction.Name != "get_weather" {
+		t.Errorf("name = %q, want %q", result[0].OfFunction.Name, "get_weather")
+	}
+}
+
+func TestParseSDKResponseOutput(t *testing.T) {
+	responseJSON := `{
+		"id": "resp_123",
+		"output": [
+			{
+				"type": "message",
+				"role": "assistant",
+				"content": [
+					{"type": "output_text", "text": "Hello!"}
+				]
+			},
+			{
+				"type": "reasoning",
+				"summary": [
+					{"type": "summary_text", "text": "I thought about it"}
+				]
+			},
+			{
+				"type": "function_call",
+				"call_id": "call_abc",
+				"name": "get_weather",
+				"arguments": "{\"city\":\"NYC\"}"
+			}
+		],
+		"usage": {
+			"input_tokens": 100,
+			"output_tokens": 50,
+			"total_tokens": 150,
+			"input_tokens_details": {"cached_tokens": 20},
+			"output_tokens_details": {"reasoning_tokens": 10}
+		}
+	}`
+
+	var resp responses.Response
+	if err := json.Unmarshal([]byte(responseJSON), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	text, reasoning, toolCalls := parseSDKResponseOutput(resp)
+	if text != "Hello!" {
+		t.Errorf("text = %q, want %q", text, "Hello!")
+	}
+	if reasoning != "I thought about it" {
+		t.Errorf("reasoning = %q, want %q", reasoning, "I thought about it")
+	}
+	if len(toolCalls) != 1 {
+		t.Fatalf("toolCalls = %d, want 1", len(toolCalls))
+	}
+	if toolCalls[0].ID != "call_abc" {
+		t.Errorf("toolCall.ID = %q, want %q", toolCalls[0].ID, "call_abc")
+	}
+	if toolCalls[0].Function.Name != "get_weather" {
+		t.Errorf("toolCall.Name = %q, want %q", toolCalls[0].Function.Name, "get_weather")
+	}
+}
+
+func TestSDKResponseUsageToGogpt(t *testing.T) {
+	usageJSON := `{
+		"input_tokens": 100,
+		"output_tokens": 50,
+		"total_tokens": 150,
+		"input_tokens_details": {"cached_tokens": 20},
+		"output_tokens_details": {"reasoning_tokens": 10}
+	}`
+
+	var sdkUsage responses.ResponseUsage
+	if err := json.Unmarshal([]byte(usageJSON), &sdkUsage); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	usage := sdkResponseUsageToUsage(sdkUsage)
+	if usage.PromptTokens != 100 {
+		t.Errorf("PromptTokens = %d, want 100", usage.PromptTokens)
+	}
+	if usage.CompletionTokens != 50 {
+		t.Errorf("CompletionTokens = %d, want 50", usage.CompletionTokens)
+	}
+	if usage.PromptTokensDetails.CachedTokens != 20 {
+		t.Errorf("CachedTokens = %d, want 20", usage.PromptTokensDetails.CachedTokens)
+	}
+	if usage.CompletionTokensDetails.ReasoningTokens != 10 {
+		t.Errorf("ReasoningTokens = %d, want 10", usage.CompletionTokensDetails.ReasoningTokens)
+	}
+}
+
+func TestBuildResponseParams(t *testing.T) {
+	cfg := AIConfig{
+		Model:               "gpt-4o",
+		MaxCompletionTokens: 1024,
+		Temperature:         0.7,
+		TopP:                0.9,
+		ReasoningEffort:     "medium",
+		PreviousResponseID:  true,
+	}
+	input := []responses.ResponseInputItemUnionParam{
+		responses.ResponseInputItemParamOfMessage("hello", responses.EasyInputMessageRoleUser),
+	}
+
+	params := buildResponseParams(cfg, input, nil, "resp_prev")
+	if params.Model != "gpt-4o" {
+		t.Errorf("Model = %q, want %q", params.Model, "gpt-4o")
+	}
+	if params.PreviousResponseID != openai.String("resp_prev") {
+		t.Error("PreviousResponseID not set correctly")
+	}
+}
+
+func TestIsResponseIDError(t *testing.T) {
+	if !isResponseIDError(fmt.Errorf(`"code":"response_not_found"`)) {
+		t.Error("should match response_not_found")
+	}
+	if !isResponseIDError(fmt.Errorf(`"code":"invalid_previous_response_id"`)) {
+		t.Error("should match invalid_previous_response_id")
+	}
+	if isResponseIDError(fmt.Errorf("rate limit exceeded")) {
+		t.Error("should not match generic error")
+	}
+	if isResponseIDError(nil) {
+		t.Error("nil should not match")
 	}
 }

@@ -8,8 +8,6 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
-
-	gogpt "github.com/sashabaranov/go-openai"
 )
 
 func TestFormatSize(t *testing.T) {
@@ -205,58 +203,58 @@ func TestDetectImageURLs(t *testing.T) {
 func TestSanitizeMessages(t *testing.T) {
 	tests := []struct {
 		name      string
-		messages  []gogpt.ChatCompletionMessage
-		wantClean []gogpt.ChatCompletionMessage
+		messages  []ChatMessage
+		wantClean []ChatMessage
 	}{
 		{
 			name:      "empty messages",
-			messages:  []gogpt.ChatCompletionMessage{},
-			wantClean: []gogpt.ChatCompletionMessage{},
+			messages:  []ChatMessage{},
+			wantClean: []ChatMessage{},
 		},
 		{
 			name: "message without multi content",
-			messages: []gogpt.ChatCompletionMessage{
-				{Role: gogpt.ChatMessageRoleUser, Content: "hello"},
+			messages: []ChatMessage{
+				{Role: RoleUser, Content: "hello"},
 			},
-			wantClean: []gogpt.ChatCompletionMessage{
-				{Role: gogpt.ChatMessageRoleUser, Content: "hello"},
+			wantClean: []ChatMessage{
+				{Role: RoleUser, Content: "hello"},
 			},
 		},
 		{
 			name: "message with text part only",
-			messages: []gogpt.ChatCompletionMessage{
+			messages: []ChatMessage{
 				{
-					Role:         gogpt.ChatMessageRoleUser,
-					MultiContent: []gogpt.ChatMessagePart{{Type: gogpt.ChatMessagePartTypeText, Text: "hello"}},
+					Role:         RoleUser,
+					MultiContent: []MessagePart{{Type: PartTypeText, Text: "hello"}},
 				},
 			},
-			wantClean: []gogpt.ChatCompletionMessage{
+			wantClean: []ChatMessage{
 				{
-					Role:         gogpt.ChatMessageRoleUser,
-					MultiContent: []gogpt.ChatMessagePart{{Type: gogpt.ChatMessagePartTypeText, Text: "hello"}},
+					Role:         RoleUser,
+					MultiContent: []MessagePart{{Type: PartTypeText, Text: "hello"}},
 				},
 			},
 		},
 		{
 			name: "message with image URL without base64",
-			messages: []gogpt.ChatCompletionMessage{
+			messages: []ChatMessage{
 				{
-					Role: gogpt.ChatMessageRoleUser,
-					MultiContent: []gogpt.ChatMessagePart{
-						{Type: gogpt.ChatMessagePartTypeImageURL, ImageURL: &gogpt.ChatMessageImageURL{
+					Role: RoleUser,
+					MultiContent: []MessagePart{
+						{Type: PartTypeImageURL, ImageURL: &ImageURL{
 							URL:    "https://example.com/image.jpg",
-							Detail: gogpt.ImageURLDetailAuto,
+							Detail: ImageDetailAuto,
 						}},
 					},
 				},
 			},
-			wantClean: []gogpt.ChatCompletionMessage{
+			wantClean: []ChatMessage{
 				{
-					Role: gogpt.ChatMessageRoleUser,
-					MultiContent: []gogpt.ChatMessagePart{
-						{Type: gogpt.ChatMessagePartTypeImageURL, ImageURL: &gogpt.ChatMessageImageURL{
+					Role: RoleUser,
+					MultiContent: []MessagePart{
+						{Type: PartTypeImageURL, ImageURL: &ImageURL{
 							URL:    "https://example.com/image.jpg",
-							Detail: gogpt.ImageURLDetailAuto,
+							Detail: ImageDetailAuto,
 						}},
 					},
 				},
@@ -264,24 +262,24 @@ func TestSanitizeMessages(t *testing.T) {
 		},
 		{
 			name: "message with base64 data URL truncated",
-			messages: []gogpt.ChatCompletionMessage{
+			messages: []ChatMessage{
 				{
-					Role: gogpt.ChatMessageRoleUser,
-					MultiContent: []gogpt.ChatMessagePart{
-						{Type: gogpt.ChatMessagePartTypeImageURL, ImageURL: &gogpt.ChatMessageImageURL{
+					Role: RoleUser,
+					MultiContent: []MessagePart{
+						{Type: PartTypeImageURL, ImageURL: &ImageURL{
 							URL:    "data:image/jpeg;base64,/9j/4AAQSkZJRg==",
-							Detail: gogpt.ImageURLDetailAuto,
+							Detail: ImageDetailAuto,
 						}},
 					},
 				},
 			},
-			wantClean: []gogpt.ChatCompletionMessage{
+			wantClean: []ChatMessage{
 				{
-					Role: gogpt.ChatMessageRoleUser,
-					MultiContent: []gogpt.ChatMessagePart{
-						{Type: gogpt.ChatMessagePartTypeImageURL, ImageURL: &gogpt.ChatMessageImageURL{
+					Role: RoleUser,
+					MultiContent: []MessagePart{
+						{Type: PartTypeImageURL, ImageURL: &ImageURL{
 							URL:    "data:image/jpeg;base64,...[truncated]",
-							Detail: gogpt.ImageURLDetailAuto,
+							Detail: ImageDetailAuto,
 						}},
 					},
 				},
@@ -289,24 +287,24 @@ func TestSanitizeMessages(t *testing.T) {
 		},
 		{
 			name: "message with webp base64 data URL",
-			messages: []gogpt.ChatCompletionMessage{
+			messages: []ChatMessage{
 				{
-					Role: gogpt.ChatMessageRoleUser,
-					MultiContent: []gogpt.ChatMessagePart{
-						{Type: gogpt.ChatMessagePartTypeImageURL, ImageURL: &gogpt.ChatMessageImageURL{
+					Role: RoleUser,
+					MultiContent: []MessagePart{
+						{Type: PartTypeImageURL, ImageURL: &ImageURL{
 							URL:    "data:image/webp;base64,abcdef",
-							Detail: gogpt.ImageURLDetailLow,
+							Detail: ImageDetailLow,
 						}},
 					},
 				},
 			},
-			wantClean: []gogpt.ChatCompletionMessage{
+			wantClean: []ChatMessage{
 				{
-					Role: gogpt.ChatMessageRoleUser,
-					MultiContent: []gogpt.ChatMessagePart{
-						{Type: gogpt.ChatMessagePartTypeImageURL, ImageURL: &gogpt.ChatMessageImageURL{
+					Role: RoleUser,
+					MultiContent: []MessagePart{
+						{Type: PartTypeImageURL, ImageURL: &ImageURL{
 							URL:    "data:image/webp;base64,...[truncated]",
-							Detail: gogpt.ImageURLDetailLow,
+							Detail: ImageDetailLow,
 						}},
 					},
 				},
@@ -314,25 +312,25 @@ func TestSanitizeMessages(t *testing.T) {
 		},
 		{
 			name: "multiple messages with mixed content",
-			messages: []gogpt.ChatCompletionMessage{
-				{Role: gogpt.ChatMessageRoleUser, Content: "hello"},
+			messages: []ChatMessage{
+				{Role: RoleUser, Content: "hello"},
 				{
-					Role: gogpt.ChatMessageRoleUser,
-					MultiContent: []gogpt.ChatMessagePart{
-						{Type: gogpt.ChatMessagePartTypeText, Text: "what is this"},
-						{Type: gogpt.ChatMessagePartTypeImageURL, ImageURL: &gogpt.ChatMessageImageURL{
+					Role: RoleUser,
+					MultiContent: []MessagePart{
+						{Type: PartTypeText, Text: "what is this"},
+						{Type: PartTypeImageURL, ImageURL: &ImageURL{
 							URL: "data:image/png;base64,abc123",
 						}},
 					},
 				},
 			},
-			wantClean: []gogpt.ChatCompletionMessage{
-				{Role: gogpt.ChatMessageRoleUser, Content: "hello"},
+			wantClean: []ChatMessage{
+				{Role: RoleUser, Content: "hello"},
 				{
-					Role: gogpt.ChatMessageRoleUser,
-					MultiContent: []gogpt.ChatMessagePart{
-						{Type: gogpt.ChatMessagePartTypeText, Text: "what is this"},
-						{Type: gogpt.ChatMessagePartTypeImageURL, ImageURL: &gogpt.ChatMessageImageURL{
+					Role: RoleUser,
+					MultiContent: []MessagePart{
+						{Type: PartTypeText, Text: "what is this"},
+						{Type: PartTypeImageURL, ImageURL: &ImageURL{
 							URL: "data:image/png;base64,...[truncated]",
 						}},
 					},
@@ -341,19 +339,19 @@ func TestSanitizeMessages(t *testing.T) {
 		},
 		{
 			name: "nil ImageURL pointer preserved",
-			messages: []gogpt.ChatCompletionMessage{
+			messages: []ChatMessage{
 				{
-					Role: gogpt.ChatMessageRoleUser,
-					MultiContent: []gogpt.ChatMessagePart{
-						{Type: gogpt.ChatMessagePartTypeImageURL, ImageURL: nil},
+					Role: RoleUser,
+					MultiContent: []MessagePart{
+						{Type: PartTypeImageURL, ImageURL: nil},
 					},
 				},
 			},
-			wantClean: []gogpt.ChatCompletionMessage{
+			wantClean: []ChatMessage{
 				{
-					Role: gogpt.ChatMessageRoleUser,
-					MultiContent: []gogpt.ChatMessagePart{
-						{Type: gogpt.ChatMessagePartTypeImageURL, ImageURL: nil},
+					Role: RoleUser,
+					MultiContent: []MessagePart{
+						{Type: PartTypeImageURL, ImageURL: nil},
 					},
 				},
 			},
@@ -408,37 +406,37 @@ func TestSanitizeMessages(t *testing.T) {
 func TestCountContextImages(t *testing.T) {
 	tests := []struct {
 		name     string
-		messages []gogpt.ChatCompletionMessage
+		messages []ChatMessage
 		want     int
 	}{
 		{
 			name:     "empty messages",
-			messages: []gogpt.ChatCompletionMessage{},
+			messages: []ChatMessage{},
 			want:     0,
 		},
 		{
 			name: "message without multi content",
-			messages: []gogpt.ChatCompletionMessage{
-				{Role: gogpt.ChatMessageRoleUser, Content: "hello"},
+			messages: []ChatMessage{
+				{Role: RoleUser, Content: "hello"},
 			},
 			want: 0,
 		},
 		{
 			name: "message with text only",
-			messages: []gogpt.ChatCompletionMessage{
+			messages: []ChatMessage{
 				{
-					Role:         gogpt.ChatMessageRoleUser,
-					MultiContent: []gogpt.ChatMessagePart{{Type: gogpt.ChatMessagePartTypeText}},
+					Role:         RoleUser,
+					MultiContent: []MessagePart{{Type: PartTypeText}},
 				},
 			},
 			want: 0,
 		},
 		{
 			name: "message with one image",
-			messages: []gogpt.ChatCompletionMessage{
+			messages: []ChatMessage{
 				{
-					MultiContent: []gogpt.ChatMessagePart{
-						{Type: gogpt.ChatMessagePartTypeImageURL},
+					MultiContent: []MessagePart{
+						{Type: PartTypeImageURL},
 					},
 				},
 			},
@@ -446,12 +444,12 @@ func TestCountContextImages(t *testing.T) {
 		},
 		{
 			name: "message with multiple images",
-			messages: []gogpt.ChatCompletionMessage{
+			messages: []ChatMessage{
 				{
-					MultiContent: []gogpt.ChatMessagePart{
-						{Type: gogpt.ChatMessagePartTypeText},
-						{Type: gogpt.ChatMessagePartTypeImageURL},
-						{Type: gogpt.ChatMessagePartTypeImageURL},
+					MultiContent: []MessagePart{
+						{Type: PartTypeText},
+						{Type: PartTypeImageURL},
+						{Type: PartTypeImageURL},
 					},
 				},
 			},
@@ -459,16 +457,16 @@ func TestCountContextImages(t *testing.T) {
 		},
 		{
 			name: "multiple messages with images",
-			messages: []gogpt.ChatCompletionMessage{
+			messages: []ChatMessage{
 				{
-					MultiContent: []gogpt.ChatMessagePart{
-						{Type: gogpt.ChatMessagePartTypeImageURL},
+					MultiContent: []MessagePart{
+						{Type: PartTypeImageURL},
 					},
 				},
 				{
-					MultiContent: []gogpt.ChatMessagePart{
-						{Type: gogpt.ChatMessagePartTypeImageURL},
-						{Type: gogpt.ChatMessagePartTypeImageURL},
+					MultiContent: []MessagePart{
+						{Type: PartTypeImageURL},
+						{Type: PartTypeImageURL},
 					},
 				},
 			},
@@ -738,10 +736,10 @@ func TestBuildImageMessageNonImageURLPreserved(t *testing.T) {
 		var textPart string
 		var imageCount int
 		for _, part := range msg.MultiContent {
-			if part.Type == gogpt.ChatMessagePartTypeText {
+			if part.Type == PartTypeText {
 				textPart = part.Text
 			}
-			if part.Type == gogpt.ChatMessagePartTypeImageURL {
+			if part.Type == PartTypeImageURL {
 				imageCount++
 			}
 		}
@@ -770,10 +768,10 @@ func TestBuildImageMessageNonImageURLPreserved(t *testing.T) {
 		var textPart string
 		var imageCount int
 		for _, part := range msg.MultiContent {
-			if part.Type == gogpt.ChatMessagePartTypeText {
+			if part.Type == PartTypeText {
 				textPart = part.Text
 			}
-			if part.Type == gogpt.ChatMessagePartTypeImageURL {
+			if part.Type == PartTypeImageURL {
 				imageCount++
 			}
 		}
@@ -801,7 +799,7 @@ func TestBuildImageMessageNonImageURLPreserved(t *testing.T) {
 
 		var textPart string
 		for _, part := range msg.MultiContent {
-			if part.Type == gogpt.ChatMessagePartTypeText {
+			if part.Type == PartTypeText {
 				textPart = part.Text
 			}
 		}

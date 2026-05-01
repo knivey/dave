@@ -3,8 +3,6 @@ package main
 import (
 	"encoding/json"
 	"testing"
-
-	gogpt "github.com/sashabaranov/go-openai"
 )
 
 func TestExtendedMessageUnmarshal(t *testing.T) {
@@ -110,14 +108,14 @@ func TestExtendedMessageGetExtraField(t *testing.T) {
 
 func TestExtendedMessageBackwardCompatible(t *testing.T) {
 	// Test that we can still use standard ChatCompletionMessage where needed
-	stdMsg := gogpt.ChatCompletionMessage{
+	stdMsg := ChatMessage{
 		Role:    "user",
 		Content: "Hello",
 	}
 
 	// Convert to ExtendedMessage
 	var extMsg ExtendedMessage
-	extMsg.ChatCompletionMessage = stdMsg
+	extMsg.ChatMessage = stdMsg
 
 	// Should be able to convert back
 	result := extMsg.ToChatCompletionMessage()

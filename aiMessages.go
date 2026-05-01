@@ -3,12 +3,10 @@ package main
 import (
 	"encoding/json"
 	"strings"
-
-	gogpt "github.com/sashabaranov/go-openai"
 )
 
 type ExtendedMessage struct {
-	gogpt.ChatCompletionMessage
+	ChatMessage
 	ExtraFields map[string]json.RawMessage `json:"-"`
 }
 
@@ -18,17 +16,16 @@ func (m *ExtendedMessage) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
-	if err := json.Unmarshal(data, &m.ChatCompletionMessage); err != nil {
+	if err := json.Unmarshal(data, &m.ChatMessage); err != nil {
 		return err
 	}
 
 	standardFields := map[string]bool{
 		"role":              true,
 		"content":           true,
-		"refusal":           true,
+		"reasoning_content": true,
 		"multi_content":     true,
 		"name":              true,
-		"reasoning_content": true,
 		"function_call":     true,
 		"tool_calls":        true,
 		"tool_call_id":      true,
@@ -44,8 +41,8 @@ func (m *ExtendedMessage) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func (m *ExtendedMessage) ToChatCompletionMessage() gogpt.ChatCompletionMessage {
-	return m.ChatCompletionMessage
+func (m *ExtendedMessage) ToChatCompletionMessage() ChatMessage {
+	return m.ChatMessage
 }
 
 func (m *ExtendedMessage) GetExtraField(key string, dest interface{}) error {

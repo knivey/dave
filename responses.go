@@ -1,209 +1,108 @@
 package main
 
 import (
-	"bufio"
-	"bytes"
-	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
 	"strings"
 
-	gogpt "github.com/sashabaranov/go-openai"
+	openai "github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/responses"
+	"github.com/openai/openai-go/v3/shared"
 )
 
-type ResponsesRequest struct {
-	Model              string              `json:"model"`
-	Input              json.RawMessage     `json:"input"`
-	Instructions       string              `json:"instructions,omitempty"`
-	Tools              []ResponseTool      `json:"tools,omitempty"`
-	ToolChoice         any                 `json:"tool_choice,omitempty"`
-	Store              *bool               `json:"store,omitempty"`
-	PreviousResponseID string              `json:"previous_response_id,omitempty"`
-	MaxOutputTokens    int                 `json:"max_output_tokens,omitempty"`
-	Temperature        float32             `json:"temperature,omitempty"`
-	TopP               float32             `json:"top_p,omitempty"`
-	Stream             bool                `json:"stream,omitempty"`
-	Include            []string            `json:"include,omitempty"`
-	Reasoning          *ResponsesReasoning `json:"reasoning,omitempty"`
-	ServiceTier        string              `json:"service_tier,omitempty"`
-	Verbosity          string              `json:"verbosity,omitempty"`
-	ParallelToolCalls  *bool               `json:"parallel_tool_calls,omitempty"`
-}
-
-type ResponsesReasoning struct {
-	Effort string `json:"effort,omitempty"`
-}
-
-type ResponseTool struct {
-	Type        string         `json:"type"`
-	Name        string         `json:"name,omitempty"`
-	Description string         `json:"description,omitempty"`
-	Parameters  map[string]any `json:"parameters,omitempty"`
-	Strict      *bool          `json:"strict,omitempty"`
-}
-
-type ResponsesResponse struct {
-	ID                string          `json:"id"`
-	Object            string          `json:"object"`
-	CreatedAt         int64           `json:"created_at"`
-	Model             string          `json:"model"`
-	Status            string          `json:"status"`
-	Output            json.RawMessage `json:"output"`
-	OutputText        string          `json:"output_text,omitempty"`
-	Usage             *ResponsesUsage `json:"usage,omitempty"`
-	IncompleteDetails json.RawMessage `json:"incomplete_details,omitempty"`
-}
-
-type ResponsesUsage struct {
-	InputTokens         int                    `json:"input_tokens"`
-	OutputTokens        int                    `json:"output_tokens"`
-	TotalTokens         int                    `json:"total_tokens"`
-	InputTokensDetails  *ResponsesTokenDetails `json:"input_tokens_details,omitempty"`
-	OutputTokensDetails *ResponsesTokenDetails `json:"output_tokens_details,omitempty"`
-}
-
-type ResponsesTokenDetails struct {
-	CachedTokens    int `json:"cached_tokens,omitempty"`
-	ReasoningTokens int `json:"reasoning_tokens,omitempty"`
-}
-
-type ResponseOutputItem struct {
-	Type             string          `json:"type"`
-	ID               string          `json:"id,omitempty"`
-	Status           string          `json:"status,omitempty"`
-	Role             string          `json:"role,omitempty"`
-	Content          json.RawMessage `json:"content,omitempty"`
-	CallID           string          `json:"call_id,omitempty"`
-	Name             string          `json:"name,omitempty"`
-	Arguments        string          `json:"arguments,omitempty"`
-	Summary          json.RawMessage `json:"summary,omitempty"`
-	EncryptedContent string          `json:"encrypted_content,omitempty"`
-}
-
-type ResponseContentPart struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
-}
-
-type ResponseStreamEvent struct {
-	Type         string          `json:"type"`
-	Delta        string          `json:"delta,omitempty"`
-	OutputIndex  int             `json:"output_index,omitempty"`
-	ContentIndex int             `json:"content_index,omitempty"`
-	Item         json.RawMessage `json:"item,omitempty"`
-	Response     json.RawMessage `json:"response,omitempty"`
-	Arguments    string          `json:"arguments,omitempty"`
-	Text         string          `json:"text,omitempty"`
-}
-
-func messagesToResponsesInput(messages []gogpt.ChatCompletionMessage) []json.RawMessage {
-	input := make([]json.RawMessage, 0, len(messages)*2)
+func messagesToResponseInputItems(messages []ChatMessage) []responses.ResponseInputItemUnionParam {
+	input := make([]responses.ResponseInputItemUnionParam, 0, len(messages)*2)
 	for _, msg := range messages {
 		switch msg.Role {
-		case gogpt.ChatMessageRoleSystem:
-			b, _ := json.Marshal(map[string]any{
-				"role":    "system",
-				"content": msg.Content,
+		case RoleSystem:
+			input = append(input, responses.ResponseInputItemUnionParam{
+				OfMessage: &responses.EasyInputMessageParam{
+					Role: responses.EasyInputMessageRoleSystem,
+					Content: responses.EasyInputMessageContentUnionParam{
+						OfString: openai.String(msg.Content),
+					},
+				},
 			})
-			input = append(input, b)
 
-		case gogpt.ChatMessageRoleUser:
+		case RoleUser:
 			if len(msg.MultiContent) > 0 {
-				content := make([]map[string]any, 0, len(msg.MultiContent))
+				content := make(responses.ResponseInputMessageContentListParam, 0, len(msg.MultiContent))
 				for _, part := range msg.MultiContent {
 					switch part.Type {
-					case gogpt.ChatMessagePartTypeText:
-						content = append(content, map[string]any{
-							"type": "input_text",
-							"text": part.Text,
-						})
-					case gogpt.ChatMessagePartTypeImageURL:
-						entry := map[string]any{
-							"type":      "input_image",
-							"image_url": part.ImageURL.URL,
+					case PartTypeText:
+						content = append(content, responses.ResponseInputContentParamOfInputText(part.Text))
+					case PartTypeImageURL:
+						imgParam := responses.ResponseInputImageParam{
+							ImageURL: openai.String(part.ImageURL.URL),
 						}
 						if part.ImageURL.Detail != "" {
-							entry["detail"] = string(part.ImageURL.Detail)
+							imgParam.Detail = responses.ResponseInputImageDetail(part.ImageURL.Detail)
 						}
-						content = append(content, entry)
+						content = append(content, responses.ResponseInputContentUnionParam{
+							OfInputImage: &imgParam,
+						})
 					}
 				}
-				b, _ := json.Marshal(map[string]any{
-					"role":    "user",
-					"content": content,
-				})
-				input = append(input, b)
-			} else {
-				b, _ := json.Marshal(map[string]any{
-					"role":    "user",
-					"content": msg.Content,
-				})
-				input = append(input, b)
-			}
-
-		case gogpt.ChatMessageRoleAssistant:
-			if len(msg.ToolCalls) > 0 {
-				if msg.Content != "" {
-					b, _ := json.Marshal(map[string]any{
-						"type": "message",
-						"role": "assistant",
-						"content": []map[string]any{
-							{"type": "output_text", "text": msg.Content},
-						},
-					})
-					input = append(input, b)
-				}
-				for _, tc := range msg.ToolCalls {
-					b, _ := json.Marshal(map[string]any{
-						"type":      "function_call",
-						"call_id":   tc.ID,
-						"name":      tc.Function.Name,
-						"arguments": tc.Function.Arguments,
-					})
-					input = append(input, b)
-				}
-			} else {
-				b, _ := json.Marshal(map[string]any{
-					"type": "message",
-					"role": "assistant",
-					"content": []map[string]any{
-						{"type": "output_text", "text": msg.Content},
+				input = append(input, responses.ResponseInputItemUnionParam{
+					OfMessage: &responses.EasyInputMessageParam{
+						Role:    responses.EasyInputMessageRoleUser,
+						Content: responses.EasyInputMessageContentUnionParam{OfInputItemContentList: content},
 					},
 				})
-				input = append(input, b)
+			} else {
+				input = append(input, responses.ResponseInputItemUnionParam{
+					OfMessage: &responses.EasyInputMessageParam{
+						Role:    responses.EasyInputMessageRoleUser,
+						Content: responses.EasyInputMessageContentUnionParam{OfString: openai.String(msg.Content)},
+					},
+				})
 			}
 
-		case gogpt.ChatMessageRoleTool:
-			b, _ := json.Marshal(map[string]any{
-				"type":    "function_call_output",
-				"call_id": msg.ToolCallID,
-				"output":  msg.Content,
-			})
-			input = append(input, b)
+		case RoleAssistant:
+			if len(msg.ToolCalls) > 0 {
+				if msg.Content != "" {
+					input = append(input, responses.ResponseInputItemUnionParam{
+						OfMessage: &responses.EasyInputMessageParam{
+							Role:    responses.EasyInputMessageRoleAssistant,
+							Content: responses.EasyInputMessageContentUnionParam{OfString: openai.String(msg.Content)},
+						},
+					})
+				}
+				for _, tc := range msg.ToolCalls {
+					input = append(input, responses.ResponseInputItemParamOfFunctionCall(
+						tc.Function.Arguments, tc.ID, tc.Function.Name,
+					))
+				}
+			} else {
+				input = append(input, responses.ResponseInputItemUnionParam{
+					OfMessage: &responses.EasyInputMessageParam{
+						Role:    responses.EasyInputMessageRoleAssistant,
+						Content: responses.EasyInputMessageContentUnionParam{OfString: openai.String(msg.Content)},
+					},
+				})
+			}
+
+		case RoleTool:
+			input = append(input, responses.ResponseInputItemParamOfFunctionCallOutput(
+				msg.ToolCallID, msg.Content,
+			))
 		}
 	}
 	return input
 }
 
-func toolResultMsgsToInput(messages []gogpt.ChatCompletionMessage) []json.RawMessage {
-	input := make([]json.RawMessage, 0, len(messages))
+func toolResultMsgsToInputItems(messages []ChatMessage) []responses.ResponseInputItemUnionParam {
+	input := make([]responses.ResponseInputItemUnionParam, 0, len(messages))
 	for _, msg := range messages {
-		if msg.Role == gogpt.ChatMessageRoleTool {
-			b, _ := json.Marshal(map[string]any{
-				"type":    "function_call_output",
-				"call_id": msg.ToolCallID,
-				"output":  msg.Content,
-			})
-			input = append(input, b)
+		if msg.Role == RoleTool {
+			input = append(input, responses.ResponseInputItemParamOfFunctionCallOutput(
+				msg.ToolCallID, msg.Content,
+			))
 		}
 	}
 	return input
 }
 
-func gogptToolsToResponseTools(tools []gogpt.Tool) []ResponseTool {
-	result := make([]ResponseTool, 0, len(tools))
+func toolsToResponseToolParams(tools []Tool) []responses.ToolUnionParam {
+	result := make([]responses.ToolUnionParam, 0, len(tools))
 	for _, t := range tools {
 		if t.Function != nil {
 			var params map[string]any
@@ -212,54 +111,43 @@ func gogptToolsToResponseTools(tools []gogpt.Tool) []ResponseTool {
 					params = p
 				}
 			}
-			result = append(result, ResponseTool{
-				Type:        "function",
-				Name:        t.Function.Name,
-				Description: t.Function.Description,
-				Parameters:  params,
+			if params == nil {
+				params = map[string]any{"type": "object"}
+			}
+			result = append(result, responses.ToolUnionParam{
+				OfFunction: &responses.FunctionToolParam{
+					Name:        t.Function.Name,
+					Description: openai.String(t.Function.Description),
+					Parameters:  params,
+				},
 			})
 		}
 	}
 	return result
 }
 
-func parseResponseOutput(raw json.RawMessage) (text string, reasoning string, toolCalls []gogpt.ToolCall) {
-	if len(raw) == 0 {
-		return "", "", nil
-	}
-	var items []ResponseOutputItem
-	if err := json.Unmarshal(raw, &items); err != nil {
-		return "", "", nil
-	}
-	for _, item := range items {
+func parseSDKResponseOutput(resp responses.Response) (text string, reasoning string, toolCalls []ToolCall) {
+	for _, item := range resp.Output {
 		switch item.Type {
 		case "message":
-			if item.Role == "assistant" && len(item.Content) > 0 {
-				var parts []ResponseContentPart
-				json.Unmarshal(item.Content, &parts)
-				for _, p := range parts {
-					if p.Type == "output_text" {
-						text += p.Text
+			if item.Role == "assistant" {
+				for _, part := range item.Content {
+					if part.Type == "output_text" {
+						text += part.Text
 					}
 				}
 			}
 		case "reasoning":
-			if len(item.Summary) > 0 {
-				var summaries []map[string]string
-				json.Unmarshal(item.Summary, &summaries)
-				for _, s := range summaries {
-					if t, ok := s["text"]; ok {
-						reasoning += t
-					}
-				}
+			for _, s := range item.Summary {
+				reasoning += s.Text
 			}
 		case "function_call":
-			toolCalls = append(toolCalls, gogpt.ToolCall{
+			toolCalls = append(toolCalls, ToolCall{
 				ID:   item.CallID,
 				Type: "function",
-				Function: gogpt.FunctionCall{
+				Function: FunctionCall{
 					Name:      item.Name,
-					Arguments: item.Arguments,
+					Arguments: item.Arguments.OfString,
 				},
 			})
 		}
@@ -267,121 +155,66 @@ func parseResponseOutput(raw json.RawMessage) (text string, reasoning string, to
 	return text, reasoning, toolCalls
 }
 
-func buildResponsesRequest(cfg AIConfig, input []json.RawMessage, tools []ResponseTool, previousResponseID string) ResponsesRequest {
-	inputJSON, _ := json.Marshal(input)
-	req := ResponsesRequest{
-		Model:              cfg.Model,
-		Input:              inputJSON,
-		MaxOutputTokens:    cfg.MaxCompletionTokens,
-		Temperature:        cfg.Temperature,
-		TopP:               cfg.TopP,
-		Tools:              tools,
-		ServiceTier:        cfg.ServiceTier,
-		Verbosity:          cfg.Verbosity,
-		PreviousResponseID: previousResponseID,
+func buildResponseParams(cfg AIConfig, input []responses.ResponseInputItemUnionParam, tools []responses.ToolUnionParam, previousResponseID string) responses.ResponseNewParams {
+	params := responses.ResponseNewParams{
+		Model: cfg.Model,
+		Input: responses.ResponseNewParamsInputUnion{
+			OfInputItemList: input,
+		},
 	}
-	if req.MaxOutputTokens == 0 && cfg.MaxTokens > 0 {
-		req.MaxOutputTokens = cfg.MaxTokens
+	if cfg.MaxCompletionTokens > 0 {
+		params.MaxOutputTokens = openai.Int(int64(cfg.MaxCompletionTokens))
+	} else if cfg.MaxTokens > 0 {
+		params.MaxOutputTokens = openai.Int(int64(cfg.MaxTokens))
+	}
+	if cfg.Temperature > 0 {
+		params.Temperature = openai.Float(float64(cfg.Temperature))
+	}
+	if cfg.TopP > 0 {
+		params.TopP = openai.Float(float64(cfg.TopP))
 	}
 	if cfg.ReasoningEffort != "" {
-		req.Reasoning = &ResponsesReasoning{Effort: cfg.ReasoningEffort}
+		params.Reasoning = shared.ReasoningParam{
+			Effort: shared.ReasoningEffort(cfg.ReasoningEffort),
+		}
+	}
+	if previousResponseID != "" {
+		params.PreviousResponseID = openai.String(previousResponseID)
+	}
+	if cfg.ServiceTier != "" {
+		params.ServiceTier = responses.ResponseNewParamsServiceTier(cfg.ServiceTier)
+	}
+	if cfg.Verbosity != "" {
+		params.Text = responses.ResponseTextConfigParam{
+			Verbosity: responses.ResponseTextConfigVerbosity(cfg.Verbosity),
+		}
 	}
 	if len(tools) > 0 {
-		req.ToolChoice = "auto"
+		params.Tools = tools
+		params.ToolChoice = responses.ResponseNewParamsToolChoiceUnion{
+			OfToolChoiceMode: openai.Opt(responses.ToolChoiceOptionsAuto),
+		}
 		if cfg.ParallelToolCalls != nil {
-			req.ParallelToolCalls = cfg.ParallelToolCalls
+			params.ParallelToolCalls = openai.Bool(*cfg.ParallelToolCalls)
 		}
 	}
-	return req
+	return params
 }
 
-func callResponsesAPI(ctx context.Context, client *http.Client, baseURL, apiKey string, req ResponsesRequest) (*ResponsesResponse, error) {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshaling responses request: %w", err)
+func sdkResponseUsageToUsage(u responses.ResponseUsage) *Usage {
+	usage := &Usage{
+		PromptTokens:     int64(u.InputTokens),
+		CompletionTokens: int64(u.OutputTokens),
+		TotalTokens:      int64(u.TotalTokens),
 	}
-	apiURL := strings.TrimRight(baseURL, "/") + "/responses"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("creating responses request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("responses API call: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("responses API error %d: %s", resp.StatusCode, string(respBody))
-	}
-	var result ResponsesResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decoding responses response: %w", err)
-	}
-	return &result, nil
-}
-
-type responsesStreamReader struct {
-	scanner *bufio.Scanner
-}
-
-func newResponsesStreamReader(body io.Reader) *responsesStreamReader {
-	s := bufio.NewScanner(body)
-	s.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	return &responsesStreamReader{scanner: s}
-}
-
-func (r *responsesStreamReader) recv() (ResponseStreamEvent, error) {
-	var eventType string
-	var data string
-	for r.scanner.Scan() {
-		line := r.scanner.Text()
-		if line == "" {
-			if data == "" {
-				continue
-			}
-			if data == "[DONE]" {
-				return ResponseStreamEvent{}, io.EOF
-			}
-			var event ResponseStreamEvent
-			if err := json.Unmarshal([]byte(data), &event); err != nil {
-				data = ""
-				eventType = ""
-				continue
-			}
-			if eventType != "" && event.Type == "" {
-				event.Type = eventType
-			}
-			return event, nil
-		}
-		if strings.HasPrefix(line, "event: ") {
-			eventType = strings.TrimPrefix(line, "event: ")
-		} else if strings.HasPrefix(line, "data: ") {
-			data = strings.TrimPrefix(line, "data: ")
+	if u.InputTokensDetails.CachedTokens > 0 {
+		usage.PromptTokensDetails = &PromptTokensDetails{
+			CachedTokens: int64(u.InputTokensDetails.CachedTokens),
 		}
 	}
-	return ResponseStreamEvent{}, io.EOF
-}
-
-func responsesUsageToGogpt(u *ResponsesUsage) *gogpt.Usage {
-	if u == nil {
-		return nil
-	}
-	usage := &gogpt.Usage{
-		PromptTokens:     u.InputTokens,
-		CompletionTokens: u.OutputTokens,
-		TotalTokens:      u.TotalTokens,
-	}
-	if u.InputTokensDetails != nil && u.InputTokensDetails.CachedTokens > 0 {
-		usage.PromptTokensDetails = &gogpt.PromptTokensDetails{
-			CachedTokens: u.InputTokensDetails.CachedTokens,
-		}
-	}
-	if u.OutputTokensDetails != nil && u.OutputTokensDetails.ReasoningTokens > 0 {
-		usage.CompletionTokensDetails = &gogpt.CompletionTokensDetails{
-			ReasoningTokens: u.OutputTokensDetails.ReasoningTokens,
+	if u.OutputTokensDetails.ReasoningTokens > 0 {
+		usage.CompletionTokensDetails = &CompletionTokensDetails{
+			ReasoningTokens: int64(u.OutputTokensDetails.ReasoningTokens),
 		}
 	}
 	return usage

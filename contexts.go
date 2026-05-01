@@ -3,8 +3,6 @@ package main
 import (
 	"encoding/json"
 	"time"
-
-	gogpt "github.com/sashabaranov/go-openai"
 )
 
 func GetContextLastActive(key string) int64 {
@@ -34,7 +32,7 @@ func ClearContext(key string) {
 	DeleteContextLastActive(key)
 }
 
-func AddContext(config AIConfig, key string, message gogpt.ChatCompletionMessage, network, channel, nick string) []gogpt.ChatCompletionMessage {
+func AddContext(config AIConfig, key string, message ChatMessage, network, channel, nick string) []ChatMessage {
 	msgs := chatContexts.Add(key, config, message)
 	SetContextLastActive(key)
 

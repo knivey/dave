@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/chai2010/webp"
-	gogpt "github.com/sashabaranov/go-openai"
 	"golang.org/x/image/bmp"
 	"golang.org/x/image/draw"
 )
@@ -257,11 +256,11 @@ func decodeAny(r io.Reader) (image.Image, error) {
 	return img, err
 }
 
-func countContextImages(messages []gogpt.ChatCompletionMessage) int {
+func countContextImages(messages []ChatMessage) int {
 	count := 0
 	for _, msg := range messages {
 		for _, part := range msg.MultiContent {
-			if part.Type == gogpt.ChatMessagePartTypeImageURL {
+			if part.Type == PartTypeImageURL {
 				count++
 			}
 		}
@@ -269,19 +268,19 @@ func countContextImages(messages []gogpt.ChatCompletionMessage) int {
 	return count
 }
 
-func sanitizeMessages(messages []gogpt.ChatCompletionMessage) []gogpt.ChatCompletionMessage {
-	out := make([]gogpt.ChatCompletionMessage, len(messages))
+func sanitizeMessages(messages []ChatMessage) []ChatMessage {
+	out := make([]ChatMessage, len(messages))
 	for i, msg := range messages {
 		msgCopy := msg
 		if len(msgCopy.MultiContent) > 0 {
-			msgCopy.MultiContent = make([]gogpt.ChatMessagePart, len(msg.MultiContent))
+			msgCopy.MultiContent = make([]MessagePart, len(msg.MultiContent))
 			for j, part := range msg.MultiContent {
 				partCopy := part
-				if partCopy.Type == gogpt.ChatMessagePartTypeImageURL && partCopy.ImageURL != nil {
+				if partCopy.Type == PartTypeImageURL && partCopy.ImageURL != nil {
 					url := partCopy.ImageURL.URL
 					if idx := strings.Index(url, ","); idx != -1 {
 						mimeType := url[5:idx]
-						partCopy.ImageURL = &gogpt.ChatMessageImageURL{
+						partCopy.ImageURL = &ImageURL{
 							URL:    "data:" + mimeType + ",...[truncated]",
 							Detail: partCopy.ImageURL.Detail,
 						}
@@ -307,12 +306,12 @@ func stripSuccessfulURLs(text string, successfulURLs []string) string {
 	return strings.Join(strings.Fields(text), " ")
 }
 
-func buildImageMessage(text string, imageUrls []string, maxImages int, format string, quality, maxW, maxH int) (gogpt.ChatCompletionMessage, error) {
+func buildImageMessage(text string, imageUrls []string, maxImages int, format string, quality, maxW, maxH int) (ChatMessage, error) {
 	if len(imageUrls) > maxImages {
 		imageUrls = imageUrls[:maxImages]
 	}
 
-	var parts []gogpt.ChatMessagePart
+	var parts []MessagePart
 	var successfulURLs []string
 
 	for _, url := range imageUrls {
@@ -335,11 +334,11 @@ func buildImageMessage(text string, imageUrls []string, maxImages int, format st
 		b64 := base64.StdEncoding.EncodeToString(imgData)
 		dataURI = dataURI + b64
 
-		parts = append(parts, gogpt.ChatMessagePart{
-			Type: gogpt.ChatMessagePartTypeImageURL,
-			ImageURL: &gogpt.ChatMessageImageURL{
+		parts = append(parts, MessagePart{
+			Type: PartTypeImageURL,
+			ImageURL: &ImageURL{
 				URL:    dataURI,
-				Detail: gogpt.ImageURLDetailAuto,
+				Detail: ImageDetailAuto,
 			},
 		})
 		successfulURLs = append(successfulURLs, url)
@@ -348,18 +347,18 @@ func buildImageMessage(text string, imageUrls []string, maxImages int, format st
 	text = stripSuccessfulURLs(text, successfulURLs)
 
 	if text != "" {
-		parts = append([]gogpt.ChatMessagePart{{
-			Type: gogpt.ChatMessagePartTypeText,
+		parts = append([]MessagePart{{
+			Type: PartTypeText,
 			Text: text,
 		}}, parts...)
 	}
 
 	if len(parts) == 0 {
-		return gogpt.ChatCompletionMessage{}, fmt.Errorf("no valid images or text found")
+		return ChatMessage{}, fmt.Errorf("no valid images or text found")
 	}
 
-	return gogpt.ChatCompletionMessage{
-		Role:         gogpt.ChatMessageRoleUser,
+	return ChatMessage{
+		Role:         RoleUser,
 		MultiContent: parts,
 	}, nil
 }

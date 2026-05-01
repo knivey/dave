@@ -6,12 +6,11 @@ import (
 	"sync"
 	"time"
 
-	gogpt "github.com/sashabaranov/go-openai"
 	"golang.org/x/time/rate"
 )
 
 type ChatContext struct {
-	Messages   []gogpt.ChatCompletionMessage
+	Messages   []ChatMessage
 	Config     AIConfig
 	SessionID  int64
 	ConvID     string
@@ -19,7 +18,7 @@ type ChatContext struct {
 }
 
 type ChatContextStore interface {
-	Add(key string, config AIConfig, message gogpt.ChatCompletionMessage) []gogpt.ChatCompletionMessage
+	Add(key string, config AIConfig, message ChatMessage) []ChatMessage
 	Get(key string) ChatContext
 	Clear(key string)
 	Exists(key string) bool
@@ -36,7 +35,7 @@ var _ ChatContextStore = (*globalContextStore)(nil)
 
 type globalContextStore struct{}
 
-func (s *globalContextStore) Add(key string, config AIConfig, message gogpt.ChatCompletionMessage) []gogpt.ChatCompletionMessage {
+func (s *globalContextStore) Add(key string, config AIConfig, message ChatMessage) []ChatMessage {
 	chatContextsMutex.Lock()
 	defer chatContextsMutex.Unlock()
 	context := chatContextsMap[key]
@@ -46,7 +45,7 @@ func (s *globalContextStore) Add(key string, config AIConfig, message gogpt.Chat
 	}
 	context.Messages = append(context.Messages, message)
 	if len(context.Messages) > config.MaxHistory+1 {
-		newMsgs := []gogpt.ChatCompletionMessage{context.Messages[0]}
+		newMsgs := []ChatMessage{context.Messages[0]}
 		context.Messages = append(newMsgs, context.Messages[len(context.Messages)-config.MaxHistory:]...)
 	}
 	chatContextsMap[key] = context
@@ -74,9 +73,9 @@ func (s *globalContextStore) Exists(key string) bool {
 
 var chatContexts ChatContextStore = &globalContextStore{}
 
-func TruncateHistory(msgs []gogpt.ChatCompletionMessage, maxHistory int) []gogpt.ChatCompletionMessage {
+func TruncateHistory(msgs []ChatMessage, maxHistory int) []ChatMessage {
 	if len(msgs) > maxHistory+1 {
-		newMsgs := []gogpt.ChatCompletionMessage{msgs[0]}
+		newMsgs := []ChatMessage{msgs[0]}
 		return append(newMsgs, msgs[len(msgs)-maxHistory:]...)
 	}
 	return msgs

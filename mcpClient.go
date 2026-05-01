@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	gogpt "github.com/sashabaranov/go-openai"
 )
 
 const (
@@ -390,8 +389,8 @@ func (srv *MCPServer) callToolWithContext(parentCtx context.Context, toolName st
 	})
 }
 
-func getMCPTools(serverNames []string) []gogpt.Tool {
-	var tools []gogpt.Tool
+func getMCPTools(serverNames []string) []Tool {
+	var tools []Tool
 
 	for _, serverName := range serverNames {
 		mcpServersMu.Lock()
@@ -424,9 +423,9 @@ func getMCPTools(serverNames []string) []gogpt.Tool {
 				params["properties"] = map[string]any{}
 			}
 
-			tools = append(tools, gogpt.Tool{
+			tools = append(tools, Tool{
 				Type: "function",
-				Function: &gogpt.FunctionDefinition{
+				Function: &FunctionDefinition{
 					Name:        tool.Name,
 					Description: tool.Description,
 					Parameters:  params,

@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
-	gogpt "github.com/sashabaranov/go-openai"
-	"github.com/sashabaranov/go-openai/jsonschema"
+	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
+	"github.com/openai/openai-go/v3/shared"
 )
 
 type EnhancementResponse struct {
@@ -22,20 +24,31 @@ type EnhanceResult struct {
 	NegativePrompt string
 }
 
+var enhancementSchema = map[string]any{
+	"type": "object",
+	"properties": map[string]any{
+		"enhanced_prompt": map[string]any{"type": "string"},
+		"negative_prompt": map[string]any{"type": "string"},
+		"refused":         map[string]any{"type": "boolean"},
+		"reason":          map[string]any{"type": "string"},
+	},
+	"required":             []string{"enhanced_prompt", "negative_prompt", "refused", "reason"},
+	"additionalProperties": false,
+}
+
 func enhancePrompt(ctx context.Context, cfg Config, enhancementName, rawPrompt string) (*EnhanceResult, error) {
 	enhCfg, ok := cfg.Enhancements[enhancementName]
 	if !ok {
 		return nil, fmt.Errorf("enhancement %q not found", enhancementName)
 	}
 
-	schema, err := jsonschema.GenerateSchemaForType(EnhancementResponse{})
-	if err != nil {
-		return nil, fmt.Errorf("generating schema: %w", err)
+	clientOpts := []option.RequestOption{
+		option.WithAPIKey(enhCfg.Key),
 	}
-
-	aiConfig := gogpt.DefaultConfig(enhCfg.Key)
-	aiConfig.BaseURL = enhCfg.BaseURL
-	aiClient := gogpt.NewClientWithConfig(aiConfig)
+	if enhCfg.BaseURL != "" {
+		clientOpts = append(clientOpts, option.WithBaseURL(enhCfg.BaseURL))
+	}
+	client := openai.NewClient(clientOpts...)
 
 	timeout := time.Duration(enhCfg.Timeout) * time.Second
 	if timeout == 0 {
@@ -44,18 +57,19 @@ func enhancePrompt(ctx context.Context, cfg Config, enhancementName, rawPrompt s
 	enhanceCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	resp, err := aiClient.CreateChatCompletion(enhanceCtx, gogpt.ChatCompletionRequest{
+	resp, err := client.Chat.Completions.New(enhanceCtx, openai.ChatCompletionNewParams{
 		Model: enhCfg.Model,
-		Messages: []gogpt.ChatCompletionMessage{
-			{Role: gogpt.ChatMessageRoleSystem, Content: enhCfg.SystemPrompt},
-			{Role: gogpt.ChatMessageRoleUser, Content: rawPrompt},
+		Messages: []openai.ChatCompletionMessageParamUnion{
+			openai.SystemMessage(enhCfg.SystemPrompt),
+			openai.UserMessage(rawPrompt),
 		},
-		ResponseFormat: &gogpt.ChatCompletionResponseFormat{
-			Type: gogpt.ChatCompletionResponseFormatTypeJSONSchema,
-			JSONSchema: &gogpt.ChatCompletionResponseFormatJSONSchema{
-				Name:   "prompt_enhancement",
-				Schema: schema,
-				Strict: true,
+		ResponseFormat: openai.ChatCompletionNewParamsResponseFormatUnion{
+			OfJSONSchema: &shared.ResponseFormatJSONSchemaParam{
+				JSONSchema: shared.ResponseFormatJSONSchemaJSONSchemaParam{
+					Name:   "prompt_enhancement",
+					Schema: enhancementSchema,
+					Strict: openai.Bool(true),
+				},
 			},
 		},
 	})
@@ -65,7 +79,7 @@ func enhancePrompt(ctx context.Context, cfg Config, enhancementName, rawPrompt s
 
 	enhanced := strings.TrimSpace(resp.Choices[0].Message.Content)
 	var result EnhancementResponse
-	if err := schema.Unmarshal(enhanced, &result); err != nil {
+	if err := json.Unmarshal([]byte(enhanced), &result); err != nil {
 		return nil, fmt.Errorf("parsing enhancement response: %w", err)
 	}
 

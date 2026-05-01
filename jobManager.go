@@ -9,7 +9,6 @@ import (
 
 	"github.com/lrstanley/girc"
 	logxi "github.com/mgutz/logxi/v1"
-	gogpt "github.com/sashabaranov/go-openai"
 )
 
 var loggerJM = logxi.New("jobManager")
@@ -40,7 +39,7 @@ func init() {
 
 type chatRunnerInterface interface {
 	setChannel(channel, nick string)
-	runTurn(messages []gogpt.ChatCompletionMessage) ([]gogpt.ChatCompletionMessage, bool)
+	runTurn(messages []ChatMessage) ([]ChatMessage, bool)
 }
 
 var newChatRunnerFn = func(network Network, client *girc.Client, cfg AIConfig, ctx context.Context, output chan<- string) chatRunnerInterface {
@@ -225,9 +224,9 @@ func switchToSession(job *asyncJob) string {
 		return ""
 	}
 
-	var messages []gogpt.ChatCompletionMessage
+	var messages []ChatMessage
 	for _, dm := range dbMsgs {
-		msg := gogpt.ChatCompletionMessage{
+		msg := ChatMessage{
 			Role:    dm.Role,
 			Content: dm.Content,
 		}
@@ -238,7 +237,7 @@ func switchToSession(job *asyncJob) string {
 			msg.ReasoningContent = *dm.ReasoningContent
 		}
 		if dm.ToolCalls != nil {
-			var toolCalls []gogpt.ToolCall
+			var toolCalls []ToolCall
 			if err := json.Unmarshal([]byte(*dm.ToolCalls), &toolCalls); err == nil {
 				msg.ToolCalls = toolCalls
 			}
@@ -278,8 +277,8 @@ func injectAsyncResultFromDB(ctxKey string, ctx ChatContext, job pendingJob, net
 		resultText = *job.Result
 	}
 	content := fmt.Sprintf("[System: Background task completed — tool: %s, job: %s. Result:\n%s]", job.ToolName, job.JobID, resultText)
-	msg := gogpt.ChatCompletionMessage{
-		Role:    gogpt.ChatMessageRoleSystem,
+	msg := ChatMessage{
+		Role:    RoleSystem,
 		Content: content,
 	}
 	AddContext(ctx.Config, ctxKey, msg, network, channel, nick)
@@ -316,15 +315,15 @@ func recoverPendingJobs() {
 }
 
 type toolAsyncJob struct {
-	JobID        string
-	ToolName     string
-	MCPServer    string
-	Network      string
-	Channel      string
-	Nick         string
-	Prompt       string
-	SubmittedAt  time.Time
-	cancel    context.CancelFunc
+	JobID       string
+	ToolName    string
+	MCPServer   string
+	Network     string
+	Channel     string
+	Nick        string
+	Prompt      string
+	SubmittedAt time.Time
+	cancel      context.CancelFunc
 }
 
 var toolJobMgr struct {

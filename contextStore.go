@@ -6,7 +6,6 @@ import (
 	"time"
 
 	logxi "github.com/mgutz/logxi/v1"
-	gogpt "github.com/sashabaranov/go-openai"
 )
 
 var loggerCS = logxi.New("contextStore")
@@ -60,9 +59,9 @@ func LoadContextStore() {
 			continue
 		}
 
-		var messages []gogpt.ChatCompletionMessage
+		var messages []ChatMessage
 		for _, dm := range dbMsgs {
-			msg := gogpt.ChatCompletionMessage{
+			msg := ChatMessage{
 				Role:    dm.Role,
 				Content: dm.Content,
 			}
@@ -73,7 +72,7 @@ func LoadContextStore() {
 				msg.ReasoningContent = *dm.ReasoningContent
 			}
 			if dm.ToolCalls != nil {
-				var toolCalls []gogpt.ToolCall
+				var toolCalls []ToolCall
 				if err := json.Unmarshal([]byte(*dm.ToolCalls), &toolCalls); err == nil {
 					msg.ToolCalls = toolCalls
 				}

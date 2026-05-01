@@ -10,7 +10,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/lrstanley/girc"
-	gogpt "github.com/sashabaranov/go-openai"
 )
 
 func historySessions(network Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, args ...string) {
@@ -319,9 +318,9 @@ func historyResume(network Network, c *girc.Client, e girc.Event, args ...string
 		return
 	}
 
-	var messages []gogpt.ChatCompletionMessage
+	var messages []ChatMessage
 	for _, dm := range dbMsgs {
-		msg := gogpt.ChatCompletionMessage{
+		msg := ChatMessage{
 			Role:    dm.Role,
 			Content: dm.Content,
 		}
@@ -332,7 +331,7 @@ func historyResume(network Network, c *girc.Client, e girc.Event, args ...string
 			msg.ReasoningContent = *dm.ReasoningContent
 		}
 		if dm.ToolCalls != nil {
-			var toolCalls []gogpt.ToolCall
+			var toolCalls []ToolCall
 			if err := json.Unmarshal([]byte(*dm.ToolCalls), &toolCalls); err == nil {
 				msg.ToolCalls = toolCalls
 			}

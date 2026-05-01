@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/lrstanley/girc"
-	gogpt "github.com/sashabaranov/go-openai"
 )
 
 func setupJMTestDB(t *testing.T) {
@@ -76,7 +75,7 @@ type mockChatRunner struct {
 	setChannelCh     string
 	setChannelNick   string
 	runTurnCalled    int
-	runTurnFn        func(messages []gogpt.ChatCompletionMessage) ([]gogpt.ChatCompletionMessage, bool)
+	runTurnFn        func(messages []ChatMessage) ([]ChatMessage, bool)
 }
 
 func (m *mockChatRunner) setChannel(channel, nick string) {
@@ -85,7 +84,7 @@ func (m *mockChatRunner) setChannel(channel, nick string) {
 	m.setChannelNick = nick
 }
 
-func (m *mockChatRunner) runTurn(messages []gogpt.ChatCompletionMessage) ([]gogpt.ChatCompletionMessage, bool) {
+func (m *mockChatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 	m.runTurnCalled++
 	if m.runTurnFn != nil {
 		return m.runTurnFn(messages)
@@ -140,7 +139,7 @@ func setupMockDeps(t *testing.T) *mockBot {
 
 	newChatRunnerFn = func(network Network, client *girc.Client, cfg AIConfig, _ context.Context, _ chan<- string) chatRunnerInterface {
 		return &mockChatRunner{
-			runTurnFn: func(messages []gogpt.ChatCompletionMessage) ([]gogpt.ChatCompletionMessage, bool) {
+			runTurnFn: func(messages []ChatMessage) ([]ChatMessage, bool) {
 				return messages, true
 			},
 		}
@@ -176,7 +175,7 @@ func TestDeliverAsyncResult_SameSession(t *testing.T) {
 	insertTestMessage(t, sid, "user", "draw me a picture")
 
 	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []gogpt.ChatCompletionMessage{{Role: "system", Content: "sys"}, {Role: "user", Content: "draw"}},
+		Messages:  []ChatMessage{{Role: "system", Content: "sys"}, {Role: "user", Content: "draw"}},
 		Config:    cfg,
 		SessionID: sid,
 	}
@@ -239,7 +238,7 @@ func TestDeliverAsyncResult_DifferentSession(t *testing.T) {
 	insertTestMessage(t, sessionB, "user", "tell me a joke")
 
 	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []gogpt.ChatCompletionMessage{{Role: "system", Content: "sys"}, {Role: "user", Content: "joke"}},
+		Messages:  []ChatMessage{{Role: "system", Content: "sys"}, {Role: "user", Content: "joke"}},
 		Config:    cfg,
 		SessionID: sessionB,
 	}
@@ -317,7 +316,7 @@ func TestOnAsyncJobCompleted_UserBusyWaitsThenDelivers(t *testing.T) {
 	insertTestMessage(t, sessionB, "user", "tell me a joke")
 
 	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []gogpt.ChatCompletionMessage{{Role: "system", Content: "sys"}, {Role: "user", Content: "joke"}},
+		Messages:  []ChatMessage{{Role: "system", Content: "sys"}, {Role: "user", Content: "joke"}},
 		Config:    cfg,
 		SessionID: sessionB,
 	}
@@ -376,7 +375,7 @@ func TestOnAsyncJobCompleted_MultipleJobsWhileBusy(t *testing.T) {
 	insertTestMessage(t, sessionB, "user", "tell me a joke")
 
 	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []gogpt.ChatCompletionMessage{{Role: "system", Content: "sys"}, {Role: "user", Content: "joke"}},
+		Messages:  []ChatMessage{{Role: "system", Content: "sys"}, {Role: "user", Content: "joke"}},
 		Config:    cfg,
 		SessionID: sessionB,
 	}
@@ -444,7 +443,7 @@ func TestSwitchToSession_CompletesOldSession(t *testing.T) {
 	insertTestMessage(t, sessionB, "user", "hello B")
 
 	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []gogpt.ChatCompletionMessage{{Role: "system", Content: "sys prompt B"}},
+		Messages:  []ChatMessage{{Role: "system", Content: "sys prompt B"}},
 		Config:    cfg,
 		SessionID: sessionB,
 	}
@@ -524,7 +523,7 @@ func TestSwitchToSession_SameSessionIsNoop(t *testing.T) {
 	insertTestMessage(t, sid, "user", "hello")
 
 	originalCtx := ChatContext{
-		Messages:  []gogpt.ChatCompletionMessage{{Role: "system", Content: "sys"}, {Role: "user", Content: "hello"}},
+		Messages:  []ChatMessage{{Role: "system", Content: "sys"}, {Role: "user", Content: "hello"}},
 		Config:    cfg,
 		SessionID: sid,
 	}
@@ -560,7 +559,7 @@ func TestSwitchToSession_InvalidChatCommand(t *testing.T) {
 
 	sessionB := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
 	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []gogpt.ChatCompletionMessage{{Role: "system", Content: "sys"}},
+		Messages:  []ChatMessage{{Role: "system", Content: "sys"}},
 		Config:    makeTestAIConfig(),
 		SessionID: sessionB,
 	}
@@ -618,7 +617,7 @@ func TestDeliverAsyncResult_UsesMockRunner(t *testing.T) {
 	insertTestMessage(t, sid, "system", "sys")
 
 	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []gogpt.ChatCompletionMessage{{Role: "system", Content: "sys"}},
+		Messages:  []ChatMessage{{Role: "system", Content: "sys"}},
 		Config:    cfg,
 		SessionID: sid,
 	}
@@ -630,7 +629,7 @@ func TestDeliverAsyncResult_UsesMockRunner(t *testing.T) {
 	origNewRunner := newChatRunnerFn
 	newChatRunnerFn = func(network Network, client *girc.Client, c AIConfig, _ context.Context, _ chan<- string) chatRunnerInterface {
 		runner = &mockChatRunner{
-			runTurnFn: func(messages []gogpt.ChatCompletionMessage) ([]gogpt.ChatCompletionMessage, bool) {
+			runTurnFn: func(messages []ChatMessage) ([]ChatMessage, bool) {
 				return messages, true
 			},
 		}
@@ -676,7 +675,7 @@ func TestDeliverAsyncResult_RunnerSeesInjectedResult(t *testing.T) {
 	insertTestMessage(t, sid, "system", "sys")
 
 	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []gogpt.ChatCompletionMessage{{Role: "system", Content: "sys"}},
+		Messages:  []ChatMessage{{Role: "system", Content: "sys"}},
 		Config:    cfg,
 		SessionID: sid,
 	}
@@ -684,11 +683,11 @@ func TestDeliverAsyncResult_RunnerSeesInjectedResult(t *testing.T) {
 	createPendingJob(sid, "job-1", "generate_image_async", "img-mcp")
 	completePendingJob("job-1", "image url: http://example.com/img.png")
 
-	var receivedMessages []gogpt.ChatCompletionMessage
+	var receivedMessages []ChatMessage
 	origNewRunner := newChatRunnerFn
 	newChatRunnerFn = func(network Network, client *girc.Client, c AIConfig, _ context.Context, _ chan<- string) chatRunnerInterface {
 		return &mockChatRunner{
-			runTurnFn: func(messages []gogpt.ChatCompletionMessage) ([]gogpt.ChatCompletionMessage, bool) {
+			runTurnFn: func(messages []ChatMessage) ([]ChatMessage, bool) {
 				receivedMessages = messages
 				return messages, true
 			},
@@ -729,7 +728,7 @@ func TestDeliverAsyncResult_MultipleCompletedJobs(t *testing.T) {
 	insertTestMessage(t, sid, "system", "sys")
 
 	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []gogpt.ChatCompletionMessage{{Role: "system", Content: "sys"}},
+		Messages:  []ChatMessage{{Role: "system", Content: "sys"}},
 		Config:    cfg,
 		SessionID: sid,
 	}
@@ -743,7 +742,7 @@ func TestDeliverAsyncResult_MultipleCompletedJobs(t *testing.T) {
 	origNewRunner := newChatRunnerFn
 	newChatRunnerFn = func(network Network, client *girc.Client, c AIConfig, _ context.Context, _ chan<- string) chatRunnerInterface {
 		return &mockChatRunner{
-			runTurnFn: func(messages []gogpt.ChatCompletionMessage) ([]gogpt.ChatCompletionMessage, bool) {
+			runTurnFn: func(messages []ChatMessage) ([]ChatMessage, bool) {
 				turnCount++
 				return messages, true
 			},
@@ -779,7 +778,7 @@ func TestInjectAsyncResultFromDB(t *testing.T) {
 	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
 
 	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []gogpt.ChatCompletionMessage{{Role: "system", Content: "sys"}},
+		Messages:  []ChatMessage{{Role: "system", Content: "sys"}},
 		Config:    cfg,
 		SessionID: sid,
 	}
@@ -836,7 +835,7 @@ func TestInjectAsyncResultFromDB_NilResult(t *testing.T) {
 	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
 
 	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []gogpt.ChatCompletionMessage{{Role: "system", Content: "sys"}},
+		Messages:  []ChatMessage{{Role: "system", Content: "sys"}},
 		Config:    cfg,
 		SessionID: sid,
 	}
@@ -871,7 +870,7 @@ func TestOnAsyncJobCompleted_RemovesJobFromMap(t *testing.T) {
 	insertTestMessage(t, sid, "system", "sys")
 
 	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []gogpt.ChatCompletionMessage{{Role: "system", Content: "sys"}},
+		Messages:  []ChatMessage{{Role: "system", Content: "sys"}},
 		Config:    cfg,
 		SessionID: sid,
 	}
@@ -904,7 +903,7 @@ func TestOnAsyncJobCompleted_MarksCompletedInDB(t *testing.T) {
 	insertTestMessage(t, sid, "system", "sys")
 
 	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []gogpt.ChatCompletionMessage{{Role: "system", Content: "sys"}},
+		Messages:  []ChatMessage{{Role: "system", Content: "sys"}},
 		Config:    cfg,
 		SessionID: sid,
 	}
@@ -949,7 +948,7 @@ func TestDeliverAsyncResult_MarksJobsDelivered(t *testing.T) {
 	insertTestMessage(t, sid, "system", "sys")
 
 	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []gogpt.ChatCompletionMessage{{Role: "system", Content: "sys"}},
+		Messages:  []ChatMessage{{Role: "system", Content: "sys"}},
 		Config:    cfg,
 		SessionID: sid,
 	}
@@ -1063,8 +1062,8 @@ func TestSwitchToSession_DBMessagesWithToolCalls(t *testing.T) {
 
 	sessionA := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
 
-	toolCallsJSON, _ := json.Marshal([]gogpt.ToolCall{
-		{ID: "tc-1", Type: "function", Function: gogpt.FunctionCall{Name: "test_tool", Arguments: `{"arg":"val"}`}},
+	toolCallsJSON, _ := json.Marshal([]ToolCall{
+		{ID: "tc-1", Type: "function", Function: FunctionCall{Name: "test_tool", Arguments: `{"arg":"val"}`}},
 	})
 	toolCallsStr := string(toolCallsJSON)
 	insertDBMessage(sessionA, "system", "sys", nil, nil, nil)
@@ -1074,7 +1073,7 @@ func TestSwitchToSession_DBMessagesWithToolCalls(t *testing.T) {
 
 	sessionB := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
 	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []gogpt.ChatCompletionMessage{{Role: "system", Content: "sys B"}},
+		Messages:  []ChatMessage{{Role: "system", Content: "sys B"}},
 		Config:    cfg,
 		SessionID: sessionB,
 	}
@@ -1158,7 +1157,7 @@ func TestDeliverAsyncResult_RunningDuringTurn(t *testing.T) {
 	insertTestMessage(t, sid, "system", "sys")
 
 	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []gogpt.ChatCompletionMessage{{Role: "system", Content: "sys"}},
+		Messages:  []ChatMessage{{Role: "system", Content: "sys"}},
 		Config:    cfg,
 		SessionID: sid,
 	}
@@ -1173,7 +1172,7 @@ func TestDeliverAsyncResult_RunningDuringTurn(t *testing.T) {
 	origNewRunner := newChatRunnerFn
 	newChatRunnerFn = func(network Network, client *girc.Client, c AIConfig, _ context.Context, _ chan<- string) chatRunnerInterface {
 		return &mockChatRunner{
-			runTurnFn: func(messages []gogpt.ChatCompletionMessage) ([]gogpt.ChatCompletionMessage, bool) {
+			runTurnFn: func(messages []ChatMessage) ([]ChatMessage, bool) {
 				runningDuringTurn = queueMgr.IsRunning("testnet", "#test", "testuser")
 				wg.Done()
 				return messages, true

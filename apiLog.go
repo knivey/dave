@@ -87,7 +87,9 @@ func (l *APILogger) RestoreSession(sessionID int64, ctxKey string) {
 	if l == nil || sessionID == 0 {
 		return
 	}
-	l.getSession(sessionID, ctxKey)
+	if _, err := l.getSession(sessionID, ctxKey); err != nil {
+		logger.Error("failed to restore api log session", "session_id", sessionID, "error", err)
+	}
 }
 
 func (s *APISession) writeEntry(entryType string, body json.RawMessage) error {

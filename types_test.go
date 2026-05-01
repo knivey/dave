@@ -41,6 +41,14 @@ func TestSummarizeMessages(t *testing.T) {
 			wantNotContains: []string{longContent},
 		},
 		{
+			name: "multibyte utf8 truncated at rune boundary",
+			messages: []ChatMessage{
+				{Role: RoleUser, Content: strings.Repeat("🎉", 60)},
+			},
+			wantContains:    []string{strings.Repeat("🎉", 50) + "..."},
+			wantNotContains: []string{strings.Repeat("🎉", 51)},
+		},
+		{
 			name: "many turns collapses middle",
 			messages: []ChatMessage{
 				{Role: RoleSystem, Content: "sys"},

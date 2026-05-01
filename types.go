@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -114,8 +115,9 @@ func summarizeMessages(messages []ChatMessage) string {
 	truncate := func(s string) string {
 		s = strings.ReplaceAll(s, "\n", " ")
 		s = strings.TrimSpace(s)
-		if len(s) > summarizeContentLen {
-			return s[:summarizeContentLen] + "..."
+		if utf8.RuneCountInString(s) > summarizeContentLen {
+			runes := []rune(s)
+			return string(runes[:summarizeContentLen]) + "..."
 		}
 		return s
 	}

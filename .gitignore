@@ -10,5 +10,6 @@ incidents/
 mcps/img-mcp/prod.toml
 mcps/img-mcp/test.toml
 mcps/img-mcp/img-mcp
+mcps/img-mcp/data/*
 data/*
 logs/

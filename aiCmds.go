@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	markdowntoirc "github.com/knivey/dave/MarkdownToIRC"
@@ -17,6 +18,8 @@ import (
 	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/responses"
 )
+
+var responseChainMu sync.Map
 
 func completion(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx context.Context, output chan<- string, args ...string) {
 	var svcKey, svcBaseURL string
@@ -724,6 +727,10 @@ func (cr *chatRunner) handleRegisterBackgroundJob(messages []ChatMessage, tc Too
 }
 
 func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, bool) {
+	mu, _ := responseChainMu.LoadOrStore(cr.ctxKey, &sync.Mutex{})
+	mu.(*sync.Mutex).Lock()
+	defer mu.(*sync.Mutex).Unlock()
+
 	mcpTools := getMCPTools(cr.cfg.MCPs)
 	if len(mcpTools) > 0 {
 		mcpTools = append(mcpTools, registerBackgroundJobTool())

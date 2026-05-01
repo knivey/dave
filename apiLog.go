@@ -22,18 +22,25 @@ type apiLogEntry struct {
 }
 
 type APISession struct {
-	file *os.File
-	mu   sync.Mutex
+	file   *os.File
+	mu     sync.Mutex
+	ctxKey string
 }
 
 type APILogger struct {
 	cfg      APILogConfig
 	dir      string
 	mu       sync.Mutex
-	sessions map[string]*APISession
+	sessions map[int64]*APISession
 }
 
 var apiLogger *APILogger
+
+var nonAlphaNum = regexp.MustCompile(`[^a-zA-Z0-9]`)
+
+func sanitizeKey(key string) string {
+	return nonAlphaNum.ReplaceAllString(key, "_")
+}
 
 func NewAPILogger(cfg APILogConfig, configDir string) (*APILogger, error) {
 	dir := cfg.Dir
@@ -49,32 +56,38 @@ func NewAPILogger(cfg APILogConfig, configDir string) (*APILogger, error) {
 	return &APILogger{
 		cfg:      cfg,
 		dir:      dir,
-		sessions: make(map[string]*APISession),
+		sessions: make(map[int64]*APISession),
 	}, nil
 }
 
-var nonAlphaNum = regexp.MustCompile(`[^a-zA-Z0-9]`)
-
-func sanitizeKey(key string) string {
-	return nonAlphaNum.ReplaceAllString(key, "_")
+func apiLogFilename(ctxKey string, sessionID int64) string {
+	return fmt.Sprintf("%s_%d.jsonl", sanitizeKey(ctxKey), sessionID)
 }
 
-func (l *APILogger) getSession(ctxKey string) (*APISession, error) {
+func (l *APILogger) getSession(sessionID int64, ctxKey string) (*APISession, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if s, ok := l.sessions[ctxKey]; ok {
+	if s, ok := l.sessions[sessionID]; ok {
 		return s, nil
 	}
-	ts := time.Now().Format("20060102-150405")
-	name := fmt.Sprintf("%s_%s.jsonl", ts, sanitizeKey(ctxKey))
-	path := filepath.Join(l.dir, name)
+	if ctxKey == "" {
+		return nil, fmt.Errorf("no api log session for id %d and no ctxKey provided", sessionID)
+	}
+	path := filepath.Join(l.dir, apiLogFilename(ctxKey, sessionID))
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("creating api log file: %w", err)
 	}
-	s := &APISession{file: f}
-	l.sessions[ctxKey] = s
+	s := &APISession{file: f, ctxKey: ctxKey}
+	l.sessions[sessionID] = s
 	return s, nil
+}
+
+func (l *APILogger) RestoreSession(sessionID int64, ctxKey string) {
+	if l == nil || sessionID == 0 {
+		return
+	}
+	l.getSession(sessionID, ctxKey)
 }
 
 func (s *APISession) writeEntry(entryType string, body json.RawMessage) error {
@@ -92,11 +105,11 @@ func (s *APISession) writeEntry(entryType string, body json.RawMessage) error {
 	return err
 }
 
-func (l *APILogger) LogRequest(ctxKey string, body []byte) {
-	if l == nil {
+func (l *APILogger) LogRequest(sessionID int64, body []byte) {
+	if l == nil || sessionID == 0 {
 		return
 	}
-	s, err := l.getSession(ctxKey)
+	s, err := l.getSession(sessionID, "")
 	if err != nil {
 		return
 	}
@@ -105,11 +118,11 @@ func (l *APILogger) LogRequest(ctxKey string, body []byte) {
 	s.writeEntry("request", json.RawMessage(body))
 }
 
-func (l *APILogger) LogResponse(ctxKey string, body []byte) {
-	if l == nil {
+func (l *APILogger) LogResponse(sessionID int64, body []byte) {
+	if l == nil || sessionID == 0 {
 		return
 	}
-	s, err := l.getSession(ctxKey)
+	s, err := l.getSession(sessionID, "")
 	if err != nil {
 		return
 	}
@@ -118,11 +131,11 @@ func (l *APILogger) LogResponse(ctxKey string, body []byte) {
 	s.writeEntry("response", json.RawMessage(body))
 }
 
-func (l *APILogger) LogStreamChunk(ctxKey string, chunk []byte) {
-	if l == nil || !l.cfg.LogRawStream {
+func (l *APILogger) LogStreamChunk(sessionID int64, chunk []byte) {
+	if l == nil || !l.cfg.LogRawStream || sessionID == 0 {
 		return
 	}
-	s, err := l.getSession(ctxKey)
+	s, err := l.getSession(sessionID, "")
 	if err != nil {
 		return
 	}
@@ -131,11 +144,11 @@ func (l *APILogger) LogStreamChunk(ctxKey string, chunk []byte) {
 	s.writeEntry("stream_chunk", json.RawMessage(chunk))
 }
 
-func (l *APILogger) LogStreamResponse(ctxKey string, reconstructed json.RawMessage) {
-	if l == nil {
+func (l *APILogger) LogStreamResponse(sessionID int64, reconstructed json.RawMessage) {
+	if l == nil || sessionID == 0 {
 		return
 	}
-	s, err := l.getSession(ctxKey)
+	s, err := l.getSession(sessionID, "")
 	if err != nil {
 		return
 	}
@@ -156,24 +169,24 @@ func (l *APILogger) CloseAll() {
 	}
 }
 
-func (l *APILogger) GetSessionFilePath(ctxKey string) string {
-	if l == nil {
+func (l *APILogger) GetSessionFilePath(sessionID int64) string {
+	if l == nil || sessionID == 0 {
 		return ""
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	s, ok := l.sessions[ctxKey]
+	s, ok := l.sessions[sessionID]
 	if !ok {
 		return ""
 	}
 	return s.file.Name()
 }
 
-func (l *APILogger) SyncSession(ctxKey string) {
-	if l == nil {
+func (l *APILogger) SyncSession(sessionID int64) {
+	if l == nil || sessionID == 0 {
 		return
 	}
-	s, err := l.getSession(ctxKey)
+	s, err := l.getSession(sessionID, "")
 	if err != nil {
 		return
 	}

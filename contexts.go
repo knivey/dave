@@ -54,6 +54,7 @@ func AddContext(config AIConfig, key string, message ChatMessage, network, chann
 					chatContextsMap[key] = c
 				}
 				chatContextsMutex.Unlock()
+				apiLogger.RestoreSession(sid, key)
 			}
 		} else if ctx.ConvID != "" {
 			if err := updateDBSessionConvID(sid, ctx.ConvID); err != nil {

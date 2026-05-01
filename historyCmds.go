@@ -362,6 +362,7 @@ func historyResume(network Network, c *girc.Client, e girc.Event, args ...string
 	}
 	chatContextsMutex.Unlock()
 	SetContextLastActive(ctxKey)
+	apiLogger.RestoreSession(sessionID, ctxKey)
 
 	if theDB != nil {
 		theDB.Exec("UPDATE sessions SET status = 'active' WHERE id = ?", sessionID)

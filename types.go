@@ -1,5 +1,11 @@
 package main
 
+import (
+	"fmt"
+	"strconv"
+	"strings"
+)
+
 const (
 	RoleSystem    = "system"
 	RoleUser      = "user"
@@ -76,4 +82,108 @@ type PromptTokensDetails struct {
 
 type CompletionTokensDetails struct {
 	ReasoningTokens int64
+}
+
+const (
+	summarizeContentLen = 50
+	summarizeHeadTail   = 3
+)
+
+type messageTurn struct {
+	start int
+	end   int
+}
+
+func buildTurns(messages []ChatMessage) []messageTurn {
+	if len(messages) == 0 {
+		return nil
+	}
+	var turns []messageTurn
+	start := 0
+	for i, m := range messages {
+		if i > 0 && m.Role == RoleUser {
+			turns = append(turns, messageTurn{start: start, end: i})
+			start = i
+		}
+	}
+	turns = append(turns, messageTurn{start: start, end: len(messages)})
+	return turns
+}
+
+func summarizeMessages(messages []ChatMessage) string {
+	truncate := func(s string) string {
+		s = strings.ReplaceAll(s, "\n", " ")
+		s = strings.TrimSpace(s)
+		if len(s) > summarizeContentLen {
+			return s[:summarizeContentLen] + "..."
+		}
+		return s
+	}
+
+	formatMsg := func(i int, m ChatMessage) string {
+		var content string
+		if len(m.MultiContent) > 0 {
+			parts := make([]string, 0, len(m.MultiContent))
+			for _, p := range m.MultiContent {
+				if p.Type == PartTypeImageURL {
+					parts = append(parts, "[image]")
+				} else {
+					parts = append(parts, truncate(p.Text))
+				}
+			}
+			content = strings.Join(parts, ", ")
+		} else {
+			content = truncate(m.Content)
+		}
+		s := fmt.Sprintf("#%d %s: %s", i, m.Role, content)
+		if len(m.ToolCalls) > 0 {
+			s += fmt.Sprintf(" [tool_calls: %d]", len(m.ToolCalls))
+		}
+		if m.ReasoningContent != "" {
+			s += " [reasoning]"
+		}
+		return s
+	}
+
+	formatTurn := func(t messageTurn) string {
+		parts := make([]string, 0, t.end-t.start)
+		for i := t.start; i < t.end; i++ {
+			parts = append(parts, formatMsg(i, messages[i]))
+		}
+		return strings.Join(parts, " + ")
+	}
+
+	n := len(messages)
+	turns := buildTurns(messages)
+	nt := len(turns)
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("[%d messages, %d turns]", n, nt))
+
+	if nt <= summarizeHeadTail*2 {
+		for i, t := range turns {
+			sb.WriteString(" | Turn ")
+			sb.WriteString(strconv.Itoa(i))
+			sb.WriteString(": ")
+			sb.WriteString(formatTurn(t))
+		}
+		return sb.String()
+	}
+
+	for i := 0; i < summarizeHeadTail; i++ {
+		sb.WriteString(" | Turn ")
+		sb.WriteString(strconv.Itoa(i))
+		sb.WriteString(": ")
+		sb.WriteString(formatTurn(turns[i]))
+	}
+	omittedFirst := summarizeHeadTail
+	omittedLast := nt - summarizeHeadTail - 1
+	sb.WriteString(fmt.Sprintf(" | ... %d turns (#%d-#%d) omitted ...", omittedLast-omittedFirst+1, omittedFirst, omittedLast))
+	for i := nt - summarizeHeadTail; i < nt; i++ {
+		sb.WriteString(" | Turn ")
+		sb.WriteString(strconv.Itoa(i))
+		sb.WriteString(": ")
+		sb.WriteString(formatTurn(turns[i]))
+	}
+	return sb.String()
 }

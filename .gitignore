@@ -4,8 +4,6 @@ test/
 .idea
 testMD/testMD
 ignores.txt
-contexts.json
-contexts.json.tmp
 opencode.json
 api_logs/
 incidents/

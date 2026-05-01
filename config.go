@@ -386,7 +386,7 @@ func loadConfigDir(dir string) (Config, error) {
 	config.Database.SetDefaults()
 
 	if config.MaxSessionHistory == 0 {
-		config.MaxSessionHistory = 10
+		config.MaxSessionHistory = 100
 	}
 
 	return config, nil
@@ -401,7 +401,7 @@ func loadServicesFile(dir string, config *Config) error {
 	}
 	for name, service := range config.Services {
 		if service.MaxHistory == 0 {
-			service.MaxHistory = 8
+			service.MaxHistory = 100
 		}
 		if service.Parallel <= 0 {
 			service.Parallel = 1

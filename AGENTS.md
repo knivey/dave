@@ -40,7 +40,6 @@ No Makefile, no linter config. Use `go fmt` + `go vet`.
 - Config in TOML directory: `config/config.toml` (main), `config/services.toml`, `config/promptenhancements.toml`, `config/mcps.toml`, `config/completions.toml`, `config/chats.toml`, `config/sd.toml`, `config/comfy.toml`.
   - Missing command/service/promptenhancement/mcps files = empty maps (not fatal).
   - `ignores.txt` (see `.example`) for host ignores (wildcard).
-  - `contexts.json` (gitignored) for persistent chat history.
 - MCP servers are self-contained packages in `mcps/<mcp-name>/`. Each MCP includes its own source code, binary, config files, and resources (e.g., workflows).
   - `mcps/img-mcp/`: ComfyUI image generation MCP with prompt enhancement.
     - Binary: `mcps/img-mcp/img-mcp`

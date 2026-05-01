@@ -154,7 +154,7 @@ func (il *IncidentLogger) logIncident(cr *chatRunner, apiErr error, messages []C
 		ResponseID:  chatCtx.ResponseID,
 	}
 
-	info.APILogCopied = copyAPILog(cr.ctxKey, incidentDir)
+	info.APILogCopied = copyAPILog(chatCtx.SessionID, incidentDir)
 
 	if err := writeJSONFile(filepath.Join(incidentDir, "incident.json"), info); err != nil {
 		cr.logger.Error("failed to write incident.json", "error", err)
@@ -177,15 +177,15 @@ func (il *IncidentLogger) logIncident(cr *chatRunner, apiErr error, messages []C
 	cr.logger.Info("incident logged", "dir", incidentDirName)
 }
 
-func copyAPILog(ctxKey string, destDir string) bool {
+func copyAPILog(sessionID int64, destDir string) bool {
 	if apiLogger == nil {
 		return false
 	}
-	srcPath := apiLogger.GetSessionFilePath(ctxKey)
+	srcPath := apiLogger.GetSessionFilePath(sessionID)
 	if srcPath == "" {
 		return false
 	}
-	apiLogger.SyncSession(ctxKey)
+	apiLogger.SyncSession(sessionID)
 
 	src, err := os.Open(srcPath)
 	if err != nil {

@@ -251,6 +251,7 @@ func switchToSession(job *asyncJob) string {
 		Config:    currentCfg,
 		SessionID: job.SessionID,
 	}
+	apiLogger.RestoreSession(job.SessionID, job.CtxKey)
 
 	if theDB != nil {
 		theDB.Exec("UPDATE sessions SET status = 'active' WHERE id = ?", job.SessionID)

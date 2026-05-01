@@ -228,7 +228,6 @@ prod/
 └── templatevars.toml        # Custom template variables (optional)
 
 # These live in the working directory (where you run ./dave):
-contexts.json                # Legacy persistent chat history (auto-created)
 data/dave.db                 # SQLite database (sessions, messages, jobs)
 ignores.txt                  # Wildcard host ignores (optional)
 ```

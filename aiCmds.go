@@ -197,8 +197,13 @@ func (cr *chatRunner) setChannel(channel, nick string) {
 	cr.channel = channel
 	cr.nick = nick
 	cr.ctxKey = cr.network.Name + channel + nick
-	cr.transport.setAPILogger(apiLogger, cr.ctxKey)
+	cr.syncAPISessionID()
 	cr.syncConvID()
+}
+
+func (cr *chatRunner) syncAPISessionID() {
+	sessionID := GetContext(cr.ctxKey).SessionID
+	cr.transport.setAPILogger(apiLogger, sessionID)
 }
 
 func (cr *chatRunner) syncConvID() {
@@ -335,7 +340,7 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 					chunk := res.chunk
 					rawBytes := []byte(chunk.RawJSON())
 					if apiLogger != nil {
-						apiLogger.LogStreamChunk(cr.ctxKey, rawBytes)
+						apiLogger.LogStreamChunk(cr.transport.sessionID, rawBytes)
 					}
 
 					chunkReasoning := ""
@@ -423,7 +428,7 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 				}
 			}
 
-			logStreamCompletion(cr.ctxKey, streamModel, fullContent, reasoningBuffer, accumulatedToolCalls, streamUsage, assistantRole)
+			logStreamCompletion(cr.transport.sessionID, streamModel, fullContent, reasoningBuffer, accumulatedToolCalls, streamUsage, assistantRole)
 
 			flushStreamedOutput := func() {
 				cr.logger.Info(fullContent)
@@ -1010,7 +1015,7 @@ func (cr *chatRunner) callResponsesStream(ctx context.Context, params responses.
 
 			if apiLogger != nil {
 				if raw, err := json.Marshal(res.event); err == nil {
-					apiLogger.LogStreamChunk(cr.ctxKey, raw)
+					apiLogger.LogStreamChunk(cr.transport.sessionID, raw)
 				}
 			}
 
@@ -1061,7 +1066,7 @@ streamDone:
 		return nil, fmt.Errorf("responses stream ended without response.completed event")
 	}
 
-	logStreamCompletion(cr.ctxKey, cr.cfg.Model, fullText, reasoningBuffer, nil, sdkResponseUsageToUsage(completedResponse.Usage), RoleAssistant)
+	logStreamCompletion(cr.transport.sessionID, cr.cfg.Model, fullText, reasoningBuffer, nil, sdkResponseUsageToUsage(completedResponse.Usage), RoleAssistant)
 
 	if streamingRenderer != nil {
 		for _, line := range streamingRenderer.Process("") {
@@ -1175,10 +1180,12 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 	}
 
 	messages = AddContext(cfg, ctx_key, userMsg, network.Name, e.Params[0], e.Source.Name)
-	runner.logger.Debug("running completion with messages:", "messages", sanitizeMessages(messages))
+	runner.syncAPISessionID()
+	runner.logger.Debug("running completion", "summary", summarizeMessages(messages))
 	runner.syncConvID()
 
 	messages, _ = runner.runTurn(messages)
+	runner.logger.Debug("completion finished", "api_log", apiLogger.GetSessionFilePath(GetContext(runner.ctxKey).SessionID))
 
 	if theDB != nil {
 		chatContextsMutex.Lock()
@@ -1256,7 +1263,7 @@ func registerBackgroundJobTool() Tool {
 	}
 }
 
-func logStreamCompletion(ctxKey, model, content, reasoning string, toolCalls []ToolCall, usage *Usage, role string) {
+func logStreamCompletion(sessionID int64, model, content, reasoning string, toolCalls []ToolCall, usage *Usage, role string) {
 	if apiLogger == nil {
 		return
 	}
@@ -1289,5 +1296,5 @@ func logStreamCompletion(ctxKey, model, content, reasoning string, toolCalls []T
 	if err != nil {
 		return
 	}
-	apiLogger.LogStreamResponse(ctxKey, body)
+	apiLogger.LogStreamResponse(sessionID, body)
 }

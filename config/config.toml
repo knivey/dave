@@ -8,7 +8,7 @@
 #   started_msg         (string)              Message shown when processing starts. Supports {nick}, {wait}
 #   max_queue_depth     (int, default: 5)     Max queued requests per network
 #   ratemsgs            (string array)        Random messages shown when rate-limited
-#   max_session_history (int, default: 10)    Max stored sessions per command per channel
+#   max_session_history (int, default: 100)   Max stored sessions per command per channel
 #
 # [database] options:
 #   path                (string, default: "data/dave.db")  SQLite database path
@@ -66,7 +66,7 @@
 # started_msg = "\x0306\u25b6 {nick}: Processing your request (waited {wait})...\x0f"
 # max_queue_depth = 5
 # ratemsgs = ["slow down!"]
-# max_session_history = 10
+# max_session_history = 100
 #
 # [database]
 # path = "data/dave.db"

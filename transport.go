@@ -20,7 +20,7 @@ type daveTransport struct {
 	lastRequestBody []byte
 
 	apiLogger *APILogger
-	ctxKey    string
+	sessionID int64
 	isStream  bool
 }
 
@@ -35,9 +35,9 @@ func newDaveTransport(extraBody map[string]any, extraHeaders map[string]string) 
 	}
 }
 
-func (t *daveTransport) setAPILogger(logger *APILogger, ctxKey string) {
+func (t *daveTransport) setAPILogger(logger *APILogger, sessionID int64) {
 	t.apiLogger = logger
-	t.ctxKey = ctxKey
+	t.sessionID = sessionID
 }
 
 func (t *daveTransport) setExtraHeaders(headers map[string]string) {
@@ -87,7 +87,7 @@ func (t *daveTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		t.lastRequestBody = finalBody
 		t.mu.Unlock()
 		if t.apiLogger != nil {
-			t.apiLogger.LogRequest(t.ctxKey, finalBody)
+			t.apiLogger.LogRequest(t.sessionID, finalBody)
 		}
 	}
 
@@ -117,7 +117,7 @@ func (t *daveTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			resp.Body = io.NopCloser(bytes.NewReader(body))
 
 			if t.apiLogger != nil {
-				t.apiLogger.LogResponse(t.ctxKey, body)
+				t.apiLogger.LogResponse(t.sessionID, body)
 			}
 		}
 	}

@@ -9,7 +9,7 @@
 #   maxtokens            (int)             Max tokens per response (legacy, prefer maxcompletiontokens)
 #   maxcompletiontokens  (int)             Max completion tokens per response
 #   temperature          (float)           Sampling temperature (0=deterministic, default: 0)
-#   maxhistory           (int, default: 8) Max conversation turns sent as context
+#   maxhistory           (int, default: 100) Max conversation turns sent as context
 #   imageformat          (string, default: "jpg")  Image format: "jpg", "jpeg", or "webp"
 #   imagequality         (int 1-100, default: 75)   Image quality percentage
 #   maximagesize         (string, default: "1024x1024") Max image dimensions "WxH"
@@ -29,7 +29,7 @@
 # maxtokens = 500
 # maxcompletiontokens = 600
 # temperature = 0.7
-# maxhistory = 8
+# maxhistory = 100
 # imageformat = "jpg"
 # imagequality = 75
 # maximagesize = "1024x1024"

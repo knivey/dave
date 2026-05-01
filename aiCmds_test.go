@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
+	logxi "github.com/mgutz/logxi/v1"
 	openai "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
-	logxi "github.com/mgutz/logxi/v1"
 )
 
 func makeResponsesAPIResponse(id, text string) map[string]any {
@@ -78,11 +78,11 @@ func TestRunTurnResponses_ConcurrentSerialization(t *testing.T) {
 
 	ctxKey := "testnet#101shrew"
 	cfg := AIConfig{
-		Model:             "test-model",
-		ResponsesAPI:      true,
+		Model:              "test-model",
+		ResponsesAPI:       true,
 		PreviousResponseID: true,
-		MaxHistory:        20,
-		Timeout:           10 * time.Second,
+		MaxHistory:         20,
+		Timeout:            10 * time.Second,
 	}
 
 	chatContextsMap[ctxKey] = ChatContext{
@@ -188,11 +188,11 @@ func TestRunTurnResponses_DifferentCtxKeysParallel(t *testing.T) {
 	defer server.Close()
 
 	cfg := AIConfig{
-		Model:             "test-model",
-		ResponsesAPI:      true,
+		Model:              "test-model",
+		ResponsesAPI:       true,
 		PreviousResponseID: true,
-		MaxHistory:        20,
-		Timeout:           10 * time.Second,
+		MaxHistory:         20,
+		Timeout:            10 * time.Second,
 	}
 
 	key1 := "testnet#101alice"

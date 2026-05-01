@@ -100,6 +100,7 @@ func LoadContextStore() {
 				}(),
 			}
 			contextLastActive[s.ContextKey] = time.Now().Unix()
+			apiLogger.RestoreSession(s.ID, s.ContextKey)
 			loggerCS.Info("Loaded session", "id", s.ID, "key", s.ContextKey, "command", s.ChatCommand, "messages", len(messages))
 		} else {
 			loggerCS.Warn("skipping session with no messages", "id", s.ID, "key", s.ContextKey)

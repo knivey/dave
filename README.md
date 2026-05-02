@@ -858,7 +858,7 @@ Create `ignores.txt` with wildcard patterns (one per line):
 | Library | Purpose |
 |---------|---------|
 | [lrstanley/girc](https://github.com/lrstanley/girc) | IRC client |
-| [sashabaranov/go-openai](https://github.com/sashabaranov/go-openai) | OpenAI API |
+| [openai/openai-go](https://github.com/openai/openai-go) | OpenAI API |
 | [modelcontextprotocol/go-sdk](https://github.com/modelcontextprotocol/go-sdk) | MCP protocol |
 | [rivo/tview](https://github.com/rivo/tview) | Terminal UI |
 | [yuin/goldmark](https://github.com/yuin/goldmark) | Markdown parsing |

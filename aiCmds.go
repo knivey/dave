@@ -490,11 +490,7 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 
 			AddContext(cr.cfg, cr.ctxKey, assistantMsg, cr.network.Name, cr.channel, cr.nick)
 
-			var registeredJob bool
-			messages, registeredJob = cr.executeToolCalls(messages, accumulatedToolCalls)
-			if registeredJob {
-				return messages, true
-			}
+			messages, _ = cr.executeToolCalls(messages, accumulatedToolCalls)
 			continue
 		}
 
@@ -601,11 +597,7 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 			cr.logger.Info("reasoning", "content", reasoning)
 		}
 
-		var registeredJob bool
-		messages, registeredJob = cr.executeToolCalls(messages, toolCalls)
-		if registeredJob {
-			return messages, true
-		}
+		messages, _ = cr.executeToolCalls(messages, toolCalls)
 	}
 }
 
@@ -817,12 +809,8 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 			cr.logger.Info("assistant made tool calls", "count", len(toolCalls))
 			logUsage(cr.logger, sdkResponseUsageToUsage(resp.Usage))
 
-			var registeredJob bool
 			numToolCalls := len(toolCalls)
-			messages, registeredJob = cr.executeToolCalls(messages, toolCalls)
-			if registeredJob {
-				return messages, true
-			}
+			messages, _ = cr.executeToolCalls(messages, toolCalls)
 
 			if cr.cfg.PreviousResponseID && currentResponseID != "" {
 				toolResultMsgs := messages[len(messages)-numToolCalls:]
@@ -938,12 +926,8 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 			cr.logger.Info("reasoning", "content", reasoning)
 		}
 
-		var registeredJob bool
 		numToolCalls := len(toolCalls)
-		messages, registeredJob = cr.executeToolCalls(messages, toolCalls)
-		if registeredJob {
-			return messages, true
-		}
+		messages, _ = cr.executeToolCalls(messages, toolCalls)
 
 		if cr.cfg.PreviousResponseID && currentResponseID != "" {
 			toolResultMsgs := messages[len(messages)-numToolCalls:]

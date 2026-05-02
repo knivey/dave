@@ -201,11 +201,12 @@ func buildResponseParams(cfg AIConfig, input []responses.ResponseInputItemUnionP
 	return params
 }
 
-func sdkResponseUsageToUsage(u responses.ResponseUsage) *Usage {
+func sdkResponseUsageToUsage(u responses.ResponseUsage, status string) *Usage {
 	usage := &Usage{
 		PromptTokens:     int64(u.InputTokens),
 		CompletionTokens: int64(u.OutputTokens),
 		TotalTokens:      int64(u.TotalTokens),
+		FinishReason:     status,
 	}
 	if u.InputTokensDetails.CachedTokens > 0 {
 		usage.PromptTokensDetails = &PromptTokensDetails{

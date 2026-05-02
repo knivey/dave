@@ -85,9 +85,24 @@ type dbSession struct {
 	FirstMessage string  `db:"first_message"`
 	ConvID       *string `db:"conv_id"`
 	ResponseID   *string `db:"response_id"`
+	Service      string  `db:"service"`
+	Model        string  `db:"model"`
 	Status       string  `db:"status"`
 	CreatedAt    string  `db:"created_at"`
 	LastActive   string  `db:"last_active"`
+}
+
+type dbTurnUsage struct {
+	ID               int64  `db:"id"`
+	SessionID        int64  `db:"session_id"`
+	PromptTokens     int    `db:"prompt_tokens"`
+	CompletionTokens int    `db:"completion_tokens"`
+	CachedTokens     int    `db:"cached_tokens"`
+	ReasoningTokens  int    `db:"reasoning_tokens"`
+	FinishReason     string `db:"finish_reason"`
+	APIPath          string `db:"api_path"`
+	DurationMs       int    `db:"duration_ms"`
+	CreatedAt        string `db:"created_at"`
 }
 
 type dbMessage struct {
@@ -102,10 +117,10 @@ type dbMessage struct {
 	CreatedAt        string  `db:"created_at"`
 }
 
-func createDBSession(contextKey, network, channel, nick, chatCommand, convID string) (int64, error) {
+func createDBSession(contextKey, network, channel, nick, chatCommand, convID, service, model string) (int64, error) {
 	result, err := theDB.Exec(
-		"INSERT INTO sessions (context_key, network, channel, nick, chat_command, conv_id, status) VALUES (?, ?, ?, ?, ?, ?, 'active')",
-		contextKey, network, channel, nick, chatCommand, convID,
+		"INSERT INTO sessions (context_key, network, channel, nick, chat_command, conv_id, service, model, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')",
+		contextKey, network, channel, nick, chatCommand, convID, service, model,
 	)
 	if err != nil {
 		return 0, err
@@ -148,6 +163,24 @@ func insertDBMessage(sessionID int64, role, content string, toolCallsJSON *strin
 	_, err = theDB.Exec(
 		"UPDATE sessions SET last_active = CURRENT_TIMESTAMP WHERE id = ?",
 		sessionID,
+	)
+	return err
+}
+
+func insertDBTurnUsage(sessionID int64, usage *Usage, finishReason, apiPath string, durationMs int) error {
+	if usage == nil || sessionID == 0 {
+		return nil
+	}
+	var cachedTokens, reasoningTokens int
+	if usage.PromptTokensDetails != nil {
+		cachedTokens = int(usage.PromptTokensDetails.CachedTokens)
+	}
+	if usage.CompletionTokensDetails != nil {
+		reasoningTokens = int(usage.CompletionTokensDetails.ReasoningTokens)
+	}
+	_, err := theDB.Exec(
+		"INSERT INTO turn_usage (session_id, prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens, finish_reason, api_path, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+		sessionID, usage.PromptTokens, usage.CompletionTokens, cachedTokens, reasoningTokens, finishReason, apiPath, durationMs,
 	)
 	return err
 }

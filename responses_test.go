@@ -429,7 +429,7 @@ func TestSDKResponseUsageToGogpt(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	usage := sdkResponseUsageToUsage(sdkUsage)
+	usage := sdkResponseUsageToUsage(sdkUsage, "completed")
 	if usage.PromptTokens != 100 {
 		t.Errorf("PromptTokens = %d, want 100", usage.PromptTokens)
 	}

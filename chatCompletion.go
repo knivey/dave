@@ -157,6 +157,9 @@ func parseChatCompletionResponse(resp openai.ChatCompletion) (string, string, []
 
 	var usage *Usage
 	usage = sdkChatUsageToUsage(resp.Usage)
+	if usage != nil {
+		usage.FinishReason = string(choice.FinishReason)
+	}
 
 	reasoning := ""
 	if raw, ok := msg.JSON.ExtraFields["reasoning_content"]; ok && raw.Valid() {

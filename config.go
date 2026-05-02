@@ -16,24 +16,24 @@ import (
 var globalRand = rand.New(rand.NewSource(uint64(time.Now().UnixNano())))
 
 type Config struct {
-	Trigger           string
-	Quitmsg           string
-	Networks          map[string]Network
-	Services          map[string]Service
-	Commands          Commands
-	QueueMsgs         []string `toml:"queue_msgs"`
-	StartedMsg        string   `toml:"started_msg"`
-	MaxQueueDepth     int      `toml:"max_queue_depth"`
-	Ratemsgs          []string
-	UploadURL         string `toml:"uploadurl"`
-	Database          DatabaseConfig
-	MCPs              map[string]MCPConfig `toml:"mcps"`
-	TUI               TUIConfig
-	APILog            APILogConfig      `toml:"api_log"`
-	IncidentLog       IncidentConfig    `toml:"incident_log"`
-	Pastebin          PastebinConfig    `toml:"pastebin"`
-	TemplateVars      map[string]string `toml:"-"`
-	SessionsDisplayLimit int             `toml:"sessions_display_limit"`
+	Trigger              string
+	Quitmsg              string
+	Networks             map[string]Network
+	Services             map[string]Service
+	Commands             Commands
+	QueueMsgs            []string `toml:"queue_msgs"`
+	StartedMsg           string   `toml:"started_msg"`
+	MaxQueueDepth        int      `toml:"max_queue_depth"`
+	Ratemsgs             []string
+	UploadURL            string `toml:"uploadurl"`
+	Database             DatabaseConfig
+	MCPs                 map[string]MCPConfig `toml:"mcps"`
+	TUI                  TUIConfig
+	APILog               APILogConfig      `toml:"api_log"`
+	IncidentLog          IncidentConfig    `toml:"incident_log"`
+	Pastebin             PastebinConfig    `toml:"pastebin"`
+	TemplateVars         map[string]string `toml:"-"`
+	SessionsDisplayLimit int               `toml:"sessions_display_limit"`
 }
 
 type PastebinConfig struct {

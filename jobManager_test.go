@@ -45,7 +45,7 @@ func setupTestJobManager(t *testing.T) {
 
 func createTestSession(t *testing.T, ctxKey, network, channel, nick, chatCmd string) int64 {
 	t.Helper()
-	sid, err := createDBSession(ctxKey, network, channel, nick, chatCmd, "")
+	sid, err := createDBSession(ctxKey, network, channel, nick, chatCmd, "", "", "")
 	if err != nil {
 		t.Fatal("createDBSession:", err)
 	}

@@ -123,6 +123,20 @@ func logUsage(logger logxi.Logger, usage *Usage) {
 	logger.Info("token usage", fields...)
 }
 
+func (cr *chatRunner) storeUsage(usage *Usage, apiPath string, durationMs int) {
+	logUsage(cr.logger, usage)
+	if theDB == nil || usage == nil {
+		return
+	}
+	sid := GetContext(cr.ctxKey).SessionID
+	if sid == 0 {
+		return
+	}
+	if err := insertDBTurnUsage(sid, usage, usage.FinishReason, apiPath, durationMs); err != nil {
+		cr.logger.Error("Failed to store turn usage", "error", err)
+	}
+}
+
 type chatRunner struct {
 	openaiClient *openai.Client
 	transport    *daveTransport
@@ -273,6 +287,7 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 
 		if cr.cfg.Streaming {
 			stream := cr.openaiClient.Chat.Completions.NewStreaming(ctx, params)
+			apiStart := time.Now()
 
 			bufferb := ""
 			fullContent := ""
@@ -287,6 +302,7 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 			var assistantRole string
 			var streamUsage *Usage
 			var streamTimings *Timings
+			var streamFinishReason string
 			streamDone := false
 			streamModel := cr.cfg.Model
 
@@ -408,11 +424,13 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 					}
 
 					if choice.FinishReason == "tool_calls" {
+						streamFinishReason = "tool_calls"
 						cr.logger.Info("stream finished with tool calls")
 						stream.Close()
 						break StreamLoop
 					}
 					if choice.FinishReason == "stop" || choice.FinishReason == "length" {
+						streamFinishReason = string(choice.FinishReason)
 						streamDone = true
 						stream.Close()
 						break StreamLoop
@@ -429,6 +447,11 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 			}
 
 			logStreamCompletion(cr.transport.sessionID, streamModel, fullContent, reasoningBuffer, accumulatedToolCalls, streamUsage, assistantRole)
+
+			if streamUsage != nil {
+				streamUsage.FinishReason = streamFinishReason
+			}
+			streamDurationMs := int(time.Since(apiStart).Milliseconds())
 
 			flushStreamedOutput := func() {
 				cr.logger.Info(fullContent)
@@ -452,7 +475,7 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 					cr.sendIRC(bufferb)
 				}
 				cr.logger.Info("output", "text", logBuf.String())
-				logUsage(cr.logger, streamUsage)
+				cr.storeUsage(streamUsage, "chat_completions_stream", streamDurationMs)
 				logTimings(cr.logger, streamTimings)
 				if reasoningBuffer != "" {
 					cr.logger.Info("reasoning", "content", reasoningBuffer)
@@ -465,7 +488,7 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 			}
 
 			cr.logger.Info("stream made tool calls", "count", len(accumulatedToolCalls))
-			logUsage(cr.logger, streamUsage)
+			cr.storeUsage(streamUsage, "chat_completions_stream", streamDurationMs)
 			logTimings(cr.logger, streamTimings)
 
 			if assistantRole == "" {
@@ -495,6 +518,7 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 		}
 
 		cr.transport.setCaptureBody(true)
+		apiStart := time.Now()
 		resp, err := cr.openaiClient.Chat.Completions.New(ctx, params)
 		cr.transport.setCaptureBody(false)
 		if err != nil {
@@ -503,6 +527,7 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 			cr.logAPIIncident(err, messages, iterations, "chat_completions")
 			return messages, true
 		}
+		durationMs := int(time.Since(apiStart).Milliseconds())
 
 		content, reasoning, toolCalls, usage := parseChatCompletionResponse(*resp)
 
@@ -529,7 +554,7 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 			cr.logger.Info(out)
 			text := ExtractFinalText(content)
 
-			logUsage(cr.logger, usage)
+			cr.storeUsage(usage, "chat_completions", durationMs)
 			logTimings(cr.logger, nonStreamTimings)
 			if reasoning != "" {
 				cr.logger.Info("reasoning", "content", reasoning)
@@ -574,7 +599,7 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 		}
 
 		cr.logger.Info("assistant made tool calls", "count", len(toolCalls))
-		logUsage(cr.logger, usage)
+		cr.storeUsage(usage, "chat_completions", durationMs)
 		logTimings(cr.logger, nonStreamTimings)
 
 		assistantMsg := ChatMessage{
@@ -756,7 +781,9 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 		params := buildResponseParams(cr.cfg, input, responseTools, currentResponseID)
 
 		if cr.cfg.Streaming {
+			apiStart := time.Now()
 			resp, err := cr.callResponsesStream(ctx, params)
+			durationMs := int(time.Since(apiStart).Milliseconds())
 			if err != nil {
 				if usePrevID && isResponseIDError(err) && iteration == 1 {
 					cr.logger.Warn("previous_response_id invalid, retrying without", "response_id", currentResponseID, "error", err)
@@ -796,7 +823,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 				messages = append(messages, assistantMsg)
 				AddContext(cr.cfg, cr.ctxKey, assistantMsg, cr.network.Name, cr.channel, cr.nick)
 				cr.logger.Info(FormatOutput(text))
-				logUsage(cr.logger, sdkResponseUsageToUsage(resp.Usage))
+				cr.storeUsage(sdkResponseUsageToUsage(resp.Usage, string(resp.Status)), "responses_stream", durationMs)
 				if reasoning != "" {
 					cr.logger.Info("reasoning", "content", reasoning)
 				}
@@ -807,7 +834,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 			messages = append(messages, assistantMsg)
 			AddContext(cr.cfg, cr.ctxKey, assistantMsg, cr.network.Name, cr.channel, cr.nick)
 			cr.logger.Info("assistant made tool calls", "count", len(toolCalls))
-			logUsage(cr.logger, sdkResponseUsageToUsage(resp.Usage))
+			cr.storeUsage(sdkResponseUsageToUsage(resp.Usage, string(resp.Status)), "responses_stream", durationMs)
 
 			numToolCalls := len(toolCalls)
 			messages, _ = cr.executeToolCalls(messages, toolCalls)
@@ -822,6 +849,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 		}
 
 		cr.transport.setCaptureBody(true)
+		apiStart := time.Now()
 		resp, err := cr.openaiClient.Responses.New(ctx, params)
 		cr.transport.setCaptureBody(false)
 		if err != nil {
@@ -839,6 +867,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 			cr.logAPIIncident(err, messages, iteration, "responses")
 			return messages, true
 		}
+		durationMs := int(time.Since(apiStart).Milliseconds())
 
 		if resp.ID != "" {
 			currentResponseID = resp.ID
@@ -862,7 +891,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 			cr.logger.Info(out)
 			textFinal := ExtractFinalText(content)
 
-			logUsage(cr.logger, sdkResponseUsageToUsage(resp.Usage))
+			cr.storeUsage(sdkResponseUsageToUsage(resp.Usage, string(resp.Status)), "responses", durationMs)
 			if reasoning != "" {
 				cr.logger.Info("reasoning", "content", reasoning)
 			}
@@ -906,7 +935,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 		}
 
 		cr.logger.Info("assistant made tool calls", "count", len(toolCalls))
-		logUsage(cr.logger, sdkResponseUsageToUsage(resp.Usage))
+		cr.storeUsage(sdkResponseUsageToUsage(resp.Usage, string(resp.Status)), "responses", durationMs)
 		assistantMsg := ChatMessage{
 			Role:             RoleAssistant,
 			Content:          text,
@@ -1050,7 +1079,7 @@ streamDone:
 		return nil, fmt.Errorf("responses stream ended without response.completed event")
 	}
 
-	logStreamCompletion(cr.transport.sessionID, cr.cfg.Model, fullText, reasoningBuffer, nil, sdkResponseUsageToUsage(completedResponse.Usage), RoleAssistant)
+	logStreamCompletion(cr.transport.sessionID, cr.cfg.Model, fullText, reasoningBuffer, nil, sdkResponseUsageToUsage(completedResponse.Usage, string(completedResponse.Status)), RoleAssistant)
 
 	if streamingRenderer != nil {
 		for _, line := range streamingRenderer.Process("") {
@@ -1064,7 +1093,6 @@ streamDone:
 	}
 
 	cr.logger.Info("output", "text", logBuf.String())
-	logUsage(cr.logger, sdkResponseUsageToUsage(completedResponse.Usage))
 	if reasoningBuffer != "" {
 		cr.logger.Info("reasoning", "content", reasoningBuffer)
 	}

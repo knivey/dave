@@ -44,7 +44,7 @@ func AddContext(config AIConfig, key string, message ChatMessage, network, chann
 
 		if sid == 0 {
 			var err error
-			sid, err = createDBSession(key, network, channel, nick, config.Name, ctx.ConvID)
+			sid, err = createDBSession(key, network, channel, nick, config.Name, ctx.ConvID, config.Service, config.Model)
 			if err != nil {
 				loggerCS.Error("Failed to create session", "error", err)
 			} else {

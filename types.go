@@ -73,6 +73,7 @@ type Usage struct {
 	PromptTokens            int64
 	CompletionTokens        int64
 	TotalTokens             int64
+	FinishReason            string
 	PromptTokensDetails     *PromptTokensDetails
 	CompletionTokensDetails *CompletionTokensDetails
 }

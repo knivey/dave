@@ -14,7 +14,7 @@ addr = ":8080"
 
 [database]
 # Database path for job persistence (relative to binary directory)
-# path = "data/img-mcp.db"
+path = "data/img-mcp.db"
 
 [comfy]
 # ComfyUI server URL

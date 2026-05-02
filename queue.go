@@ -437,6 +437,17 @@ func (qm *QueueManager) runJob(item *QueueItem) {
 		qm.executionComplete(item)
 	}()
 
+	for !botReadyFn(item.Network, item.Channel) {
+		if item.ctx.Err() != nil {
+			for range item.outputCh {
+			}
+			ds := qm.getDeliverySlot(item.Network, item.Channel)
+			ds.remove(item)
+			return
+		}
+		time.Sleep(1 * time.Second)
+	}
+
 	bot := getBotFn(item.Network)
 	if bot == nil || bot.Client == nil {
 		for range item.outputCh {

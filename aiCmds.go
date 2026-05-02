@@ -786,6 +786,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 			durationMs := int(time.Since(apiStart).Milliseconds())
 			if err != nil {
 				if usePrevID && isResponseIDError(err) && iteration == 1 {
+					cr.logAPIIncident(err, messages, iteration, "responses_stream")
 					cr.logger.Warn("previous_response_id invalid, retrying without", "response_id", currentResponseID, "error", err)
 					currentResponseID = ""
 					SetContextResponseID(cr.ctxKey, "")
@@ -803,11 +804,22 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 			if resp == nil {
 				return messages, true
 			}
-			if resp.ID != "" {
+			text, reasoning, toolCalls := parseSDKResponseOutput(*resp)
+			// Only save response ID when the response has actual output (text or tool calls).
+			// Empty-output responses (output:[]) cause "Each message must have at least one
+			// content element" errors when chained via previous_response_id, because the API
+			// reconstructs an assistant message with no content server-side.
+			// See isResponseIDError() comment in responses.go for the full two-layer design.
+			if resp.ID != "" && (text != "" || len(toolCalls) > 0) {
 				currentResponseID = resp.ID
 				SetContextResponseID(cr.ctxKey, resp.ID)
+			} else if resp.ID != "" {
+				if currentResponseID != "" {
+					currentResponseID = ""
+					SetContextResponseID(cr.ctxKey, "")
+				}
+				cr.logger.Warn("response had empty output, clearing previous_response_id", "response_id", resp.ID)
 			}
-			text, reasoning, toolCalls := parseSDKResponseOutput(*resp)
 
 			assistantMsg := ChatMessage{
 				Role:             RoleAssistant,
@@ -854,6 +866,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 		cr.transport.setCaptureBody(false)
 		if err != nil {
 			if usePrevID && isResponseIDError(err) && iteration == 1 {
+				cr.logAPIIncident(err, messages, iteration, "responses")
 				cr.logger.Warn("previous_response_id invalid, retrying without", "response_id", currentResponseID, "error", err)
 				currentResponseID = ""
 				SetContextResponseID(cr.ctxKey, "")
@@ -869,12 +882,20 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 		}
 		durationMs := int(time.Since(apiStart).Milliseconds())
 
-		if resp.ID != "" {
+		text, reasoning, toolCalls := parseSDKResponseOutput(*resp)
+		// Only save response ID when the response has actual output (text or tool calls).
+		// See the streaming path above and isResponseIDError() comment in responses.go
+		// for the full two-layer design.
+		if resp.ID != "" && (text != "" || len(toolCalls) > 0) {
 			currentResponseID = resp.ID
 			SetContextResponseID(cr.ctxKey, resp.ID)
+		} else if resp.ID != "" {
+			if currentResponseID != "" {
+				currentResponseID = ""
+				SetContextResponseID(cr.ctxKey, "")
+			}
+			cr.logger.Warn("response had empty output, clearing previous_response_id", "response_id", resp.ID)
 		}
-
-		text, reasoning, toolCalls := parseSDKResponseOutput(*resp)
 
 		if len(toolCalls) == 0 {
 			content := text

@@ -173,6 +173,12 @@ type UploadImageOutput struct {
 	URL string `json:"url"`
 }
 
+type ServerStatusInput struct{}
+
+type ServerStatusOutput struct {
+	Ready bool `json:"ready"`
+}
+
 type ToolHandlers struct {
 	cfg   Config
 	queue *JobQueue
@@ -456,6 +462,12 @@ func (h *ToolHandlers) handleUploadImage(ctx context.Context, req *mcp.CallToolR
 	}
 
 	return nil, UploadImageOutput{URL: url}, nil
+}
+
+func (h *ToolHandlers) handleServerStatus(ctx context.Context, req *mcp.CallToolRequest, input ServerStatusInput) (*mcp.CallToolResult, ServerStatusOutput, error) {
+	ready := h.queue.IsReady()
+	loggerTools.Info("server_status tool called", "ready", ready)
+	return nil, ServerStatusOutput{Ready: ready}, nil
 }
 
 func jobToStatusOutput(job *Job) JobStatusOutput {

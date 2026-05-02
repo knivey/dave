@@ -46,6 +46,10 @@ func (bot *Bot) Quit() {
 	bot.Client.Cmd.SendRawf("QUIT :%s\r\n", bot.Network.Quitmsg)
 }
 
+func (bot *Bot) isReady(channel string) bool {
+	return bot.Client != nil && bot.Client.IsConnected() && bot.Client.IsInChannel(channel)
+}
+
 var bots map[string]*Bot
 
 func init() {
@@ -226,14 +230,18 @@ func main() {
 	queueMgr.Start()
 	startJobManager()
 	startToolJobManager()
-	recoverPendingJobs()
-	recoverToolPendingJobs()
 	registerCommands(config.Commands)
 
 	ignorePath := filepath.Join(configDir, "ignores.txt")
 	loadIgnores(ignorePath)
 	watchIgnores(ignorePath)
 	startRateLimitGC()
+
+	go func() {
+		waitForMCPReady()
+		recoverPendingJobs()
+		recoverToolPendingJobs()
+	}()
 
 	if !noTUI {
 		for _, network := range config.Networks {

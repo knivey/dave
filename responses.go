@@ -221,6 +221,18 @@ func sdkResponseUsageToUsage(u responses.ResponseUsage, status string) *Usage {
 	return usage
 }
 
+// isResponseIDError checks if an API error is caused by an invalid or unusable
+// previous_response_id chain, so the caller can retry without it.
+//
+// DESIGN NOTE — "Each message must have at least one content element":
+// This is technically a request validation error, not an invalid response ID.
+// However, it occurs when chaining via previous_response_id to a response that
+// had empty output (output:[]). The API reconstructs the conversation server-side
+// and finds an assistant message with no content. Retrying without
+// previous_response_id (sending full history from our side) is the correct fix.
+// Layer 1 prevention: we avoid saving empty-output response IDs (in aiCmds.go).
+// This check is the Layer 2 safety net in case something slips through.
+// Do not remove this condition without understanding the full two-layer design.
 func isResponseIDError(err error) bool {
 	if err == nil {
 		return false
@@ -228,5 +240,6 @@ func isResponseIDError(err error) bool {
 	s := err.Error()
 	return strings.Contains(s, `"code":"response_not_found"`) ||
 		strings.Contains(s, `"code":"invalid_previous_response_id"`) ||
-		strings.Contains(s, "previous_response_id") && strings.Contains(s, "not found")
+		strings.Contains(s, "previous_response_id") && strings.Contains(s, "not found") ||
+		strings.Contains(s, "Each message must have at least one content element")
 }

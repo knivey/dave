@@ -60,6 +60,11 @@ func createSyncServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 		Description: "Get overview of the job queue: counts of queued, running, completed, failed jobs, plus per-job ETA estimates.",
 	}, handlers.handleQueueStatus)
 
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "server_status",
+		Description: "Check if the server has finished startup recovery. Returns {ready: true} when all jobs have been recovered from the database and the server is fully operational.",
+	}, handlers.handleServerStatus)
+
 	return server
 }
 
@@ -111,6 +116,11 @@ func createAsyncServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 		Name:        "queue_status",
 		Description: "Get overview of the job queue: counts of queued, running, completed, failed jobs, plus per-job ETA estimates.",
 	}, handlers.handleQueueStatus)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "server_status",
+		Description: "Check if the server has finished startup recovery. Returns {ready: true} when all jobs have been recovered from the database and the server is fully operational.",
+	}, handlers.handleServerStatus)
 
 	return server
 }
@@ -183,6 +193,11 @@ func createFullServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 		Name:        "upload_image",
 		Description: "Upload base64-encoded image data to the configured file host and return the URL.",
 	}, handlers.handleUploadImage)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "server_status",
+		Description: "Check if the server has finished startup recovery. Returns {ready: true} when all jobs have been recovered from the database and the server is fully operational.",
+	}, handlers.handleServerStatus)
 
 	return server
 }

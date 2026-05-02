@@ -177,6 +177,127 @@ func reloadMCPClients(newMCPs map[string]MCPConfig) {
 	initMCPClients()
 }
 
+func waitForMCPReady() {
+	const maxWait = 30 * time.Second
+	const pollInterval = 500 * time.Millisecond
+	deadline := time.Now().Add(maxWait)
+
+	for {
+		ready, pending := isMCPReady()
+		if ready {
+			return
+		}
+		if time.Now().After(deadline) {
+			logger.Warn("timed out waiting for MCP servers to become ready", "pending", pending)
+			return
+		}
+		if logger != nil {
+			logger.Info("waiting for MCP servers to become ready", "pending", pending)
+		}
+		time.Sleep(pollInterval)
+	}
+}
+
+func isMCPReady() (allReady bool, pendingServers []string) {
+	mcpServersMu.Lock()
+	servers := make(map[string]*MCPServer, len(mcpServers))
+	for name, srv := range mcpServers {
+		servers[name] = srv
+	}
+	mcpServersMu.Unlock()
+
+	allReady = true
+	for name, srv := range servers {
+		hasStatus := false
+		for _, tool := range srv.Tools {
+			if tool.Name == "server_status" {
+				hasStatus = true
+				break
+			}
+		}
+		if !hasStatus {
+			continue
+		}
+
+		result, err := srv.callTool("server_status", nil, 5*time.Second)
+		if err != nil {
+			allReady = false
+			pendingServers = append(pendingServers, name+"(error)")
+			logger.Warn("MCP server_status call failed", "server", name, "error", err)
+			continue
+		}
+		if result.IsError {
+			allReady = false
+			pendingServers = append(pendingServers, name+"(tool_error)")
+			logger.Warn("MCP server_status returned error", "server", name)
+			continue
+		}
+
+		parsed := false
+		for _, c := range result.Content {
+			t, ok := c.(*mcp.TextContent)
+			if !ok {
+				continue
+			}
+			var status struct {
+				Ready bool `json:"ready"`
+			}
+			if err := json.Unmarshal([]byte(t.Text), &status); err != nil {
+				logger.Warn("MCP server_status parse error, treating as ready", "server", name, "text", t.Text, "error", err)
+				parsed = true
+				break
+			}
+			parsed = true
+			if !status.Ready {
+				allReady = false
+				pendingServers = append(pendingServers, name)
+			}
+			break
+		}
+		if !parsed {
+			logger.Warn("MCP server_status: no parseable TextContent found, treating as ready", "server", name, "content_count", len(result.Content))
+		}
+	}
+	return
+}
+
+func checkMCPServerReady(serverName string) bool {
+	mcpServersMu.Lock()
+	srv, ok := mcpServers[serverName]
+	mcpServersMu.Unlock()
+	if !ok {
+		return false
+	}
+
+	result, err := srv.callTool("server_status", nil, 5*time.Second)
+	if err != nil {
+		logger.Warn("checkMCPServerReady: call failed, treating as not ready", "server", serverName, "error", err)
+		return false
+	}
+	if result.IsError {
+		logger.Warn("checkMCPServerReady: tool error, treating as not ready", "server", serverName)
+		return false
+	}
+
+	for _, c := range result.Content {
+		t, ok := c.(*mcp.TextContent)
+		if !ok {
+			continue
+		}
+		var status struct {
+			Ready bool `json:"ready"`
+		}
+		if err := json.Unmarshal([]byte(t.Text), &status); err != nil {
+			logger.Warn("checkMCPServerReady: parse error, treating as ready", "server", serverName, "text", t.Text, "error", err)
+			return true
+		}
+		return status.Ready
+	}
+
+	logger.Warn("checkMCPServerReady: no TextContent found, treating as ready", "server", serverName)
+	return true
+}
+
 func reconnectBackoff(count int) time.Duration {
 	if count <= 0 {
 		return 0

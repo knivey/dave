@@ -74,6 +74,7 @@ No Makefile, no linter config. Use `go fmt` + `go vet`.
 - Globals heavily used. Concurrency via `go cmd(...)` + `sync.WaitGroup`.
 - Struct fields use TOML snake_case tags.
 - Error: `log.Fatalln` at startup only. TUI `/reload` uses error-returning `loadReloadableDir`.
+- **Design comments**: Preserve and maintain block comments that explain non-obvious design decisions (e.g. "DESIGN NOTE", "Rationale", multi-line comments explaining why code is structured a certain way). When you encounter code that could be misunderstood or that implements a multi-layer defense, add a comment explaining the full picture. These comments are critical for maintaining correctness across future edits. See `isResponseIDError()` in `responses.go` for an example.
 
 ## Config Documentation Convention
 - All TOML config files in `config/` MUST have a **reference section** at the top listing every available option with type and default value.

@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"embed"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -28,8 +27,8 @@ type dbJob struct {
 	Enhancement    string  `db:"enhancement"`
 	Seed           *int64  `db:"seed"`
 	OutputFormat   string  `db:"output_format"`
-	Error          string  `db:"error"`
-	ComfyPromptID  string  `db:"comfy_prompt_id"`
+	Error          *string `db:"error"`
+	ComfyPromptID  *string `db:"comfy_prompt_id"`
 	CreatedAt      string  `db:"created_at"`
 	StartedAt      *string `db:"started_at"`
 	CompletedAt    *string `db:"completed_at"`
@@ -75,7 +74,7 @@ func initDB(dbPath string) (*sqlx.DB, error) {
 
 	db := sqlx.NewDb(sqldb, "sqlite")
 
-	log.Printf("Database initialized: %s", dbPath)
+	loggerDB.Info("Database initialized", "path", dbPath)
 	return db, nil
 }
 
@@ -220,13 +219,20 @@ func dbCleanupExpiredJobs(db *sqlx.DB, ttl time.Duration) (int64, error) {
 	return result.RowsAffected()
 }
 
+func ptrStr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
 func jobFromDBJob(dbj *dbJob) *Job {
 	job := &Job{
 		ID:            dbj.JobID,
 		Type:          JobType(dbj.Type),
 		Status:        JobStatus(dbj.Status),
 		Workflow:      dbj.Workflow,
-		ComfyPromptID: dbj.ComfyPromptID,
+		ComfyPromptID: ptrStr(dbj.ComfyPromptID),
 		Input: JobInput{
 			Prompt:         dbj.Prompt,
 			NegativePrompt: dbj.NegativePrompt,
@@ -234,7 +240,7 @@ func jobFromDBJob(dbj *dbJob) *Job {
 			Seed:           dbj.Seed,
 			OutputFormat:   dbj.OutputFormat,
 		},
-		Error: dbj.Error,
+		Error: ptrStr(dbj.Error),
 	}
 
 	if dbj.CreatedAt != "" {

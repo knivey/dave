@@ -4,7 +4,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -25,6 +24,9 @@ func main() {
 	}
 	exeDir := filepath.Dir(exePath)
 
+	initLogger(exeDir)
+	defer closeLogger()
+
 	configPath := filepath.Join(exeDir, "config.toml")
 	if args := flag.Args(); len(args) > 0 {
 		configPath = args[0]
@@ -40,6 +42,9 @@ func main() {
 	}
 
 	dbPath := cfg.Database.Path
+	if dbPath == "" {
+		dbPath = "data/img-mcp.db"
+	}
 	if !filepath.IsAbs(dbPath) {
 		dbPath = filepath.Join(exeDir, dbPath)
 	}
@@ -111,7 +116,7 @@ func serveHTTP(ctx context.Context, cfg Config, handlers *ToolHandlers) {
 		httpServer.Shutdown(context.Background())
 	}()
 
-	log.Printf("img-mcp HTTP server listening on %s (sync=%s, async=%s)", cfg.Server.Addr, cfg.Server.SyncPath, cfg.Server.AsyncPath)
+	logger.Info("HTTP server listening", "addr", cfg.Server.Addr, "sync", cfg.Server.SyncPath, "async", cfg.Server.AsyncPath)
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fmt.Fprintf(os.Stderr, "HTTP server error: %v\n", err)
 		os.Exit(1)

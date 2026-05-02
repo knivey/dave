@@ -3,8 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -83,6 +83,7 @@ type JobQueue struct {
 
 	wg     sync.WaitGroup
 	cancel context.CancelFunc
+	ready  atomic.Bool
 }
 
 func NewJobQueue(cfg Config, db *sqlx.DB) *JobQueue {
@@ -97,6 +98,8 @@ func NewJobQueue(cfg Config, db *sqlx.DB) *JobQueue {
 
 	if db != nil {
 		q.recoverJobs(ctx)
+	} else {
+		q.ready.Store(true)
 	}
 
 	for i := 0; i < cfg.Queue.MaxWorkers; i++ {
@@ -112,6 +115,10 @@ func NewJobQueue(cfg Config, db *sqlx.DB) *JobQueue {
 func (q *JobQueue) Stop() {
 	q.cancel()
 	q.wg.Wait()
+}
+
+func (q *JobQueue) IsReady() bool {
+	return q.ready.Load()
 }
 
 func (q *JobQueue) Submit(jobType JobType, workflow string, input JobInput) (*Job, error) {
@@ -218,7 +225,7 @@ func (q *JobQueue) Cancel(jobID string) bool {
 		if job.ComfyPromptID != "" {
 			interruptCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			if err := interruptComfyPrompt(interruptCtx, q.cfg, job.ComfyPromptID); err != nil {
-				log.Printf("warning: failed to interrupt comfy prompt %s for job %s: %v", job.ComfyPromptID, jobID, err)
+				loggerQueue.Warn("failed to interrupt comfy prompt", "prompt_id", job.ComfyPromptID, "job_id", jobID, "error", err)
 			}
 			cancel()
 		}
@@ -231,7 +238,7 @@ func (q *JobQueue) Cancel(jobID string) bool {
 
 	if q.db != nil {
 		if err := dbCancelJob(q.db, jobID); err != nil {
-			log.Printf("error cancelling job %s in DB: %v", jobID, err)
+			loggerQueue.Error("error cancelling job in DB", "job_id", jobID, "error", err)
 		}
 	}
 
@@ -244,17 +251,23 @@ func (q *JobQueue) WaitForJob(jobID string, timeout time.Duration) *Job {
 	q.mu.RUnlock()
 
 	if !ok {
+		loggerQueue.Info("WaitForJob: not in memory", "job_id", jobID)
 		if q.db != nil {
 			dbJob, err := dbGetJob(q.db, jobID)
-			if err == nil && isTerminalStatus(JobStatus(dbJob.Status)) {
-				recovered := jobFromDBJob(dbJob)
-				if JobStatus(dbJob.Status) == StatusCompleted {
-					result, _, err := buildJobResultFromDB(q.db, jobID)
-					if err == nil {
-						recovered.Result = result
+			if err != nil {
+				loggerQueue.Warn("WaitForJob: not in DB", "job_id", jobID, "error", err)
+			} else {
+				loggerQueue.Info("WaitForJob: found in DB", "job_id", jobID, "status", dbJob.Status)
+				if isTerminalStatus(JobStatus(dbJob.Status)) {
+					recovered := jobFromDBJob(dbJob)
+					if JobStatus(dbJob.Status) == StatusCompleted {
+						result, _, err := buildJobResultFromDB(q.db, jobID)
+						if err == nil {
+							recovered.Result = result
+						}
 					}
+					return recovered
 				}
-				return recovered
 			}
 		}
 		return nil
@@ -451,7 +464,7 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 
 	if q.db != nil {
 		if err := dbUpdateJobRunning(q.db, job.ID); err != nil {
-			log.Printf("error updating job %s to running in DB: %v", job.ID, err)
+			loggerQueue.Error("error updating job to running in DB", "job_id", job.ID, "error", err)
 		}
 	}
 
@@ -515,7 +528,7 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 
 	if q.db != nil {
 		if err := dbUpdateJobComfyPromptID(q.db, job.ID, promptID); err != nil {
-			log.Printf("error saving comfy_prompt_id for job %s: %v", job.ID, err)
+			loggerQueue.Error("error saving comfy_prompt_id", "job_id", job.ID, "error", err)
 		}
 	}
 
@@ -572,7 +585,7 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 
 	if q.db != nil {
 		if err := dbCompleteJob(q.db, job.ID, jobResult, comfyImgs); err != nil {
-			log.Printf("error completing job %s in DB: %v", job.ID, err)
+			loggerQueue.Error("error completing job in DB", "job_id", job.ID, "error", err)
 		}
 	}
 }
@@ -582,7 +595,7 @@ func (q *JobQueue) failJob(job *Job, errMsg string) {
 	job.Error = errMsg
 	if q.db != nil {
 		if err := dbFailJob(q.db, job.ID, errMsg); err != nil {
-			log.Printf("error failing job %s in DB: %v", job.ID, err)
+			loggerQueue.Error("error failing job in DB", "job_id", job.ID, "error", err)
 		}
 	}
 }
@@ -614,19 +627,32 @@ func (q *JobQueue) cleanup() {
 
 	if q.db != nil {
 		if _, err := dbCleanupExpiredJobs(q.db, q.cfg.Queue.ResultTTL); err != nil {
-			log.Printf("error cleaning up expired jobs from DB: %v", err)
+			loggerQueue.Error("error cleaning up expired jobs from DB", "error", err)
 		}
 	}
 }
 
 func (q *JobQueue) recoverJobs(ctx context.Context) {
-	recoverable, err := dbLoadRecoverableJobs(q.db)
-	if err != nil {
-		log.Printf("error loading recoverable jobs: %v", err)
+	defer func() {
+		q.ready.Store(true)
+		loggerQueue.Info("server recovery finished, ready=true")
+	}()
+
+	if q.db == nil {
+		loggerQueue.Info("no database configured, skipping job recovery")
 		return
 	}
 
+	recoverable, err := dbLoadRecoverableJobs(q.db)
+	if err != nil {
+		loggerQueue.Error("error loading recoverable jobs", "error", err)
+		return
+	}
+	loggerQueue.Info("found recoverable jobs in database", "count", len(recoverable))
+
 	for _, dbj := range recoverable {
+		comfyID := ptrStr(dbj.ComfyPromptID)
+		loggerQueue.Info("recovering job", "job_id", dbj.JobID, "status", dbj.Status, "comfy_prompt_id", comfyID)
 		job := jobFromDBJob(&dbj)
 		job.done = make(chan struct{})
 		job.cancel = make(chan struct{})
@@ -637,7 +663,7 @@ func (q *JobQueue) recoverJobs(ctx context.Context) {
 
 		switch job.Status {
 		case StatusQueued:
-			log.Printf("recovering queued job %s", job.ID)
+			loggerQueue.Info("recovering queued job", "job_id", job.ID)
 			select {
 			case q.pending <- job:
 				q.orderMu.Lock()
@@ -645,7 +671,7 @@ func (q *JobQueue) recoverJobs(ctx context.Context) {
 				q.queuedOrder = append(q.queuedOrder, job)
 				q.orderMu.Unlock()
 			default:
-				log.Printf("queue full during recovery, dropping job %s", job.ID)
+				loggerQueue.Warn("queue full during recovery, dropping job", "job_id", job.ID)
 				q.mu.Lock()
 				q.failJob(job, "queue full during recovery")
 				job.CompletedAt = ptrTime(time.Now().UTC())
@@ -654,22 +680,22 @@ func (q *JobQueue) recoverJobs(ctx context.Context) {
 			}
 
 		case StatusRunning:
-			if dbj.ComfyPromptID != "" {
-				log.Printf("recovering running job %s with comfy_prompt_id %s", job.ID, dbj.ComfyPromptID)
+			if comfyID != "" {
+				loggerQueue.Info("recovering running job with comfy_prompt_id", "job_id", job.ID, "comfy_prompt_id", comfyID)
 				q.wg.Add(1)
-				go q.recoverRunningJob(ctx, job, dbj.ComfyPromptID)
+				go q.recoverRunningJob(ctx, job, comfyID)
 			} else {
-				log.Printf("recovering running job %s without comfy_prompt_id, re-queueing", job.ID)
+				loggerQueue.Info("recovering running job without comfy_prompt_id, re-queueing", "job_id", job.ID)
 				job.Status = StatusQueued
 				if q.db != nil {
 					if err := dbUpdateJobStatus(q.db, job.ID, StatusQueued); err != nil {
-						log.Printf("error re-queueing job %s in DB: %v", job.ID, err)
+						loggerQueue.Error("error re-queueing job in DB", "job_id", job.ID, "error", err)
 					}
 				}
 				select {
 				case q.pending <- job:
 				default:
-					log.Printf("queue full during recovery, dropping job %s", job.ID)
+					loggerQueue.Warn("queue full during recovery, dropping job", "job_id", job.ID)
 					q.mu.Lock()
 					q.failJob(job, "queue full during recovery")
 					job.CompletedAt = ptrTime(time.Now().UTC())
@@ -686,7 +712,7 @@ func (q *JobQueue) recoverJobs(ctx context.Context) {
 
 	completed, err := dbLoadRecentCompletedJobs(q.db, q.cfg.Queue.ResultTTL)
 	if err != nil {
-		log.Printf("error loading recent completed jobs: %v", err)
+		loggerQueue.Error("error loading recent completed jobs", "error", err)
 		return
 	}
 
@@ -714,16 +740,18 @@ func (q *JobQueue) recoverJobs(ctx context.Context) {
 		}
 	}
 
-	log.Printf("recovery complete: %d queued, %d running, %d completed loaded",
-		queuedCount, runningCount, len(completed))
+	loggerQueue.Info("recovery complete", "queued", queuedCount, "running", runningCount, "completed", len(completed))
 }
 
-func (q *JobQueue) recoverRunningJob(ctx context.Context, job *Job, comfyPromptID string) {
+func (q *JobQueue) recoverRunningJob(_ context.Context, job *Job, comfyPromptID string) {
 	defer q.wg.Done()
 
-	comfyResult, err := resumeComfyGeneration(ctx, q.cfg, job.Workflow, comfyPromptID)
+	recoverCtx, recoverCancel := context.WithTimeout(context.Background(), time.Duration(q.cfg.Comfy.Timeout)*time.Second)
+	defer recoverCancel()
+
+	comfyResult, err := resumeComfyGeneration(recoverCtx, q.cfg, job.Workflow, comfyPromptID)
 	if err != nil {
-		log.Printf("failed to recover job %s: %v", job.ID, err)
+		loggerQueue.Error("failed to recover job", "job_id", job.ID, "error", err)
 		q.mu.Lock()
 		q.failJob(job, fmt.Sprintf("recovery failed: %v", err))
 		job.CompletedAt = ptrTime(time.Now().UTC())
@@ -791,11 +819,11 @@ func (q *JobQueue) recoverRunningJob(ctx context.Context, job *Job, comfyPromptI
 
 	if q.db != nil {
 		if err := dbCompleteJob(q.db, job.ID, jobResult, comfyImgs); err != nil {
-			log.Printf("error completing recovered job %s in DB: %v", job.ID, err)
+			loggerQueue.Error("error completing recovered job in DB", "job_id", job.ID, "error", err)
 		}
 	}
 
-	log.Printf("successfully recovered job %s", job.ID)
+	loggerQueue.Info("successfully recovered job", "job_id", job.ID)
 }
 
 func isTerminalStatus(status JobStatus) bool {

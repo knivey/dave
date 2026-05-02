@@ -328,3 +328,26 @@ func TestJobQueue_Cancel_MultipleJobs(t *testing.T) {
 		t.Errorf("expected interrupt for comfy-2, got %q", interrupts[0]["prompt_id"])
 	}
 }
+
+func TestJobQueue_IsReady_NoDB(t *testing.T) {
+	cfg := testConfig("http://127.0.0.1:0")
+	cfg.Queue.MaxWorkers = 0
+	q := NewJobQueue(cfg, nil)
+	defer q.Stop()
+
+	if !q.IsReady() {
+		t.Fatal("expected IsReady true when no DB")
+	}
+}
+
+func TestJobQueue_IsReady_WithDB(t *testing.T) {
+	cfg := testConfig("http://127.0.0.1:0")
+	cfg.Queue.MaxWorkers = 0
+	db := setupTestDB(t)
+	q := NewJobQueue(cfg, db)
+	defer q.Stop()
+
+	if !q.IsReady() {
+		t.Fatal("expected IsReady true after NewJobQueue with DB (recovery is synchronous)")
+	}
+}

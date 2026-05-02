@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/lrstanley/girc"
 	logxi "github.com/mgutz/logxi/v1"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 var loggerJM = logxi.New("jobManager")
@@ -51,6 +53,50 @@ var newChatRunnerFn = func(network Network, client *girc.Client, cfg AIConfig, c
 
 var getBotFn = func(network string) *Bot {
 	return bots[network]
+}
+
+var botReadyFn = func(network, channel string) bool {
+	bot := getBotFn(network)
+	if bot == nil {
+		return false
+	}
+	return bot.isReady(channel)
+}
+
+func isJobNotFoundError(result *mcp.CallToolResult, err error) bool {
+	if err != nil {
+		return strings.Contains(err.Error(), "not found")
+	}
+	if result != nil && result.IsError {
+		text := mcpToolResultToText(result)
+		return strings.Contains(text, "not found")
+	}
+	return false
+}
+
+func waitForJobWithRetry(ctx context.Context, jobID, mcpServer string) (*mcp.CallToolResult, error) {
+	result, err := callMCPToolWithContext(ctx, "wait_for_job", map[string]any{
+		"job_id": jobID,
+	})
+
+	if !isJobNotFoundError(result, err) {
+		return result, err
+	}
+
+	if !checkMCPServerReady(mcpServer) {
+		loggerJM.Info("job not found but MCP server not ready, retrying in 5s", "job_id", jobID, "server", mcpServer)
+		select {
+		case <-ctx.Done():
+			return result, err
+		case <-time.After(5 * time.Second):
+		}
+		return callMCPToolWithContext(ctx, "wait_for_job", map[string]any{
+			"job_id": jobID,
+		})
+	}
+
+	loggerJM.Warn("job not found and MCP server ready, job was lost", "job_id", jobID, "server", mcpServer)
+	return result, err
 }
 
 func startJobManager() {
@@ -112,9 +158,7 @@ func registerAsyncJob(jobID string, sessionID int64, ctxKey, toolName, mcpServer
 }
 
 func waitForAsyncJob(ctx context.Context, job *asyncJob) {
-	result, err := callMCPToolWithContext(ctx, "wait_for_job", map[string]any{
-		"job_id": job.JobID,
-	})
+	result, err := waitForJobWithRetry(ctx, job.JobID, job.MCPServer)
 
 	if ctx.Err() != nil {
 		jobMgr.mu.Lock()
@@ -417,9 +461,7 @@ func registerToolAsyncJobMem(jobID, toolName, mcpServer, network, channel, nick,
 }
 
 func waitForToolAsyncJob(ctx context.Context, job *toolAsyncJob) {
-	result, err := callMCPToolWithContext(ctx, "wait_for_job", map[string]any{
-		"job_id": job.JobID,
-	})
+	result, err := waitForJobWithRetry(ctx, job.JobID, job.MCPServer)
 
 	if ctx.Err() != nil {
 		loggerJM.Info("tool job wait cancelled", "job_id", job.JobID)

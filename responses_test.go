@@ -473,6 +473,12 @@ func TestIsResponseIDError(t *testing.T) {
 	if !isResponseIDError(fmt.Errorf(`"code":"invalid_previous_response_id"`)) {
 		t.Error("should match invalid_previous_response_id")
 	}
+	if !isResponseIDError(fmt.Errorf("previous_response_id abc not found")) {
+		t.Error("should match previous_response_id not found")
+	}
+	if !isResponseIDError(fmt.Errorf(`Invalid request content: Each message must have at least one content element.`)) {
+		t.Error("should match empty content element error")
+	}
 	if isResponseIDError(fmt.Errorf("rate limit exceeded")) {
 		t.Error("should not match generic error")
 	}

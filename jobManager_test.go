@@ -128,6 +128,7 @@ func setupMockDeps(t *testing.T) *mockBot {
 	mb := newMockBot("testnet", "!")
 
 	origGetBot := getBotFn
+	origBotReady := botReadyFn
 	origNewRunner := newChatRunnerFn
 	origConfig := config
 
@@ -136,6 +137,10 @@ func setupMockDeps(t *testing.T) *mockBot {
 			return &Bot{Client: mb.client, Network: mb.network}
 		}
 		return nil
+	}
+
+	botReadyFn = func(network, channel string) bool {
+		return network == "testnet"
 	}
 
 	newChatRunnerFn = func(network Network, client *girc.Client, cfg AIConfig, _ context.Context, _ chan<- string) chatRunnerInterface {
@@ -156,6 +161,7 @@ func setupMockDeps(t *testing.T) *mockBot {
 
 	t.Cleanup(func() {
 		getBotFn = origGetBot
+		botReadyFn = origBotReady
 		newChatRunnerFn = origNewRunner
 		config = origConfig
 	})

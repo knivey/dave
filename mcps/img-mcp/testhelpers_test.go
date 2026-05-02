@@ -13,6 +13,11 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
+func TestMain(m *testing.M) {
+	initLogger(os.TempDir())
+	os.Exit(m.Run())
+}
+
 func setupTestDB(t *testing.T) *sqlx.DB {
 	t.Helper()
 	db, err := initDB(t.TempDir() + "/test.db")

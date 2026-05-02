@@ -11,6 +11,10 @@ import (
 
 func newTestQM(t *testing.T) *QueueManager {
 	t.Helper()
+	origBotReady := botReadyFn
+	botReadyFn = func(_, _ string) bool { return true }
+	t.Cleanup(func() { botReadyFn = origBotReady })
+
 	qm := NewQueueManager([]string{"queued (position {position})"}, "started", 5)
 	qm.UpdateServiceLimits(map[string]Service{"svc": {Parallel: 1}})
 	qm.Start()

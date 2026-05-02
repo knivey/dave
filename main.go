@@ -218,7 +218,7 @@ func main() {
 	var dbErr error
 	theDB, dbErr = initDB(config.Database)
 	if dbErr != nil {
-		fmt.Fprintf(os.Stderr, "Failed to initialize database: %v\n", dbErr)
+		logger.Error("Failed to initialize database", "error", dbErr)
 		os.Exit(1)
 	}
 
@@ -308,7 +308,7 @@ func main() {
 	}
 
 	if err := tuiApp.Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
+		logger.Error("TUI error", "error", err)
 	}
 
 	restoreStdoutStderr()

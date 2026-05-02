@@ -65,6 +65,11 @@ func main() {
 	}
 	defer db.Close()
 
+	if err := ensureSchema(db); err != nil {
+		fmt.Fprintf(os.Stderr, "error applying schema: %v\n", err)
+		os.Exit(1)
+	}
+
 	rows, err := db.Query("SELECT id, chat_command FROM sessions WHERE service = '' OR model = ''")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error querying sessions: %v\n", err)
@@ -135,4 +140,55 @@ func main() {
 	}
 
 	fmt.Printf("updated %d/%d sessions\n", updated, len(updates))
+}
+
+func ensureSchema(db *sql.DB) error {
+	var hasServiceCol bool
+	colRows, err := db.Query("PRAGMA table_info(sessions)")
+	if err != nil {
+		return fmt.Errorf("reading sessions schema: %w", err)
+	}
+	for colRows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull int
+		var dfltValue interface{}
+		var pk int
+		if err := colRows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err != nil {
+			colRows.Close()
+			return err
+		}
+		if name == "service" {
+			hasServiceCol = true
+		}
+	}
+	colRows.Close()
+
+	if !hasServiceCol {
+		fmt.Println("running migration 006...")
+		statements := []string{
+			"ALTER TABLE sessions ADD COLUMN service TEXT NOT NULL DEFAULT ''",
+			"ALTER TABLE sessions ADD COLUMN model TEXT NOT NULL DEFAULT ''",
+			`CREATE TABLE IF NOT EXISTS turn_usage (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+				prompt_tokens INTEGER NOT NULL DEFAULT 0,
+				completion_tokens INTEGER NOT NULL DEFAULT 0,
+				cached_tokens INTEGER NOT NULL DEFAULT 0,
+				reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+				finish_reason TEXT NOT NULL DEFAULT '',
+				api_path TEXT NOT NULL DEFAULT '',
+				duration_ms INTEGER NOT NULL DEFAULT 0,
+				created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+			)`,
+			"CREATE INDEX IF NOT EXISTS idx_turn_usage_session_id ON turn_usage(session_id)",
+		}
+		for _, stmt := range statements {
+			if _, err := db.Exec(stmt); err != nil {
+				return fmt.Errorf("migration: %w\nstatement: %s", err, stmt)
+			}
+		}
+		fmt.Println("migration 006 applied")
+	}
+	return nil
 }

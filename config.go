@@ -33,7 +33,7 @@ type Config struct {
 	IncidentLog       IncidentConfig    `toml:"incident_log"`
 	Pastebin          PastebinConfig    `toml:"pastebin"`
 	TemplateVars      map[string]string `toml:"-"`
-	MaxSessionHistory int               `toml:"max_session_history"`
+	SessionsDisplayLimit int             `toml:"sessions_display_limit"`
 }
 
 type PastebinConfig struct {
@@ -392,8 +392,8 @@ func loadConfigDir(dir string) (Config, error) {
 
 	config.Database.SetDefaults()
 
-	if config.MaxSessionHistory == 0 {
-		config.MaxSessionHistory = 100
+	if config.SessionsDisplayLimit == 0 {
+		config.SessionsDisplayLimit = 10
 	}
 
 	return config, nil

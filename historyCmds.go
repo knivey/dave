@@ -14,7 +14,7 @@ import (
 
 func historySessions(network Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, args ...string) {
 	var maxHistory int
-	readConfig(func() { maxHistory = config.MaxSessionHistory })
+	readConfig(func() { maxHistory = config.SessionsDisplayLimit })
 	sessions, err := getUserDBSessions(network.Name, e.Params[0], e.Source.Name, maxHistory)
 	if err != nil {
 		select {

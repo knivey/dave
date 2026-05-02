@@ -122,7 +122,13 @@ func submitComfyPrompt(ctx context.Context, cfg Config, workflowName string, wor
 		return "", fmt.Errorf("marshaling prompt: %w", err)
 	}
 
-	resp, err := http.Post(cfg.Comfy.BaseURL+"/prompt", "application/json", bytes.NewBuffer(jsonData))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.Comfy.BaseURL+"/prompt", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return "", fmt.Errorf("creating prompt request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("submitting prompt: %w", err)
 	}
@@ -134,6 +140,28 @@ func submitComfyPrompt(ctx context.Context, cfg Config, workflowName string, wor
 	}
 
 	return promptResp.PromptID, nil
+}
+
+func interruptComfyPrompt(ctx context.Context, cfg Config, promptID string) error {
+	body := map[string]string{"prompt_id": promptID}
+	jsonData, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshaling interrupt request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.Comfy.BaseURL+"/api/interrupt", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("creating interrupt request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("sending interrupt: %w", err)
+	}
+	defer resp.Body.Close()
+
+	return nil
 }
 
 func monitorComfyGeneration(ctx context.Context, cfg Config, workflowName, promptID string) (ComfyResult, error) {

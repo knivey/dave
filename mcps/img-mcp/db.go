@@ -222,10 +222,11 @@ func dbCleanupExpiredJobs(db *sqlx.DB, ttl time.Duration) (int64, error) {
 
 func jobFromDBJob(dbj *dbJob) *Job {
 	job := &Job{
-		ID:       dbj.JobID,
-		Type:     JobType(dbj.Type),
-		Status:   JobStatus(dbj.Status),
-		Workflow: dbj.Workflow,
+		ID:            dbj.JobID,
+		Type:          JobType(dbj.Type),
+		Status:        JobStatus(dbj.Status),
+		Workflow:      dbj.Workflow,
+		ComfyPromptID: dbj.ComfyPromptID,
 		Input: JobInput{
 			Prompt:         dbj.Prompt,
 			NegativePrompt: dbj.NegativePrompt,

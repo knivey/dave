@@ -65,6 +65,25 @@ func stopJobManager() {
 	}
 }
 
+func cancelAsyncJobsForSession(sessionID int64) {
+	jobMgr.mu.Lock()
+	defer jobMgr.mu.Unlock()
+
+	for _, job := range jobMgr.jobs {
+		if job.SessionID != sessionID {
+			continue
+		}
+		loggerJM.Info("cancelling async job for session", "job_id", job.JobID, "session_id", sessionID)
+		job.cancel()
+		if _, err := callMCPToolWithTimeout("cancel_job", map[string]any{
+			"job_id": job.JobID,
+		}, 10*time.Second); err != nil {
+			loggerJM.Warn("failed to cancel job in MCP server", "job_id", job.JobID, "error", err)
+		}
+		delete(jobMgr.jobs, job.JobID)
+	}
+}
+
 func registerAsyncJob(jobID string, sessionID int64, ctxKey, toolName, mcpServer, network, channel, nick string) {
 	jobMgr.mu.Lock()
 	defer jobMgr.mu.Unlock()
@@ -98,6 +117,9 @@ func waitForAsyncJob(ctx context.Context, job *asyncJob) {
 	})
 
 	if ctx.Err() != nil {
+		jobMgr.mu.Lock()
+		delete(jobMgr.jobs, job.JobID)
+		jobMgr.mu.Unlock()
 		loggerJM.Info("job wait cancelled", "job_id", job.JobID)
 		return
 	}

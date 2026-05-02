@@ -260,6 +260,8 @@ func historyDelete(network Network, c *girc.Client, e girc.Event, args ...string
 		return
 	}
 
+	cancelAsyncJobsForSession(sessionID)
+
 	if err := deleteDBSession(sessionID); err != nil {
 		c.Cmd.Reply(e, errorMsg("failed to delete session: "+err.Error()))
 		return

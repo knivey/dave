@@ -29,20 +29,23 @@ const (
 )
 
 type Job struct {
-	ID          string
-	Type        JobType
-	Status      JobStatus
-	Workflow    string
-	Input       JobInput
-	Result      *JobResult
-	Error       string
-	CreatedAt   time.Time
-	StartedAt   *time.Time
-	CompletedAt *time.Time
-	QueuedIndex int
+	ID            string
+	Type          JobType
+	Status        JobStatus
+	Workflow      string
+	Input         JobInput
+	Result        *JobResult
+	Error         string
+	ComfyPromptID string
+	CreatedAt     time.Time
+	StartedAt     *time.Time
+	CompletedAt   *time.Time
+	QueuedIndex   int
 
-	done   chan struct{}
-	cancel chan struct{}
+	done      chan struct{}
+	cancel    chan struct{}
+	cancelCtx context.CancelFunc
+	closeOnce sync.Once
 }
 
 type JobInput struct {
@@ -188,34 +191,49 @@ func (q *JobQueue) Cancel(jobID string) bool {
 		return false
 	}
 
-	if job.Status != StatusQueued {
+	if isTerminalStatus(job.Status) {
 		return false
 	}
 
-	select {
-	case job.cancel <- struct{}{}:
-	default:
+	if job.Status == StatusQueued {
+		select {
+		case job.cancel <- struct{}{}:
+		default:
+		}
+
+		q.orderMu.Lock()
+		for i, j := range q.queuedOrder {
+			if j.ID == jobID {
+				q.queuedOrder = append(q.queuedOrder[:i], q.queuedOrder[i+1:]...)
+				break
+			}
+		}
+		q.orderMu.Unlock()
 	}
 
-	job.Status = StatusCancelled
+	if job.Status == StatusRunning {
+		if job.cancelCtx != nil {
+			job.cancelCtx()
+		}
+		if job.ComfyPromptID != "" {
+			interruptCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := interruptComfyPrompt(interruptCtx, q.cfg, job.ComfyPromptID); err != nil {
+				log.Printf("warning: failed to interrupt comfy prompt %s for job %s: %v", job.ComfyPromptID, jobID, err)
+			}
+			cancel()
+		}
+	}
+
 	now := time.Now().UTC()
+	job.Status = StatusCancelled
 	job.CompletedAt = &now
-	close(job.done)
+	job.closeOnce.Do(func() { close(job.done) })
 
 	if q.db != nil {
 		if err := dbCancelJob(q.db, jobID); err != nil {
 			log.Printf("error cancelling job %s in DB: %v", jobID, err)
 		}
 	}
-
-	q.orderMu.Lock()
-	for i, j := range q.queuedOrder {
-		if j.ID == jobID {
-			q.queuedOrder = append(q.queuedOrder[:i], q.queuedOrder[i+1:]...)
-			break
-		}
-	}
-	q.orderMu.Unlock()
 
 	return true
 }
@@ -423,6 +441,10 @@ func (q *JobQueue) worker(ctx context.Context, id int) {
 }
 
 func (q *JobQueue) processJob(ctx context.Context, job *Job) {
+	jobCtx, cancel := context.WithCancel(ctx)
+	job.cancelCtx = cancel
+	defer cancel()
+
 	now := time.Now().UTC()
 	job.Status = StatusRunning
 	job.StartedAt = &now
@@ -434,8 +456,11 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 	}
 
 	defer func() {
+		if job.Status == StatusCancelled {
+			return
+		}
 		job.CompletedAt = ptrTime(time.Now().UTC())
-		close(job.done)
+		job.closeOnce.Do(func() { close(job.done) })
 
 		if job.Status == StatusFailed {
 			q.statsMu.Lock()
@@ -457,8 +482,11 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 			enhancementName = "default"
 		}
 
-		result, err := enhancePrompt(ctx, q.cfg, enhancementName, job.Input.Prompt)
+		result, err := enhancePrompt(jobCtx, q.cfg, enhancementName, job.Input.Prompt)
 		if err != nil {
+			if jobCtx.Err() != nil {
+				return
+			}
 			q.failJob(job, fmt.Sprintf("prompt enhancement failed: %v", err))
 			return
 		}
@@ -474,11 +502,16 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 		return
 	}
 
-	promptID, err := submitComfyPrompt(ctx, q.cfg, job.Workflow, workflow)
+	promptID, err := submitComfyPrompt(jobCtx, q.cfg, job.Workflow, workflow)
 	if err != nil {
+		if jobCtx.Err() != nil {
+			return
+		}
 		q.failJob(job, fmt.Sprintf("prompt submission failed: %v", err))
 		return
 	}
+
+	job.ComfyPromptID = promptID
 
 	if q.db != nil {
 		if err := dbUpdateJobComfyPromptID(q.db, job.ID, promptID); err != nil {
@@ -486,8 +519,11 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 		}
 	}
 
-	comfyResult, err := monitorComfyGeneration(ctx, q.cfg, job.Workflow, promptID)
+	comfyResult, err := monitorComfyGeneration(jobCtx, q.cfg, job.Workflow, promptID)
 	if err != nil {
+		if job.Status == StatusCancelled {
+			return
+		}
 		q.failJob(job, fmt.Sprintf("generation failed: %v", err))
 		return
 	}
@@ -691,7 +727,7 @@ func (q *JobQueue) recoverRunningJob(ctx context.Context, job *Job, comfyPromptI
 		q.mu.Lock()
 		q.failJob(job, fmt.Sprintf("recovery failed: %v", err))
 		job.CompletedAt = ptrTime(time.Now().UTC())
-		close(job.done)
+		job.closeOnce.Do(func() { close(job.done) })
 		q.statsMu.Lock()
 		q.failedCount++
 		q.statsMu.Unlock()
@@ -746,7 +782,7 @@ func (q *JobQueue) recoverRunningJob(ctx context.Context, job *Job, comfyPromptI
 	job.Result = jobResult
 	job.Status = StatusCompleted
 	job.CompletedAt = ptrTime(time.Now().UTC())
-	close(job.done)
+	job.closeOnce.Do(func() { close(job.done) })
 	q.mu.Unlock()
 
 	q.statsMu.Lock()

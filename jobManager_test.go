@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/lrstanley/girc"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 func setupJMTestDB(t *testing.T) {
@@ -1239,5 +1240,253 @@ func TestDeliverAsyncResult_RunningDuringTurn_BusyPath(t *testing.T) {
 
 	if !runningDuringTurn {
 		t.Error("queueMgr.IsRunning() returned false during queued job execution — item should be active")
+	}
+}
+
+func setupCancelTestMCP(t *testing.T) {
+	t.Helper()
+
+	type CancelJobInput struct {
+		JobID string `json:"job_id" jsonschema:"the job ID to cancel"`
+	}
+	type CancelJobOutput struct {
+		Cancelled bool `json:"cancelled"`
+	}
+
+	ctx := context.Background()
+	server := mcp.NewServer(&mcp.Implementation{Name: "test-mcp", Version: "1.0.0"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "cancel_job", Description: "cancel a job"}, func(ctx context.Context, req *mcp.CallToolRequest, input CancelJobInput) (*mcp.CallToolResult, CancelJobOutput, error) {
+		return nil, CancelJobOutput{Cancelled: true}, nil
+	})
+	mcp.AddTool(server, &mcp.Tool{Name: "wait_for_job", Description: "wait for a job"}, func(ctx context.Context, req *mcp.CallToolRequest, input struct {
+		JobID   string `json:"job_id"`
+		Timeout int    `json:"timeout,omitempty"`
+	}) (*mcp.CallToolResult, struct {
+		JobID  string `json:"job_id"`
+		Status string `json:"status"`
+	}, error) {
+		return nil, struct {
+			JobID  string `json:"job_id"`
+			Status string `json:"status"`
+		}{JobID: input.JobID, Status: "completed"}, nil
+	})
+
+	t1, t2 := mcp.NewInMemoryTransports()
+
+	_, err := server.Connect(ctx, t1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
+	session, err := client.Connect(ctx, t2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { session.Close() })
+
+	origServers := mcpServers
+	origToolMap := mcpToolToServer
+
+	mcpServers = make(map[string]*MCPServer)
+	mcpToolToServer = make(map[string]string)
+
+	srv := &MCPServer{
+		Config:  MCPConfig{Timeout: 10 * time.Second},
+		Client:  client,
+		Session: session,
+	}
+	for tool, err := range session.Tools(ctx, nil) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv.Tools = append(srv.Tools, tool)
+	}
+
+	mcpServers["img-mcp"] = srv
+	mcpToolToServer["cancel_job"] = "img-mcp"
+	mcpToolToServer["wait_for_job"] = "img-mcp"
+
+	t.Cleanup(func() {
+		mcpServers = origServers
+		mcpToolToServer = origToolMap
+	})
+}
+
+func TestCancelAsyncJobsForSession_CancelsMatchingJobs(t *testing.T) {
+	setupJMTestDB(t)
+	setupTestJobManager(t)
+	setupCancelTestMCP(t)
+
+	ctxKey := "testnet#testuser"
+	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+
+	jobMgr.jobs["job-a"] = &asyncJob{
+		JobID:     "job-a",
+		SessionID: sid,
+		CtxKey:    ctxKey,
+		Network:   "testnet",
+		Channel:   "#test",
+		Nick:      "testuser",
+		cancel:    func() {},
+	}
+	jobMgr.jobs["job-b"] = &asyncJob{
+		JobID:     "job-b",
+		SessionID: sid,
+		CtxKey:    ctxKey,
+		Network:   "testnet",
+		Channel:   "#test",
+		Nick:      "testuser",
+		cancel:    func() {},
+	}
+
+	otherSID := createTestSession(t, "testnet#otheruser", "testnet", "#test", "otheruser", "testchat")
+	jobMgr.jobs["job-c"] = &asyncJob{
+		JobID:     "job-c",
+		SessionID: otherSID,
+		CtxKey:    "testnet#otheruser",
+		Network:   "testnet",
+		Channel:   "#test",
+		Nick:      "otheruser",
+		cancel:    func() {},
+	}
+
+	cancelAsyncJobsForSession(sid)
+
+	if _, exists := jobMgr.jobs["job-a"]; exists {
+		t.Error("job-a should be removed from jobMgr.jobs")
+	}
+	if _, exists := jobMgr.jobs["job-b"]; exists {
+		t.Error("job-b should be removed from jobMgr.jobs")
+	}
+	if _, exists := jobMgr.jobs["job-c"]; !exists {
+		t.Error("job-c should still exist (different session)")
+	}
+}
+
+func TestCancelAsyncJobsForSession_NoJobs(t *testing.T) {
+	setupJMTestDB(t)
+	setupTestJobManager(t)
+
+	cancelAsyncJobsForSession(99999)
+}
+
+func TestCancelAsyncJobsForSession_DeletesFromMap(t *testing.T) {
+	setupJMTestDB(t)
+	setupTestJobManager(t)
+	setupCancelTestMCP(t)
+
+	ctxKey := "testnet#testuser"
+	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+
+	jobMgr.jobs["job-x"] = &asyncJob{
+		JobID:     "job-x",
+		SessionID: sid,
+		CtxKey:    ctxKey,
+		Network:   "testnet",
+		Channel:   "#test",
+		Nick:      "testuser",
+		cancel:    func() {},
+	}
+
+	cancelAsyncJobsForSession(sid)
+
+	if len(jobMgr.jobs) != 0 {
+		t.Errorf("expected 0 jobs in map, got %d", len(jobMgr.jobs))
+	}
+}
+
+func setupBlockingWaitMCP(t *testing.T) {
+	t.Helper()
+
+	ctx := context.Background()
+	server := mcp.NewServer(&mcp.Implementation{Name: "test-mcp-blocking", Version: "1.0.0"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "wait_for_job", Description: "wait for a job"}, func(ctx context.Context, req *mcp.CallToolRequest, input struct {
+		JobID   string `json:"job_id"`
+		Timeout int    `json:"timeout,omitempty"`
+	}) (*mcp.CallToolResult, struct {
+		JobID  string `json:"job_id"`
+		Status string `json:"status"`
+	}, error) {
+		<-ctx.Done()
+		return nil, struct {
+			JobID  string `json:"job_id"`
+			Status string `json:"status"`
+		}{}, ctx.Err()
+	})
+
+	t1, t2 := mcp.NewInMemoryTransports()
+
+	_, err := server.Connect(ctx, t1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
+	session, err := client.Connect(ctx, t2, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { session.Close() })
+
+	origServers := mcpServers
+	origToolMap := mcpToolToServer
+
+	mcpServers = make(map[string]*MCPServer)
+	mcpToolToServer = make(map[string]string)
+
+	srv := &MCPServer{
+		Config:  MCPConfig{Timeout: 10 * time.Second},
+		Client:  client,
+		Session: session,
+	}
+	for tool, err := range session.Tools(ctx, nil) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv.Tools = append(srv.Tools, tool)
+	}
+
+	mcpServers["img-mcp"] = srv
+	mcpToolToServer["wait_for_job"] = "img-mcp"
+
+	t.Cleanup(func() {
+		mcpServers = origServers
+		mcpToolToServer = origToolMap
+	})
+}
+
+func TestWaitForAsyncJob_CleanupOnCancel(t *testing.T) {
+	setupJMTestDB(t)
+	setupTestJobManager(t)
+	setupBlockingWaitMCP(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	job := &asyncJob{
+		JobID:     "job-cancel-test",
+		SessionID: 1,
+		CtxKey:    "testnet#testuser",
+		Network:   "testnet",
+		Channel:   "#test",
+		Nick:      "testuser",
+		cancel:    cancel,
+	}
+	jobMgr.jobs["job-cancel-test"] = job
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	waitForAsyncJob(ctx, job)
+
+	time.Sleep(100 * time.Millisecond)
+
+	jobMgr.mu.Lock()
+	_, exists := jobMgr.jobs["job-cancel-test"]
+	jobMgr.mu.Unlock()
+	if exists {
+		t.Error("cancelled job should be removed from jobMgr.jobs")
 	}
 }

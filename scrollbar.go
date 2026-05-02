@@ -18,13 +18,8 @@ func NewScrollbar(cfg TUIScrollbarConfig) *Scrollbar {
 	bgColor := colorFromName(cfg.BackgroundColor, tcell.ColorBlack)
 	trackColor := colorFromName(cfg.TrackColor, tcell.ColorDarkGray)
 
-	visible := cfg.Visible != nil && *cfg.Visible
-	showAlways := cfg.ShowAlways != nil && *cfg.ShowAlways
-
-	if cfg.Visible == nil && cfg.ShowAlways == nil {
-		visible = true
-		showAlways = true
-	}
+	visible := cfg.Visible == nil || *cfg.Visible
+	showAlways := cfg.ShowAlways == nil || *cfg.ShowAlways
 
 	width := cfg.Width
 	if width <= 0 {

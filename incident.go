@@ -10,8 +10,15 @@ import (
 )
 
 type IncidentConfig struct {
-	Enabled bool   `toml:"enabled"`
+	Enabled *bool  `toml:"enabled"`
 	Dir     string `toml:"dir"`
+}
+
+func (c IncidentConfig) IsEnabled() bool {
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
 }
 
 type IncidentLogger struct {
@@ -21,7 +28,7 @@ type IncidentLogger struct {
 var incidentLogger *IncidentLogger
 
 func NewIncidentLogger(cfg IncidentConfig) (*IncidentLogger, error) {
-	if !cfg.Enabled {
+	if !cfg.IsEnabled() {
 		return nil, nil
 	}
 	dir := cfg.Dir

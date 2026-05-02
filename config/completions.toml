@@ -10,7 +10,7 @@
 #   maxtokens            (int, cascades from service)    Max tokens per response
 #   maxcompletiontokens  (int, cascades from service)    Max completion tokens per response
 #   temperature          (float, cascades from service)  Sampling temperature
-#   topp                 (float, default: 1)             Nucleus sampling (0-1)
+#   topp                 (float, omitted when unset, API default typically 1.0)  Nucleus sampling (0-1)
 #   stop                 (string array)                  Stop sequences
 #   presencepenalty      (float, default: 0)             -2.0 to 2.0, penalize new topics
 #   frequencypenalty     (float, default: 0)             -2.0 to 2.0, penalize repetition

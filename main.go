@@ -237,7 +237,7 @@ func main() {
 
 	if !noTUI {
 		for _, network := range config.Networks {
-			if network.Enabled {
+			if network.IsEnabled() {
 				logger.Info("Starting network", "network", network.Name)
 				startClient(network)
 			}

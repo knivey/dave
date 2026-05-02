@@ -4,7 +4,7 @@
 #
 # Available options (per [section]):
 #   key                  (string)          API key (not required for local/unauthed endpoints)
-#   type                 (string)          "openai" (default) or "llama"
+#   type                 (string, default: "openai")  "openai" or "llama" (omitted = openai behavior)
 #   baseurl              (string)          API base URL (e.g. "https://api.openai.com/v1/")
 #   maxtokens            (int)             Max tokens per response (legacy, prefer maxcompletiontokens)
 #   maxcompletiontokens  (int)             Max completion tokens per response

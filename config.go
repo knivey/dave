@@ -74,7 +74,7 @@ type Network struct {
 	Servers    []Server
 	nextServer int
 	Channels   map[string]ChannelConfig
-	Enabled    bool
+	Enabled    *bool
 	Throttle   time.Duration
 	Trigger    string
 	Quitmsg    string
@@ -85,6 +85,13 @@ func (n *Network) GetChannelConfig(channel string) ChannelConfig {
 		return ChannelConfig{}
 	}
 	return n.Channels[channel]
+}
+
+func (n *Network) IsEnabled() bool {
+	if n.Enabled == nil {
+		return true
+	}
+	return *n.Enabled
 }
 
 type Server struct {

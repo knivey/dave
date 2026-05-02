@@ -503,6 +503,71 @@ maxtokens = 100
 	}
 }
 
+func TestNetworkIsEnabled(t *testing.T) {
+	tests := []struct {
+		name    string
+		enabled *bool
+		expect  bool
+	}{
+		{"nil defaults to true", nil, true},
+		{"explicit true", boolPtr(true), true},
+		{"explicit false", boolPtr(false), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			n := Network{Enabled: tt.enabled}
+			if got := n.IsEnabled(); got != tt.expect {
+				t.Errorf("IsEnabled() = %v, want %v", got, tt.expect)
+			}
+		})
+	}
+}
+
+func TestLoadConfigDirNetworkEnabledDefault(t *testing.T) {
+	t.Run("network without enabled field defaults to true", func(t *testing.T) {
+		mainTOML := `
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+		dir := createTestConfigDir(t, mainTOML, nil)
+		defer os.RemoveAll(dir)
+
+		config := loadConfigDirOrDie(dir)
+		net, ok := config.Networks["testnet"]
+		if !ok {
+			t.Fatal("network testnet not found")
+		}
+		if !net.IsEnabled() {
+			t.Error("network should be enabled by default when enabled field is omitted")
+		}
+	})
+
+	t.Run("network with enabled false", func(t *testing.T) {
+		mainTOML := `
+[networks.testnet]
+enabled = false
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+		dir := createTestConfigDir(t, mainTOML, nil)
+		defer os.RemoveAll(dir)
+
+		config := loadConfigDirOrDie(dir)
+		net := config.Networks["testnet"]
+		if net.IsEnabled() {
+			t.Error("network should be disabled when explicitly set to false")
+		}
+	})
+}
+
+func boolPtr(b bool) *bool {
+	return &b
+}
+
 func TestParallelToolCallsCascading(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -520,14 +585,14 @@ func TestParallelToolCallsCascading(t *testing.T) {
 			name: "set only in service cascades to command",
 			cfg:  AIConfig{},
 			svc: Service{
-				ParallelToolCalls: func() *bool { b := false; return &b }(),
+				ParallelToolCalls: boolPtr(false),
 			},
 			expect: false,
 		},
 		{
 			name: "set only in command uses command value",
 			cfg: AIConfig{
-				ParallelToolCalls: func() *bool { b := false; return &b }(),
+				ParallelToolCalls: boolPtr(false),
 			},
 			svc:    Service{},
 			expect: false,
@@ -535,10 +600,10 @@ func TestParallelToolCallsCascading(t *testing.T) {
 		{
 			name: "set in both command overrides service",
 			cfg: AIConfig{
-				ParallelToolCalls: func() *bool { b := true; return &b }(),
+				ParallelToolCalls: boolPtr(true),
 			},
 			svc: Service{
-				ParallelToolCalls: func() *bool { b := false; return &b }(),
+				ParallelToolCalls: boolPtr(false),
 			},
 			expect: true,
 		},
@@ -546,17 +611,17 @@ func TestParallelToolCallsCascading(t *testing.T) {
 			name: "explicit true in service cascades to command",
 			cfg:  AIConfig{},
 			svc: Service{
-				ParallelToolCalls: func() *bool { b := true; return &b }(),
+				ParallelToolCalls: boolPtr(true),
 			},
 			expect: true,
 		},
 		{
 			name: "explicit false in command overrides service true",
 			cfg: AIConfig{
-				ParallelToolCalls: func() *bool { b := false; return &b }(),
+				ParallelToolCalls: boolPtr(false),
 			},
 			svc: Service{
-				ParallelToolCalls: func() *bool { b := true; return &b }(),
+				ParallelToolCalls: boolPtr(true),
 			},
 			expect: false,
 		},

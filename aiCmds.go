@@ -1046,7 +1046,7 @@ func (cr *chatRunner) callResponsesStream(ctx context.Context, params responses.
 				// accumulated via response.completed
 
 			case "response.output_item.done":
-				if event.Item.Type == "function_call" && cr.cfg.ToolVerbose != nil && *cr.cfg.ToolVerbose {
+				if event.Item.Type == "function_call" && (cr.cfg.ToolVerbose == nil || *cr.cfg.ToolVerbose) {
 					serverName := getMCPServerForTool(event.Item.Name)
 					cr.sendIRC(fmt.Sprintf("\x0315🔧 ToolCall: %s > %s", serverName, event.Item.Name))
 				}

@@ -59,7 +59,7 @@ func connectMCPServer(name string, mcpCfg MCPConfig) (*MCPServer, error) {
 		if len(mcpCfg.Env) > 0 {
 			cmd.Env = append(os.Environ(), mcpCfg.Env...)
 		}
-		transport = &mcp.CommandTransport{Command: cmd}
+		transport = &mcp.CommandTransport{Command: cmd, TerminateDuration: 2 * time.Second}
 	} else {
 		transport = &mcp.StreamableClientTransport{Endpoint: mcpCfg.URL}
 	}

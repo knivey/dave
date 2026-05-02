@@ -13,3 +13,4 @@ mcps/img-mcp/img-mcp
 mcps/img-mcp/data/*
 data/*
 logs/
+tools/backfill-session-meta/backfill-session-meta

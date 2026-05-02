@@ -69,6 +69,7 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
+		queue.Stop()
 		cancel()
 	}()
 

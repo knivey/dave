@@ -81,19 +81,24 @@ type JobQueue struct {
 	failedCount    int
 	statsMu        sync.Mutex
 
-	wg     sync.WaitGroup
-	cancel context.CancelFunc
-	ready  atomic.Bool
+	wg             sync.WaitGroup
+	cancel         context.CancelFunc
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
+	ready          atomic.Bool
 }
 
 func NewJobQueue(cfg Config, db *sqlx.DB) *JobQueue {
 	ctx, cancel := context.WithCancel(context.Background())
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	q := &JobQueue{
-		cfg:     cfg,
-		db:      db,
-		pending: make(chan *Job, cfg.Queue.MaxDepth),
-		results: make(map[string]*Job),
-		cancel:  cancel,
+		cfg:            cfg,
+		db:             db,
+		pending:        make(chan *Job, cfg.Queue.MaxDepth),
+		results:        make(map[string]*Job),
+		cancel:         cancel,
+		shutdownCtx:    shutdownCtx,
+		shutdownCancel: shutdownCancel,
 	}
 
 	if db != nil {
@@ -113,6 +118,7 @@ func NewJobQueue(cfg Config, db *sqlx.DB) *JobQueue {
 }
 
 func (q *JobQueue) Stop() {
+	q.shutdownCancel()
 	q.cancel()
 	q.wg.Wait()
 }
@@ -454,7 +460,7 @@ func (q *JobQueue) worker(ctx context.Context, id int) {
 }
 
 func (q *JobQueue) processJob(ctx context.Context, job *Job) {
-	jobCtx, cancel := context.WithCancel(ctx)
+	jobCtx, cancel := context.WithCancel(q.shutdownCtx)
 	job.cancelCtx = cancel
 	defer cancel()
 

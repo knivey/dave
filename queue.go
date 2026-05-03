@@ -22,9 +22,10 @@ type QueueItem struct {
 	Description string
 	Enqueued    time.Time
 	Execute     func(ctx context.Context, output chan<- string)
-	outputCh    chan string
-	ctx         context.Context
-	cancel      context.CancelFunc
+	outputCh        chan string
+	ctx             context.Context
+	cancel          context.CancelFunc
+	deliveryWaited  bool
 }
 
 type ChannelQueue struct {
@@ -83,6 +84,7 @@ func (ds *deliverySlot) waitTurn(item *QueueItem) {
 		if len(ds.queue) == 0 {
 			return
 		}
+		item.deliveryWaited = true
 		ds.cond.Wait()
 	}
 	if len(ds.queue) > 0 {
@@ -469,7 +471,7 @@ func (qm *QueueManager) runJob(item *QueueItem) {
 	}
 
 	waitTime := time.Since(item.Enqueued)
-	if waitTime > time.Second {
+	if item.deliveryWaited || waitTime > time.Second {
 		msg := qm.formatStartedMsg(item.Nick, waitTime)
 		bot.Client.Cmd.Message(item.Channel, msg)
 	}

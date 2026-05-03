@@ -5,7 +5,7 @@
 #   quitmsg             (string)              Default quit message
 #   uploadurl           (string)              URL prefix for paste uploads
 #   queue_msgs          (string array)        Messages shown while queued. Supports {position} placeholder
-#   started_msg         (string)              Message shown when processing starts. Supports {nick}, {wait}
+#   started_msg         (string)              Message shown when processing starts. Supports {nick}, {wait}, {prompt}
 #   max_queue_depth     (int, default: 5)     Max queued requests per network
 #   ratemsgs            (string array)        Random messages shown when rate-limited
 #   sessions_display_limit (int, default: 10)   Max sessions shown in sessions list command
@@ -63,7 +63,7 @@
 # quitmsg = "goodbye"
 # uploadurl = "https://upload.example.com"
 # queue_msgs = ["queued (position {position})"]
-# started_msg = "\x0306\u25b6 {nick}: Processing your request (waited {wait})...\x0f"
+# started_msg = "\x0306\u25b6 {nick}: Processing your request (waited {wait})...{prompt}\x0f"
 # max_queue_depth = 5
 # ratemsgs = ["slow down!"]
 # sessions_display_limit = 10
@@ -123,7 +123,7 @@ uploadurl = "https://upload.beer"
 queue_msgs = [
     "queued (position {position})"
 ]
-started_msg = "\x0306\u25b6 {nick}: Processing your request (waited {wait})...\x0f"
+started_msg = "\x0306\u25b6 {nick}: Processing your request (waited {wait})...{prompt}\x0f"
 max_queue_depth = 5
 ratemsgs = [
     "whoa!! slow down!!!1~ AHHHHHHHHHHHHHHHH AHhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhA HHHHHHHHHHHHHhhhhhhhhhhhhhhhhhhhAAAAAAAAAAAAAAAAAAHhhhhhhhhhhhhhhhh"

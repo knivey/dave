@@ -341,7 +341,7 @@ func loadConfigDir(dir string) (Config, error) {
 		config.QueueMsgs = []string{"queued (position {position})"}
 	}
 	if config.StartedMsg == "" {
-		config.StartedMsg = "\x0306\u25b6 {nick}: Processing your request (waited {wait})...\x0f"
+		config.StartedMsg = "\x0306\u25b6 {nick}: Processing your request (waited {wait})...{prompt}\x0f"
 	}
 	if config.MaxQueueDepth <= 0 {
 		config.MaxQueueDepth = 5

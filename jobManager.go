@@ -503,7 +503,9 @@ func onToolAsyncJobCompleted(job *toolAsyncJob, resultText string) {
 		}
 	}
 
-	queueMgr.EnqueueAt(job.Network, job.Channel, job.Nick, "", job.ToolName, job.SubmittedAt,
+	queueMgr.EnqueueAtWithPrompt(job.Network, job.Channel, job.Nick, "", job.ToolName, job.Prompt,
+		"\x0306\u25b6 {nick}: Processed your image request (waited {wait})...{prompt}\x0f",
+		job.SubmittedAt,
 		func(ctx context.Context, output chan<- string) {
 			deliverToolAsyncResult(job, resultText, ctx, output)
 		})
@@ -531,20 +533,6 @@ func deliverToolAsyncResult(job *toolAsyncJob, resultText string, ctx context.Co
 			return
 		}
 		if waitResult.Result != nil && len(waitResult.Result.Images) > 0 {
-			header := fmt.Sprintf("\x02%s\x02's image", job.Nick)
-			if job.Prompt != "" {
-				promptDisplay := job.Prompt
-				if len(promptDisplay) > 80 {
-					promptDisplay = promptDisplay[:77] + "..."
-				}
-				header += fmt.Sprintf(" (\x0310%s\x0F)", promptDisplay)
-			}
-			header += ":"
-			select {
-			case output <- header:
-			case <-ctx.Done():
-				return
-			}
 			for _, img := range waitResult.Result.Images {
 				if img.URL != "" {
 					select {

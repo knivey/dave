@@ -21,6 +21,8 @@ type QueueItem struct {
 	Service        string
 	Description    string
 	Enqueued       time.Time
+	Prompt         string
+	StartedMsg     string
 	Execute        func(ctx context.Context, output chan<- string)
 	outputCh       chan string
 	ctx            context.Context
@@ -121,7 +123,7 @@ func NewQueueManager(queueMsgs []string, startedMsg string, maxDepth int) *Queue
 		queueMsgs = []string{"queued (position {position})"}
 	}
 	if startedMsg == "" {
-		startedMsg = "\x0306\u25b6 {nick}: Processing your request (waited {wait})...\x0f"
+		startedMsg = "\x0306\u25b6 {nick}: Processing your request (waited {wait})...{prompt}\x0f"
 	}
 	if maxDepth <= 0 {
 		maxDepth = 5
@@ -213,6 +215,55 @@ func (qm *QueueManager) EnqueueAt(network, channel, nick, service, desc string, 
 		Service:     service,
 		Description: desc,
 		Enqueued:    enqueuedAt,
+		Execute:     fn,
+		outputCh:    make(chan string, 200),
+		ctx:         ctx,
+		cancel:      cancel,
+	}
+
+	ds := qm.getDeliverySlot(network, channel)
+	ds.enqueue(item)
+
+	slot := qm.execSlots[service]
+	if slot != nil && !slot.tryAcquire() {
+		cq.pending = append(cq.pending, item)
+		qm.notify()
+		return position
+	}
+
+	cq.running[item.ID] = item
+	go qm.runJob(item)
+	return 0
+}
+
+func (qm *QueueManager) EnqueueAtWithPrompt(network, channel, nick, service, desc, prompt, startedMsgOverride string, enqueuedAt time.Time, fn func(ctx context.Context, output chan<- string)) int {
+	if !qm.running.Load() {
+		return -1
+	}
+
+	qm.mu.Lock()
+	defer qm.mu.Unlock()
+
+	key := channelKey(network, channel)
+	cq := qm.getOrCreateChannelQueue(key)
+
+	position := len(cq.pending) + len(cq.running)
+	if position >= qm.maxDepth {
+		return -1
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	item := &QueueItem{
+		ID:          qm.idCounter.Add(1),
+		Network:     network,
+		Channel:     channel,
+		Nick:        nick,
+		Service:     service,
+		Description: desc,
+		Enqueued:    enqueuedAt,
+		Prompt:      prompt,
+		StartedMsg:  startedMsgOverride,
 		Execute:     fn,
 		outputCh:    make(chan string, 200),
 		ctx:         ctx,
@@ -418,6 +469,10 @@ func (qm *QueueManager) runJob(item *QueueItem) {
 	}
 
 	execDone := make(chan struct{})
+	startedMsg := ""
+	if item.deliveryWaited || time.Since(item.Enqueued) > time.Second {
+		startedMsg = qm.formatStartedMsg(item.Nick, time.Since(item.Enqueued), item.Prompt, item.StartedMsg)
+	}
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -425,11 +480,19 @@ func (qm *QueueManager) runJob(item *QueueItem) {
 				select {
 				case item.outputCh <- errorMsg(fmt.Sprintf("internal error: %v", r)):
 				case <-item.ctx.Done():
+				default:
 				}
 			}
 			close(item.outputCh)
 			close(execDone)
 		}()
+		if startedMsg != "" {
+			select {
+			case item.outputCh <- startedMsg:
+			case <-item.ctx.Done():
+				return
+			}
+		}
 		item.Execute(item.ctx, item.outputCh)
 	}()
 
@@ -468,12 +531,6 @@ func (qm *QueueManager) runJob(item *QueueItem) {
 		for range item.outputCh {
 		}
 		return
-	}
-
-	waitTime := time.Since(item.Enqueued)
-	if item.deliveryWaited || waitTime > time.Second {
-		msg := qm.formatStartedMsg(item.Nick, waitTime)
-		bot.Client.Cmd.Message(item.Channel, msg)
 	}
 
 	throttle := bot.Network.Throttle
@@ -526,13 +583,25 @@ func (ds *deliverySlot) remove(item *QueueItem) {
 	}
 }
 
-func (qm *QueueManager) formatStartedMsg(nick string, waitTime time.Duration) string {
+func (qm *QueueManager) formatStartedMsg(nick string, waitTime time.Duration, prompt, override string) string {
 	s := qm.startedMsg
+	if override != "" {
+		s = override
+	}
 	s = strings.ReplaceAll(s, "{nick}", nick)
 	s = strings.ReplaceAll(s, "{wait}", waitTime.Round(time.Second).String())
 	s = strings.ReplaceAll(s, "{position}", "0")
 	s = strings.ReplaceAll(s, "{eta}", "0s")
-	return s
+	if prompt != "" {
+		promptDisplay := prompt
+		if len(promptDisplay) > 80 {
+			promptDisplay = promptDisplay[:77] + "..."
+		}
+		s = strings.ReplaceAll(s, "{prompt}", fmt.Sprintf(" (\x0310%s\x0F\x0306)", promptDisplay))
+	} else {
+		s = strings.ReplaceAll(s, "{prompt}", "")
+	}
+	return strings.TrimRight(s, " \t")
 }
 
 func (c *Config) QueueMsg(position int, eta time.Duration) string {

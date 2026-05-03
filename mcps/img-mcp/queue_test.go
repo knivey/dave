@@ -4,6 +4,9 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestJobQueue_Cancel_QueuedJob(t *testing.T) {
@@ -23,22 +26,16 @@ func TestJobQueue_Cancel_QueuedJob(t *testing.T) {
 	job := submitTestJob(t, q)
 
 	ok := q.Cancel(job.ID)
-	if !ok {
-		t.Fatal("expected Cancel to return true")
-	}
+	require.True(t, ok, "expected Cancel to return true")
 
 	assertJobStatus(t, q, job.ID, StatusCancelled)
 
-	if dbStatus := dbJobStatus(t, q.db, job.ID); dbStatus != string(StatusCancelled) {
-		t.Errorf("expected DB status %q, got %q", StatusCancelled, dbStatus)
-	}
+	assert.Equal(t, string(StatusCancelled), dbJobStatus(t, q.db, job.ID), "DB status")
 
 	q.mu.RLock()
 	_, inResults := q.results[job.ID]
 	q.mu.RUnlock()
-	if !inResults {
-		t.Error("cancelled job should still be in results map")
-	}
+	assert.True(t, inResults, "cancelled job should still be in results map")
 }
 
 func TestJobQueue_Cancel_NonExistentJob(t *testing.T) {
@@ -47,9 +44,7 @@ func TestJobQueue_Cancel_NonExistentJob(t *testing.T) {
 	defer cleanup()
 
 	ok := q.Cancel("nonexistent")
-	if ok {
-		t.Fatal("expected Cancel to return false for nonexistent job")
-	}
+	require.False(t, ok, "expected Cancel to return false for nonexistent job")
 }
 
 func TestJobQueue_Cancel_AlreadyCompleted(t *testing.T) {
@@ -75,9 +70,7 @@ func TestJobQueue_Cancel_AlreadyCompleted(t *testing.T) {
 	q.mu.Unlock()
 
 	ok := q.Cancel(job.ID)
-	if ok {
-		t.Fatal("expected Cancel to return false for completed job")
-	}
+	require.False(t, ok, "expected Cancel to return false for completed job")
 }
 
 func TestJobQueue_Cancel_AlreadyCancelled(t *testing.T) {
@@ -99,9 +92,7 @@ func TestJobQueue_Cancel_AlreadyCancelled(t *testing.T) {
 	q.Cancel(job.ID)
 
 	ok := q.Cancel(job.ID)
-	if ok {
-		t.Fatal("expected Cancel to return false for already-cancelled job")
-	}
+	require.False(t, ok, "expected Cancel to return false for already-cancelled job")
 }
 
 func TestJobQueue_Cancel_RunningJob_InterruptsComfy(t *testing.T) {
@@ -129,24 +120,16 @@ func TestJobQueue_Cancel_RunningJob_InterruptsComfy(t *testing.T) {
 	q.mu.Unlock()
 
 	ok := q.Cancel(job.ID)
-	if !ok {
-		t.Fatal("expected Cancel to return true for running job")
-	}
+	require.True(t, ok, "expected Cancel to return true for running job")
 
 	q.mu.RLock()
 	storedJob := q.results[job.ID]
 	q.mu.RUnlock()
-	if storedJob.Status != StatusCancelled {
-		t.Errorf("expected status %s, got %s", StatusCancelled, storedJob.Status)
-	}
+	assert.Equal(t, StatusCancelled, storedJob.Status, "job status")
 
 	interrupts := mockComfy.getInterrupts()
-	if len(interrupts) != 1 {
-		t.Fatalf("expected 1 interrupt call, got %d", len(interrupts))
-	}
-	if interrupts[0]["prompt_id"] != "comfy-prompt-456" {
-		t.Errorf("expected interrupt for prompt_id 'comfy-prompt-456', got %q", interrupts[0]["prompt_id"])
-	}
+	require.Len(t, interrupts, 1, "interrupt calls")
+	assert.Equal(t, "comfy-prompt-456", interrupts[0]["prompt_id"], "interrupt prompt_id")
 }
 
 func TestJobQueue_Cancel_RunningJob_WithoutComfyPromptID(t *testing.T) {
@@ -173,21 +156,15 @@ func TestJobQueue_Cancel_RunningJob_WithoutComfyPromptID(t *testing.T) {
 	q.mu.Unlock()
 
 	ok := q.Cancel(job.ID)
-	if !ok {
-		t.Fatal("expected Cancel to return true")
-	}
+	require.True(t, ok, "expected Cancel to return true")
 
 	q.mu.RLock()
 	storedJob := q.results[job.ID]
 	q.mu.RUnlock()
-	if storedJob.Status != StatusCancelled {
-		t.Errorf("expected status %s, got %s", StatusCancelled, storedJob.Status)
-	}
+	assert.Equal(t, StatusCancelled, storedJob.Status, "job status")
 
 	interrupts := mockComfy.getInterrupts()
-	if len(interrupts) != 0 {
-		t.Errorf("expected no interrupt calls when no comfy_prompt_id, got %d", len(interrupts))
-	}
+	assert.Len(t, interrupts, 0, "expected no interrupt calls when no comfy_prompt_id")
 }
 
 func TestJobQueue_Cancel_RunningJob_CancelsContext(t *testing.T) {
@@ -268,18 +245,14 @@ func TestJobQueue_Cancel_QueuedJob_RemovesFromQueue(t *testing.T) {
 	q.orderMu.Lock()
 	beforeLen := len(q.queuedOrder)
 	q.orderMu.Unlock()
-	if beforeLen != 1 {
-		t.Fatalf("expected 1 queued job before cancel, got %d", beforeLen)
-	}
+	require.Equal(t, 1, beforeLen, "queued jobs before cancel")
 
 	q.Cancel(job.ID)
 
 	q.orderMu.Lock()
 	afterLen := len(q.queuedOrder)
 	q.orderMu.Unlock()
-	if afterLen != 0 {
-		t.Errorf("expected 0 queued jobs after cancel, got %d", afterLen)
-	}
+	assert.Equal(t, 0, afterLen, "queued jobs after cancel")
 }
 
 func TestJobQueue_Cancel_MultipleJobs(t *testing.T) {
@@ -309,24 +282,16 @@ func TestJobQueue_Cancel_MultipleJobs(t *testing.T) {
 	job2.cancelCtx = cancel2
 	q.mu.Unlock()
 
-	if !q.Cancel(job1.ID) {
-		t.Fatal("expected job1 cancel to succeed")
-	}
-	if !q.Cancel(job2.ID) {
-		t.Fatal("expected job2 cancel to succeed")
-	}
+	require.True(t, q.Cancel(job1.ID), "expected job1 cancel to succeed")
+	require.True(t, q.Cancel(job2.ID), "expected job2 cancel to succeed")
 
 	assertJobStatus(t, q, job1.ID, StatusCancelled)
 	assertJobStatus(t, q, job2.ID, StatusCancelled)
 	assertJobStatus(t, q, job3.ID, StatusQueued)
 
 	interrupts := mockComfy.getInterrupts()
-	if len(interrupts) != 1 {
-		t.Fatalf("expected 1 interrupt, got %d", len(interrupts))
-	}
-	if interrupts[0]["prompt_id"] != "comfy-2" {
-		t.Errorf("expected interrupt for comfy-2, got %q", interrupts[0]["prompt_id"])
-	}
+	require.Len(t, interrupts, 1, "interrupt calls")
+	assert.Equal(t, "comfy-2", interrupts[0]["prompt_id"], "interrupt prompt_id")
 }
 
 func TestJobQueue_IsReady_NoDB(t *testing.T) {
@@ -335,9 +300,7 @@ func TestJobQueue_IsReady_NoDB(t *testing.T) {
 	q := NewJobQueue(cfg, nil)
 	defer q.Stop()
 
-	if !q.IsReady() {
-		t.Fatal("expected IsReady true when no DB")
-	}
+	require.True(t, q.IsReady(), "expected IsReady true when no DB")
 }
 
 func TestJobQueue_IsReady_WithDB(t *testing.T) {
@@ -347,7 +310,5 @@ func TestJobQueue_IsReady_WithDB(t *testing.T) {
 	q := NewJobQueue(cfg, db)
 	defer q.Stop()
 
-	if !q.IsReady() {
-		t.Fatal("expected IsReady true after NewJobQueue with DB (recovery is synchronous)")
-	}
+	require.True(t, q.IsReady(), "expected IsReady true after NewJobQueue with DB (recovery is synchronous)")
 }

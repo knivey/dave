@@ -7,6 +7,9 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/knivey/dave/MarkdownToIRC/irc"
 )
 
@@ -31,14 +34,10 @@ func testStreamingIncremental(t *testing.T, input string, contain, notContain []
 	}
 	got := output.String()
 	for _, want := range contain {
-		if !strings.Contains(got, want) {
-			t.Errorf("output missing %q\ngot:  %s\nwant: %s", humanize(want), humanize(got), humanize(want))
-		}
+		assert.Contains(t, got, want, "output missing %q\ngot:  %s\nwant: %s", humanize(want), humanize(got), humanize(want))
 	}
 	for _, notwant := range notContain {
-		if strings.Contains(got, notwant) {
-			t.Errorf("output unexpectedly contains %q\ngot:  %s", humanize(notwant), humanize(got))
-		}
+		assert.NotContains(t, got, notwant, "output unexpectedly contains %q\ngot:  %s", humanize(notwant), humanize(got))
 	}
 }
 
@@ -92,9 +91,7 @@ func TestUserProvidedExample(t *testing.T) {
 	input := "# This is a header\n\nThis is a paragraph.\n\n```\ncode block line 1\n\ncode block line 2\n```\n\n- list item 1\n- list item 2"
 	expected := "\x02This is a header\x02\nThis is a paragraph.\n \x030,90code block line 1\x03 \n \x030,90                 \x03 \n \x030,90code block line 2\x03 \n • list item 1\n • list item 2"
 	got := MarkdownToIRC(input)
-	if got != expected {
-		t.Errorf("expected %q, got %q", expected, got)
-	}
+	assert.Equal(t, expected, got)
 }
 
 func TestStreamingCodeBlockWidthCapping(t *testing.T) {
@@ -116,13 +113,11 @@ func TestStreamingCodeBlockWidthCapping(t *testing.T) {
 			}
 		}
 		if len(codeLines) < 2 {
-			t.Fatalf("expected multiple code lines, got %d", len(codeLines))
+			require.GreaterOrEqual(t, len(codeLines), 2, "expected multiple code lines")
 		}
 		firstLen := utf8.RuneCountInString(codeLines[0])
 		secondLen := utf8.RuneCountInString(codeLines[1])
-		if firstLen != secondLen {
-			t.Errorf("expected all lines padded to same length, got %d vs %d", firstLen, secondLen)
-		}
+		assert.Equal(t, firstLen, secondLen, "expected all lines padded to same length")
 	})
 
 	t.Run("PlainCodeBlockMixedLengths", func(t *testing.T) {
@@ -135,20 +130,14 @@ func TestStreamingCodeBlockWidthCapping(t *testing.T) {
 				codeLines = append(codeLines, l)
 			}
 		}
-		if len(codeLines) != 2 {
-			t.Fatalf("expected 2 code lines, got %d", len(codeLines))
-		}
+		require.Len(t, codeLines, 2, "expected 2 code lines")
 		shortClean := stripAll(codeLines[0])
 		longClean := stripAll(codeLines[1])
 		shortLen := utf8.RuneCountInString(shortClean)
 		longLen := utf8.RuneCountInString(longClean)
 		expectedPad := maxCodeBlockPadWidth + 2
-		if shortLen != expectedPad {
-			t.Errorf("short line padded to %d chars, want %d (80 + borders), got: %q", shortLen, expectedPad, shortClean)
-		}
-		if longLen <= shortLen {
-			t.Errorf("long line should exceed padded width, got length %d vs short %d", longLen, shortLen)
-		}
+		assert.Equal(t, expectedPad, shortLen, "short line padded to %d chars, want %d (80 + borders), got: %q", shortLen, expectedPad, shortClean)
+		assert.Greater(t, longLen, shortLen, "long line should exceed padded width")
 	})
 
 	t.Run("PlainCodeBlockAllLinesOver80", func(t *testing.T) {
@@ -163,14 +152,10 @@ func TestStreamingCodeBlockWidthCapping(t *testing.T) {
 				codeLines = append(codeLines, stripAll(l))
 			}
 		}
-		if len(codeLines) != 2 {
-			t.Fatalf("expected 2 code lines, got %d", len(codeLines))
-		}
+		require.Len(t, codeLines, 2, "expected 2 code lines")
 		len1 := utf8.RuneCountInString(codeLines[0])
 		len2 := utf8.RuneCountInString(codeLines[1])
-		if len1 == len2 {
-			t.Errorf("expected different lengths when all lines exceed 80, got both %d", len1)
-		}
+		assert.NotEqual(t, len1, len2, "expected different lengths when all lines exceed 80")
 	})
 }
 
@@ -192,20 +177,14 @@ func TestStreamingHighlightedCodeBlockWidthCapping(t *testing.T) {
 				codeLines = append(codeLines, l)
 			}
 		}
-		if len(codeLines) != 2 {
-			t.Fatalf("expected 2 code lines, got %d", len(codeLines))
-		}
+		require.Len(t, codeLines, 2, "expected 2 code lines")
 		shortClean := stripAll(codeLines[0])
 		longClean := stripAll(codeLines[1])
 		shortLen := utf8.RuneCountInString(shortClean)
 		longLen := utf8.RuneCountInString(longClean)
 		expectedPad := maxCodeBlockPadWidth + 2
-		if shortLen != expectedPad {
-			t.Errorf("short line padded to %d chars, want %d (80 + borders), got: %q", shortLen, expectedPad, shortClean)
-		}
-		if longLen <= shortLen {
-			t.Errorf("long line should exceed padded width, got length %d vs short %d", longLen, shortLen)
-		}
+		assert.Equal(t, expectedPad, shortLen, "short line padded to %d chars, want %d (80 + borders), got: %q", shortLen, expectedPad, shortClean)
+		assert.Greater(t, longLen, shortLen, "long line should exceed padded width")
 	})
 
 	t.Run("AllLinesOver80WithLanguage", func(t *testing.T) {
@@ -220,14 +199,10 @@ func TestStreamingHighlightedCodeBlockWidthCapping(t *testing.T) {
 				codeLines = append(codeLines, stripAll(l))
 			}
 		}
-		if len(codeLines) != 2 {
-			t.Fatalf("expected 2 code lines, got %d", len(codeLines))
-		}
+		require.Len(t, codeLines, 2, "expected 2 code lines")
 		len1 := utf8.RuneCountInString(codeLines[0])
 		len2 := utf8.RuneCountInString(codeLines[1])
-		if len1 == len2 {
-			t.Errorf("expected different lengths when all lines exceed 80, got both %d", len1)
-		}
+		assert.NotEqual(t, len1, len2, "expected different lengths when all lines exceed 80")
 	})
 
 	t.Run("AllLinesUnder80WithLanguage", func(t *testing.T) {
@@ -241,13 +216,11 @@ func TestStreamingHighlightedCodeBlockWidthCapping(t *testing.T) {
 			}
 		}
 		if len(codeLines) < 2 {
-			t.Fatalf("expected multiple code lines, got %d", len(codeLines))
+			require.GreaterOrEqual(t, len(codeLines), 2, "expected multiple code lines")
 		}
 		firstLen := utf8.RuneCountInString(codeLines[0])
 		secondLen := utf8.RuneCountInString(codeLines[1])
-		if firstLen != secondLen {
-			t.Errorf("expected all lines padded to same length, got %d vs %d", firstLen, secondLen)
-		}
+		assert.Equal(t, firstLen, secondLen, "expected all lines padded to same length")
 	})
 }
 
@@ -275,9 +248,7 @@ func TestStreamingFromTestData(t *testing.T) {
 
 	testDataDir := "testdata/streaming"
 	files, err := os.ReadDir(testDataDir)
-	if err != nil {
-		t.Fatalf("failed to read testdata directory: %v", err)
-	}
+	require.NoError(t, err, "failed to read testdata directory")
 
 	mdFiles := make(map[string]string)
 	for _, f := range files {
@@ -292,23 +263,19 @@ func TestStreamingFromTestData(t *testing.T) {
 		ircPath := filepath.Join(testDataDir, name+".irc")
 
 		ircData, err := os.ReadFile(ircPath)
-		if err != nil {
-			t.Errorf("failed to read %s: %v", ircPath, err)
+		if !assert.NoError(t, err, "failed to read %s", ircPath) {
 			continue
 		}
 		expected := dehumanize(string(ircData))
 
 		mdData, err := os.ReadFile(mdPath)
-		if err != nil {
-			t.Errorf("failed to read %s: %v", mdPath, err)
+		if !assert.NoError(t, err, "failed to read %s", mdPath) {
 			continue
 		}
 		input := string(mdData)
 
 		got := streamingRender(input)
 
-		if got != expected {
-			t.Errorf("output mismatch for %s\ngot:\n%s\nwant:\n%s", name, humanize(got), humanize(expected))
-		}
+		assert.Equal(t, expected, got, "output mismatch for %s\ngot:\n%s\nwant:\n%s", name, humanize(got), humanize(expected))
 	}
 }

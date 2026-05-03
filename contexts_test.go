@@ -3,6 +3,8 @@ package main
 import (
 	"sync"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 type mockContextStore struct {
@@ -103,11 +105,9 @@ func TestTruncateHistory(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := TruncateHistory(tt.messages, tt.maxHistory)
-			if len(got) != tt.wantLen {
-				t.Errorf("TruncateHistory() len = %d, want %d", len(got), tt.wantLen)
-			}
-			if len(got) > 0 && got[0].Role != RoleSystem {
-				t.Errorf("TruncateHistory()[0].Role = %q, want %q", got[0].Role, RoleSystem)
+			assert.Len(t, got, tt.wantLen, "TruncateHistory() len")
+			if len(got) > 0 {
+				assert.Equal(t, RoleSystem, got[0].Role, "TruncateHistory()[0].Role")
 			}
 		})
 	}
@@ -117,9 +117,7 @@ func TestChatContextStore(t *testing.T) {
 	store := newMockContextStore()
 
 	t.Run("initially empty", func(t *testing.T) {
-		if store.Exists("key1") {
-			t.Error("expected Exists() to return false for new key")
-		}
+		assert.False(t, store.Exists("key1"), "expected Exists() to return false for new key")
 	})
 
 	t.Run("Add creates context", func(t *testing.T) {
@@ -127,20 +125,14 @@ func TestChatContextStore(t *testing.T) {
 		msg := ChatMessage{Role: RoleUser, Content: "hello"}
 		store.Add("key1", config, msg)
 
-		if !store.Exists("key1") {
-			t.Error("expected Exists() to return true after Add")
-		}
+		assert.True(t, store.Exists("key1"), "expected Exists() to return true after Add")
 		ctx := store.Get("key1")
-		if len(ctx.Messages) != 1 {
-			t.Errorf("Messages len = %d, want 1", len(ctx.Messages))
-		}
+		assert.Len(t, ctx.Messages, 1, "Messages")
 	})
 
 	t.Run("Clear removes context", func(t *testing.T) {
 		store.Clear("key1")
-		if store.Exists("key1") {
-			t.Error("expected Exists() to return false after Clear")
-		}
+		assert.False(t, store.Exists("key1"), "expected Exists() to return false after Clear")
 	})
 
 	t.Run("Add truncates history", func(t *testing.T) {
@@ -153,12 +145,8 @@ func TestChatContextStore(t *testing.T) {
 		}
 
 		ctx := store.Get("key2")
-		if len(ctx.Messages) != 3 {
-			t.Errorf("Messages len = %d, want 3 (maxHistory+1)", len(ctx.Messages))
-		}
-		if ctx.Messages[0].Role != RoleSystem {
-			t.Errorf("First message should be system, got %s", ctx.Messages[0].Role)
-		}
+		assert.Len(t, ctx.Messages, 3, "Messages (maxHistory+1)")
+		assert.Equal(t, RoleSystem, ctx.Messages[0].Role, "First message should be system")
 	})
 
 	t.Run("preserves config", func(t *testing.T) {
@@ -167,19 +155,13 @@ func TestChatContextStore(t *testing.T) {
 		store.Add("key3", config, msg)
 
 		ctx := store.Get("key3")
-		if ctx.Config.MaxHistory != 3 {
-			t.Errorf("Config.MaxHistory = %d, want 3", ctx.Config.MaxHistory)
-		}
-		if ctx.Config.Temperature != 0.7 {
-			t.Errorf("Config.Temperature = %f, want 0.7", ctx.Config.Temperature)
-		}
+		assert.Equal(t, 3, ctx.Config.MaxHistory, "Config.MaxHistory")
+		assert.Equal(t, float32(0.7), ctx.Config.Temperature, "Config.Temperature")
 	})
 
 	t.Run("Get on non-existent returns empty", func(t *testing.T) {
 		ctx := store.Get("nonexistent")
-		if len(ctx.Messages) != 0 {
-			t.Errorf("Get() on nonexistent key should return empty context")
-		}
+		assert.Len(t, ctx.Messages, 0, "Get() on nonexistent key should return empty context")
 	})
 }
 
@@ -208,7 +190,5 @@ func TestChatContextStoreConcurrency(t *testing.T) {
 	wg.Wait()
 
 	ctx := store.Get("shared_key")
-	if len(ctx.Messages) == 0 {
-		t.Error("expected messages after concurrent adds")
-	}
+	assert.NotEmpty(t, ctx.Messages, "expected messages after concurrent adds")
 }

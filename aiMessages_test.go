@@ -3,6 +3,9 @@ package main
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestExtendedMessageUnmarshal(t *testing.T) {
@@ -39,30 +42,15 @@ func TestExtendedMessageUnmarshal(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var msg ExtendedMessage
-			if err := json.Unmarshal([]byte(tt.jsonData), &msg); err != nil {
-				t.Fatalf("Unmarshal failed: %v", err)
-			}
+			require.NoError(t, json.Unmarshal([]byte(tt.jsonData), &msg), "Unmarshal failed")
 
-			if msg.Role != tt.wantRole {
-				t.Errorf("Role = %q, want %q", msg.Role, tt.wantRole)
-			}
+			assert.Equal(t, tt.wantRole, msg.Role, "Role")
+			assert.Equal(t, tt.wantContent, msg.Content, "Content")
+			assert.Equal(t, tt.wantHasReasoningDetails, msg.HasExtraField("reasoning_details"), "HasExtraField(reasoning_details)")
 
-			if msg.Content != tt.wantContent {
-				t.Errorf("Content = %q, want %q", msg.Content, tt.wantContent)
-			}
-
-			if msg.HasExtraField("reasoning_details") != tt.wantHasReasoningDetails {
-				t.Errorf("HasExtraField(reasoning_details) = %v, want %v", msg.HasExtraField("reasoning_details"), tt.wantHasReasoningDetails)
-			}
-
-			// Test ToChatCompletionMessage
 			stdMsg := msg.ToChatCompletionMessage()
-			if stdMsg.Role != tt.wantRole {
-				t.Errorf("ToChatCompletionMessage().Role = %q, want %q", stdMsg.Role, tt.wantRole)
-			}
-			if stdMsg.Content != tt.wantContent {
-				t.Errorf("ToChatCompletionMessage().Content = %q, want %q", stdMsg.Content, tt.wantContent)
-			}
+			assert.Equal(t, tt.wantRole, stdMsg.Role, "ToChatCompletionMessage().Role")
+			assert.Equal(t, tt.wantContent, stdMsg.Content, "ToChatCompletionMessage().Content")
 		})
 	}
 }
@@ -71,58 +59,32 @@ func TestExtendedMessageGetExtraField(t *testing.T) {
 	jsonData := `{"role":"assistant","content":"Answer","reasoning_details":[{"step":1,"content":"Thinking..."}],"custom_field":"value"}`
 
 	var msg ExtendedMessage
-	if err := json.Unmarshal([]byte(jsonData), &msg); err != nil {
-		t.Fatalf("Unmarshal failed: %v", err)
-	}
+	require.NoError(t, json.Unmarshal([]byte(jsonData), &msg), "Unmarshal failed")
 
-	// Test getting reasoning_details
 	var reasoningDetails []map[string]any
-	if err := msg.GetExtraField("reasoning_details", &reasoningDetails); err != nil {
-		t.Errorf("GetExtraField(reasoning_details) failed: %v", err)
-	}
+	assert.NoError(t, msg.GetExtraField("reasoning_details", &reasoningDetails), "GetExtraField(reasoning_details)")
 
-	if len(reasoningDetails) != 1 {
-		t.Errorf("Got %d reasoning details, want 1", len(reasoningDetails))
-	}
+	assert.Len(t, reasoningDetails, 1, "reasoning details")
+	assert.Equal(t, float64(1), reasoningDetails[0]["step"], "reasoning_details[0].step")
 
-	if reasoningDetails[0]["step"].(float64) != 1 {
-		t.Errorf("reasoning_details[0].step = %v, want 1", reasoningDetails[0]["step"])
-	}
-
-	// Test getting custom_field
 	var customField string
-	if err := msg.GetExtraField("custom_field", &customField); err != nil {
-		t.Errorf("GetExtraField(custom_field) failed: %v", err)
-	}
+	assert.NoError(t, msg.GetExtraField("custom_field", &customField), "GetExtraField(custom_field)")
+	assert.Equal(t, "value", customField, "custom_field")
 
-	if customField != "value" {
-		t.Errorf("custom_field = %q, want %q", customField, "value")
-	}
-
-	// Test non-existent field (should not error)
 	var nonExistent string
-	if err := msg.GetExtraField("non_existent", &nonExistent); err != nil {
-		t.Errorf("GetExtraField(non_existent) should not error: %v", err)
-	}
+	assert.NoError(t, msg.GetExtraField("non_existent", &nonExistent), "GetExtraField(non_existent)")
 }
 
 func TestExtendedMessageBackwardCompatible(t *testing.T) {
-	// Test that we can still use standard ChatCompletionMessage where needed
 	stdMsg := ChatMessage{
 		Role:    "user",
 		Content: "Hello",
 	}
 
-	// Convert to ExtendedMessage
 	var extMsg ExtendedMessage
 	extMsg.ChatMessage = stdMsg
 
-	// Should be able to convert back
 	result := extMsg.ToChatCompletionMessage()
-	if result.Role != stdMsg.Role {
-		t.Errorf("Role mismatch: got %q, want %q", result.Role, stdMsg.Role)
-	}
-	if result.Content != stdMsg.Content {
-		t.Errorf("Content mismatch: got %q, want %q", result.Content, stdMsg.Content)
-	}
+	assert.Equal(t, stdMsg.Role, result.Role, "Role mismatch")
+	assert.Equal(t, stdMsg.Content, result.Content, "Content mismatch")
 }

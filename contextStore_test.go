@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/jmoiron/sqlx"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMain(m *testing.M) {
@@ -29,9 +31,7 @@ func setupTestDB(t *testing.T) (*sqlx.DB, func()) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
 	db, err := initDB(DatabaseConfig{Path: dbPath, MaxAgeDays: 90})
-	if err != nil {
-		t.Fatalf("failed to init test db: %v", err)
-	}
+	require.NoError(t, err, "failed to init test db")
 	oldDB := theDB
 	theDB = db
 	return db, func() {
@@ -59,9 +59,7 @@ func TestDBSessionRoundtrip(t *testing.T) {
 
 	ctxKey := "net#chanuser"
 	sid, err := createDBSession(ctxKey, "net", "#chan", "user", "testcmd", "", "testservice", "testmodel")
-	if err != nil {
-		t.Fatalf("failed to create session: %v", err)
-	}
+	require.NoError(t, err, "failed to create session")
 
 	chatContextsMutex.Lock()
 	ctx := chatContextsMap[ctxKey]
@@ -78,9 +76,8 @@ func TestDBSessionRoundtrip(t *testing.T) {
 			}
 			return nil
 		}(msg)
-		if err := insertDBMessage(sid, msg.Role, msg.Content, toolCallsJSON, nil, nil); err != nil {
-			t.Fatalf("failed to insert message: %v", err)
-		}
+		err := insertDBMessage(sid, msg.Role, msg.Content, toolCallsJSON, nil, nil)
+		require.NoError(t, err, "failed to insert message")
 	}
 
 	chatContextsMutex.Lock()
@@ -100,21 +97,13 @@ func TestDBSessionRoundtrip(t *testing.T) {
 	ctx2, ok := chatContextsMap[ctxKey]
 	chatContextsMutex.Unlock()
 
-	if !ok {
-		t.Fatal("expected context to be loaded")
-	}
+	require.True(t, ok, "expected context to be loaded")
 
-	if len(ctx2.Messages) != 3 {
-		t.Errorf("expected 3 messages, got %d", len(ctx2.Messages))
-	}
+	assert.Len(t, ctx2.Messages, 3, "messages count")
 
-	if ctx2.Messages[0].Role != "system" {
-		t.Errorf("first message should be system, got %s", ctx2.Messages[0].Role)
-	}
+	assert.Equal(t, "system", ctx2.Messages[0].Role, "first message role")
 
-	if ctx2.Messages[0].Content != "You are a helpful assistant" {
-		t.Errorf("system prompt mismatch: %s", ctx2.Messages[0].Content)
-	}
+	assert.Equal(t, "You are a helpful assistant", ctx2.Messages[0].Content, "system prompt")
 }
 
 func TestDBCleanupByAge(t *testing.T) {
@@ -123,28 +112,18 @@ func TestDBCleanupByAge(t *testing.T) {
 	_ = db
 
 	sid, err := createDBSession("oldkey", "net", "#chan", "user", "testcmd", "", "", "")
-	if err != nil {
-		t.Fatalf("failed to create session: %v", err)
-	}
+	require.NoError(t, err, "failed to create session")
 	insertDBMessage(sid, "user", "hello", nil, nil, nil)
 
 	theDB.Exec("UPDATE sessions SET last_active = datetime('now', '-100 days') WHERE id = ?", sid)
 
 	affected, err := cleanupDBSessions(90)
-	if err != nil {
-		t.Fatalf("cleanup failed: %v", err)
-	}
-	if affected != 1 {
-		t.Errorf("expected 1 session cleaned up, got %d", affected)
-	}
+	require.NoError(t, err, "cleanup failed")
+	assert.Equal(t, int64(1), affected, "sessions cleaned up")
 
 	session, err := getDBSessionByID(sid)
-	if err != nil {
-		t.Fatalf("failed to get session: %v", err)
-	}
-	if session.Status != "completed" {
-		t.Errorf("expected status 'completed', got %s", session.Status)
-	}
+	require.NoError(t, err, "failed to get session")
+	assert.Equal(t, "completed", session.Status, "session status")
 }
 
 func TestDBSessionCreateAndMessage(t *testing.T) {
@@ -153,35 +132,19 @@ func TestDBSessionCreateAndMessage(t *testing.T) {
 	_ = db
 
 	sid, err := createDBSession("testkey", "net", "#chan", "nick", "chat", "", "", "")
-	if err != nil {
-		t.Fatalf("createDBSession failed: %v", err)
-	}
-	if sid == 0 {
-		t.Error("expected non-zero session id")
-	}
+	require.NoError(t, err, "createDBSession failed")
+	assert.NotZero(t, sid, "expected non-zero session id")
 
 	err = insertDBMessage(sid, "system", "You are helpful", nil, nil, nil)
-	if err != nil {
-		t.Fatalf("insertDBMessage failed: %v", err)
-	}
+	require.NoError(t, err, "insertDBMessage failed")
 	err = insertDBMessage(sid, "user", "Hello!", nil, nil, nil)
-	if err != nil {
-		t.Fatalf("insertDBMessage failed: %v", err)
-	}
+	require.NoError(t, err, "insertDBMessage failed")
 
 	msgs, err := loadDBSessionMessages(sid)
-	if err != nil {
-		t.Fatalf("loadDBSessionMessages failed: %v", err)
-	}
-	if len(msgs) != 2 {
-		t.Errorf("expected 2 messages, got %d", len(msgs))
-	}
-	if msgs[0].Role != "system" {
-		t.Errorf("expected first message role 'system', got %s", msgs[0].Role)
-	}
-	if msgs[1].Content != "Hello!" {
-		t.Errorf("expected second message content 'Hello!', got %s", msgs[1].Content)
-	}
+	require.NoError(t, err, "loadDBSessionMessages failed")
+	assert.Len(t, msgs, 2, "messages count")
+	assert.Equal(t, "system", msgs[0].Role, "first message role")
+	assert.Equal(t, "Hello!", msgs[1].Content, "second message content")
 }
 
 func TestDBSessionComplete(t *testing.T) {
@@ -192,17 +155,11 @@ func TestDBSessionComplete(t *testing.T) {
 	sid, _ := createDBSession("testkey", "net", "#chan", "nick", "chat", "", "", "")
 
 	err := completeDBSession(sid)
-	if err != nil {
-		t.Fatalf("completeDBSession failed: %v", err)
-	}
+	require.NoError(t, err, "completeDBSession failed")
 
 	session, err := getDBSessionByID(sid)
-	if err != nil {
-		t.Fatalf("getDBSessionByID failed: %v", err)
-	}
-	if session.Status != "completed" {
-		t.Errorf("expected status 'completed', got %s", session.Status)
-	}
+	require.NoError(t, err, "getDBSessionByID failed")
+	assert.Equal(t, "completed", session.Status, "session status")
 }
 
 func TestDBDeleteSession(t *testing.T) {
@@ -214,14 +171,10 @@ func TestDBDeleteSession(t *testing.T) {
 	insertDBMessage(sid, "user", "hello", nil, nil, nil)
 
 	err := deleteDBSession(sid)
-	if err != nil {
-		t.Fatalf("deleteDBSession failed: %v", err)
-	}
+	require.NoError(t, err, "deleteDBSession failed")
 
 	_, err = getDBSessionByID(sid)
-	if err == nil {
-		t.Error("expected error getting deleted session")
-	}
+	assert.Error(t, err, "expected error getting deleted session")
 }
 
 func TestDBUserSessions(t *testing.T) {
@@ -235,12 +188,8 @@ func TestDBUserSessions(t *testing.T) {
 	createDBSession("other", "net", "#chan", "other", "chat", "", "", "")
 
 	sessions, err := getUserDBSessions("net", "#chan", "nick", 10)
-	if err != nil {
-		t.Fatalf("getUserDBSessions failed: %v", err)
-	}
-	if len(sessions) != 3 {
-		t.Errorf("expected 3 sessions for nick, got %d", len(sessions))
-	}
+	require.NoError(t, err, "getUserDBSessions failed")
+	assert.Len(t, sessions, 3, "sessions for nick")
 }
 
 func TestDBUserStats(t *testing.T) {
@@ -256,15 +205,9 @@ func TestDBUserStats(t *testing.T) {
 	insertDBMessage(sid2, "system", "sys", nil, nil, nil)
 
 	sessionCount, messageCount, err := getUserDBStats("net", "#chan", "nick")
-	if err != nil {
-		t.Fatalf("getUserDBStats failed: %v", err)
-	}
-	if sessionCount != 2 {
-		t.Errorf("expected 2 sessions, got %d", sessionCount)
-	}
-	if messageCount != 3 {
-		t.Errorf("expected 3 messages, got %d", messageCount)
-	}
+	require.NoError(t, err, "getUserDBStats failed")
+	assert.Equal(t, 2, sessionCount, "session count")
+	assert.Equal(t, 3, messageCount, "message count")
 }
 
 func TestDBDeleteUserSessions(t *testing.T) {
@@ -277,29 +220,19 @@ func TestDBDeleteUserSessions(t *testing.T) {
 	createDBSession("key3", "net", "#chan", "other", "chat", "", "", "")
 
 	affected, err := deleteUserDBSessions("net", "#chan", "nick")
-	if err != nil {
-		t.Fatalf("deleteUserDBSessions failed: %v", err)
-	}
-	if affected != 2 {
-		t.Errorf("expected 2 sessions deleted, got %d", affected)
-	}
+	require.NoError(t, err, "deleteUserDBSessions failed")
+	assert.Equal(t, int64(2), affected, "sessions deleted")
 
 	sessions, _ := getUserDBSessions("net", "#chan", "nick", 10)
-	if len(sessions) != 0 {
-		t.Errorf("expected 0 sessions for nick after delete, got %d", len(sessions))
-	}
+	assert.Len(t, sessions, 0, "sessions for nick after delete")
 }
 
 func TestDatabaseConfigDefaults(t *testing.T) {
 	cfg := DatabaseConfig{}
 	cfg.SetDefaults()
 
-	if cfg.Path != "data/dave.db" {
-		t.Errorf("expected default path 'data/dave.db', got %s", cfg.Path)
-	}
-	if cfg.MaxAgeDays != 90 {
-		t.Errorf("expected default MaxAgeDays 90, got %d", cfg.MaxAgeDays)
-	}
+	assert.Equal(t, "data/dave.db", cfg.Path, "default path")
+	assert.Equal(t, 90, cfg.MaxAgeDays, "default MaxAgeDays")
 }
 
 func TestDatabaseConfigNoOverwrite(t *testing.T) {
@@ -309,12 +242,8 @@ func TestDatabaseConfigNoOverwrite(t *testing.T) {
 	}
 	cfg.SetDefaults()
 
-	if cfg.Path != "custom/path.db" {
-		t.Errorf("expected path 'custom/path.db', got %s", cfg.Path)
-	}
-	if cfg.MaxAgeDays != 30 {
-		t.Errorf("expected MaxAgeDays 30, got %d", cfg.MaxAgeDays)
-	}
+	assert.Equal(t, "custom/path.db", cfg.Path, "path")
+	assert.Equal(t, 30, cfg.MaxAgeDays, "MaxAgeDays")
 }
 
 func TestDBToolCalls(t *testing.T) {
@@ -332,17 +261,12 @@ func TestDBToolCalls(t *testing.T) {
 	toolCallID := "tc1"
 
 	err := insertDBMessage(sid, "assistant", "", &tcJSON, &toolCallID, nil)
-	if err != nil {
-		t.Fatalf("insertDBMessage with tool calls failed: %v", err)
-	}
+	require.NoError(t, err, "insertDBMessage with tool calls failed")
 
 	msgs, err := loadDBSessionMessages(sid)
-	if err != nil {
-		t.Fatalf("loadDBSessionMessages failed: %v", err)
-	}
-	if len(msgs) != 1 {
-		t.Fatalf("expected 1 message, got %d", len(msgs))
-	}
+	require.NoError(t, err, "loadDBSessionMessages failed")
+	require.Len(t, msgs, 1, "messages count")
+
 	if msgs[0].ToolCalls == nil || *msgs[0].ToolCalls != tcJSON {
 		t.Error("tool_calls mismatch")
 	}
@@ -365,41 +289,27 @@ func TestDBFirstMessage(t *testing.T) {
 	chatContextsMutex.Lock()
 	sid := chatContextsMap[ctxKey].SessionID
 	chatContextsMutex.Unlock()
-	if sid == 0 {
-		t.Fatal("expected session to be created")
-	}
+	require.NotZero(t, sid, "expected session to be created")
 
 	session, err := getDBSessionByID(sid)
-	if err != nil {
-		t.Fatalf("getDBSessionByID failed: %v", err)
-	}
-	if session.FirstMessage != "" {
-		t.Errorf("expected empty first_message after system prompt, got %q", session.FirstMessage)
-	}
+	require.NoError(t, err, "getDBSessionByID failed")
+	assert.Equal(t, "", session.FirstMessage, "first_message after system prompt")
 
 	AddContext(cfg, ctxKey,
 		ChatMessage{Role: "user", Content: "hello world this is my first message"},
 		"net", "#chan", "user")
 
 	session, err = getDBSessionByID(sid)
-	if err != nil {
-		t.Fatalf("getDBSessionByID failed: %v", err)
-	}
-	if session.FirstMessage != "hello world this is my first message" {
-		t.Errorf("expected first_message to be saved, got %q", session.FirstMessage)
-	}
+	require.NoError(t, err, "getDBSessionByID failed")
+	assert.Equal(t, "hello world this is my first message", session.FirstMessage, "first_message")
 
 	AddContext(cfg, ctxKey,
 		ChatMessage{Role: "user", Content: "this should not overwrite"},
 		"net", "#chan", "user")
 
 	session, err = getDBSessionByID(sid)
-	if err != nil {
-		t.Fatalf("getDBSessionByID failed: %v", err)
-	}
-	if session.FirstMessage != "hello world this is my first message" {
-		t.Errorf("expected first_message to remain unchanged, got %q", session.FirstMessage)
-	}
+	require.NoError(t, err, "getDBSessionByID failed")
+	assert.Equal(t, "hello world this is my first message", session.FirstMessage, "first_message unchanged")
 }
 
 func TestClearContextCompletesSession(t *testing.T) {
@@ -420,23 +330,15 @@ func TestClearContextCompletesSession(t *testing.T) {
 	chatContextsMutex.Lock()
 	sid := chatContextsMap[ctxKey].SessionID
 	chatContextsMutex.Unlock()
-	if sid == 0 {
-		t.Fatal("expected session to be created")
-	}
+	require.NotZero(t, sid, "expected session to be created")
 
 	ClearContext(ctxKey)
 
 	session, err := getDBSessionByID(sid)
-	if err != nil {
-		t.Fatalf("getDBSessionByID failed: %v", err)
-	}
-	if session.Status != "completed" {
-		t.Errorf("expected session status 'completed' after ClearContext, got %s", session.Status)
-	}
+	require.NoError(t, err, "getDBSessionByID failed")
+	assert.Equal(t, "completed", session.Status, "session status after ClearContext")
 
-	if ContextExists(ctxKey) {
-		t.Error("expected context to be cleared")
-	}
+	assert.False(t, ContextExists(ctxKey), "expected context to be cleared")
 }
 
 func TestContextLastActive(t *testing.T) {
@@ -448,12 +350,10 @@ func TestContextLastActive(t *testing.T) {
 	after := time.Now().Unix()
 
 	active := GetContextLastActive(key)
-	if active < before || active > after {
-		t.Errorf("GetContextLastActive = %d, want between %d and %d", active, before, after)
-	}
+	assert.GreaterOrEqual(t, active, before, "GetContextLastActive >= before")
+	assert.LessOrEqual(t, active, after, "GetContextLastActive <= after")
 
 	DeleteContextLastActive(key)
-	if _, ok := contextLastActive[key]; ok {
-		t.Error("expected key to be deleted")
-	}
+	_, ok := contextLastActive[key]
+	assert.False(t, ok, "expected key to be deleted")
 }

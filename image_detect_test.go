@@ -8,6 +8,9 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestFormatSize(t *testing.T) {
@@ -32,9 +35,7 @@ func TestFormatSize(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := formatSize(tt.b)
-			if got != tt.want {
-				t.Errorf("formatSize(%d) = %q, want %q", tt.b, got, tt.want)
-			}
+			assert.Equal(t, tt.want, got, "formatSize(%d)", tt.b)
 		})
 	}
 }
@@ -183,17 +184,10 @@ func TestDetectImageURLs(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			clean, urls := detectImageURLs(tt.text)
-			if clean != tt.wantClean {
-				t.Errorf("detectImageURLs() clean = %q, want %q", clean, tt.wantClean)
-			}
-			if len(urls) != len(tt.wantUrls) {
-				t.Errorf("detectImageURLs() urls count = %d, want %d\ngot: %v\nwant: %v",
-					len(urls), len(tt.wantUrls), urls, tt.wantUrls)
-				return
-			}
-			for i, u := range urls {
-				if u != tt.wantUrls[i] {
-					t.Errorf("detectImageURLs() urls[%d] = %q, want %q", i, u, tt.wantUrls[i])
+			assert.Equal(t, tt.wantClean, clean, "detectImageURLs() clean")
+			if assert.Len(t, urls, len(tt.wantUrls), "detectImageURLs() urls count") {
+				for i, u := range urls {
+					assert.Equal(t, tt.wantUrls[i], u, "detectImageURLs() urls[%d]", i)
 				}
 			}
 		})
@@ -361,41 +355,25 @@ func TestSanitizeMessages(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := sanitizeMessages(tt.messages)
-			if len(got) != len(tt.wantClean) {
-				t.Errorf("sanitizeMessages() returned %d messages, want %d", len(got), len(tt.wantClean))
+			if !assert.Len(t, got, len(tt.wantClean), "sanitizeMessages() message count") {
 				return
 			}
 			for i := range got {
-				if len(got[i].MultiContent) != len(tt.wantClean[i].MultiContent) {
-					t.Errorf("sanitizeMessages()[%d] MultiContent count = %d, want %d",
-						i, len(got[i].MultiContent), len(tt.wantClean[i].MultiContent))
+				if !assert.Len(t, got[i].MultiContent, len(tt.wantClean[i].MultiContent), "sanitizeMessages()[%d] MultiContent count", i) {
 					continue
 				}
 				for j := range got[i].MultiContent {
 					gotPart := got[i].MultiContent[j]
 					wantPart := tt.wantClean[i].MultiContent[j]
-					if gotPart.Type != wantPart.Type {
-						t.Errorf("sanitizeMessages()[%d].MultiContent[%d].Type = %v, want %v",
-							i, j, gotPart.Type, wantPart.Type)
-					}
-					if gotPart.Text != wantPart.Text {
-						t.Errorf("sanitizeMessages()[%d].MultiContent[%d].Text = %q, want %q",
-							i, j, gotPart.Text, wantPart.Text)
-					}
+					assert.Equal(t, wantPart.Type, gotPart.Type, "sanitizeMessages()[%d].MultiContent[%d].Type", i, j)
+					assert.Equal(t, wantPart.Text, gotPart.Text, "sanitizeMessages()[%d].MultiContent[%d].Text", i, j)
 					if gotPart.ImageURL == nil && wantPart.ImageURL == nil {
 						continue
 					}
-					if gotPart.ImageURL == nil || wantPart.ImageURL == nil {
-						t.Errorf("sanitizeMessages()[%d].MultiContent[%d].ImageURL mismatch", i, j)
-						continue
-					}
-					if gotPart.ImageURL.URL != wantPart.ImageURL.URL {
-						t.Errorf("sanitizeMessages()[%d].MultiContent[%d].ImageURL.URL = %q, want %q",
-							i, j, gotPart.ImageURL.URL, wantPart.ImageURL.URL)
-					}
-					if gotPart.ImageURL.Detail != wantPart.ImageURL.Detail {
-						t.Errorf("sanitizeMessages()[%d].MultiContent[%d].ImageURL.Detail = %v, want %v",
-							i, j, gotPart.ImageURL.Detail, wantPart.ImageURL.Detail)
+					if assert.NotNil(t, gotPart.ImageURL, "sanitizeMessages()[%d].MultiContent[%d].ImageURL", i, j) &&
+						assert.NotNil(t, wantPart.ImageURL, "sanitizeMessages()[%d].MultiContent[%d].ImageURL", i, j) {
+						assert.Equal(t, wantPart.ImageURL.URL, gotPart.ImageURL.URL, "sanitizeMessages()[%d].MultiContent[%d].ImageURL.URL", i, j)
+						assert.Equal(t, wantPart.ImageURL.Detail, gotPart.ImageURL.Detail, "sanitizeMessages()[%d].MultiContent[%d].ImageURL.Detail", i, j)
 					}
 				}
 			}
@@ -477,9 +455,7 @@ func TestCountContextImages(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := countContextImages(tt.messages)
-			if got != tt.want {
-				t.Errorf("countContextImages() = %d, want %d", got, tt.want)
-			}
+			assert.Equal(t, tt.want, got, "countContextImages()")
 		})
 	}
 }
@@ -582,28 +558,13 @@ func TestConvertImage(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			data, dataURI, err := convertImage(tt.imgData, tt.mimeType, tt.format, tt.quality, tt.maxW, tt.maxH)
-			if err != nil {
-				t.Fatalf("convertImage() error = %v", err)
+			require.NoError(t, err, "convertImage() error")
+			if tt.wantContain != "" {
+				assert.Contains(t, dataURI, tt.wantContain, "dataURI")
 			}
-			if tt.wantContain != "" && !containsStr(dataURI, tt.wantContain) {
-				t.Errorf("dataURI = %q, want containing %q", dataURI, tt.wantContain)
-			}
-			if len(data) == 0 {
-				t.Error("encoded data is empty")
-			}
+			assert.NotEmpty(t, data, "encoded data")
 		})
 	}
-}
-
-func containsStr(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || func() bool {
-		for i := 0; i <= len(s)-len(substr); i++ {
-			if s[i:i+len(substr)] == substr {
-				return true
-			}
-		}
-		return false
-	}())
 }
 
 func TestStripSuccessfulURLs(t *testing.T) {
@@ -684,9 +645,7 @@ func TestStripSuccessfulURLs(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := stripSuccessfulURLs(tt.text, tt.successfulURLs)
-			if got != tt.want {
-				t.Errorf("stripSuccessfulURLs() = %q, want %q", got, tt.want)
-			}
+			assert.Equal(t, tt.want, got, "stripSuccessfulURLs()")
 		})
 	}
 }
@@ -695,9 +654,7 @@ func createTestJPEG(t *testing.T) []byte {
 	t.Helper()
 	img := image.NewRGBA(image.Rect(0, 0, 10, 10))
 	var buf bytes.Buffer
-	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 75}); err != nil {
-		t.Fatalf("createTestJPEG: %v", err)
-	}
+	require.NoError(t, jpeg.Encode(&buf, img, &jpeg.Options{Quality: 75}), "createTestJPEG")
 	return buf.Bytes()
 }
 
@@ -725,13 +682,9 @@ func TestBuildImageMessageNonImageURLPreserved(t *testing.T) {
 		urls := []string{htmlServer.URL + "/page.html", imgServer.URL + "/pic.jpg"}
 
 		msg, err := buildImageMessage(text, urls, 5, "jpg", 75, 1024, 1024)
-		if err != nil {
-			t.Fatalf("buildImageMessage() error = %v", err)
-		}
+		require.NoError(t, err, "buildImageMessage() error")
 
-		if len(msg.MultiContent) < 2 {
-			t.Fatalf("expected at least 2 parts, got %d", len(msg.MultiContent))
-		}
+		require.GreaterOrEqual(t, len(msg.MultiContent), 2, "expected at least 2 parts")
 
 		var textPart string
 		var imageCount int
@@ -744,16 +697,10 @@ func TestBuildImageMessageNonImageURLPreserved(t *testing.T) {
 			}
 		}
 
-		if imageCount != 1 {
-			t.Errorf("expected 1 image part, got %d", imageCount)
-		}
+		assert.Equal(t, 1, imageCount, "image part count")
 
-		if !containsStr(textPart, htmlServer.URL+"/page.html") {
-			t.Errorf("non-image URL missing from text: %q", textPart)
-		}
-		if containsStr(textPart, imgServer.URL+"/pic.jpg") {
-			t.Errorf("image URL should have been stripped from text: %q", textPart)
-		}
+		assert.Contains(t, textPart, htmlServer.URL+"/page.html", "non-image URL should be in text")
+		assert.NotContains(t, textPart, imgServer.URL+"/pic.jpg", "image URL should have been stripped from text")
 	})
 
 	t.Run("all non-image URLs preserved", func(t *testing.T) {
@@ -761,9 +708,7 @@ func TestBuildImageMessageNonImageURLPreserved(t *testing.T) {
 		urls := []string{htmlServer.URL + "/a", htmlServer.URL + "/b"}
 
 		msg, err := buildImageMessage(text, urls, 5, "jpg", 75, 1024, 1024)
-		if err != nil {
-			t.Fatalf("buildImageMessage() error = %v", err)
-		}
+		require.NoError(t, err, "buildImageMessage() error")
 
 		var textPart string
 		var imageCount int
@@ -776,16 +721,10 @@ func TestBuildImageMessageNonImageURLPreserved(t *testing.T) {
 			}
 		}
 
-		if imageCount != 0 {
-			t.Errorf("expected 0 image parts, got %d", imageCount)
-		}
+		assert.Equal(t, 0, imageCount, "image part count")
 
-		if !containsStr(textPart, htmlServer.URL+"/a") {
-			t.Errorf("first non-image URL missing from text: %q", textPart)
-		}
-		if !containsStr(textPart, htmlServer.URL+"/b") {
-			t.Errorf("second non-image URL missing from text: %q", textPart)
-		}
+		assert.Contains(t, textPart, htmlServer.URL+"/a", "first non-image URL should be in text")
+		assert.Contains(t, textPart, htmlServer.URL+"/b", "second non-image URL should be in text")
 	})
 
 	t.Run("successful image URL stripped from text", func(t *testing.T) {
@@ -793,9 +732,7 @@ func TestBuildImageMessageNonImageURLPreserved(t *testing.T) {
 		urls := []string{imgServer.URL + "/pic.jpg"}
 
 		msg, err := buildImageMessage(text, urls, 5, "jpg", 75, 1024, 1024)
-		if err != nil {
-			t.Fatalf("buildImageMessage() error = %v", err)
-		}
+		require.NoError(t, err, "buildImageMessage() error")
 
 		var textPart string
 		for _, part := range msg.MultiContent {
@@ -804,11 +741,8 @@ func TestBuildImageMessageNonImageURLPreserved(t *testing.T) {
 			}
 		}
 
-		if containsStr(textPart, imgServer.URL) {
-			t.Errorf("image URL should have been stripped from text: %q", textPart)
-		}
-		if !containsStr(textPart, "see") || !containsStr(textPart, "now") {
-			t.Errorf("surrounding text should be preserved: %q", textPart)
-		}
+		assert.NotContains(t, textPart, imgServer.URL, "image URL should have been stripped from text")
+		assert.Contains(t, textPart, "see", "surrounding text 'see' should be preserved")
+		assert.Contains(t, textPart, "now", "surrounding text 'now' should be preserved")
 	})
 }

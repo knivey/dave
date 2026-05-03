@@ -7,6 +7,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func newTestQM(t *testing.T) *QueueManager {
@@ -50,20 +53,14 @@ func TestQueueManager_BasicEnqueueAndRun(t *testing.T) {
 		wg.Done()
 	})
 
-	if pos != 0 {
-		t.Errorf("first enqueue position = %d, want 0", pos)
-	}
+	assert.Equal(t, 0, pos, "first enqueue position")
 
 	wg.Wait()
 
-	if !ran.Load() {
-		t.Error("job did not run")
-	}
+	assert.True(t, ran.Load(), "job did not run")
 
 	waitForNotRunning(t, qm, "net", "#chan", "user")
-	if qm.IsRunning("net", "#chan", "user") {
-		t.Error("should not be running after job completes")
-	}
+	assert.False(t, qm.IsRunning("net", "#chan", "user"), "should not be running after job completes")
 }
 
 func TestQueueManager_EnqueueWhileBusy(t *testing.T) {
@@ -85,29 +82,19 @@ func TestQueueManager_EnqueueWhileBusy(t *testing.T) {
 		wg2.Done()
 	})
 
-	if pos != 1 {
-		t.Errorf("second enqueue position = %d, want 1", pos)
-	}
+	assert.Equal(t, 1, pos, "second enqueue position")
 
-	if !qm.IsRunning("net", "#chan", "user") {
-		t.Error("first job should be running")
-	}
+	assert.True(t, qm.IsRunning("net", "#chan", "user"), "first job should be running")
 
 	current, pending := qm.QueueStatus("net", "#chan", "user")
-	if current == nil {
-		t.Fatal("expected current item")
-	}
-	if len(pending) != 1 {
-		t.Fatalf("expected 1 pending, got %d", len(pending))
-	}
+	require.NotNil(t, current, "expected current item")
+	require.Len(t, pending, 1, "expected 1 pending")
 
 	close(unblock)
 	wg2.Wait()
 
 	waitForNotRunning(t, qm, "net", "#chan", "user")
-	if qm.IsRunning("net", "#chan", "user") {
-		t.Error("should not be running after both jobs complete")
-	}
+	assert.False(t, qm.IsRunning("net", "#chan", "user"), "should not be running after both jobs complete")
 }
 
 func TestQueueManager_MaxDepth(t *testing.T) {
@@ -125,15 +112,11 @@ func TestQueueManager_MaxDepth(t *testing.T) {
 
 	for i := 0; i < 4; i++ {
 		pos := qm.Enqueue("net", "#chan", "user", "svc", "", func(ctx context.Context, output chan<- string) {})
-		if pos != i+1 {
-			t.Errorf("enqueue %d position = %d, want %d", i+1, pos, i+1)
-		}
+		assert.Equal(t, i+1, pos, "enqueue %d position", i+1)
 	}
 
 	pos := qm.Enqueue("net", "#chan", "user", "svc", "", func(ctx context.Context, output chan<- string) {})
-	if pos != -1 {
-		t.Errorf("overflow enqueue position = %d, want -1", pos)
-	}
+	assert.Equal(t, -1, pos, "overflow enqueue position")
 
 	close(unblock)
 }
@@ -155,16 +138,12 @@ func TestQueueManager_StopCurrent(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	if !qm.StopCurrent("net", "#chan") {
-		t.Error("StopCurrent should return true for running job")
-	}
+	assert.True(t, qm.StopCurrent("net", "#chan"), "StopCurrent should return true for running job")
 
 	wg.Wait()
 
 	waitForNotRunning(t, qm, "net", "#chan", "user")
-	if qm.StopCurrent("net", "#chan") {
-		t.Error("StopCurrent should return false when no job running")
-	}
+	assert.False(t, qm.StopCurrent("net", "#chan"), "StopCurrent should return false when no job running")
 }
 
 func TestQueueManager_StopCurrentStartsNext(t *testing.T) {
@@ -195,12 +174,8 @@ func TestQueueManager_StopCurrentStartsNext(t *testing.T) {
 
 	wg.Wait()
 
-	if !firstDone.Load() {
-		t.Error("first job should have completed (via cancel)")
-	}
-	if !secondRan.Load() {
-		t.Error("second job should have run after first was cancelled")
-	}
+	assert.True(t, firstDone.Load(), "first job should have completed (via cancel)")
+	assert.True(t, secondRan.Load(), "second job should have run after first was cancelled")
 }
 
 func TestQueueManager_DifferentChannelsParallel(t *testing.T) {
@@ -228,12 +203,8 @@ func TestQueueManager_DifferentChannelsParallel(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	if !ch1Ran.Load() {
-		t.Error("chan1 job should have started")
-	}
-	if !ch2Ran.Load() {
-		t.Error("chan2 job should start in parallel (different channel)")
-	}
+	assert.True(t, ch1Ran.Load(), "chan1 job should have started")
+	assert.True(t, ch2Ran.Load(), "chan2 job should start in parallel (different channel)")
 
 	close(unblock)
 	wg.Wait()
@@ -256,17 +227,13 @@ func TestQueueManager_StopCancelsRunning(t *testing.T) {
 	qm.Stop()
 	wg.Wait()
 
-	if !cancelled.Load() {
-		t.Error("job should have been cancelled by Stop()")
-	}
+	assert.True(t, cancelled.Load(), "job should have been cancelled by Stop()")
 }
 
 func TestQueueManager_IsRunning(t *testing.T) {
 	qm := newTestQM(t)
 
-	if qm.IsRunning("net", "#chan", "user") {
-		t.Error("should not be running initially")
-	}
+	assert.False(t, qm.IsRunning("net", "#chan", "user"), "should not be running initially")
 
 	unblock := make(chan struct{})
 	var wg sync.WaitGroup
@@ -279,17 +246,13 @@ func TestQueueManager_IsRunning(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	if !qm.IsRunning("net", "#chan", "user") {
-		t.Error("should be running during execution")
-	}
+	assert.True(t, qm.IsRunning("net", "#chan", "user"), "should be running during execution")
 
 	close(unblock)
 	wg.Wait()
 
 	waitForNotRunning(t, qm, "net", "#chan", "user")
-	if qm.IsRunning("net", "#chan", "user") {
-		t.Error("should not be running after completion")
-	}
+	assert.False(t, qm.IsRunning("net", "#chan", "user"), "should not be running after completion")
 }
 
 func TestQueueManager_UpdateServiceLimits(t *testing.T) {
@@ -315,12 +278,8 @@ func TestQueueManager_UpdateServiceLimits(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	if !user1Started.Load() {
-		t.Error("user1 should have started")
-	}
-	if !user2Started.Load() {
-		t.Error("user2 should start with parallel=2 (same channel)")
-	}
+	assert.True(t, user1Started.Load(), "user1 should have started")
+	assert.True(t, user2Started.Load(), "user2 should start with parallel=2 (same channel)")
 
 	close(unblock)
 	wg.Wait()
@@ -330,9 +289,8 @@ func TestQueueManager_QueueStatus(t *testing.T) {
 	qm := newTestQM(t)
 
 	current, pending := qm.QueueStatus("net", "#chan", "user")
-	if current != nil || pending != nil {
-		t.Error("expected nil status for unknown user")
-	}
+	assert.Nil(t, current, "expected nil status for unknown user")
+	assert.Nil(t, pending, "expected nil status for unknown user")
 
 	unblock := make(chan struct{})
 	var wg sync.WaitGroup
@@ -346,23 +304,15 @@ func TestQueueManager_QueueStatus(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	current, pending = qm.QueueStatus("net", "#chan", "user")
-	if current == nil {
-		t.Fatal("expected current item")
-	}
-	if len(pending) != 0 {
-		t.Errorf("expected 0 pending, got %d", len(pending))
-	}
+	require.NotNil(t, current, "expected current item")
+	assert.Len(t, pending, 0, "expected 0 pending")
 
 	qm.Enqueue("net", "#chan", "user", "svc", "", func(ctx context.Context, output chan<- string) {})
 	qm.Enqueue("net", "#chan", "user", "svc", "", func(ctx context.Context, output chan<- string) {})
 
 	current, pending = qm.QueueStatus("net", "#chan", "user")
-	if current == nil {
-		t.Fatal("expected current item")
-	}
-	if len(pending) != 2 {
-		t.Fatalf("expected 2 pending, got %d", len(pending))
-	}
+	require.NotNil(t, current, "expected current item")
+	require.Len(t, pending, 2, "expected 2 pending")
 
 	close(unblock)
 	wg.Wait()
@@ -412,13 +362,9 @@ func TestQueueManager_FIFOOrder(t *testing.T) {
 
 	orderMu.Lock()
 	defer orderMu.Unlock()
-	if len(order) != 4 {
-		t.Fatalf("expected 4 executions, got %d", len(order))
-	}
+	require.Len(t, order, 4, "expected 4 executions")
 	for i, want := range []int{1, 2, 3, 4} {
-		if order[i] != want {
-			t.Errorf("execution[%d] = %d, want %d", i, order[i], want)
-		}
+		assert.Equal(t, want, order[i], "execution[%d]", i)
 	}
 }
 
@@ -461,14 +407,10 @@ func TestQueueManager_CrossUserFIFOOrder(t *testing.T) {
 
 	orderMu.Lock()
 	defer orderMu.Unlock()
-	if len(order) != 3 {
-		t.Fatalf("expected 3 executions, got %d: %v", len(order), order)
-	}
+	require.Len(t, order, 3, "expected 3 executions: %v", order)
 	want := []string{"user1", "user2", "user3"}
 	for i, w := range want {
-		if order[i] != w {
-			t.Errorf("execution[%d] = %q, want %q", i, order[i], w)
-		}
+		assert.Equal(t, w, order[i], "execution[%d]", i)
 	}
 }
 
@@ -503,9 +445,7 @@ func TestQueueManager_ConcurrentExecutionFIFODelivery(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	execMu.Lock()
-	if len(execOrder) != 2 {
-		t.Fatalf("expected both jobs to start concurrently, got %d: %v", len(execOrder), execOrder)
-	}
+	require.Len(t, execOrder, 2, "expected both jobs to start concurrently: %v", execOrder)
 	execMu.Unlock()
 
 	close(unblock)
@@ -534,19 +474,13 @@ func TestQueueManager_ServiceParallel1(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	if !user1Started.Load() {
-		t.Error("user1 should have started")
-	}
-	if user2Started.Load() {
-		t.Error("user2 should NOT start while user1 holds the service slot (parallel=1)")
-	}
+	assert.True(t, user1Started.Load(), "user1 should have started")
+	assert.False(t, user2Started.Load(), "user2 should NOT start while user1 holds the service slot (parallel=1)")
 
 	close(unblock)
 	wg.Wait()
 
-	if !user2Started.Load() {
-		t.Error("user2 should have started after user1 completed")
-	}
+	assert.True(t, user2Started.Load(), "user2 should have started after user1 completed")
 }
 
 func TestQueueManager_ServiceParallel0(t *testing.T) {
@@ -572,9 +506,7 @@ func TestQueueManager_ServiceParallel0(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	started := count.Load()
-	if started != 5 {
-		t.Errorf("expected all 5 jobs to start with parallel=0 (unlimited), got %d", started)
-	}
+	assert.Equal(t, int32(5), started, "expected all 5 jobs to start with parallel=0 (unlimited)")
 
 	close(unblock)
 	wg.Wait()
@@ -601,9 +533,7 @@ func TestQueueManager_CancellationPropagation(t *testing.T) {
 	qm.StopCurrent("net", "#chan")
 	wg.Wait()
 
-	if !gotCancelled.Load() {
-		t.Error("Execute should have received ctx.Done() after StopCurrent")
-	}
+	assert.True(t, gotCancelled.Load(), "Execute should have received ctx.Done() after StopCurrent")
 }
 
 func TestQueueManager_SchedulerFairness(t *testing.T) {
@@ -646,20 +576,14 @@ func TestQueueManager_SchedulerFairness(t *testing.T) {
 
 	orderMu.Lock()
 	defer orderMu.Unlock()
-	if len(order) != 3 {
-		t.Fatalf("expected 3 executions, got %d: %v", len(order), order)
-	}
-	if order[0] != "user1-first" {
-		t.Errorf("first = %q, want user1-first", order[0])
-	}
+	require.Len(t, order, 3, "expected 3 executions: %v", order)
+	assert.Equal(t, "user1-first", order[0], "first")
 }
 
 func TestQueueManager_StopEmptyQueue(t *testing.T) {
 	qm := newTestQM(t)
 
-	if qm.StopCurrent("net", "#chan") {
-		t.Error("StopCurrent on empty queue should return false")
-	}
+	assert.False(t, qm.StopCurrent("net", "#chan"), "StopCurrent on empty queue should return false")
 }
 
 func TestQueueManager_CancelPending(t *testing.T) {
@@ -678,22 +602,14 @@ func TestQueueManager_CancelPending(t *testing.T) {
 	qm.Enqueue("net", "#chan", "user", "svc", "", func(ctx context.Context, output chan<- string) {})
 
 	_, pending := qm.QueueStatus("net", "#chan", "user")
-	if len(pending) != 1 {
-		t.Fatalf("expected 1 pending, got %d", len(pending))
-	}
+	require.Len(t, pending, 1, "expected 1 pending")
 
-	if !qm.CancelPending("net", "#chan", "user") {
-		t.Error("CancelPending should return true when items removed")
-	}
+	assert.True(t, qm.CancelPending("net", "#chan", "user"), "CancelPending should return true when items removed")
 
 	_, pending = qm.QueueStatus("net", "#chan", "user")
-	if len(pending) != 0 {
-		t.Errorf("expected 0 pending after cancel, got %d", len(pending))
-	}
+	assert.Len(t, pending, 0, "expected 0 pending after cancel")
 
-	if qm.CancelPending("net", "#chan", "nobody") {
-		t.Error("CancelPending should return false when no items match")
-	}
+	assert.False(t, qm.CancelPending("net", "#chan", "nobody"), "CancelPending should return false when no items match")
 
 	close(unblock)
 }
@@ -726,9 +642,7 @@ func TestQueueManager_CancelPendingOtherUserPreserved(t *testing.T) {
 	close(unblock)
 	wg.Wait()
 
-	if !user2Ran.Load() {
-		t.Error("user2's pending job should still run after cancelling user1's pending items")
-	}
+	assert.True(t, user2Ran.Load(), "user2's pending job should still run after cancelling user1's pending items")
 }
 
 func TestQueueManager_QueueStatusOtherUser(t *testing.T) {
@@ -748,20 +662,12 @@ func TestQueueManager_QueueStatusOtherUser(t *testing.T) {
 	qm.Enqueue("net", "#chan", "user2", "svc", "", func(ctx context.Context, output chan<- string) {})
 
 	current1, pending1 := qm.QueueStatus("net", "#chan", "user1")
-	if current1 == nil {
-		t.Fatal("user1 should see current item (their running job)")
-	}
-	if len(pending1) != 0 {
-		t.Errorf("user1 should see 0 pending, got %d", len(pending1))
-	}
+	require.NotNil(t, current1, "user1 should see current item (their running job)")
+	assert.Len(t, pending1, 0, "user1 should see 0 pending")
 
 	current2, pending2 := qm.QueueStatus("net", "#chan", "user2")
-	if current2 != nil {
-		t.Error("user2 should not see current item (user1 is running)")
-	}
-	if len(pending2) != 1 {
-		t.Errorf("user2 should see 1 pending, got %d", len(pending2))
-	}
+	assert.Nil(t, current2, "user2 should not see current item (user1 is running)")
+	assert.Len(t, pending2, 1, "user2 should see 1 pending")
 
 	close(unblock)
 	wg.Wait()

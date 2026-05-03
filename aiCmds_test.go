@@ -14,6 +14,8 @@ import (
 	logxi "github.com/mgutz/logxi/v1"
 	openai "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func makeResponsesAPIResponse(id, text string) map[string]any {
@@ -145,15 +147,9 @@ func TestRunTurnResponses_ConcurrentSerialization(t *testing.T) {
 	copy(ids, prevIDs)
 	mu.Unlock()
 
-	if len(ids) != 2 {
-		t.Fatalf("expected 2 API calls, got %d (prevIDs: %v)", len(ids), ids)
-	}
-	if ids[0] != "resp-initial" {
-		t.Errorf("first request prevID = %q, want %q", ids[0], "resp-initial")
-	}
-	if ids[1] != "resp-1" {
-		t.Errorf("second request prevID = %q, want %q (should use first response's ID)", ids[1], "resp-1")
-	}
+	require.Len(t, ids, 2, "expected 2 API calls")
+	assert.Equal(t, "resp-initial", ids[0], "first request prevID")
+	assert.Equal(t, "resp-1", ids[1], "second request prevID (should use first response's ID)")
 }
 
 func TestRunTurnResponses_DifferentCtxKeysParallel(t *testing.T) {
@@ -256,18 +252,12 @@ func TestRunTurnResponses_DifferentCtxKeysParallel(t *testing.T) {
 	copy(ids, prevIDs)
 	mu.Unlock()
 
-	if len(ids) != 2 {
-		t.Fatalf("expected 2 API calls, got %d", len(ids))
-	}
+	require.Len(t, ids, 2, "expected 2 API calls")
 
 	found := make(map[string]bool)
 	for _, id := range ids {
 		found[id] = true
 	}
-	if !found["resp-alice"] {
-		t.Errorf("missing prevID %q in %v", "resp-alice", ids)
-	}
-	if !found["resp-bob"] {
-		t.Errorf("missing prevID %q in %v", "resp-bob", ids)
-	}
+	assert.True(t, found["resp-alice"], "missing prevID %q in %v", "resp-alice", ids)
+	assert.True(t, found["resp-bob"], "missing prevID %q in %v", "resp-bob", ids)
 }

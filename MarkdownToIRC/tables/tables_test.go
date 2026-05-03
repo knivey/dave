@@ -5,6 +5,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/knivey/dave/MarkdownToIRC/irc"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestFormatTableLine(t *testing.T) {
@@ -55,16 +57,12 @@ func TestFormatTableLine(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := FormatTableLine(tt.text, tt.width, tt.align)
-			if got != tt.expected {
-				t.Errorf("expected %q, got %q", tt.expected, got)
-			}
+			assert.Equal(t, tt.expected, got)
 			stripped := irc.StripCodes(got)
 			if tt.width < utf8.RuneCountInString(irc.StripCodes(tt.text)) {
 				return
 			}
-			if utf8.RuneCountInString(stripped) != tt.width {
-				t.Errorf("stripped width: expected %d, got %d", tt.width, utf8.RuneCountInString(stripped))
-			}
+			assert.Equal(t, tt.width, utf8.RuneCountInString(stripped), "stripped width")
 		})
 	}
 }
@@ -123,13 +121,9 @@ func TestWrapCellText(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := wrapCellText(tt.text, tt.maxWidth)
-			if len(got) != len(tt.expected) {
-				t.Fatalf("expected %d lines, got %d: %v", len(tt.expected), len(got), got)
-			}
+			require.Len(t, got, len(tt.expected), "expected %d lines, got %d: %v", len(tt.expected), len(got), got)
 			for i, line := range got {
-				if line != tt.expected[i] {
-					t.Errorf("line %d: expected %q, got %q", i, tt.expected[i], line)
-				}
+				assert.Equal(t, tt.expected[i], line, "line %d", i)
 			}
 		})
 	}
@@ -176,13 +170,9 @@ func TestFitColWidths(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := fitColWidths(tt.colWidths, tt.available)
-			if len(got) != len(tt.expected) {
-				t.Fatalf("expected %d columns, got %d", len(tt.expected), len(got))
-			}
+			require.Len(t, got, len(tt.expected), "expected %d columns, got %d", len(tt.expected), len(got))
 			for i := range got {
-				if got[i] != tt.expected[i] {
-					t.Errorf("col %d: expected %d, got %d", i, tt.expected[i], got[i])
-				}
+				assert.Equal(t, tt.expected[i], got[i], "col %d", i)
 			}
 		})
 	}
@@ -265,9 +255,7 @@ func TestRenderTable(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := RenderTable(tt.data)
-			if got != tt.expected {
-				t.Errorf("expected %q, got %q", tt.expected, got)
-			}
+			assert.Equal(t, tt.expected, got)
 		})
 	}
 }

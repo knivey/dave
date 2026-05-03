@@ -3,26 +3,22 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"text/template"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func createTestConfigDir(t *testing.T, mainTOML string, extraFiles map[string]string) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "dave_test_config_*")
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
-	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(mainTOML), 0644); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.toml"), []byte(mainTOML), 0644))
 
 	for name, content := range extraFiles {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644); err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0644))
 	}
 
 	return dir
@@ -171,33 +167,15 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 			cfg := tt.cfg
 			cfg.ApplyDefaults(tt.svc)
 			want := tt.expect(AIConfig{})
-			if cfg.MaxTokens != want.MaxTokens {
-				t.Errorf("MaxTokens = %d, want %d", cfg.MaxTokens, want.MaxTokens)
-			}
-			if cfg.MaxCompletionTokens != want.MaxCompletionTokens {
-				t.Errorf("MaxCompletionTokens = %d, want %d", cfg.MaxCompletionTokens, want.MaxCompletionTokens)
-			}
-			if cfg.Temperature != want.Temperature {
-				t.Errorf("Temperature = %f, want %f", cfg.Temperature, want.Temperature)
-			}
-			if cfg.MaxHistory != want.MaxHistory {
-				t.Errorf("MaxHistory = %d, want %d", cfg.MaxHistory, want.MaxHistory)
-			}
-			if cfg.MaxImages != want.MaxImages {
-				t.Errorf("MaxImages = %d, want %d", cfg.MaxImages, want.MaxImages)
-			}
-			if cfg.MaxContextImages != want.MaxContextImages {
-				t.Errorf("MaxContextImages = %d, want %d", cfg.MaxContextImages, want.MaxContextImages)
-			}
-			if cfg.ImageFormat != want.ImageFormat {
-				t.Errorf("ImageFormat = %q, want %q", cfg.ImageFormat, want.ImageFormat)
-			}
-			if cfg.ImageQuality != want.ImageQuality {
-				t.Errorf("ImageQuality = %d, want %d", cfg.ImageQuality, want.ImageQuality)
-			}
-			if cfg.MaxImageSize != want.MaxImageSize {
-				t.Errorf("MaxImageSize = %q, want %q", cfg.MaxImageSize, want.MaxImageSize)
-			}
+			assert.Equal(t, want.MaxTokens, cfg.MaxTokens, "MaxTokens")
+			assert.Equal(t, want.MaxCompletionTokens, cfg.MaxCompletionTokens, "MaxCompletionTokens")
+			assert.Equal(t, want.Temperature, cfg.Temperature, "Temperature")
+			assert.Equal(t, want.MaxHistory, cfg.MaxHistory, "MaxHistory")
+			assert.Equal(t, want.MaxImages, cfg.MaxImages, "MaxImages")
+			assert.Equal(t, want.MaxContextImages, cfg.MaxContextImages, "MaxContextImages")
+			assert.Equal(t, want.ImageFormat, cfg.ImageFormat, "ImageFormat")
+			assert.Equal(t, want.ImageQuality, cfg.ImageQuality, "ImageQuality")
+			assert.Equal(t, want.MaxImageSize, cfg.MaxImageSize, "MaxImageSize")
 		})
 	}
 }
@@ -227,9 +205,7 @@ func TestServerGetPort(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.s.GetPort(); got != tt.want {
-				t.Errorf("GetPort() = %d, want %d", got, tt.want)
-			}
+			assert.Equal(t, tt.want, tt.s.GetPort(), "GetPort()")
 		})
 	}
 }
@@ -244,12 +220,8 @@ func TestNetworkGetNextServer(t *testing.T) {
 		want := []string{"a", "b", "c", "a", "b"}
 		for _, w := range want {
 			got, err := n.getNextServer()
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got.Host != w {
-				t.Errorf("getNextServer() = %q, want %q", got.Host, w)
-			}
+			require.NoError(t, err, "unexpected error")
+			assert.Equal(t, w, got.Host, "getNextServer()")
 		}
 	})
 
@@ -261,24 +233,16 @@ func TestNetworkGetNextServer(t *testing.T) {
 
 		for i := 0; i < 5; i++ {
 			got, err := n.getNextServer()
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got.Host != "single" {
-				t.Errorf("getNextServer() = %q, want %q", got.Host, "single")
-			}
+			require.NoError(t, err, "unexpected error")
+			assert.Equal(t, "single", got.Host, "getNextServer()")
 		}
 	})
 
 	t.Run("returns error for empty servers", func(t *testing.T) {
 		n := Network{Name: "testnet"}
 		_, err := n.getNextServer()
-		if err == nil {
-			t.Fatal("expected error for empty servers")
-		}
-		if !strings.Contains(err.Error(), "no servers") {
-			t.Errorf("error = %q, want mention of no servers", err.Error())
-		}
+		require.Error(t, err, "expected error for empty servers")
+		assert.Contains(t, err.Error(), "no servers", "error message")
 	})
 }
 
@@ -328,18 +292,10 @@ system = "Static message"
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg, ok := config.Commands.Chats[tt.name]
-			if !ok {
-				t.Fatalf("command %s not found", tt.name)
-			}
-			if cfg.Name != tt.wantName {
-				t.Errorf("Name = %q, want %q", cfg.Name, tt.wantName)
-			}
-			if cfg.Regex != tt.wantRegex {
-				t.Errorf("Regex = %q, want %q", cfg.Regex, tt.wantRegex)
-			}
-			if (cfg.SystemTmpl != nil) != tt.hasTmpl {
-				t.Errorf("SystemTmpl presence = %v, want %v", cfg.SystemTmpl != nil, tt.hasTmpl)
-			}
+			require.True(t, ok, "command %s not found", tt.name)
+			assert.Equal(t, tt.wantName, cfg.Name, "Name")
+			assert.Equal(t, tt.wantRegex, cfg.Regex, "Regex")
+			assert.Equal(t, tt.hasTmpl, cfg.SystemTmpl != nil, "SystemTmpl presence")
 		})
 	}
 }
@@ -380,13 +336,9 @@ func TestSystemPromptTemplateValidation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tmpl, err := template.New("test").Parse(tt.templateStr)
-			if err != nil {
-				t.Fatalf("failed to parse template: %v", err)
-			}
+			require.NoError(t, err, "failed to parse template")
 			err = validateSystemPromptTemplate(tmpl)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("validateSystemPromptTemplate() error = %v, wantErr %v", err, tt.wantErr)
-			}
+			assert.Equal(t, tt.wantErr, err != nil, "validateSystemPromptTemplate() error")
 		})
 	}
 }
@@ -487,17 +439,17 @@ maxtokens = 100
 			config := loadConfigDirOrDie(dir)
 			cfg := config.Commands.Chats["chat1"]
 
-			if tt.wantW > 0 && cfg.MaxImageWidth != tt.wantW {
-				t.Errorf("MaxImageWidth = %d, want %d", cfg.MaxImageWidth, tt.wantW)
+			if tt.wantW > 0 {
+				assert.Equal(t, tt.wantW, cfg.MaxImageWidth, "MaxImageWidth")
 			}
-			if tt.wantH > 0 && cfg.MaxImageHeight != tt.wantH {
-				t.Errorf("MaxImageHeight = %d, want %d", cfg.MaxImageHeight, tt.wantH)
+			if tt.wantH > 0 {
+				assert.Equal(t, tt.wantH, cfg.MaxImageHeight, "MaxImageHeight")
 			}
-			if tt.wantFmt != "" && cfg.ImageFormat != tt.wantFmt {
-				t.Errorf("ImageFormat = %q, want %q", cfg.ImageFormat, tt.wantFmt)
+			if tt.wantFmt != "" {
+				assert.Equal(t, tt.wantFmt, cfg.ImageFormat, "ImageFormat")
 			}
-			if tt.wantQ > 0 && cfg.ImageQuality != tt.wantQ {
-				t.Errorf("ImageQuality = %d, want %d", cfg.ImageQuality, tt.wantQ)
+			if tt.wantQ > 0 {
+				assert.Equal(t, tt.wantQ, cfg.ImageQuality, "ImageQuality")
 			}
 		})
 	}
@@ -517,9 +469,7 @@ func TestNetworkIsEnabled(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			n := Network{Enabled: tt.enabled}
-			if got := n.IsEnabled(); got != tt.expect {
-				t.Errorf("IsEnabled() = %v, want %v", got, tt.expect)
-			}
+			assert.Equal(t, tt.expect, n.IsEnabled(), "IsEnabled()")
 		})
 	}
 }
@@ -537,12 +487,8 @@ host = "irc.example.com"
 
 		config := loadConfigDirOrDie(dir)
 		net, ok := config.Networks["testnet"]
-		if !ok {
-			t.Fatal("network testnet not found")
-		}
-		if !net.IsEnabled() {
-			t.Error("network should be enabled by default when enabled field is omitted")
-		}
+		require.True(t, ok, "network testnet not found")
+		assert.True(t, net.IsEnabled(), "network should be enabled by default when enabled field is omitted")
 	})
 
 	t.Run("network with enabled false", func(t *testing.T) {
@@ -558,9 +504,7 @@ host = "irc.example.com"
 
 		config := loadConfigDirOrDie(dir)
 		net := config.Networks["testnet"]
-		if net.IsEnabled() {
-			t.Error("network should be disabled when explicitly set to false")
-		}
+		assert.False(t, net.IsEnabled(), "network should be disabled when explicitly set to false")
 	})
 }
 
@@ -635,9 +579,7 @@ func TestParallelToolCallsCascading(t *testing.T) {
 			if cfg.ParallelToolCalls != nil {
 				got = *cfg.ParallelToolCalls
 			}
-			if got != tt.expect {
-				t.Errorf("ParallelToolCalls = %v, want %v", got, tt.expect)
-			}
+			assert.Equal(t, tt.expect, got, "ParallelToolCalls")
 		})
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	openai "github.com/openai/openai-go/v3"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestFormatOutput(t *testing.T) {
@@ -82,9 +83,7 @@ func TestFormatOutput(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := FormatOutput(tt.input)
-			if got != tt.want {
-				t.Errorf("FormatOutput() = %q, want %q", got, tt.want)
-			}
+			assert.Equal(t, tt.want, got, "FormatOutput()")
 		})
 	}
 }
@@ -145,9 +144,7 @@ func TestExtractFinalText(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := ExtractFinalText(tt.input)
-			if got != tt.want {
-				t.Errorf("ExtractFinalText() = %q, want %q", got, tt.want)
-			}
+			assert.Equal(t, tt.want, got, "ExtractFinalText()")
 		})
 	}
 }
@@ -171,21 +168,17 @@ func TestBuildChatRequest(t *testing.T) {
 				{Role: RoleUser, Content: "hi"},
 			},
 			check: func(t *testing.T, req openai.ChatCompletionNewParams) {
-				if req.Model != "gpt-4" {
-					t.Errorf("Model = %q, want %q", req.Model, "gpt-4")
+				assert.Equal(t, "gpt-4", req.Model, "Model")
+				if assert.True(t, req.MaxTokens.Valid(), "MaxTokens should be valid") {
+					assert.Equal(t, int64(100), req.MaxTokens.Value, "MaxTokens")
 				}
-				if !req.MaxTokens.Valid() || req.MaxTokens.Value != 100 {
-					t.Errorf("MaxTokens = %v, want 100", req.MaxTokens)
+				if assert.True(t, req.MaxCompletionTokens.Valid(), "MaxCompletionTokens should be valid") {
+					assert.Equal(t, int64(200), req.MaxCompletionTokens.Value, "MaxCompletionTokens")
 				}
-				if !req.MaxCompletionTokens.Valid() || req.MaxCompletionTokens.Value != 200 {
-					t.Errorf("MaxCompletionTokens = %v, want 200", req.MaxCompletionTokens)
+				if assert.True(t, req.Temperature.Valid(), "Temperature should be valid") {
+					assert.InDelta(t, 0.7, req.Temperature.Value, 0.01, "Temperature")
 				}
-				if !req.Temperature.Valid() || req.Temperature.Value < 0.69 || req.Temperature.Value > 0.71 {
-					t.Errorf("Temperature = %v, want ~0.7", req.Temperature)
-				}
-				if len(req.Messages) != 1 {
-					t.Errorf("Messages len = %d, want %d", len(req.Messages), 1)
-				}
+				assert.Len(t, req.Messages, 1, "Messages")
 			},
 		},
 		{
@@ -196,8 +189,8 @@ func TestBuildChatRequest(t *testing.T) {
 			},
 			messages: nil,
 			check: func(t *testing.T, req openai.ChatCompletionNewParams) {
-				if !req.StreamOptions.IncludeUsage.Valid() || !req.StreamOptions.IncludeUsage.Value {
-					t.Error("StreamOptions.IncludeUsage should be true for streaming")
+				if assert.True(t, req.StreamOptions.IncludeUsage.Valid(), "StreamOptions.IncludeUsage should be valid") {
+					assert.True(t, req.StreamOptions.IncludeUsage.Value, "StreamOptions.IncludeUsage should be true for streaming")
 				}
 			},
 		},
@@ -211,15 +204,9 @@ func TestBuildChatRequest(t *testing.T) {
 			},
 			messages: []ChatMessage{},
 			check: func(t *testing.T, req openai.ChatCompletionNewParams) {
-				if req.MaxTokens.Valid() {
-					t.Errorf("MaxTokens = %v, want omitted", req.MaxTokens)
-				}
-				if req.MaxCompletionTokens.Valid() {
-					t.Errorf("MaxCompletionTokens = %v, want omitted", req.MaxCompletionTokens)
-				}
-				if req.Temperature.Valid() {
-					t.Errorf("Temperature = %v, want omitted", req.Temperature)
-				}
+				assert.False(t, req.MaxTokens.Valid(), "MaxTokens should be omitted, got %v", req.MaxTokens)
+				assert.False(t, req.MaxCompletionTokens.Valid(), "MaxCompletionTokens should be omitted, got %v", req.MaxCompletionTokens)
+				assert.False(t, req.Temperature.Valid(), "Temperature should be omitted, got %v", req.Temperature)
 			},
 		},
 		{
@@ -234,9 +221,7 @@ func TestBuildChatRequest(t *testing.T) {
 				{Role: RoleUser, Content: "how are you"},
 			},
 			check: func(t *testing.T, req openai.ChatCompletionNewParams) {
-				if len(req.Messages) != 4 {
-					t.Errorf("Messages len = %d, want 4", len(req.Messages))
-				}
+				assert.Len(t, req.Messages, 4, "Messages")
 			},
 		},
 	}
@@ -295,12 +280,8 @@ func TestReasoningContent(t *testing.T) {
 				ReasoningContent: tt.reasoningContent,
 			}
 
-			if msg.Content != tt.wantContent {
-				t.Errorf("Content = %q, want %q", msg.Content, tt.wantContent)
-			}
-			if msg.ReasoningContent != tt.wantReasoning {
-				t.Errorf("ReasoningContent = %q, want %q", msg.ReasoningContent, tt.wantReasoning)
-			}
+			assert.Equal(t, tt.wantContent, msg.Content, "Content")
+			assert.Equal(t, tt.wantReasoning, msg.ReasoningContent, "ReasoningContent")
 		})
 	}
 }

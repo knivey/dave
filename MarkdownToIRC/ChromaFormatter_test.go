@@ -2,10 +2,11 @@ package markdowntoirc
 
 import (
 	"bytes"
-	"strings"
 	"testing"
 
 	"github.com/alecthomas/chroma/v2"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestIRCStyleFormat(t *testing.T) {
@@ -53,9 +54,7 @@ func TestIRCStyleFormat(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := tt.style.Format()
-			if got != tt.want {
-				t.Errorf("Format() = %q, want %q", got, tt.want)
-			}
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -119,9 +118,7 @@ func TestIRCStyleDeltaFormat(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := tt.new.DeltaFormat(tt.old)
-			if got != tt.want {
-				t.Errorf("DeltaFormat() = %q, want %q", got, tt.want)
-			}
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -161,9 +158,7 @@ func TestFindClosestColor(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := ircTable.findClosest(tt.seeking)
-			if got != tt.want {
-				t.Errorf("findClosest(%v) = %v, want %v", tt.seeking, got, tt.want)
-			}
+			assert.Equal(t, tt.want, got, "findClosest(%v)", tt.seeking)
 		})
 	}
 }
@@ -203,9 +198,7 @@ func TestIRCStyleFromEntry(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := IRCStyleFromEntry(tt.entry)
-			if got != tt.want {
-				t.Errorf("IRCStyleFromEntry() = %+v, want %+v", got, tt.want)
-			}
+			assert.Equal(t, tt.want, got, "IRCStyleFromEntry() mismatch")
 		})
 	}
 }
@@ -214,9 +207,7 @@ func TestIRCFormatterFormat(t *testing.T) {
 	style, err := chroma.NewStyle("test", map[chroma.TokenType]string{
 		chroma.NameKeyword: "#FF0000",
 	})
-	if err != nil {
-		t.Fatalf("NewStyle() error: %v", err)
-	}
+	require.NoError(t, err, "NewStyle() error")
 
 	tokens := []chroma.Token{
 		{Type: chroma.Text, Value: "hello "},
@@ -229,24 +220,14 @@ func TestIRCFormatterFormat(t *testing.T) {
 	var buf bytes.Buffer
 	f := &IRCFormatter{}
 	err = f.Format(&buf, style, it)
-	if err != nil {
-		t.Fatalf("Format() error: %v", err)
-	}
+	require.NoError(t, err, "Format() error")
 
 	got := buf.String()
 
-	if !strings.Contains(got, "hello ") {
-		t.Errorf("output missing 'hello ', got: %q", got)
-	}
-	if !strings.Contains(got, "func") {
-		t.Errorf("output missing 'func', got: %q", got)
-	}
-	if !strings.Contains(got, " world") {
-		t.Errorf("output missing ' world', got: %q", got)
-	}
-	if !strings.Contains(got, "\x0304") {
-		t.Errorf("output missing colour code for red keyword, got: %q", got)
-	}
+	assert.Contains(t, got, "hello ")
+	assert.Contains(t, got, "func")
+	assert.Contains(t, got, " world")
+	assert.Contains(t, got, "\x0304")
 }
 
 func TestWriteTokenNewlines(t *testing.T) {
@@ -286,9 +267,7 @@ func TestWriteTokenNewlines(t *testing.T) {
 			var buf bytes.Buffer
 			writeToken(&buf, tt.style, tt.text)
 			got := buf.String()
-			if got != tt.want {
-				t.Errorf("writeToken() = %q, want %q", got, tt.want)
-			}
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }

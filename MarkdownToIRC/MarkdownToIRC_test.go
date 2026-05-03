@@ -7,6 +7,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/knivey/dave/MarkdownToIRC/irc"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestInlineFormatting(t *testing.T) {
@@ -344,9 +346,7 @@ func TestNoExtraEmptyLines(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := MarkdownToIRC(tt.input)
-			if strings.Contains(got, "\n\n") {
-				t.Errorf("output contains consecutive newlines\ngot: %s", humanize(got))
-			}
+			assert.NotContains(t, got, "\n\n", "output contains consecutive newlines")
 		})
 	}
 }
@@ -588,12 +588,8 @@ func TestCodeBlockFallback(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := MarkdownToIRC(tt.input)
-			if strings.Contains(got, "\n\n") {
-				t.Errorf("output contains consecutive newlines\ngot: %s", humanize(got))
-			}
-			if !strings.Contains(got, "\x030,90") {
-				t.Errorf("output missing code colour code, got: %s", humanize(got))
-			}
+			assert.NotContains(t, got, "\n\n", "output contains consecutive newlines")
+			assert.Contains(t, got, "\x030,90", "output missing code colour code")
 		})
 	}
 }
@@ -753,14 +749,10 @@ func TestCodeBlockWidthCapping(t *testing.T) {
 				codeLines = append(codeLines, stripAll(l))
 			}
 		}
-		if len(codeLines) < 2 {
-			t.Fatalf("expected multiple code lines, got %d", len(codeLines))
-		}
+		require.GreaterOrEqual(t, len(codeLines), 2, "expected multiple code lines")
 		firstLen := utf8.RuneCountInString(codeLines[0])
 		secondLen := utf8.RuneCountInString(codeLines[1])
-		if firstLen != secondLen {
-			t.Errorf("expected all lines padded to same length, got %d vs %d", firstLen, secondLen)
-		}
+		assert.Equal(t, firstLen, secondLen, "expected all lines padded to same length")
 	})
 
 	t.Run("PlainCodeBlockMixedLengths", func(t *testing.T) {
@@ -773,20 +765,14 @@ func TestCodeBlockWidthCapping(t *testing.T) {
 				codeLines = append(codeLines, l)
 			}
 		}
-		if len(codeLines) != 2 {
-			t.Fatalf("expected 2 code lines, got %d", len(codeLines))
-		}
+		require.Len(t, codeLines, 2, "expected 2 code lines")
 		shortClean := stripAll(codeLines[0])
 		longClean := stripAll(codeLines[1])
 		shortLen := utf8.RuneCountInString(shortClean)
 		longLen := utf8.RuneCountInString(longClean)
 		expectedPad := maxCodeBlockPadWidth + 2
-		if shortLen != expectedPad {
-			t.Errorf("short line padded to %d chars, want %d (80 + borders), got: %q", shortLen, expectedPad, shortClean)
-		}
-		if longLen <= shortLen {
-			t.Errorf("long line should exceed padded width, got length %d vs short %d", longLen, shortLen)
-		}
+		assert.Equal(t, expectedPad, shortLen, "short line padding")
+		assert.Greater(t, longLen, shortLen, "long line should exceed padded width")
 	})
 
 	t.Run("PlainCodeBlockAllLinesOver80", func(t *testing.T) {
@@ -801,14 +787,10 @@ func TestCodeBlockWidthCapping(t *testing.T) {
 				codeLines = append(codeLines, stripAll(l))
 			}
 		}
-		if len(codeLines) != 2 {
-			t.Fatalf("expected 2 code lines, got %d", len(codeLines))
-		}
+		require.Len(t, codeLines, 2, "expected 2 code lines")
 		len1 := utf8.RuneCountInString(codeLines[0])
 		len2 := utf8.RuneCountInString(codeLines[1])
-		if len1 == len2 {
-			t.Errorf("expected different lengths when all lines exceed 80, got both %d", len1)
-		}
+		assert.NotEqual(t, len1, len2, "expected different lengths when all lines exceed 80")
 	})
 }
 
@@ -830,20 +812,14 @@ func TestHighlightedCodeBlockWidthCapping(t *testing.T) {
 				codeLines = append(codeLines, l)
 			}
 		}
-		if len(codeLines) != 2 {
-			t.Fatalf("expected 2 code lines, got %d", len(codeLines))
-		}
+		require.Len(t, codeLines, 2, "expected 2 code lines")
 		shortClean := stripAll(codeLines[0])
 		longClean := stripAll(codeLines[1])
 		shortLen := utf8.RuneCountInString(shortClean)
 		longLen := utf8.RuneCountInString(longClean)
 		expectedPad := maxCodeBlockPadWidth + 2
-		if shortLen != expectedPad {
-			t.Errorf("short line padded to %d chars, want %d (80 + borders), got: %q", shortLen, expectedPad, shortClean)
-		}
-		if longLen <= shortLen {
-			t.Errorf("long line should exceed padded width, got length %d vs short %d", longLen, shortLen)
-		}
+		assert.Equal(t, expectedPad, shortLen, "short line padding")
+		assert.Greater(t, longLen, shortLen, "long line should exceed padded width")
 	})
 
 	t.Run("AllLinesOver80WithLanguage", func(t *testing.T) {
@@ -858,14 +834,10 @@ func TestHighlightedCodeBlockWidthCapping(t *testing.T) {
 				codeLines = append(codeLines, stripAll(l))
 			}
 		}
-		if len(codeLines) != 2 {
-			t.Fatalf("expected 2 code lines, got %d", len(codeLines))
-		}
+		require.Len(t, codeLines, 2, "expected 2 code lines")
 		len1 := utf8.RuneCountInString(codeLines[0])
 		len2 := utf8.RuneCountInString(codeLines[1])
-		if len1 == len2 {
-			t.Errorf("expected different lengths when all lines exceed 80, got both %d", len1)
-		}
+		assert.NotEqual(t, len1, len2, "expected different lengths when all lines exceed 80")
 	})
 
 	t.Run("AllLinesUnder80WithLanguage", func(t *testing.T) {
@@ -878,14 +850,10 @@ func TestHighlightedCodeBlockWidthCapping(t *testing.T) {
 				codeLines = append(codeLines, stripAll(l))
 			}
 		}
-		if len(codeLines) < 2 {
-			t.Fatalf("expected multiple code lines, got %d", len(codeLines))
-		}
+		require.GreaterOrEqual(t, len(codeLines), 2, "expected multiple code lines")
 		firstLen := utf8.RuneCountInString(codeLines[0])
 		secondLen := utf8.RuneCountInString(codeLines[1])
-		if firstLen != secondLen {
-			t.Errorf("expected all lines padded to same length, got %d vs %d", firstLen, secondLen)
-		}
+		assert.Equal(t, firstLen, secondLen, "expected all lines padded to same length")
 	})
 }
 
@@ -1013,9 +981,7 @@ func TestTableEdgeCases(t *testing.T) {
 		for _, line := range lines {
 			if strings.HasPrefix(stripAll(line), "│") {
 				lineLen := utf8.RuneCountInString(stripAll(line))
-				if lineLen > 100 {
-					t.Errorf("table line too long: %d chars", lineLen)
-				}
+				assert.LessOrEqual(t, lineLen, 100, "table line too long")
 			}
 		}
 	})
@@ -1023,15 +989,9 @@ func TestTableEdgeCases(t *testing.T) {
 	t.Run("TableWithMixedFormatting", func(t *testing.T) {
 		input := "| **Bold** | *Italic* | `Code` |\n|----------|----------|--------|\n| val1     | val2     | val3   |"
 		got := MarkdownToIRC(input)
-		if !strings.Contains(got, "\x02Bold\x02") {
-			t.Errorf("missing bold in table cell, got: %s", humanize(got))
-		}
-		if !strings.Contains(got, "\x1DItalic\x1D") {
-			t.Errorf("missing italic in table cell, got: %s", humanize(got))
-		}
-		if !strings.Contains(got, "\x030,90Code\x03") {
-			t.Errorf("missing inline code in table cell, got: %s", humanize(got))
-		}
+		assert.Contains(t, got, "\x02Bold\x02", "missing bold in table cell")
+		assert.Contains(t, got, "\x1DItalic\x1D", "missing italic in table cell")
+		assert.Contains(t, got, "\x030,90Code\x03", "missing inline code in table cell")
 	})
 
 	t.Run("TableBorderAlignment", func(t *testing.T) {
@@ -1046,18 +1006,10 @@ func TestTableEdgeCases(t *testing.T) {
 				break
 			}
 		}
-		if dataLine == "" {
-			t.Fatalf("could not find data line in: %s", humanize(got))
-		}
-		if !strings.HasPrefix(dataLine, "│ a ") {
-			t.Errorf("left alignment failed, got: %q", dataLine)
-		}
-		if !strings.Contains(dataLine, " b ") {
-			t.Errorf("center alignment failed, got: %q", dataLine)
-		}
-		if !strings.Contains(dataLine, " c │") {
-			t.Errorf("right alignment failed, got: %q", dataLine)
-		}
+		require.NotEmpty(t, dataLine, "could not find data line")
+		assert.True(t, strings.HasPrefix(dataLine, "│ a "), "left alignment failed")
+		assert.Contains(t, dataLine, " b ", "center alignment failed")
+		assert.Contains(t, dataLine, " c │", "right alignment failed")
 	})
 
 	t.Run("TableWrapNoFormatBleeding", func(t *testing.T) {
@@ -1075,15 +1027,9 @@ func TestTableEdgeCases(t *testing.T) {
 			boldCount := strings.Count(line, "\x02")
 			italicCount := strings.Count(line, "\x1D")
 			colorCount := strings.Count(line, "\x03")
-			if boldCount%2 != 0 {
-				t.Errorf("unbalanced bold on line: %q", stripped)
-			}
-			if italicCount%2 != 0 {
-				t.Errorf("unbalanced italic on line: %q", stripped)
-			}
-			if colorCount%2 != 0 {
-				t.Errorf("unbalanced color on line: %q", stripped)
-			}
+			assert.Zero(t, boldCount%2, "unbalanced bold on line: %q", stripped)
+			assert.Zero(t, italicCount%2, "unbalanced italic on line: %q", stripped)
+			assert.Zero(t, colorCount%2, "unbalanced color on line: %q", stripped)
 		}
 	})
 }
@@ -1109,9 +1055,7 @@ func TestTableStrictRendering(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := MarkdownToIRC(tt.input)
-			if got != tt.expected {
-				t.Errorf("expected %q, got %q", tt.expected, got)
-			}
+			assert.Equal(t, tt.expected, got)
 		})
 	}
 }

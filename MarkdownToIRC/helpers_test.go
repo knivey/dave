@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/knivey/dave/MarkdownToIRC/irc"
+	"github.com/stretchr/testify/assert"
 )
 
 func humanize(s string) string {
@@ -38,14 +39,10 @@ func runTests(t *testing.T, tests []mdTest) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := MarkdownToIRC(tt.input)
 			for _, want := range tt.contain {
-				if !strings.Contains(got, want) {
-					t.Errorf("output missing %q\ngot:  %s\nwant: %s", humanize(want), humanize(got), humanize(want))
-				}
+				assert.Contains(t, got, want, "output missing %q\ngot:  %s", humanize(want), humanize(got))
 			}
 			for _, notwant := range tt.notContain {
-				if strings.Contains(got, notwant) {
-					t.Errorf("output unexpectedly contains %q\ngot:  %s", humanize(notwant), humanize(got))
-				}
+				assert.NotContains(t, got, notwant, "output unexpectedly contains %q\ngot:  %s", humanize(notwant), humanize(got))
 			}
 		})
 	}
@@ -61,8 +58,8 @@ func runTestsStripIRC(t *testing.T, tests []struct {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := MarkdownToIRC(tt.input)
-			if tt.checkBgColor && !strings.Contains(got, "\x030,90") {
-				t.Errorf("missing background color code \\x030,90\ngot: %s", humanize(got))
+			if tt.checkBgColor {
+				assert.Contains(t, got, "\x030,90", "missing background color code \\x030,90\ngot: %s", humanize(got))
 			}
 			stripped := irc.StripCodes(got)
 			gotLines := strings.Split(stripped, "\n")
@@ -71,13 +68,9 @@ func runTestsStripIRC(t *testing.T, tests []struct {
 				gotLines = gotLines[1:]
 			}
 
-			if len(gotLines) != len(tt.lines) {
-				t.Errorf("line count mismatch: got %d, want %d", len(gotLines), len(tt.lines))
-				return
-			}
-			for i, want := range tt.lines {
-				if gotLines[i] != want {
-					t.Errorf("line %d mismatch\ngot:  %q\nwant: %q", i, gotLines[i], want)
+			if assert.Len(t, gotLines, len(tt.lines), "line count mismatch") {
+				for i, want := range tt.lines {
+					assert.Equal(t, want, gotLines[i], "line %d mismatch", i)
 				}
 			}
 		})

@@ -4,20 +4,21 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/lrstanley/girc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func setupJMTestDB(t *testing.T) {
 	t.Helper()
 	db, err := initDB(DatabaseConfig{Path: t.TempDir() + "/test.db"})
-	if err != nil {
-		t.Fatal("initDB:", err)
-	}
+	require.NoError(t, err, "initDB")
 	theDB = db
 	t.Cleanup(func() {
 		closeDB(theDB)
@@ -47,18 +48,14 @@ func setupTestJobManager(t *testing.T) {
 func createTestSession(t *testing.T, ctxKey, network, channel, nick, chatCmd string) int64 {
 	t.Helper()
 	sid, err := createDBSession(ctxKey, network, channel, nick, chatCmd, "", "", "")
-	if err != nil {
-		t.Fatal("createDBSession:", err)
-	}
+	require.NoError(t, err, "createDBSession")
 	return sid
 }
 
 func insertTestMessage(t *testing.T, sessionID int64, role, content string) {
 	t.Helper()
 	err := insertDBMessage(sessionID, role, content, nil, nil, nil)
-	if err != nil {
-		t.Fatal("insertDBMessage:", err)
-	}
+	require.NoError(t, err, "insertDBMessage")
 }
 
 func makeTestAIConfig() AIConfig {
@@ -187,12 +184,8 @@ func TestDeliverAsyncResult_SameSession(t *testing.T) {
 		SessionID: sid,
 	}
 
-	if err := createPendingJob(sid, "job-1", "generate_image_async", "img-mcp"); err != nil {
-		t.Fatal("createPendingJob:", err)
-	}
-	if err := completePendingJob("job-1", "image generated successfully"); err != nil {
-		t.Fatal("completePendingJob:", err)
-	}
+	require.NoError(t, createPendingJob(sid, "job-1", "generate_image_async", "img-mcp"), "createPendingJob")
+	require.NoError(t, completePendingJob("job-1", "image generated successfully"), "completePendingJob")
 
 	job := &asyncJob{
 		JobID:     "job-1",
@@ -209,22 +202,16 @@ func TestDeliverAsyncResult_SameSession(t *testing.T) {
 	deliverAsyncResult(job, context.Background(), output)
 
 	ctx := chatContextsMap[ctxKey]
-	if ctx.SessionID != sid {
-		t.Errorf("SessionID = %d, want %d", ctx.SessionID, sid)
-	}
+	assert.Equal(t, sid, ctx.SessionID, "SessionID")
 
 	hasAsyncMsg := false
 	for _, m := range ctx.Messages {
-		if m.Role == "system" && contains(m.Content, "Background task completed") {
+		if m.Role == "system" && strings.Contains(m.Content, "Background task completed") {
 			hasAsyncMsg = true
-			if !contains(m.Content, "image generated successfully") {
-				t.Errorf("async result message missing result text: %q", m.Content)
-			}
+			assert.Contains(t, m.Content, "image generated successfully", "async result message missing result text")
 		}
 	}
-	if !hasAsyncMsg {
-		t.Error("expected async result system message in context")
-	}
+	assert.True(t, hasAsyncMsg, "expected async result system message in context")
 	_ = mb
 }
 
@@ -250,12 +237,8 @@ func TestDeliverAsyncResult_DifferentSession(t *testing.T) {
 		SessionID: sessionB,
 	}
 
-	if err := createPendingJob(sessionA, "job-1", "generate_image_async", "img-mcp"); err != nil {
-		t.Fatal("createPendingJob:", err)
-	}
-	if err := completePendingJob("job-1", "image url: http://example.com/img.png"); err != nil {
-		t.Fatal("completePendingJob:", err)
-	}
+	require.NoError(t, createPendingJob(sessionA, "job-1", "generate_image_async", "img-mcp"), "createPendingJob")
+	require.NoError(t, completePendingJob("job-1", "image url: http://example.com/img.png"), "completePendingJob")
 
 	job := &asyncJob{
 		JobID:     "job-1",
@@ -272,35 +255,23 @@ func TestDeliverAsyncResult_DifferentSession(t *testing.T) {
 	deliverAsyncResult(job, context.Background(), output)
 
 	ctx := chatContextsMap[ctxKey]
-	if ctx.SessionID != sessionA {
-		t.Errorf("SessionID = %d, want %d (should have switched back to session A)", ctx.SessionID, sessionA)
-	}
+	assert.Equal(t, sessionA, ctx.SessionID, "should have switched back to session A")
 
 	sessB, err := getDBSessionByID(sessionB)
-	if err != nil {
-		t.Fatal("getDBSessionByID:", err)
-	}
-	if sessB.Status != "completed" {
-		t.Errorf("session B status = %q, want %q", sessB.Status, "completed")
-	}
+	require.NoError(t, err, "getDBSessionByID")
+	assert.Equal(t, "completed", sessB.Status, "session B status")
 
 	sessA, err := getDBSessionByID(sessionA)
-	if err != nil {
-		t.Fatal("getDBSessionByID:", err)
-	}
-	if sessA.Status != "active" {
-		t.Errorf("session A status = %q, want %q", sessA.Status, "active")
-	}
+	require.NoError(t, err, "getDBSessionByID")
+	assert.Equal(t, "active", sessA.Status, "session A status")
 
 	hasAsyncMsg := false
 	for _, m := range ctx.Messages {
-		if m.Role == "system" && contains(m.Content, "Background task completed") {
+		if m.Role == "system" && strings.Contains(m.Content, "Background task completed") {
 			hasAsyncMsg = true
 		}
 	}
-	if !hasAsyncMsg {
-		t.Error("expected async result system message after switch")
-	}
+	assert.True(t, hasAsyncMsg, "expected async result system message after switch")
 	_ = mb
 }
 
@@ -328,9 +299,7 @@ func TestOnAsyncJobCompleted_UserBusyWaitsThenDelivers(t *testing.T) {
 		SessionID: sessionB,
 	}
 
-	if err := createPendingJob(sessionA, "job-1", "generate_image_async", "img-mcp"); err != nil {
-		t.Fatal("createPendingJob:", err)
-	}
+	require.NoError(t, createPendingJob(sessionA, "job-1", "generate_image_async", "img-mcp"), "createPendingJob")
 
 	blockDone := make(chan struct{})
 	queueMgr.Enqueue("testnet", "#test", "testuser", "", "",
@@ -353,16 +322,12 @@ func TestOnAsyncJobCompleted_UserBusyWaitsThenDelivers(t *testing.T) {
 	onAsyncJobCompleted(job, "result text")
 	time.Sleep(100 * time.Millisecond)
 
-	if chatContextsMap[ctxKey].SessionID == sessionA {
-		t.Error("session should NOT have switched while blocking job holds the slot")
-	}
+	assert.NotEqual(t, sessionA, chatContextsMap[ctxKey].SessionID, "session should NOT have switched while blocking job holds the slot")
 
 	close(blockDone)
 	time.Sleep(300 * time.Millisecond)
 
-	if chatContextsMap[ctxKey].SessionID != sessionA {
-		t.Error("session should have switched to session A after delivery completed")
-	}
+	assert.Equal(t, sessionA, chatContextsMap[ctxKey].SessionID, "session should have switched to session A after delivery completed")
 }
 
 func TestOnAsyncJobCompleted_MultipleJobsWhileBusy(t *testing.T) {
@@ -418,19 +383,15 @@ func TestOnAsyncJobCompleted_MultipleJobsWhileBusy(t *testing.T) {
 	waitForSessionSwitch(t, ctxKey, sessionA, 5*time.Second)
 
 	ctx := chatContextsMap[ctxKey]
-	if ctx.SessionID != sessionA {
-		t.Fatalf("SessionID = %d, want %d", ctx.SessionID, sessionA)
-	}
+	require.Equal(t, sessionA, ctx.SessionID, "SessionID")
 
 	asyncCount := 0
 	for _, m := range ctx.Messages {
-		if m.Role == "system" && contains(m.Content, "Background task completed") {
+		if m.Role == "system" && strings.Contains(m.Content, "Background task completed") {
 			asyncCount++
 		}
 	}
-	if asyncCount < 2 {
-		t.Errorf("expected at least 2 async result messages, got %d", asyncCount)
-	}
+	assert.GreaterOrEqual(t, asyncCount, 2, "expected at least 2 async result messages")
 }
 
 func TestSwitchToSession_CompletesOldSession(t *testing.T) {
@@ -463,19 +424,13 @@ func TestSwitchToSession_CompletesOldSession(t *testing.T) {
 	switchToSession(job)
 
 	ctx := chatContextsMap[ctxKey]
-	if ctx.SessionID != sessionA {
-		t.Errorf("SessionID = %d, want %d", ctx.SessionID, sessionA)
-	}
+	assert.Equal(t, sessionA, ctx.SessionID, "SessionID")
 
 	sessB, _ := getDBSessionByID(sessionB)
-	if sessB.Status != "completed" {
-		t.Errorf("session B status = %q, want completed", sessB.Status)
-	}
+	assert.Equal(t, "completed", sessB.Status, "session B status")
 
 	sessA, _ := getDBSessionByID(sessionA)
-	if sessA.Status != "active" {
-		t.Errorf("session A status = %q, want active", sessA.Status)
-	}
+	assert.Equal(t, "active", sessA.Status, "session A status")
 
 	foundUserMsg := false
 	for _, m := range ctx.Messages {
@@ -483,9 +438,7 @@ func TestSwitchToSession_CompletesOldSession(t *testing.T) {
 			foundUserMsg = true
 		}
 	}
-	if !foundUserMsg {
-		t.Error("expected session A's messages to be loaded after switch")
-	}
+	assert.True(t, foundUserMsg, "expected session A's messages to be loaded after switch")
 }
 
 func TestSwitchToSession_NoOldSession(t *testing.T) {
@@ -509,12 +462,8 @@ func TestSwitchToSession_NoOldSession(t *testing.T) {
 	switchToSession(job)
 
 	ctx := chatContextsMap[ctxKey]
-	if ctx.SessionID != sessionA {
-		t.Errorf("SessionID = %d, want %d", ctx.SessionID, sessionA)
-	}
-	if len(ctx.Messages) == 0 {
-		t.Error("expected messages to be loaded")
-	}
+	assert.Equal(t, sessionA, ctx.SessionID, "SessionID")
+	assert.NotEmpty(t, ctx.Messages, "expected messages to be loaded")
 }
 
 func TestSwitchToSession_SameSessionIsNoop(t *testing.T) {
@@ -544,14 +493,10 @@ func TestSwitchToSession_SameSessionIsNoop(t *testing.T) {
 	switchToSession(job)
 
 	ctx := chatContextsMap[ctxKey]
-	if len(ctx.Messages) != len(originalCtx.Messages) {
-		t.Errorf("messages changed: got %d, want %d", len(ctx.Messages), len(originalCtx.Messages))
-	}
+	assert.Equal(t, len(originalCtx.Messages), len(ctx.Messages), "messages count should not change")
 
 	sess, _ := getDBSessionByID(sid)
-	if sess.Status != "active" {
-		t.Errorf("session status = %q, want active", sess.Status)
-	}
+	assert.Equal(t, "active", sess.Status, "session status")
 }
 
 func TestSwitchToSession_InvalidChatCommand(t *testing.T) {
@@ -579,9 +524,7 @@ func TestSwitchToSession_InvalidChatCommand(t *testing.T) {
 	switchToSession(job)
 
 	ctx := chatContextsMap[ctxKey]
-	if ctx.SessionID != sessionB {
-		t.Errorf("SessionID = %d, should remain %d when chat command not found", ctx.SessionID, sessionB)
-	}
+	assert.Equal(t, sessionB, ctx.SessionID, "should remain session B when chat command not found")
 }
 
 func TestDeliverAsyncResult_NoContext(t *testing.T) {
@@ -593,9 +536,7 @@ func TestDeliverAsyncResult_NoContext(t *testing.T) {
 
 	sessionA := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sessionA, "system", "sys")
-	if err := createPendingJob(sessionA, "job-1", "generate_image_async", "img-mcp"); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, createPendingJob(sessionA, "job-1", "generate_image_async", "img-mcp"), "createPendingJob")
 	completePendingJob("job-1", "result")
 
 	delete(chatContextsMap, ctxKey)
@@ -611,19 +552,15 @@ func TestDeliverAsyncResult_NoContext(t *testing.T) {
 	chatContextsMutex.Lock()
 	ctx := chatContextsMap[ctxKey]
 	chatContextsMutex.Unlock()
-	if ctx.SessionID != sessionA {
-		t.Errorf("SessionID = %d, want %d (should have loaded from DB)", ctx.SessionID, sessionA)
-	}
+	assert.Equal(t, sessionA, ctx.SessionID, "should have loaded from DB")
 
 	hasAsyncMsg := false
 	for _, m := range ctx.Messages {
-		if m.Role == "system" && contains(m.Content, "Background task completed") {
+		if m.Role == "system" && strings.Contains(m.Content, "Background task completed") {
 			hasAsyncMsg = true
 		}
 	}
-	if !hasAsyncMsg {
-		t.Error("expected async result system message after loading context from DB")
-	}
+	assert.True(t, hasAsyncMsg, "expected async result system message after loading context from DB")
 }
 
 func TestDeliverAsyncResult_UsesMockRunner(t *testing.T) {
@@ -667,21 +604,11 @@ func TestDeliverAsyncResult_UsesMockRunner(t *testing.T) {
 	output := make(chan string, 100)
 	deliverAsyncResult(job, context.Background(), output)
 
-	if runner == nil {
-		t.Fatal("runner was never created")
-	}
-	if !runner.setChannelCalled {
-		t.Error("setChannel was not called")
-	}
-	if runner.setChannelCh != "#test" {
-		t.Errorf("setChannel channel = %q, want %q", runner.setChannelCh, "#test")
-	}
-	if runner.setChannelNick != "testuser" {
-		t.Errorf("setChannel nick = %q, want %q", runner.setChannelNick, "testuser")
-	}
-	if runner.runTurnCalled == 0 {
-		t.Error("runTurn was never called")
-	}
+	require.NotNil(t, runner, "runner was never created")
+	assert.True(t, runner.setChannelCalled, "setChannel was not called")
+	assert.Equal(t, "#test", runner.setChannelCh, "setChannel channel")
+	assert.Equal(t, "testuser", runner.setChannelNick, "setChannel nick")
+	assert.NotZero(t, runner.runTurnCalled, "runTurn was never called")
 }
 
 func TestDeliverAsyncResult_RunnerSeesInjectedResult(t *testing.T) {
@@ -727,7 +654,7 @@ func TestDeliverAsyncResult_RunnerSeesInjectedResult(t *testing.T) {
 
 	foundInjected := false
 	for _, m := range receivedMessages {
-		if m.Role == "system" && contains(m.Content, "Background task completed") && contains(m.Content, "http://example.com/img.png") {
+		if m.Role == "system" && strings.Contains(m.Content, "Background task completed") && strings.Contains(m.Content, "http://example.com/img.png") {
 			foundInjected = true
 		}
 	}
@@ -780,14 +707,10 @@ func TestDeliverAsyncResult_MultipleCompletedJobs(t *testing.T) {
 	output := make(chan string, 100)
 	deliverAsyncResult(job, context.Background(), output)
 
-	if turnCount != 1 {
-		t.Errorf("runTurn called %d times, want 1 (both jobs delivered in one turn)", turnCount)
-	}
+	assert.Equal(t, 1, turnCount, "runTurn should be called once (both jobs delivered in one turn)")
 
 	jobs, _ := getCompletedPendingJobs(sid)
-	if len(jobs) != 0 {
-		t.Errorf("expected all jobs delivered, got %d remaining", len(jobs))
-	}
+	assert.Empty(t, jobs, "expected all jobs delivered")
 }
 
 func TestInjectAsyncResultFromDB(t *testing.T) {
@@ -818,33 +741,17 @@ func TestInjectAsyncResultFromDB(t *testing.T) {
 	injectAsyncResultFromDB(ctxKey, ctx, pj, "testnet", "#test", "testuser")
 
 	ctx = chatContextsMap[ctxKey]
-	if len(ctx.Messages) != 2 {
-		t.Fatalf("expected 2 messages, got %d", len(ctx.Messages))
-	}
+	require.Len(t, ctx.Messages, 2, "expected 2 messages")
 	lastMsg := ctx.Messages[len(ctx.Messages)-1]
-	if lastMsg.Role != "system" {
-		t.Errorf("injected message role = %q, want system", lastMsg.Role)
-	}
-	if !contains(lastMsg.Content, "Background task completed") {
-		t.Errorf("injected message missing expected text: %q", lastMsg.Content)
-	}
-	if !contains(lastMsg.Content, "generate_image_async") {
-		t.Errorf("injected message missing tool name: %q", lastMsg.Content)
-	}
-	if !contains(lastMsg.Content, "http://example.com/test.png") {
-		t.Errorf("injected message missing result: %q", lastMsg.Content)
-	}
+	assert.Equal(t, "system", lastMsg.Role, "injected message role")
+	assert.Contains(t, lastMsg.Content, "Background task completed", "injected message missing expected text")
+	assert.Contains(t, lastMsg.Content, "generate_image_async", "injected message missing tool name")
+	assert.Contains(t, lastMsg.Content, "http://example.com/test.png", "injected message missing result")
 
 	dbMsgs, err := loadDBSessionMessages(sid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(dbMsgs) != 1 {
-		t.Errorf("expected 1 DB message (only the injected one), got %d", len(dbMsgs))
-	}
-	if dbMsgs[0].Role != "system" {
-		t.Errorf("DB message role = %q, want system", dbMsgs[0].Role)
-	}
+	require.NoError(t, err, "loadDBSessionMessages")
+	assert.Len(t, dbMsgs, 1, "expected 1 DB message (only the injected one)")
+	assert.Equal(t, "system", dbMsgs[0].Role, "DB message role")
 }
 
 func TestInjectAsyncResultFromDB_NilResult(t *testing.T) {
@@ -874,9 +781,7 @@ func TestInjectAsyncResultFromDB_NilResult(t *testing.T) {
 
 	ctx = chatContextsMap[ctxKey]
 	lastMsg := ctx.Messages[len(ctx.Messages)-1]
-	if !contains(lastMsg.Content, "Background task completed") {
-		t.Errorf("injected message missing expected text even with nil result: %q", lastMsg.Content)
-	}
+	assert.Contains(t, lastMsg.Content, "Background task completed", "injected message missing expected text even with nil result")
 }
 
 func TestOnAsyncJobCompleted_RemovesJobFromMap(t *testing.T) {
@@ -907,9 +812,8 @@ func TestOnAsyncJobCompleted_RemovesJobFromMap(t *testing.T) {
 
 	onAsyncJobCompleted(job, "result")
 
-	if _, exists := jobMgr.jobs["job-1"]; exists {
-		t.Error("job should be removed from in-memory map after completion")
-	}
+	_, exists := jobMgr.jobs["job-1"]
+	assert.False(t, exists, "job should be removed from in-memory map after completion")
 }
 
 func TestOnAsyncJobCompleted_MarksCompletedInDB(t *testing.T) {
@@ -941,20 +845,15 @@ func TestOnAsyncJobCompleted_MarksCompletedInDB(t *testing.T) {
 	var pj pendingJob
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := theDB.Get(&pj, "SELECT * FROM pending_jobs WHERE job_id = ?", "job-1"); err != nil {
-			t.Fatal("query job:", err)
-		}
+		require.NoError(t, theDB.Get(&pj, "SELECT * FROM pending_jobs WHERE job_id = ?", "job-1"), "query job")
 		if pj.Status == "delivered" {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	if pj.Status != "delivered" {
-		t.Errorf("job status = %q, want delivered (completed then delivered by deliverAsyncResult)", pj.Status)
-	}
-	if pj.Result == nil || *pj.Result != "the image result" {
-		t.Errorf("job result = %v, want %q", pj.Result, "the image result")
-	}
+	assert.Equal(t, "delivered", pj.Status, "job status (completed then delivered by deliverAsyncResult)")
+	require.NotNil(t, pj.Result, "job result")
+	assert.Equal(t, "the image result", *pj.Result, "job result")
 }
 
 func TestDeliverAsyncResult_MarksJobsDelivered(t *testing.T) {
@@ -986,25 +885,8 @@ func TestDeliverAsyncResult_MarksJobsDelivered(t *testing.T) {
 	deliverAsyncResult(job, context.Background(), output)
 
 	var pj pendingJob
-	if err := theDB.Get(&pj, "SELECT * FROM pending_jobs WHERE job_id = ?", "job-1"); err != nil {
-		t.Fatal("query job:", err)
-	}
-	if pj.Status != "delivered" {
-		t.Errorf("job status = %q, want delivered", pj.Status)
-	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstr(s, substr))
-}
-
-func containsSubstr(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
+	require.NoError(t, theDB.Get(&pj, "SELECT * FROM pending_jobs WHERE job_id = ?", "job-1"), "query job")
+	assert.Equal(t, "delivered", pj.Status, "job status")
 }
 
 func waitForSessionSwitch(t *testing.T, ctxKey string, expectedSID int64, timeout time.Duration) {
@@ -1022,7 +904,7 @@ func waitForSessionSwitch(t *testing.T, ctxKey string, expectedSID int64, timeou
 	chatContextsMutex.Lock()
 	ctx := chatContextsMap[ctxKey]
 	chatContextsMutex.Unlock()
-	t.Fatalf("timed out waiting for session switch: got SessionID=%d, want %d", ctx.SessionID, expectedSID)
+	require.Equal(t, expectedSID, ctx.SessionID, "timed out waiting for session switch")
 }
 
 func TestDeliverAsyncResult_NoContextLoaded_LoadsFromDB(t *testing.T) {
@@ -1036,12 +918,8 @@ func TestDeliverAsyncResult_NoContextLoaded_LoadsFromDB(t *testing.T) {
 	insertTestMessage(t, sid, "system", "you are helpful")
 	insertTestMessage(t, sid, "user", "draw me a picture")
 
-	if err := createPendingJob(sid, "job-1", "generate_image_async", "img-mcp"); err != nil {
-		t.Fatal("createPendingJob:", err)
-	}
-	if err := completePendingJob("job-1", "image url: http://example.com/img.png"); err != nil {
-		t.Fatal("completePendingJob:", err)
-	}
+	require.NoError(t, createPendingJob(sid, "job-1", "generate_image_async", "img-mcp"), "createPendingJob")
+	require.NoError(t, completePendingJob("job-1", "image url: http://example.com/img.png"), "completePendingJob")
 
 	delete(chatContextsMap, ctxKey)
 
@@ -1063,23 +941,16 @@ func TestDeliverAsyncResult_NoContextLoaded_LoadsFromDB(t *testing.T) {
 	ctx := chatContextsMap[ctxKey]
 	chatContextsMutex.Unlock()
 
-	if ctx.SessionID != sid {
-		t.Errorf("SessionID = %d, want %d (should have loaded from DB)", ctx.SessionID, sid)
-	}
-
-	if len(ctx.Messages) == 0 {
-		t.Error("expected messages to be loaded from DB")
-	}
+	assert.Equal(t, sid, ctx.SessionID, "should have loaded from DB")
+	assert.NotEmpty(t, ctx.Messages, "expected messages to be loaded from DB")
 
 	hasAsyncMsg := false
 	for _, m := range ctx.Messages {
-		if m.Role == "system" && contains(m.Content, "Background task completed") {
+		if m.Role == "system" && strings.Contains(m.Content, "Background task completed") {
 			hasAsyncMsg = true
 		}
 	}
-	if !hasAsyncMsg {
-		t.Error("expected async result system message after loading context from DB")
-	}
+	assert.True(t, hasAsyncMsg, "expected async result system message after loading context from DB")
 
 	select {
 	case msg := <-output:
@@ -1111,17 +982,13 @@ func TestSwitchToSession_NoCurrentSession_NoSwitchMessage(t *testing.T) {
 	}
 
 	msg := switchToSession(job)
-	if msg != "" {
-		t.Errorf("switchToSession returned %q, want empty string when no prior session", msg)
-	}
+	assert.Equal(t, "", msg, "switchToSession should return empty string when no prior session")
 
 	chatContextsMutex.Lock()
 	ctx := chatContextsMap[ctxKey]
 	chatContextsMutex.Unlock()
 
-	if ctx.SessionID != sid {
-		t.Errorf("SessionID = %d, want %d (should have loaded from DB)", ctx.SessionID, sid)
-	}
+	assert.Equal(t, sid, ctx.SessionID, "should have loaded from DB")
 	_ = cfg
 }
 
@@ -1144,9 +1011,7 @@ func TestRecoverPendingJobs(t *testing.T) {
 	jobMgr.mu.Lock()
 	_, exists := jobMgr.jobs["recovery-job-1"]
 	jobMgr.mu.Unlock()
-	if !exists {
-		t.Error("expected job to be recovered in memory")
-	}
+	assert.True(t, exists, "expected job to be recovered in memory")
 
 	jobMgr.cancel()
 	time.Sleep(100 * time.Millisecond)
@@ -1168,9 +1033,7 @@ func TestRegisterAsyncJob_Duplicate(t *testing.T) {
 	jobMgr.mu.Lock()
 	count := len(jobMgr.jobs)
 	jobMgr.mu.Unlock()
-	if count != 1 {
-		t.Errorf("expected 1 job, got %d (duplicate should be ignored)", count)
-	}
+	assert.Equal(t, 1, count, "expected 1 job (duplicate should be ignored)")
 }
 
 func TestSwitchToSession_DBMessagesWithToolCalls(t *testing.T) {
@@ -1206,9 +1069,7 @@ func TestSwitchToSession_DBMessagesWithToolCalls(t *testing.T) {
 	switchToSession(job)
 
 	ctx := chatContextsMap[ctxKey]
-	if ctx.SessionID != sessionA {
-		t.Fatalf("SessionID = %d, want %d", ctx.SessionID, sessionA)
-	}
+	require.Equal(t, sessionA, ctx.SessionID, "SessionID")
 
 	foundToolCall := false
 	foundToolCallID := false
@@ -1220,12 +1081,8 @@ func TestSwitchToSession_DBMessagesWithToolCalls(t *testing.T) {
 			foundToolCallID = true
 		}
 	}
-	if !foundToolCall {
-		t.Error("tool_calls not restored from DB")
-	}
-	if !foundToolCallID {
-		t.Error("tool_call_id not restored from DB")
-	}
+	assert.True(t, foundToolCall, "tool_calls not restored from DB")
+	assert.True(t, foundToolCallID, "tool_call_id not restored from DB")
 }
 
 func TestSwitchToSession_TruncatesHistory(t *testing.T) {
@@ -1258,12 +1115,8 @@ func TestSwitchToSession_TruncatesHistory(t *testing.T) {
 	switchToSession(job)
 
 	ctx := chatContextsMap[ctxKey]
-	if len(ctx.Messages) > cfg.MaxHistory+1 {
-		t.Errorf("messages not truncated: got %d, max is %d", len(ctx.Messages), cfg.MaxHistory+1)
-	}
-	if ctx.Messages[0].Role != "system" {
-		t.Error("first message should be system prompt after truncation")
-	}
+	assert.LessOrEqual(t, len(ctx.Messages), cfg.MaxHistory+1, "messages not truncated")
+	assert.Equal(t, "system", ctx.Messages[0].Role, "first message should be system prompt after truncation")
 }
 
 func TestDeliverAsyncResult_RunningDuringTurn(t *testing.T) {
@@ -1313,9 +1166,7 @@ func TestDeliverAsyncResult_RunningDuringTurn(t *testing.T) {
 
 	wg.Wait()
 
-	if !runningDuringTurn {
-		t.Error("queueMgr.IsRunning() returned false during runTurn — item should be active")
-	}
+	assert.True(t, runningDuringTurn, "queueMgr.IsRunning() returned false during runTurn — item should be active")
 }
 
 func TestDeliverAsyncResult_RunningDuringTurn_BusyPath(t *testing.T) {
@@ -1333,9 +1184,7 @@ func TestDeliverAsyncResult_RunningDuringTurn_BusyPath(t *testing.T) {
 
 	<-ready
 
-	if !queueMgr.IsRunning("testnet", "#test", "testuser") {
-		t.Fatal("expected first job to be running")
-	}
+	require.True(t, queueMgr.IsRunning("testnet", "#test", "testuser"), "expected first job to be running")
 
 	runningDuringTurn := false
 	var turnWg sync.WaitGroup
@@ -1347,20 +1196,14 @@ func TestDeliverAsyncResult_RunningDuringTurn_BusyPath(t *testing.T) {
 	})
 
 	current, pending := queueMgr.QueueStatus("testnet", "#test", "testuser")
-	if current == nil {
-		t.Fatal("expected first job still running")
-	}
-	if len(pending) != 1 {
-		t.Fatalf("expected 1 pending job, got %d", len(pending))
-	}
+	require.NotNil(t, current, "expected first job still running")
+	require.Len(t, pending, 1, "expected 1 pending job")
 
 	close(unblockFirst)
 
 	turnWg.Wait()
 
-	if !runningDuringTurn {
-		t.Error("queueMgr.IsRunning() returned false during queued job execution — item should be active")
-	}
+	assert.True(t, runningDuringTurn, "queueMgr.IsRunning() returned false during queued job execution — item should be active")
 }
 
 func setupCancelTestMCP(t *testing.T) {
@@ -1394,15 +1237,11 @@ func setupCancelTestMCP(t *testing.T) {
 	t1, t2 := mcp.NewInMemoryTransports()
 
 	_, err := server.Connect(ctx, t1, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
 	session, err := client.Connect(ctx, t2, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	t.Cleanup(func() { session.Close() })
 
 	origServers := mcpServers
@@ -1417,9 +1256,7 @@ func setupCancelTestMCP(t *testing.T) {
 		Session: session,
 	}
 	for tool, err := range session.Tools(ctx, nil) {
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
 		srv.Tools = append(srv.Tools, tool)
 	}
 
@@ -1473,15 +1310,12 @@ func TestCancelAsyncJobsForSession_CancelsMatchingJobs(t *testing.T) {
 
 	cancelAsyncJobsForSession(sid)
 
-	if _, exists := jobMgr.jobs["job-a"]; exists {
-		t.Error("job-a should be removed from jobMgr.jobs")
-	}
-	if _, exists := jobMgr.jobs["job-b"]; exists {
-		t.Error("job-b should be removed from jobMgr.jobs")
-	}
-	if _, exists := jobMgr.jobs["job-c"]; !exists {
-		t.Error("job-c should still exist (different session)")
-	}
+	_, exists := jobMgr.jobs["job-a"]
+	assert.False(t, exists, "job-a should be removed from jobMgr.jobs")
+	_, exists = jobMgr.jobs["job-b"]
+	assert.False(t, exists, "job-b should be removed from jobMgr.jobs")
+	_, exists = jobMgr.jobs["job-c"]
+	assert.True(t, exists, "job-c should still exist (different session)")
 }
 
 func TestCancelAsyncJobsForSession_NoJobs(t *testing.T) {
@@ -1511,9 +1345,7 @@ func TestCancelAsyncJobsForSession_DeletesFromMap(t *testing.T) {
 
 	cancelAsyncJobsForSession(sid)
 
-	if len(jobMgr.jobs) != 0 {
-		t.Errorf("expected 0 jobs in map, got %d", len(jobMgr.jobs))
-	}
+	assert.Empty(t, jobMgr.jobs, "expected 0 jobs in map")
 }
 
 func setupBlockingWaitMCP(t *testing.T) {
@@ -1538,15 +1370,11 @@ func setupBlockingWaitMCP(t *testing.T) {
 	t1, t2 := mcp.NewInMemoryTransports()
 
 	_, err := server.Connect(ctx, t1, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
 	session, err := client.Connect(ctx, t2, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	t.Cleanup(func() { session.Close() })
 
 	origServers := mcpServers
@@ -1561,9 +1389,7 @@ func setupBlockingWaitMCP(t *testing.T) {
 		Session: session,
 	}
 	for tool, err := range session.Tools(ctx, nil) {
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
 		srv.Tools = append(srv.Tools, tool)
 	}
 
@@ -1606,7 +1432,5 @@ func TestWaitForAsyncJob_CleanupOnCancel(t *testing.T) {
 	jobMgr.mu.Lock()
 	_, exists := jobMgr.jobs["job-cancel-test"]
 	jobMgr.mu.Unlock()
-	if exists {
-		t.Error("cancelled job should be removed from jobMgr.jobs")
-	}
+	assert.False(t, exists, "cancelled job should be removed from jobMgr.jobs")
 }

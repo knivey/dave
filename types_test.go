@@ -3,6 +3,9 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestSummarizeMessages(t *testing.T) {
@@ -137,14 +140,10 @@ func TestSummarizeMessages(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := summarizeMessages(tt.messages)
 			for _, want := range tt.wantContains {
-				if !strings.Contains(got, want) {
-					t.Errorf("summarizeMessages() = %q\nwant to contain %q", got, want)
-				}
+				assert.Contains(t, got, want, "summarizeMessages()")
 			}
 			for _, notWant := range tt.wantNotContains {
-				if strings.Contains(got, notWant) {
-					t.Errorf("summarizeMessages() = %q\nwant NOT to contain %q", got, notWant)
-				}
+				assert.NotContains(t, got, notWant, "summarizeMessages() should NOT contain")
 			}
 		})
 	}
@@ -198,14 +197,9 @@ func TestBuildTurns(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := buildTurns(tt.messages)
-			if len(got) != len(tt.want) {
-				t.Errorf("buildTurns() = %v, want %v", got, tt.want)
-				return
-			}
+			require.Len(t, got, len(tt.want), "buildTurns() = %v, want %v", got, tt.want)
 			for i := range got {
-				if got[i] != tt.want[i] {
-					t.Errorf("buildTurns()[%d] = %v, want %v", i, got[i], tt.want[i])
-				}
+				assert.Equal(t, tt.want[i], got[i], "buildTurns()[%d]", i)
 			}
 		})
 	}

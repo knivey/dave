@@ -10,17 +10,16 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestInterruptComfyPrompt_Success(t *testing.T) {
 	var receivedBody map[string]string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/interrupt" {
-			t.Errorf("expected path /api/interrupt, got %s", r.URL.Path)
-		}
-		if r.Method != http.MethodPost {
-			t.Errorf("expected POST, got %s", r.Method)
-		}
+		assert.Equal(t, "/api/interrupt", r.URL.Path, "request path")
+		assert.Equal(t, http.MethodPost, r.Method, "request method")
 		body, _ := io.ReadAll(r.Body)
 		json.Unmarshal(body, &receivedBody)
 		w.WriteHeader(http.StatusOK)
@@ -31,13 +30,9 @@ func TestInterruptComfyPrompt_Success(t *testing.T) {
 	ctx := context.Background()
 
 	err := interruptComfyPrompt(ctx, cfg, "prompt-abc-123")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
+	require.NoError(t, err, "unexpected error")
 
-	if receivedBody["prompt_id"] != "prompt-abc-123" {
-		t.Errorf("expected prompt_id 'prompt-abc-123', got %q", receivedBody["prompt_id"])
-	}
+	assert.Equal(t, "prompt-abc-123", receivedBody["prompt_id"], "prompt_id")
 }
 
 func TestInterruptComfyPrompt_NetworkError(t *testing.T) {
@@ -46,9 +41,7 @@ func TestInterruptComfyPrompt_NetworkError(t *testing.T) {
 	defer cancel()
 
 	err := interruptComfyPrompt(ctx, cfg, "prompt-123")
-	if err == nil {
-		t.Fatal("expected error for unreachable server")
-	}
+	require.Error(t, err, "expected error for unreachable server")
 }
 
 func TestInterruptComfyPrompt_WithContext(t *testing.T) {
@@ -63,9 +56,7 @@ func TestInterruptComfyPrompt_WithContext(t *testing.T) {
 	defer cancel()
 
 	err := interruptComfyPrompt(ctx, cfg, "prompt-123")
-	if err == nil {
-		t.Fatal("expected error due to context cancellation")
-	}
+	require.Error(t, err, "expected error due to context cancellation")
 }
 
 func TestInterruptComfyPrompt_MultipleInterrupts(t *testing.T) {
@@ -91,14 +82,10 @@ func TestInterruptComfyPrompt_MultipleInterrupts(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(received) != 3 {
-		t.Fatalf("expected 3 interrupts, got %d", len(received))
-	}
+	require.Len(t, received, 3, "interrupt count")
 	for i, r := range received {
 		expected := fmt.Sprintf("prompt-%d", i+1)
-		if r["prompt_id"] != expected {
-			t.Errorf("interrupt %d: expected prompt_id %q, got %q", i, expected, r["prompt_id"])
-		}
+		assert.Equal(t, expected, r["prompt_id"], fmt.Sprintf("interrupt %d prompt_id", i))
 	}
 }
 
@@ -115,7 +102,5 @@ func TestSubmitComfyPrompt_UsesContext(t *testing.T) {
 	defer cancel()
 
 	_, err := submitComfyPrompt(ctx, cfg, "test", ComfyWorkflow{})
-	if err == nil {
-		t.Fatal("expected error due to context cancellation")
-	}
+	require.Error(t, err, "expected error due to context cancellation")
 }

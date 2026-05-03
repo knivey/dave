@@ -3,6 +3,9 @@ package irc
 import (
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseIRC(t *testing.T) {
@@ -66,16 +69,10 @@ func TestParseIRC(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := ParseIRC(tt.input)
-			if len(got) != len(tt.expected) {
-				t.Fatalf("expected %d segments, got %d", len(tt.expected), len(got))
-			}
+			require.Len(t, got, len(tt.expected), "expected %d segments, got %d", len(tt.expected), len(got))
 			for i, seg := range got {
-				if seg.Text != tt.expected[i].Text {
-					t.Errorf("segment %d text: expected %q, got %q", i, tt.expected[i].Text, seg.Text)
-				}
-				if !seg.Style.Equal(tt.expected[i].Style) {
-					t.Errorf("segment %d style: expected %+v, got %+v", i, tt.expected[i].Style, seg.Style)
-				}
+				assert.Equal(t, tt.expected[i].Text, seg.Text, "segment %d text", i)
+				assert.True(t, seg.Style.Equal(tt.expected[i].Style), "segment %d style: expected %+v, got %+v", i, tt.expected[i].Style, seg.Style)
 			}
 		})
 	}
@@ -112,9 +109,7 @@ func TestCloseCodes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := CloseCodes(tt.style)
-			if got != tt.expected {
-				t.Errorf("expected %q, got %q", tt.expected, got)
-			}
+			assert.Equal(t, tt.expected, got)
 		})
 	}
 }
@@ -155,9 +150,7 @@ func TestOpenCodes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := OpenCodes(tt.style)
-			if got != tt.expected {
-				t.Errorf("expected %q, got %q", tt.expected, got)
-			}
+			assert.Equal(t, tt.expected, got)
 		})
 	}
 }
@@ -243,9 +236,7 @@ func TestStripCodes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := StripCodes(tt.input)
-			if got != tt.expected {
-				t.Errorf("expected %q, got %q", tt.expected, got)
-			}
+			assert.Equal(t, tt.expected, got)
 		})
 	}
 }
@@ -291,21 +282,13 @@ func TestSplitAt(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			bef, aft := SplitAt(tt.input, tt.pos)
-			if bef != tt.wantBef {
-				t.Errorf("before: expected %q, got %q", tt.wantBef, bef)
-			}
-			if aft != tt.wantAft {
-				t.Errorf("after: expected %q, got %q", tt.wantAft, aft)
-			}
+			assert.Equal(t, tt.wantBef, bef, "before mismatch")
+			assert.Equal(t, tt.wantAft, aft, "after mismatch")
 
 			boldB := strings.Count(bef, "\x02")
 			boldA := strings.Count(aft, "\x02")
-			if boldB%2 != 0 {
-				t.Errorf("before has unbalanced bold: %q", bef)
-			}
-			if boldA%2 != 0 {
-				t.Errorf("after has unbalanced bold: %q", aft)
-			}
+			assert.Zero(t, boldB%2, "before has unbalanced bold: %q", bef)
+			assert.Zero(t, boldA%2, "after has unbalanced bold: %q", aft)
 		})
 	}
 }
@@ -358,12 +341,8 @@ func TestByteSplitAt(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			bef, aft := byteSplitAt(tt.input, tt.pos)
-			if bef != tt.wantBef {
-				t.Errorf("before: expected %q, got %q", tt.wantBef, bef)
-			}
-			if aft != tt.wantAft {
-				t.Errorf("after: expected %q, got %q", tt.wantAft, aft)
-			}
+			assert.Equal(t, tt.wantBef, bef, "before mismatch")
+			assert.Equal(t, tt.wantAft, aft, "after mismatch")
 			if strings.Contains(tt.input, "\x02") {
 				if strings.Count(bef, "\x02")%2 != 0 && !strings.HasSuffix(strings.TrimSuffix(bef, "\x02"), "\x02") {
 					if strings.Count(bef, "\x02")%2 != 0 {
@@ -422,9 +401,7 @@ func TestFindByteBreak(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := FindByteBreak(tt.plain, tt.pos, tt.minBack)
-			if got != tt.want {
-				t.Errorf("expected %d, got %d", tt.want, got)
-			}
+			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -441,12 +418,8 @@ func TestByteWrap(t *testing.T) {
 			input:    "hello",
 			maxBytes: 100,
 			check: func(t *testing.T, got []string) {
-				if len(got) != 1 {
-					t.Fatalf("expected 1 line, got %d: %v", len(got), got)
-				}
-				if got[0] != "hello" {
-					t.Errorf("expected %q, got %q", "hello", got[0])
-				}
+				require.Len(t, got, 1, "expected 1 line, got %d: %v", len(got), got)
+				assert.Equal(t, "hello", got[0])
 			},
 		},
 		{
@@ -454,12 +427,8 @@ func TestByteWrap(t *testing.T) {
 			input:    "",
 			maxBytes: 100,
 			check: func(t *testing.T, got []string) {
-				if len(got) != 1 {
-					t.Fatalf("expected 1 line, got %d", len(got))
-				}
-				if got[0] != "" {
-					t.Errorf("expected empty string, got %q", got[0])
-				}
+				require.Len(t, got, 1, "expected 1 line, got %d", len(got))
+				assert.Equal(t, "", got[0])
 			},
 		},
 		{
@@ -467,19 +436,13 @@ func TestByteWrap(t *testing.T) {
 			input:    strings.Repeat("x", 400),
 			maxBytes: 350,
 			check: func(t *testing.T, got []string) {
-				if len(got) < 2 {
-					t.Fatalf("expected >= 2 lines, got %d", len(got))
-				}
+				require.GreaterOrEqual(t, len(got), 2, "expected >= 2 lines, got %d", len(got))
 				for i, line := range got {
-					if len([]byte(line)) > 350 {
-						t.Errorf("line %d exceeds 350 bytes: %d", i, len([]byte(line)))
-					}
+					assert.LessOrEqual(t, len([]byte(line)), 350, "line %d exceeds 350 bytes", i)
 				}
 				joined := strings.Join(got, "")
 				expected := strings.Repeat("x", 400)
-				if StripCodes(joined) != expected {
-					t.Errorf("content mismatch: expected %q, got %q", expected, StripCodes(joined))
-				}
+				assert.Equal(t, expected, StripCodes(joined), "content mismatch")
 			},
 		},
 		{
@@ -487,25 +450,22 @@ func TestByteWrap(t *testing.T) {
 			input:    "\x02" + strings.Repeat("hello ", 60) + "\x02",
 			maxBytes: 350,
 			check: func(t *testing.T, got []string) {
-				if len(got) < 2 {
-					t.Fatalf("expected >= 2 lines, got %d", len(got))
-				}
+				require.GreaterOrEqual(t, len(got), 2, "expected >= 2 lines, got %d", len(got))
 				for i, line := range got {
 					if len([]byte(line)) > 360 {
-						t.Errorf("line %d exceeds 360 bytes: %d bytes", i, len([]byte(line)))
+						boldCount := strings.Count(line, "\x02")
+						assert.Zero(t, boldCount%2, "line %d exceeds 360 bytes: %d bytes, boldCount=%d", i, len([]byte(line)), boldCount)
 					}
 				}
 				first := got[0]
-				if len(first) > 0 && first[0] != '\x02' {
-					t.Errorf("first line should start with bold, got %q", first[:min(20, len(first))])
+				if len(first) > 0 {
+					assert.Equal(t, byte('\x02'), first[0], "first line should start with bold")
 				}
 				for i := 1; i < len(got); i++ {
 					if len(got[i]) == 0 {
 						continue
 					}
-					if got[i][0] != '\x02' {
-						t.Errorf("line %d should start with bold open code, got %q", i, got[i][:min(20, len(got[i]))])
-					}
+					assert.Equal(t, byte('\x02'), got[i][0], "line %d should start with bold open code", i)
 				}
 			},
 		},
@@ -517,18 +477,14 @@ func TestByteWrap(t *testing.T) {
 				for i, line := range got {
 					if len([]byte(line)) > 360 {
 						boldCount := strings.Count(line, "\x02")
-						if boldCount%2 != 0 {
-							t.Errorf("line %d exceeds 360 bytes: %d bytes, boldCount=%d", i, len([]byte(line)), boldCount)
-						}
+						assert.Zero(t, boldCount%2, "line %d exceeds 360 bytes: %d bytes, boldCount=%d", i, len([]byte(line)), boldCount)
 					}
 				}
 				colorCount := 0
 				for _, line := range got {
 					colorCount += strings.Count(line, "\x03")
 				}
-				if colorCount < 2 {
-					t.Errorf("expected color codes to be preserved across lines, got %d color codes", colorCount)
-				}
+				assert.GreaterOrEqual(t, colorCount, 2, "expected color codes to be preserved across lines")
 			},
 		},
 		{
@@ -536,13 +492,9 @@ func TestByteWrap(t *testing.T) {
 			input:    "hello " + strings.Repeat("x", 350) + " world",
 			maxBytes: 350,
 			check: func(t *testing.T, got []string) {
-				if len(got) < 2 {
-					t.Fatalf("expected >= 2 lines, got %d", len(got))
-				}
+				require.GreaterOrEqual(t, len(got), 2, "expected >= 2 lines, got %d", len(got))
 				for i, line := range got {
-					if len([]byte(line)) > 360 {
-						t.Errorf("line %d exceeds 360 bytes: %d", i, len([]byte(line)))
-					}
+					assert.LessOrEqual(t, len([]byte(line)), 360, "line %d exceeds 360 bytes", i)
 				}
 			},
 		},
@@ -551,9 +503,7 @@ func TestByteWrap(t *testing.T) {
 			input:    strings.Repeat("x", 100),
 			maxBytes: 100,
 			check: func(t *testing.T, got []string) {
-				if len(got) != 1 {
-					t.Fatalf("expected 1 line, got %d", len(got))
-				}
+				require.Len(t, got, 1, "expected 1 line, got %d", len(got))
 			},
 		},
 		{
@@ -561,13 +511,9 @@ func TestByteWrap(t *testing.T) {
 			input:    strings.Repeat("x", 101),
 			maxBytes: 100,
 			check: func(t *testing.T, got []string) {
-				if len(got) != 2 {
-					t.Fatalf("expected 2 lines, got %d", len(got))
-				}
+				require.Len(t, got, 2, "expected 2 lines, got %d", len(got))
 				stripped := StripCodes(strings.Join(got, ""))
-				if stripped != strings.Repeat("x", 101) {
-					t.Errorf("content mismatch")
-				}
+				assert.Equal(t, strings.Repeat("x", 101), stripped, "content mismatch")
 			},
 		},
 	}
@@ -617,17 +563,11 @@ func TestWordWrap(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := WordWrap(tt.input, tt.maxWidth)
-			if len(got) != len(tt.want) {
-				t.Fatalf("expected %d lines, got %d: %v", len(tt.want), len(got), got)
-			}
+			require.Len(t, got, len(tt.want), "expected %d lines, got %d: %v", len(tt.want), len(got), got)
 			for i, line := range got {
-				if line != tt.want[i] {
-					t.Errorf("line %d: expected %q, got %q", i, tt.want[i], line)
-				}
+				assert.Equal(t, tt.want[i], line, "line %d", i)
 				boldCount := strings.Count(line, "\x02")
-				if boldCount%2 != 0 {
-					t.Errorf("line %d has unbalanced bold: %q", i, line)
-				}
+				assert.Zero(t, boldCount%2, "line %d has unbalanced bold: %q", i, line)
 			}
 		})
 	}

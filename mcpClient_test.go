@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var mcpServicesTOML = `
@@ -107,17 +109,13 @@ mcps = ["nonexistent"]`,
 			outStr := string(output)
 
 			if tt.wantErr == "" {
-				if strings.Contains(outStr, "transport is required") ||
-					strings.Contains(outStr, "transport must be") ||
-					strings.Contains(outStr, "command is required") ||
-					strings.Contains(outStr, "url is required") ||
-					strings.Contains(outStr, "references undefined MCP") {
-					t.Errorf("unexpected config error: %s", outStr)
-				}
+				assert.NotContains(t, outStr, "transport is required", "unexpected config error: %s", outStr)
+				assert.NotContains(t, outStr, "transport must be", "unexpected config error: %s", outStr)
+				assert.NotContains(t, outStr, "command is required", "unexpected config error: %s", outStr)
+				assert.NotContains(t, outStr, "url is required", "unexpected config error: %s", outStr)
+				assert.NotContains(t, outStr, "references undefined MCP", "unexpected config error: %s", outStr)
 			} else {
-				if !strings.Contains(outStr, tt.wantErr) {
-					t.Errorf("expected error containing %q, got: %s", tt.wantErr, outStr)
-				}
+				assert.Contains(t, outStr, tt.wantErr, "expected error containing %q, got: %s", tt.wantErr, outStr)
 			}
 		})
 	}
@@ -148,30 +146,16 @@ func TestMCPToolSchemaConversion(t *testing.T) {
 
 	tools := getMCPTools([]string{"test"})
 
-	if len(tools) != 1 {
-		t.Fatalf("expected 1 tool, got %d", len(tools))
-	}
+	require.Len(t, tools, 1, "expected 1 tool")
 
-	if tools[0].Type != "function" {
-		t.Errorf("expected type 'function', got %q", tools[0].Type)
-	}
-
-	if tools[0].Function.Name != "read_file" {
-		t.Errorf("expected name 'read_file', got %q", tools[0].Function.Name)
-	}
-
-	if tools[0].Function.Description != "Read a file from disk" {
-		t.Errorf("expected description 'Read a file from disk', got %q", tools[0].Function.Description)
-	}
+	assert.Equal(t, "function", tools[0].Type, "type mismatch")
+	assert.Equal(t, "read_file", tools[0].Function.Name, "name mismatch")
+	assert.Equal(t, "Read a file from disk", tools[0].Function.Description, "description mismatch")
 
 	params, ok := tools[0].Function.Parameters.(map[string]any)
-	if !ok {
-		t.Fatal("expected parameters to be map[string]any")
-	}
+	require.True(t, ok, "expected parameters to be map[string]any")
 
-	if params["type"] != "object" {
-		t.Errorf("expected params type 'object', got %v", params["type"])
-	}
+	assert.Equal(t, "object", params["type"], "params type mismatch")
 }
 
 func TestMCPToolResultToText(t *testing.T) {
@@ -219,10 +203,7 @@ func TestMCPToolResultToText(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := mcpToolResultToText(tt.result)
-			if got != tt.want {
-				t.Errorf("got %q, want %q", got, tt.want)
-			}
+			assert.Equal(t, tt.want, mcpToolResultToText(tt.result))
 		})
 	}
 }
@@ -249,15 +230,9 @@ func TestGetMCPToolInfo(t *testing.T) {
 
 	info := getMCPToolInfo([]string{"fs", "github"})
 
-	if !strings.Contains(info, "fs(read_file,write_file)") {
-		t.Errorf("expected fs tools in info, got: %s", info)
-	}
-	if !strings.Contains(info, "github(search_repos)") {
-		t.Errorf("expected github tools in info, got: %s", info)
-	}
-	if !strings.HasPrefix(info, "MCP tools: ") {
-		t.Errorf("expected 'MCP tools: ' prefix, got: %s", info)
-	}
+	assert.Contains(t, info, "fs(read_file,write_file)", "expected fs tools in info")
+	assert.Contains(t, info, "github(search_repos)", "expected github tools in info")
+	assert.True(t, strings.HasPrefix(info, "MCP tools: "), "expected 'MCP tools: ' prefix, got: %s", info)
 }
 
 func TestMCPInMemoryIntegration(t *testing.T) {
@@ -278,15 +253,11 @@ func TestMCPInMemoryIntegration(t *testing.T) {
 	t1, t2 := mcp.NewInMemoryTransports()
 
 	_, err := server.Connect(ctx, t1, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
 	session, err := client.Connect(ctx, t2, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer session.Close()
 
 	mcpServers = make(map[string]*MCPServer)
@@ -299,9 +270,7 @@ func TestMCPInMemoryIntegration(t *testing.T) {
 	}
 
 	for tool, err := range session.Tools(ctx, nil) {
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
 		srv.Tools = append(srv.Tools, tool)
 	}
 
@@ -309,19 +278,13 @@ func TestMCPInMemoryIntegration(t *testing.T) {
 	mcpToolToServer["greet"] = "test"
 
 	tools := getMCPTools([]string{"test"})
-	if len(tools) != 1 {
-		t.Fatalf("expected 1 tool, got %d", len(tools))
-	}
+	require.Len(t, tools, 1, "expected 1 tool")
 
 	result, err := callMCPTool("greet", map[string]any{"name": "World"})
-	if err != nil {
-		t.Fatalf("callMCPTool failed: %v", err)
-	}
+	require.NoError(t, err, "callMCPTool failed")
 
 	text := mcpToolResultToText(result)
-	if !strings.Contains(text, "Hello, World!") {
-		t.Errorf("expected greeting in result, got: %s", text)
-	}
+	assert.Contains(t, text, "Hello, World!", "expected greeting in result")
 }
 
 func TestMCPToolToServerMapping(t *testing.T) {
@@ -341,19 +304,12 @@ func TestMCPToolToServerMapping(t *testing.T) {
 	mcpToolToServer["tool_b"] = "serverB"
 
 	_, err := callMCPTool("unknown_tool", nil)
-	if err == nil {
-		t.Error("expected error for unknown tool")
-	}
-	if !strings.Contains(err.Error(), "unknown MCP tool") {
-		t.Errorf("expected 'unknown MCP tool' error, got: %v", err)
-	}
+	assert.Error(t, err, "expected error for unknown tool")
+	assert.Contains(t, err.Error(), "unknown MCP tool", "expected 'unknown MCP tool' error")
 }
 
 func TestMCPToolInfoEmpty(t *testing.T) {
-	info := getMCPToolInfo([]string{"nonexistent"})
-	if info != "" {
-		t.Errorf("expected empty string for nonexistent server, got: %s", info)
-	}
+	assert.Equal(t, "", getMCPToolInfo([]string{"nonexistent"}), "expected empty string for nonexistent server")
 }
 
 func TestMCPConfigTimeoutDefault(t *testing.T) {
@@ -370,18 +326,10 @@ service = "test"
 [test]
 maxtokens = 100
 `
-	if err := os.WriteFile(filepath.Join(dir, "config.toml"), []byte(""), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "mcps.toml"), []byte(mcpsTOML), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "chats.toml"), []byte(chatsTOML), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "services.toml"), []byte(servicesTOML), 0644); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.toml"), []byte(""), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "mcps.toml"), []byte(mcpsTOML), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "chats.toml"), []byte(chatsTOML), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "services.toml"), []byte(servicesTOML), 0644))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -390,9 +338,7 @@ maxtokens = 100
 	output, _ := cmd.CombinedOutput()
 	outStr := string(output)
 
-	if !strings.Contains(outStr, "connecting MCP server") {
-		t.Logf("MCP connection attempt not found in output (expected for stdio with echo): %s", outStr)
-	}
+	assert.Contains(t, outStr, "connecting MCP server", "MCP connection attempt not found in output")
 }
 
 func TestMCPToolConversionWithNilSchema(t *testing.T) {
@@ -406,24 +352,14 @@ func TestMCPToolConversionWithNilSchema(t *testing.T) {
 	}
 
 	tools := getMCPTools([]string{"test"})
-	if len(tools) != 1 {
-		t.Fatalf("expected 1 tool, got %d", len(tools))
-	}
+	require.Len(t, tools, 1, "expected 1 tool")
 
-	if tools[0].Function.Name != "no_schema" {
-		t.Errorf("expected name 'no_schema', got %q", tools[0].Function.Name)
-	}
+	assert.Equal(t, "no_schema", tools[0].Function.Name, "name mismatch")
 
 	params, ok := tools[0].Function.Parameters.(map[string]any)
-	if !ok {
-		t.Fatal("expected parameters to be map[string]any")
-	}
-	if params["type"] != "object" {
-		t.Errorf("expected params type 'object', got %v", params["type"])
-	}
-	if _, hasProps := params["properties"]; !hasProps {
-		t.Error("expected params to have 'properties' key for nil schema")
-	}
+	require.True(t, ok, "expected parameters to be map[string]any")
+	assert.Equal(t, "object", params["type"], "params type mismatch")
+	assert.Contains(t, params, "properties", "expected params to have 'properties' key for nil schema")
 }
 
 func TestMCPToolConversionObjectWithoutProperties(t *testing.T) {
@@ -443,27 +379,15 @@ func TestMCPToolConversionObjectWithoutProperties(t *testing.T) {
 	}
 
 	tools := getMCPTools([]string{"test"})
-	if len(tools) != 1 {
-		t.Fatalf("expected 1 tool, got %d", len(tools))
-	}
+	require.Len(t, tools, 1, "expected 1 tool")
 
 	params, ok := tools[0].Function.Parameters.(map[string]any)
-	if !ok {
-		t.Fatal("expected parameters to be map[string]any")
-	}
-	if params["type"] != "object" {
-		t.Errorf("expected params type 'object', got %v", params["type"])
-	}
-	if _, hasProps := params["properties"]; !hasProps {
-		t.Error("expected params to have 'properties' key added for object schema without one")
-	}
+	require.True(t, ok, "expected parameters to be map[string]any")
+	assert.Equal(t, "object", params["type"], "params type mismatch")
+	assert.Contains(t, params, "properties", "expected params to have 'properties' key added for object schema without one")
 	props, ok := params["properties"].(map[string]any)
-	if !ok {
-		t.Fatal("expected properties to be map[string]any")
-	}
-	if len(props) != 0 {
-		t.Errorf("expected empty properties map, got %v", props)
-	}
+	require.True(t, ok, "expected properties to be map[string]any")
+	assert.Empty(t, props, "expected empty properties map")
 }
 
 func TestToolCallAccumulation(t *testing.T) {
@@ -567,27 +491,17 @@ func TestToolCallAccumulation(t *testing.T) {
 				}
 			}
 
-			if bufferb != tt.wantText {
-				t.Errorf("text = %q, want %q", bufferb, tt.wantText)
-			}
+			assert.Equal(t, tt.wantText, bufferb, "text mismatch")
 
-			if len(accumulated) != tt.wantToolCallCount {
-				t.Fatalf("expected %d tool calls, got %d", tt.wantToolCallCount, len(accumulated))
-			}
+			require.Len(t, accumulated, tt.wantToolCallCount, "tool call count mismatch")
 
 			for i, want := range tt.wantToolCalls {
 				if i >= len(accumulated) {
 					break
 				}
-				if accumulated[i].ID != want.ID {
-					t.Errorf("tool[%d].ID = %q, want %q", i, accumulated[i].ID, want.ID)
-				}
-				if accumulated[i].Function.Name != want.Function.Name {
-					t.Errorf("tool[%d].Name = %q, want %q", i, accumulated[i].Function.Name, want.Function.Name)
-				}
-				if accumulated[i].Function.Arguments != want.Function.Arguments {
-					t.Errorf("tool[%d].Args = %q, want %q", i, accumulated[i].Function.Arguments, want.Function.Arguments)
-				}
+				assert.Equal(t, want.ID, accumulated[i].ID, "tool[%d].ID mismatch", i)
+				assert.Equal(t, want.Function.Name, accumulated[i].Function.Name, "tool[%d].Name mismatch", i)
+				assert.Equal(t, want.Function.Arguments, accumulated[i].Function.Arguments, "tool[%d].Args mismatch", i)
 			}
 		})
 	}
@@ -610,12 +524,8 @@ func TestReconnectBackoff(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("count_%d", tt.count), func(t *testing.T) {
 			got := reconnectBackoff(tt.count)
-			if got < tt.min {
-				t.Errorf("reconnectBackoff(%d) = %v, want >= %v", tt.count, got, tt.min)
-			}
-			if got > tt.max {
-				t.Errorf("reconnectBackoff(%d) = %v, want <= %v", tt.count, got, tt.max)
-			}
+			assert.GreaterOrEqual(t, got, tt.min, "reconnectBackoff(%d) too low", tt.count)
+			assert.LessOrEqual(t, got, tt.max, "reconnectBackoff(%d) too high", tt.count)
 		})
 	}
 }
@@ -652,15 +562,11 @@ func TestCallMCPToolAutoReconnect(t *testing.T) {
 
 		t1, t2 := mcp.NewInMemoryTransports()
 		_, err := server.Connect(ctx, t1, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
 
 		client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
 		session, err := client.Connect(ctx, t2, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
 		return client, session
 	}
 
@@ -669,13 +575,9 @@ func TestCallMCPToolAutoReconnect(t *testing.T) {
 	srv.Session = session
 
 	result, err := callMCPTool("greet", map[string]any{"name": "before_disconnect"})
-	if err != nil {
-		t.Fatalf("callMCPTool before disconnect failed: %v", err)
-	}
+	require.NoError(t, err, "callMCPTool before disconnect failed")
 	text := mcpToolResultToText(result)
-	if !strings.Contains(text, "Hello, before_disconnect!") {
-		t.Errorf("expected greeting before disconnect, got: %s", text)
-	}
+	assert.Contains(t, text, "Hello, before_disconnect!", "expected greeting before disconnect")
 
 	session.Close()
 
@@ -711,19 +613,13 @@ func TestCallMCPToolAutoReconnect(t *testing.T) {
 	mcpServersMu.Unlock()
 
 	_, err = callMCPTool("greet", map[string]any{"name": "after_disconnect"})
-	if err != nil {
-		t.Fatalf("callMCPTool after disconnect should have reconnected: %v", err)
-	}
+	require.NoError(t, err, "callMCPTool after disconnect should have reconnected")
 
 	mcpServersMu.Lock()
 	newSrv := mcpServers["test"]
 	mcpServersMu.Unlock()
-	if newSrv.Session == nil {
-		t.Error("expected session to be re-established after reconnect")
-	}
-	if newSrv.reconnectCount != 0 {
-		t.Errorf("expected reconnectCount to be reset to 0, got %d", newSrv.reconnectCount)
-	}
+	assert.NotNil(t, newSrv.Session, "expected session to be re-established after reconnect")
+	assert.Equal(t, 0, newSrv.reconnectCount, "expected reconnectCount to be reset to 0")
 }
 
 func TestConcurrentReconnect(t *testing.T) {
@@ -801,7 +697,5 @@ func TestConcurrentReconnect(t *testing.T) {
 		}
 	}
 
-	if successCount == 0 {
-		t.Error("expected at least one successful tool call after concurrent reconnect")
-	}
+	assert.Greater(t, successCount, 0, "expected at least one successful tool call after concurrent reconnect")
 }

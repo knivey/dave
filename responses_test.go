@@ -8,6 +8,8 @@ import (
 
 	openai "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/responses"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func marshalInputItems(items []responses.ResponseInputItemUnionParam) [][]byte {
@@ -66,9 +68,9 @@ func TestMessagesToResponseInputItems(t *testing.T) {
 			wantParts: []map[string]any{
 				{
 					"role": "user",
-					"content": []map[string]any{
-						{"type": "input_text", "text": "describe this"},
-						{"type": "input_image", "image_url": "data:image/png;base64,abc123", "detail": "auto"},
+					"content": []any{
+						map[string]any{"type": "input_text", "text": "describe this"},
+						map[string]any{"type": "input_image", "image_url": "data:image/png;base64,abc123", "detail": "auto"},
 					},
 				},
 			},
@@ -88,8 +90,8 @@ func TestMessagesToResponseInputItems(t *testing.T) {
 			wantParts: []map[string]any{
 				{
 					"role": "user",
-					"content": []map[string]any{
-						{"type": "input_image", "image_url": "https://example.com/img.png"},
+					"content": []any{
+						map[string]any{"type": "input_image", "image_url": "https://example.com/img.png"},
 					},
 				},
 			},
@@ -159,82 +161,15 @@ func TestMessagesToResponseInputItems(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := messagesToResponseInputItems(tt.messages)
-			if len(result) != len(tt.wantParts) {
-				t.Fatalf("got %d input items, want %d", len(result), len(tt.wantParts))
-			}
+			require.Len(t, result, len(tt.wantParts), "input items count")
 			rawItems := marshalInputItems(result)
 			for i, raw := range rawItems {
 				var got map[string]any
-				if err := json.Unmarshal(raw, &got); err != nil {
-					t.Fatalf("item %d: unmarshal error: %v", i, err)
-				}
+				require.NoError(t, json.Unmarshal(raw, &got), "item %d: unmarshal", i)
 				want := tt.wantParts[i]
-				assertJSONEqual(t, i, got, want)
+				assert.Equal(t, want, got, "item %d mismatch", i)
 			}
 		})
-	}
-}
-
-func assertJSONEqual(t *testing.T, idx int, got, want map[string]any) {
-	t.Helper()
-	for k, wantV := range want {
-		gotV, ok := got[k]
-		if !ok {
-			t.Errorf("item %d: missing key %q", idx, k)
-			continue
-		}
-		switch wv := wantV.(type) {
-		case []map[string]any:
-			gotSlice, ok := gotV.([]any)
-			if !ok {
-				t.Errorf("item %d key %q: got %T, want slice", idx, k, gotV)
-				continue
-			}
-			if len(gotSlice) != len(wv) {
-				t.Errorf("item %d key %q: got %d items, want %d", idx, k, len(gotSlice), len(wv))
-				continue
-			}
-			for j, wantItem := range wv {
-				gotItem, ok := gotSlice[j].(map[string]any)
-				if !ok {
-					t.Errorf("item %d key %q[%d]: got %T, want map", idx, k, j, gotSlice[j])
-					continue
-				}
-				for kk, wv2 := range wantItem {
-					gv2, ok := gotItem[kk]
-					if !ok {
-						t.Errorf("item %d key %q[%d]: missing key %q", idx, k, j, kk)
-						continue
-					}
-					if gv2 != wv2 {
-						t.Errorf("item %d key %q[%d].%s: got %v, want %v", idx, k, j, kk, gv2, wv2)
-					}
-				}
-				for kk := range gotItem {
-					if _, ok := wantItem[kk]; !ok {
-						t.Errorf("item %d key %q[%d]: unexpected key %q with value %v", idx, k, j, kk, gotItem[kk])
-					}
-				}
-			}
-		case string:
-			gs, ok := gotV.(string)
-			if !ok {
-				t.Errorf("item %d key %q: got %T, want string", idx, k, gotV)
-				continue
-			}
-			if gs != wv {
-				t.Errorf("item %d key %q: got %q, want %q", idx, k, gs, wv)
-			}
-		default:
-			if gotV != wantV {
-				t.Errorf("item %d key %q: got %v, want %v", idx, k, gotV, wantV)
-			}
-		}
-	}
-	for k := range got {
-		if _, ok := want[k]; !ok {
-			t.Errorf("item %d: unexpected key %q with value %v", idx, k, got[k])
-		}
 	}
 }
 
@@ -252,51 +187,30 @@ func TestMessagesToResponseInputItems_ImageURLIsString(t *testing.T) {
 	}
 
 	input := messagesToResponseInputItems(msgs)
-	if len(input) != 1 {
-		t.Fatalf("expected 1 input item, got %d", len(input))
-	}
+	require.Len(t, input, 1, "input items")
 
 	rawItems := marshalInputItems(input)
 	var parsed map[string]any
-	if err := json.Unmarshal(rawItems[0], &parsed); err != nil {
-		t.Fatalf("unmarshal error: %v", err)
-	}
+	require.NoError(t, json.Unmarshal(rawItems[0], &parsed), "unmarshal")
 
 	content, ok := parsed["content"].([]any)
-	if !ok {
-		t.Fatalf("content is not a slice, got %T", parsed["content"])
-	}
-	if len(content) != 1 {
-		t.Fatalf("expected 1 content part, got %d", len(content))
-	}
+	require.True(t, ok, "content is not a slice, got %T", parsed["content"])
+	require.Len(t, content, 1, "content parts")
 
 	part, ok := content[0].(map[string]any)
-	if !ok {
-		t.Fatalf("content part is not a map, got %T", content[0])
-	}
+	require.True(t, ok, "content part is not a map, got %T", content[0])
 
-	if part["type"] != "input_image" {
-		t.Errorf("type = %q, want %q", part["type"], "input_image")
-	}
+	assert.Equal(t, "input_image", part["type"], "type")
 
 	url, ok := part["image_url"].(string)
-	if !ok {
-		t.Errorf("image_url is %T, want string", part["image_url"])
-	} else if url != "data:image/png;base64,abc123" {
-		t.Errorf("image_url = %q, want %q", url, "data:image/png;base64,abc123")
-	}
+	assert.True(t, ok, "image_url is %T, want string", part["image_url"])
+	assert.Equal(t, "data:image/png;base64,abc123", url, "image_url")
 
-	if part["detail"] != "auto" {
-		t.Errorf("detail = %v, want %q", part["detail"], "auto")
-	}
+	assert.Equal(t, "auto", part["detail"], "detail")
 
 	raw := string(rawItems[0])
-	if strings.Contains(raw, `"image_url":{"url":`) {
-		t.Error("image_url was serialized as an object (chat completions format), expected a plain string (responses API format)")
-	}
-	if !strings.Contains(raw, `"input_image"`) {
-		t.Error("expected type 'input_image' not found in output")
-	}
+	assert.False(t, strings.Contains(raw, `"image_url":{"url":`), "image_url was serialized as an object (chat completions format), expected a plain string (responses API format)")
+	assert.True(t, strings.Contains(raw, `"input_image"`), "expected type 'input_image' not found in output")
 }
 
 func TestMessagesToResponseInputItems_TextPartIsInputText(t *testing.T) {
@@ -317,17 +231,11 @@ func TestMessagesToResponseInputItems_TextPartIsInputText(t *testing.T) {
 	content, _ := parsed["content"].([]any)
 	part, _ := content[0].(map[string]any)
 
-	if part["type"] != "input_text" {
-		t.Errorf("type = %v, want input_text", part["type"])
-	}
-	if part["text"] != "hello" {
-		t.Errorf("text = %v, want hello", part["text"])
-	}
+	assert.Equal(t, "input_text", part["type"], "type")
+	assert.Equal(t, "hello", part["text"], "text")
 
 	raw := string(rawItems[0])
-	if strings.Contains(raw, `"type":"text"`) {
-		t.Error("found chat completions type 'text', expected responses API type 'input_text'")
-	}
+	assert.False(t, strings.Contains(raw, `"type":"text"`), "found chat completions type 'text', expected responses API type 'input_text'")
 }
 
 func TestGogptToolsToResponseToolParams(t *testing.T) {
@@ -348,15 +256,9 @@ func TestGogptToolsToResponseToolParams(t *testing.T) {
 	}
 
 	result := toolsToResponseToolParams(tools)
-	if len(result) != 1 {
-		t.Fatalf("expected 1 tool, got %d", len(result))
-	}
-	if result[0].OfFunction == nil {
-		t.Fatal("expected OfFunction to be set")
-	}
-	if result[0].OfFunction.Name != "get_weather" {
-		t.Errorf("name = %q, want %q", result[0].OfFunction.Name, "get_weather")
-	}
+	require.Len(t, result, 1, "tools")
+	require.NotNil(t, result[0].OfFunction, "OfFunction")
+	assert.Equal(t, "get_weather", result[0].OfFunction.Name, "name")
 }
 
 func TestParseSDKResponseOutput(t *testing.T) {
@@ -393,26 +295,14 @@ func TestParseSDKResponseOutput(t *testing.T) {
 	}`
 
 	var resp responses.Response
-	if err := json.Unmarshal([]byte(responseJSON), &resp); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
+	require.NoError(t, json.Unmarshal([]byte(responseJSON), &resp), "unmarshal")
 
 	text, reasoning, toolCalls := parseSDKResponseOutput(resp)
-	if text != "Hello!" {
-		t.Errorf("text = %q, want %q", text, "Hello!")
-	}
-	if reasoning != "I thought about it" {
-		t.Errorf("reasoning = %q, want %q", reasoning, "I thought about it")
-	}
-	if len(toolCalls) != 1 {
-		t.Fatalf("toolCalls = %d, want 1", len(toolCalls))
-	}
-	if toolCalls[0].ID != "call_abc" {
-		t.Errorf("toolCall.ID = %q, want %q", toolCalls[0].ID, "call_abc")
-	}
-	if toolCalls[0].Function.Name != "get_weather" {
-		t.Errorf("toolCall.Name = %q, want %q", toolCalls[0].Function.Name, "get_weather")
-	}
+	assert.Equal(t, "Hello!", text, "text")
+	assert.Equal(t, "I thought about it", reasoning, "reasoning")
+	require.Len(t, toolCalls, 1, "toolCalls")
+	assert.Equal(t, "call_abc", toolCalls[0].ID, "toolCall.ID")
+	assert.Equal(t, "get_weather", toolCalls[0].Function.Name, "toolCall.Name")
 }
 
 func TestSDKResponseUsageToGogpt(t *testing.T) {
@@ -425,23 +315,13 @@ func TestSDKResponseUsageToGogpt(t *testing.T) {
 	}`
 
 	var sdkUsage responses.ResponseUsage
-	if err := json.Unmarshal([]byte(usageJSON), &sdkUsage); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
+	require.NoError(t, json.Unmarshal([]byte(usageJSON), &sdkUsage), "unmarshal")
 
 	usage := sdkResponseUsageToUsage(sdkUsage, "completed")
-	if usage.PromptTokens != 100 {
-		t.Errorf("PromptTokens = %d, want 100", usage.PromptTokens)
-	}
-	if usage.CompletionTokens != 50 {
-		t.Errorf("CompletionTokens = %d, want 50", usage.CompletionTokens)
-	}
-	if usage.PromptTokensDetails.CachedTokens != 20 {
-		t.Errorf("CachedTokens = %d, want 20", usage.PromptTokensDetails.CachedTokens)
-	}
-	if usage.CompletionTokensDetails.ReasoningTokens != 10 {
-		t.Errorf("ReasoningTokens = %d, want 10", usage.CompletionTokensDetails.ReasoningTokens)
-	}
+	assert.Equal(t, int64(100), usage.PromptTokens, "PromptTokens")
+	assert.Equal(t, int64(50), usage.CompletionTokens, "CompletionTokens")
+	assert.Equal(t, int64(20), usage.PromptTokensDetails.CachedTokens, "CachedTokens")
+	assert.Equal(t, int64(10), usage.CompletionTokensDetails.ReasoningTokens, "ReasoningTokens")
 }
 
 func TestBuildResponseParams(t *testing.T) {
@@ -458,31 +338,15 @@ func TestBuildResponseParams(t *testing.T) {
 	}
 
 	params := buildResponseParams(cfg, input, nil, "resp_prev")
-	if params.Model != "gpt-4o" {
-		t.Errorf("Model = %q, want %q", params.Model, "gpt-4o")
-	}
-	if params.PreviousResponseID != openai.String("resp_prev") {
-		t.Error("PreviousResponseID not set correctly")
-	}
+	assert.Equal(t, "gpt-4o", params.Model, "Model")
+	assert.Equal(t, openai.String("resp_prev"), params.PreviousResponseID, "PreviousResponseID")
 }
 
 func TestIsResponseIDError(t *testing.T) {
-	if !isResponseIDError(fmt.Errorf(`"code":"response_not_found"`)) {
-		t.Error("should match response_not_found")
-	}
-	if !isResponseIDError(fmt.Errorf(`"code":"invalid_previous_response_id"`)) {
-		t.Error("should match invalid_previous_response_id")
-	}
-	if !isResponseIDError(fmt.Errorf("previous_response_id abc not found")) {
-		t.Error("should match previous_response_id not found")
-	}
-	if !isResponseIDError(fmt.Errorf(`Invalid request content: Each message must have at least one content element.`)) {
-		t.Error("should match empty content element error")
-	}
-	if isResponseIDError(fmt.Errorf("rate limit exceeded")) {
-		t.Error("should not match generic error")
-	}
-	if isResponseIDError(nil) {
-		t.Error("nil should not match")
-	}
+	assert.True(t, isResponseIDError(fmt.Errorf(`"code":"response_not_found"`)), "should match response_not_found")
+	assert.True(t, isResponseIDError(fmt.Errorf(`"code":"invalid_previous_response_id"`)), "should match invalid_previous_response_id")
+	assert.True(t, isResponseIDError(fmt.Errorf("previous_response_id abc not found")), "should match previous_response_id not found")
+	assert.True(t, isResponseIDError(fmt.Errorf(`Invalid request content: Each message must have at least one content element.`)), "should match empty content element error")
+	assert.False(t, isResponseIDError(fmt.Errorf("rate limit exceeded")), "should not match generic error")
+	assert.False(t, isResponseIDError(nil), "nil should not match")
 }

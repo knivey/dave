@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"golang.org/x/time/rate"
 )
 
@@ -38,9 +39,7 @@ func TestCheckRateKeyFormat(t *testing.T) {
 		limiter := newMockRateLimiter()
 		limiter.Allow("network1", "channel1")
 
-		if _, ok := limiter.calls["network1channel1"]; !ok {
-			t.Error("expected limiter to be called with combined key")
-		}
+		assert.Contains(t, limiter.calls, "network1channel1", "expected limiter to be called with combined key")
 	})
 
 	t.Run("different keys are tracked separately", func(t *testing.T) {
@@ -49,15 +48,9 @@ func TestCheckRateKeyFormat(t *testing.T) {
 		limiter.Allow("network1", "key2")
 		limiter.Allow("network2", "key1")
 
-		if limiter.calls["network1key1"] != 1 {
-			t.Errorf("network1key1 calls = %d, want 1", limiter.calls["network1key1"])
-		}
-		if limiter.calls["network1key2"] != 1 {
-			t.Errorf("network1key2 calls = %d, want 1", limiter.calls["network1key2"])
-		}
-		if limiter.calls["network2key1"] != 1 {
-			t.Errorf("network2key1 calls = %d, want 1", limiter.calls["network2key1"])
-		}
+		assert.Equal(t, 1, limiter.calls["network1key1"], "network1key1 calls")
+		assert.Equal(t, 1, limiter.calls["network1key2"], "network1key2 calls")
+		assert.Equal(t, 1, limiter.calls["network2key1"], "network2key1 calls")
 	})
 }
 

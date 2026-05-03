@@ -2,6 +2,8 @@ package main
 
 import (
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestNewScrollbarDefaults(t *testing.T) {
@@ -52,12 +54,8 @@ func TestNewScrollbarDefaults(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sb := NewScrollbar(tt.cfg)
-			if sb.visible != tt.wantVis {
-				t.Errorf("visible = %v, want %v", sb.visible, tt.wantVis)
-			}
-			if sb.showAlways != tt.wantAlways {
-				t.Errorf("showAlways = %v, want %v", sb.showAlways, tt.wantAlways)
-			}
+			assert.Equal(t, tt.wantVis, sb.visible, "visible")
+			assert.Equal(t, tt.wantAlways, sb.showAlways, "showAlways")
 		})
 	}
 }

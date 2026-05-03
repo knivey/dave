@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/jmoiron/sqlx"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMain(m *testing.M) {
@@ -21,9 +23,7 @@ func TestMain(m *testing.M) {
 func setupTestDB(t *testing.T) *sqlx.DB {
 	t.Helper()
 	db, err := initDB(t.TempDir() + "/test.db")
-	if err != nil {
-		t.Fatalf("initDB: %v", err)
-	}
+	require.NoError(t, err, "initDB")
 	t.Cleanup(func() { db.Close() })
 	return db
 }
@@ -63,9 +63,7 @@ func submitTestJob(t *testing.T, q *JobQueue) *Job {
 	job, err := q.Submit(JobTypeGenerate, "test", JobInput{
 		Prompt: "a cat",
 	})
-	if err != nil {
-		t.Fatalf("Submit: %v", err)
-	}
+	require.NoError(t, err, "Submit")
 	return job
 }
 
@@ -85,9 +83,7 @@ func assertJobStatus(t *testing.T, q *JobQueue, jobID string, expected JobStatus
 	if !ok {
 		t.Fatalf("job %s not found", jobID)
 	}
-	if job.Status != expected {
-		t.Errorf("expected status %s, got %s", expected, job.Status)
-	}
+	assert.Equal(t, expected, job.Status, "job status")
 }
 
 type mockInterruptServer struct {
@@ -142,13 +138,9 @@ func mustWriteWorkflow(t *testing.T, dir string) string {
 		},
 	}
 	data, err := json.Marshal(workflow)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	path := dir + "/test_workflow.json"
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.WriteFile(path, data, 0644))
 	return path
 }
 
@@ -156,8 +148,6 @@ func dbJobStatus(t *testing.T, db *sqlx.DB, jobID string) string {
 	t.Helper()
 	var status string
 	err := db.Get(&status, "SELECT status FROM jobs WHERE job_id = ?", jobID)
-	if err != nil {
-		t.Fatalf("querying job status: %v", err)
-	}
+	require.NoError(t, err, "querying job status")
 	return status
 }

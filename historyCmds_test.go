@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/lrstanley/girc"
+	"github.com/stretchr/testify/assert"
 )
 
 func setupHistoryTest(t *testing.T) (*girc.Client, func()) {
@@ -70,12 +71,8 @@ func TestHistoryDelete_CancelsAsyncJobs(t *testing.T) {
 
 	historyDelete(network, client, e, "1")
 
-	if _, exists := jobMgr.jobs["job-delete-1"]; exists {
-		t.Error("job-delete-1 should be removed after session delete")
-	}
-	if _, exists := jobMgr.jobs["job-delete-2"]; exists {
-		t.Error("job-delete-2 should be removed after session delete")
-	}
+	assert.NotContains(t, jobMgr.jobs, "job-delete-1", "job-delete-1 should be removed after session delete")
+	assert.NotContains(t, jobMgr.jobs, "job-delete-2", "job-delete-2 should be removed after session delete")
 }
 
 func TestHistoryDelete_NoAsyncJobs(t *testing.T) {
@@ -112,9 +109,7 @@ func TestHistoryDelete_ClearsInMemoryContext(t *testing.T) {
 	chatContextsMutex.Lock()
 	ctx := chatContextsMap[ctxKey]
 	chatContextsMutex.Unlock()
-	if ctx.SessionID != 0 {
-		t.Errorf("expected SessionID 0 after delete, got %d", ctx.SessionID)
-	}
+	assert.Equal(t, int64(0), ctx.SessionID, "expected SessionID 0 after delete")
 }
 
 func TestHistoryDelete_OwnershipCheck(t *testing.T) {
@@ -140,7 +135,5 @@ func TestHistoryDelete_OwnershipCheck(t *testing.T) {
 
 	historyDelete(network, client, e, "1")
 
-	if _, exists := jobMgr.jobs["job-owned"]; !exists {
-		t.Error("job-owned should NOT be removed when different user deletes")
-	}
+	assert.Contains(t, jobMgr.jobs, "job-owned", "job-owned should NOT be removed when different user deletes")
 }

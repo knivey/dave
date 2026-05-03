@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/knivey/dave/MarkdownToIRC/irc"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestWrapForIRC(t *testing.T) {
@@ -17,78 +19,50 @@ func TestWrapForIRC(t *testing.T) {
 			name:  "Short text no wrap",
 			input: "hello world",
 			check: func(t *testing.T, got []string) {
-				if len(got) != 1 {
-					t.Fatalf("expected 1 line, got %d", len(got))
-				}
-				if got[0] != "hello world" {
-					t.Errorf("expected %q, got %q", "hello world", got[0])
-				}
+				require.Len(t, got, 1, "expected 1 line")
+				assert.Equal(t, "hello world", got[0])
 			},
 		},
 		{
 			name:  "Multi-line input preserved",
 			input: "line1\nline2\nline3",
 			check: func(t *testing.T, got []string) {
-				if len(got) != 3 {
-					t.Fatalf("expected 3 lines, got %d", len(got))
-				}
-				if got[0] != "line1" {
-					t.Errorf("line 0: expected %q, got %q", "line1", got[0])
-				}
-				if got[1] != "line2" {
-					t.Errorf("line 1: expected %q, got %q", "line2", got[1])
-				}
-				if got[2] != "line3" {
-					t.Errorf("line 2: expected %q, got %q", "line3", got[2])
-				}
+				require.Len(t, got, 3, "expected 3 lines")
+				assert.Equal(t, "line1", got[0], "line 0")
+				assert.Equal(t, "line2", got[1], "line 1")
+				assert.Equal(t, "line3", got[2], "line 2")
 			},
 		},
 		{
 			name:  "Empty string",
 			input: "",
 			check: func(t *testing.T, got []string) {
-				if len(got) != 1 {
-					t.Fatalf("expected 1 line, got %d", len(got))
-				}
-				if got[0] != "" {
-					t.Errorf("expected empty string, got %q", got[0])
-				}
+				require.Len(t, got, 1, "expected 1 line")
+				assert.Equal(t, "", got[0], "expected empty string")
 			},
 		},
 		{
 			name:  "Long line wraps by bytes",
 			input: strings.Repeat("x", 400),
 			check: func(t *testing.T, got []string) {
-				if len(got) < 2 {
-					t.Fatalf("expected >= 2 lines, got %d", len(got))
-				}
+				require.GreaterOrEqual(t, len(got), 2, "expected >= 2 lines")
 				for i, line := range got {
-					if len([]byte(line)) > maxLineLen+10 {
-						t.Errorf("line %d exceeds byte budget: %d bytes", i, len([]byte(line)))
-					}
+					assert.LessOrEqual(t, len([]byte(line)), maxLineLen+10, "line %d exceeds byte budget", i)
 				}
 				stripped := irc.StripCodes(strings.Join(got, ""))
-				if stripped != strings.Repeat("x", 400) {
-					t.Errorf("content mismatch after stripping codes")
-				}
+				assert.Equal(t, strings.Repeat("x", 400), stripped, "content mismatch after stripping codes")
 			},
 		},
 		{
 			name:  "Multi-line with one long line",
 			input: "short\n" + strings.Repeat("y", 400) + "\nalso short",
 			check: func(t *testing.T, got []string) {
-				if len(got) < 3 {
-					t.Fatalf("expected >= 3 lines, got %d", len(got))
-				}
-				if got[0] != "short" {
-					t.Errorf("line 0: expected %q, got %q", "short", got[0])
-				}
+				require.GreaterOrEqual(t, len(got), 3, "expected >= 3 lines")
+				assert.Equal(t, "short", got[0], "line 0")
 				last := got[len(got)-1]
 				stripped := irc.StripCodes(strings.Join(got, ""))
 				expected := "short" + strings.Repeat("y", 400) + "also short"
-				if stripped != expected {
-					t.Errorf("content mismatch")
-				}
+				assert.Equal(t, expected, stripped, "content mismatch")
 				_ = last
 			},
 		},
@@ -96,26 +70,18 @@ func TestWrapForIRC(t *testing.T) {
 			name:  "Bold formatting preserved across wraps",
 			input: "\x02" + strings.Repeat("hello ", 60) + "\x02",
 			check: func(t *testing.T, got []string) {
-				if len(got) < 2 {
-					t.Fatalf("expected >= 2 lines, got %d", len(got))
-				}
+				require.GreaterOrEqual(t, len(got), 2, "expected >= 2 lines")
 				for i, line := range got {
-					if len([]byte(line)) > maxLineLen+10 {
-						t.Errorf("line %d exceeds byte budget: %d bytes", i, len([]byte(line)))
-					}
+					assert.LessOrEqual(t, len([]byte(line)), maxLineLen+10, "line %d exceeds byte budget", i)
 				}
-				if got[0][0] != '\x02' {
-					t.Errorf("first line should start with bold, got %q", got[0][:min(10, len(got[0]))])
-				}
+				assert.Equal(t, byte('\x02'), got[0][0], "first line should start with bold")
 				for i := 1; i < len(got); i++ {
-					if len(got[i]) > 0 && got[i][0] != '\x02' {
-						t.Errorf("line %d should start with bold open code", i)
+					if len(got[i]) > 0 {
+						assert.Equal(t, byte('\x02'), got[i][0], "line %d should start with bold open code", i)
 					}
 				}
 				stripped := irc.StripCodes(strings.Join(got, ""))
-				if len(stripped) < 358 {
-					t.Errorf("expected >= 358 visible chars after wrapping, got %d", len(stripped))
-				}
+				assert.GreaterOrEqual(t, len(stripped), 358, "expected >= 358 visible chars after wrapping")
 			},
 		},
 	}

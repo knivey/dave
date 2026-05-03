@@ -14,18 +14,18 @@ import (
 var loggerQM = logxi.New("queue")
 
 type QueueItem struct {
-	ID          int64
-	Network     string
-	Channel     string
-	Nick        string
-	Service     string
-	Description string
-	Enqueued    time.Time
-	Execute     func(ctx context.Context, output chan<- string)
-	outputCh        chan string
-	ctx             context.Context
-	cancel          context.CancelFunc
-	deliveryWaited  bool
+	ID             int64
+	Network        string
+	Channel        string
+	Nick           string
+	Service        string
+	Description    string
+	Enqueued       time.Time
+	Execute        func(ctx context.Context, output chan<- string)
+	outputCh       chan string
+	ctx            context.Context
+	cancel         context.CancelFunc
+	deliveryWaited bool
 }
 
 type ChannelQueue struct {

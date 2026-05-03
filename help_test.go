@@ -3,6 +3,9 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestFormatCmd(t *testing.T) {
@@ -46,9 +49,7 @@ func TestFormatCmd(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := formatCmd(tt.trigger, tt.regex, tt.cmdName)
-			if got != tt.want {
-				t.Errorf("formatCmd() = %q, want %q", got, tt.want)
-			}
+			assert.Equal(t, tt.want, got, "formatCmd()")
 		})
 	}
 }
@@ -89,9 +90,7 @@ func TestFormatDesc(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := formatDesc(tt.desc, tt.detectImages)
-			if got != tt.want {
-				t.Errorf("formatDesc() = %q, want %q", got, tt.want)
-			}
+			assert.Equal(t, tt.want, got, "formatDesc()")
 		})
 	}
 }
@@ -120,9 +119,7 @@ func TestFormatToolInfo(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := formatToolInfo(tt.mcpServer, tt.tool)
-			if got != tt.want {
-				t.Errorf("formatToolInfo() = %q, want %q", got, tt.want)
-			}
+			assert.Equal(t, tt.want, got, "formatToolInfo()")
 		})
 	}
 }
@@ -191,14 +188,9 @@ func TestFormatTable(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := formatTable(tt.entries)
-			if len(got) != len(tt.want) {
-				t.Errorf("formatTable() returned %d lines, want %d\ngot: %v\nwant: %v", len(got), len(tt.want), got, tt.want)
-				return
-			}
+			require.Len(t, got, len(tt.want), "formatTable() line count\ngot: %v\nwant: %v", got, tt.want)
 			for i := range got {
-				if got[i] != tt.want[i] {
-					t.Errorf("formatTable()[%d] = %q, want %q", i, got[i], tt.want[i])
-				}
+				assert.Equal(t, tt.want[i], got[i], "formatTable()[%d]", i)
 			}
 		})
 	}
@@ -280,15 +272,9 @@ func TestWrapLine(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := wrapLine(tt.line)
-			if len(got) != len(tt.want) {
-				t.Errorf("wrapLine() returned %d parts, want %d\nline length: %d\ngot: %v\nwant: %v",
-					len(got), len(tt.want), len(tt.line), got, tt.want)
-				return
-			}
+			require.Len(t, got, len(tt.want), "wrapLine() part count\nline length: %d\ngot: %v\nwant: %v", len(tt.line), got, tt.want)
 			for i := range got {
-				if got[i] != tt.want[i] {
-					t.Errorf("wrapLine()[%d] = %q, want %q", i, got[i], tt.want[i])
-				}
+				assert.Equal(t, tt.want[i], got[i], "wrapLine()[%d]", i)
 			}
 		})
 	}

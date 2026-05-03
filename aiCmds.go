@@ -39,12 +39,17 @@ func completion(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx
 	apiCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
+	maxTokens := cfg.MaxTokens
+	if maxTokens == 0 {
+		maxTokens = cfg.MaxCompletionTokens
+	}
+
 	resp, err := aiClient.Completions.New(apiCtx, openai.CompletionNewParams{
 		Model: openai.CompletionNewParamsModel(cfg.Model),
 		Prompt: openai.CompletionNewParamsPromptUnion{
 			OfString: openai.String(args[0]),
 		},
-		MaxTokens:   openai.Int(int64(cfg.MaxTokens)),
+		MaxTokens:   openai.Int(int64(maxTokens)),
 		Temperature: openai.Float(float64(cfg.Temperature)),
 	})
 	if err != nil {

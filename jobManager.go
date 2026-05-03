@@ -202,7 +202,7 @@ func deliverAsyncResult(job *asyncJob, ctx context.Context, output chan<- string
 	currentSessionID := currentCtx.SessionID
 	chatContextsMutex.Unlock()
 
-	if currentSessionID != 0 && currentSessionID != job.SessionID {
+	if currentSessionID != job.SessionID {
 		if msg := switchToSession(job); msg != "" {
 			select {
 			case output <- msg:
@@ -324,14 +324,12 @@ func switchToSession(job *asyncJob) string {
 	}
 
 	var switchMsg string
-	bot := getBotFn(job.Network)
-	if bot != nil && bot.Client != nil {
-		var oldID int64
-		if currentCtx.SessionID != 0 {
-			oldID = currentCtx.SessionID
+	if currentCtx.SessionID != 0 {
+		bot := getBotFn(job.Network)
+		if bot != nil && bot.Client != nil {
+			switchMsg = fmt.Sprintf("\x02Switched %s's session to #%d\x02. Use %sresume %d to go back.",
+				job.Nick, job.SessionID, bot.Network.Trigger, currentCtx.SessionID)
 		}
-		switchMsg = fmt.Sprintf("\x02Switched %s's session to #%d\x02. Use %sresume %d to go back.",
-			job.Nick, job.SessionID, bot.Network.Trigger, oldID)
 	}
 
 	loggerJM.Info("switched sessions", "from", currentCtx.SessionID, "to", job.SessionID, "nick", job.Nick)

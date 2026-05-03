@@ -590,13 +590,15 @@ func TestDeliverAsyncResult_NoContext(t *testing.T) {
 	_ = setupMockDeps(t)
 
 	ctxKey := "testnet#testuser"
-	chatContextsMap[ctxKey] = ChatContext{}
 
 	sessionA := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	insertTestMessage(t, sessionA, "system", "sys")
 	if err := createPendingJob(sessionA, "job-1", "generate_image_async", "img-mcp"); err != nil {
 		t.Fatal(err)
 	}
 	completePendingJob("job-1", "result")
+
+	delete(chatContextsMap, ctxKey)
 
 	job := &asyncJob{
 		JobID: "job-1", SessionID: sessionA, CtxKey: ctxKey,
@@ -606,9 +608,21 @@ func TestDeliverAsyncResult_NoContext(t *testing.T) {
 	output := make(chan string, 100)
 	deliverAsyncResult(job, context.Background(), output)
 
+	chatContextsMutex.Lock()
 	ctx := chatContextsMap[ctxKey]
-	if ctx.SessionID != 0 {
-		t.Error("should not modify context when no context exists")
+	chatContextsMutex.Unlock()
+	if ctx.SessionID != sessionA {
+		t.Errorf("SessionID = %d, want %d (should have loaded from DB)", ctx.SessionID, sessionA)
+	}
+
+	hasAsyncMsg := false
+	for _, m := range ctx.Messages {
+		if m.Role == "system" && contains(m.Content, "Background task completed") {
+			hasAsyncMsg = true
+		}
+	}
+	if !hasAsyncMsg {
+		t.Error("expected async result system message after loading context from DB")
 	}
 }
 
@@ -1009,6 +1023,106 @@ func waitForSessionSwitch(t *testing.T, ctxKey string, expectedSID int64, timeou
 	ctx := chatContextsMap[ctxKey]
 	chatContextsMutex.Unlock()
 	t.Fatalf("timed out waiting for session switch: got SessionID=%d, want %d", ctx.SessionID, expectedSID)
+}
+
+func TestDeliverAsyncResult_NoContextLoaded_LoadsFromDB(t *testing.T) {
+	setupJMTestDB(t)
+	setupTestJobManager(t)
+	_ = setupMockDeps(t)
+
+	ctxKey := "testnet#testuser"
+
+	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	insertTestMessage(t, sid, "system", "you are helpful")
+	insertTestMessage(t, sid, "user", "draw me a picture")
+
+	if err := createPendingJob(sid, "job-1", "generate_image_async", "img-mcp"); err != nil {
+		t.Fatal("createPendingJob:", err)
+	}
+	if err := completePendingJob("job-1", "image url: http://example.com/img.png"); err != nil {
+		t.Fatal("completePendingJob:", err)
+	}
+
+	delete(chatContextsMap, ctxKey)
+
+	job := &asyncJob{
+		JobID:     "job-1",
+		SessionID: sid,
+		CtxKey:    ctxKey,
+		ToolName:  "generate_image_async",
+		MCPServer: "img-mcp",
+		Network:   "testnet",
+		Channel:   "#test",
+		Nick:      "testuser",
+	}
+
+	output := make(chan string, 100)
+	deliverAsyncResult(job, context.Background(), output)
+
+	chatContextsMutex.Lock()
+	ctx := chatContextsMap[ctxKey]
+	chatContextsMutex.Unlock()
+
+	if ctx.SessionID != sid {
+		t.Errorf("SessionID = %d, want %d (should have loaded from DB)", ctx.SessionID, sid)
+	}
+
+	if len(ctx.Messages) == 0 {
+		t.Error("expected messages to be loaded from DB")
+	}
+
+	hasAsyncMsg := false
+	for _, m := range ctx.Messages {
+		if m.Role == "system" && contains(m.Content, "Background task completed") {
+			hasAsyncMsg = true
+		}
+	}
+	if !hasAsyncMsg {
+		t.Error("expected async result system message after loading context from DB")
+	}
+
+	select {
+	case msg := <-output:
+		t.Errorf("unexpected switch message (no prior session): %q", msg)
+	default:
+	}
+}
+
+func TestSwitchToSession_NoCurrentSession_NoSwitchMessage(t *testing.T) {
+	setupJMTestDB(t)
+	setupTestJobManager(t)
+	_ = setupMockDeps(t)
+
+	cfg := makeTestAIConfig()
+	ctxKey := "testnet#testuser"
+
+	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	insertTestMessage(t, sid, "system", "you are helpful")
+
+	delete(chatContextsMap, ctxKey)
+
+	job := &asyncJob{
+		JobID:     "job-1",
+		SessionID: sid,
+		CtxKey:    ctxKey,
+		Network:   "testnet",
+		Channel:   "#test",
+		Nick:      "testuser",
+	}
+
+	msg := switchToSession(job)
+	if msg != "" {
+		t.Errorf("switchToSession returned %q, want empty string when no prior session", msg)
+	}
+
+	chatContextsMutex.Lock()
+	ctx := chatContextsMap[ctxKey]
+	chatContextsMutex.Unlock()
+
+	if ctx.SessionID != sid {
+		t.Errorf("SessionID = %d, want %d (should have loaded from DB)", ctx.SessionID, sid)
+	}
+	_ = cfg
 }
 
 func TestRecoverPendingJobs(t *testing.T) {

@@ -326,6 +326,13 @@ func wrapForIRC(out string) []string {
 	return lines
 }
 
+func isIRCAction(line string) (string, bool) {
+	if strings.HasPrefix(line, "/me ") {
+		return strings.TrimPrefix(line, "/me "), true
+	}
+	return line, false
+}
+
 func sendToOutput(out string, output chan<- string, ctx context.Context) {
 	for _, line := range wrapForIRC(out) {
 		if len(line) <= 0 {
@@ -544,7 +551,11 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 				}()
 				go func() {
 					for msg := range outCh {
-						client.Cmd.Message(event.Params[0], "\x02\x02"+msg)
+						if action, ok := isIRCAction(msg); ok {
+							client.Cmd.Action(event.Params[0], action)
+						} else {
+							client.Cmd.Message(event.Params[0], "\x02\x02"+msg)
+						}
 						time.Sleep(time.Millisecond * time.Duration(network.Throttle))
 					}
 				}()

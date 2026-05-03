@@ -483,7 +483,11 @@ func (qm *QueueManager) runJob(item *QueueItem) {
 			}
 			break
 		}
-		bot.Client.Cmd.Message(item.Channel, "\x02\x02"+line)
+		if action, ok := isIRCAction(line); ok {
+			bot.Client.Cmd.Action(item.Channel, action)
+		} else {
+			bot.Client.Cmd.Message(item.Channel, "\x02\x02"+line)
+		}
 		time.Sleep(time.Millisecond * time.Duration(throttle))
 	}
 }

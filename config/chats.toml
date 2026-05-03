@@ -42,6 +42,9 @@
 #   needsusersuffix      (bool, default: false)      Append user message after system messages (auto-detected for anthropic/ models)
 #                                                Fix for: "This model does not support assistant message prefill. The conversation must end with a user message."
 #
+# /me action support: The LLM can use "/me <action text>" on its own line to send IRC CTCP ACTION messages.
+# Add {{.Vars.IRCActionNote}} to the system prompt to instruct the LLM how to use this feature.
+#
 # Duration values: TOML strings like "30s", "2m", "1m30s".
 #
 # Example with all options:
@@ -50,7 +53,7 @@
 # model = "gpt-4o"
 # regex = "chat"
 # description = "Example chat with all options"
-# system = "You are {{.BotNick}} chatting with {{.Nick}} in {{.Channel}} on {{.Network}}."
+# system = "You are {{.BotNick}} chatting with {{.Nick}} in {{.Channel}} on {{.Network}}.\n{{.Vars.IRCActionNote}}"
 # streaming = true
 # rendermarkdown = true
 # detectimages = true
@@ -109,6 +112,8 @@ IRC Color Codes:
  - 14 Grey
  - 15 Light Grey
 If you are writing source code you MUST NOT use raw IRC codes in the source, instead use \\x03 or whatever is appropriate.
+
+{{.Vars.IRCActionNote}}
 """
 
 [yo]

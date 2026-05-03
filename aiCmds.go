@@ -569,7 +569,8 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 				if chCfg.Pastebin {
 					lines := wrapForIRC(text)
 					if len(lines) >= chCfg.GetMaxLines() {
-						url, err := uploadToPastebin(rawText)
+						pasteTitle := cr.cfg.Service + "/" + cr.cfg.Model
+						url, err := uploadToPastebin(rawText, pasteTitle)
 						if err != nil {
 							cr.sendIRC(errorMsg("pastebin: " + err.Error()))
 							preview := chCfg.GetMaxLines()
@@ -926,7 +927,8 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 				if chCfg.Pastebin {
 					lines := wrapForIRC(textFinal)
 					if len(lines) >= chCfg.GetMaxLines() {
-						url, err := uploadToPastebin(rawText)
+						pasteTitle := cr.cfg.Service + "/" + cr.cfg.Model
+						url, err := uploadToPastebin(rawText, pasteTitle)
 						if err != nil {
 							cr.sendIRC(errorMsg("pastebin: " + err.Error()))
 							preview := chCfg.GetMaxLines()

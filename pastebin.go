@@ -14,6 +14,7 @@ var pastebinHTTPClient = &http.Client{Timeout: 15 * time.Second}
 
 type pastebinCreateRequest struct {
 	Content string `json:"content"`
+	Title   string `json:"title,omitempty"`
 }
 
 type pastebinCreateResponse struct {
@@ -25,7 +26,7 @@ type pastebinErrorResponse struct {
 	Error string `json:"error"`
 }
 
-func uploadToPastebin(text string) (string, error) {
+func uploadToPastebin(text, title string) (string, error) {
 	if config.Pastebin.URL == "" {
 		return "", fmt.Errorf("pastebin: no url configured")
 	}
@@ -33,7 +34,7 @@ func uploadToPastebin(text string) (string, error) {
 		return "", fmt.Errorf("pastebin: no api_key configured")
 	}
 
-	body, err := json.Marshal(pastebinCreateRequest{Content: text})
+	body, err := json.Marshal(pastebinCreateRequest{Content: text, Title: title})
 	if err != nil {
 		return "", fmt.Errorf("pastebin: encoding request: %w", err)
 	}

@@ -163,7 +163,7 @@ func help(network Network, client *girc.Client, event girc.Event, ctx context.Co
 		rawText := strings.Join(lines, "\n")
 		wrappedLines := wrapForIRC(rawText)
 		if len(wrappedLines) >= chCfg.GetMaxLines() {
-			url, err := uploadToPastebin("```\n" + rawText + "\n```")
+			url, err := uploadToPastebin("```\n"+rawText+"\n```", "Dave's Help")
 			if err != nil {
 				select {
 				case output <- errorMsg("pastebin: " + err.Error()):

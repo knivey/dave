@@ -92,6 +92,7 @@ type sanitizedAIConfig struct {
 	ReasoningEffort     string         `json:"reasoningeffort,omitempty"`
 	ResponsesAPI        bool           `json:"responses_api"`
 	PreviousResponseID  bool           `json:"previous_response_id"`
+	NeedsUserSuffix     bool           `json:"needsusersuffix"`
 	Timeout             string         `json:"timeout,omitempty"`
 	StreamTimeout       string         `json:"streamtimeout,omitempty"`
 	ExtraBody           map[string]any `json:"extra_body,omitempty"`
@@ -116,6 +117,7 @@ func sanitizeAIConfig(cfg AIConfig) sanitizedAIConfig {
 		ReasoningEffort:     cfg.ReasoningEffort,
 		ResponsesAPI:        cfg.ResponsesAPI,
 		PreviousResponseID:  cfg.PreviousResponseID,
+		NeedsUserSuffix:     cfg.NeedsUserSuffix,
 		ExtraBody:           cfg.ExtraBody,
 		System:              cfg.System,
 	}

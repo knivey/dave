@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -12,6 +13,12 @@ import (
 	logxi "github.com/mgutz/logxi/v1"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+var anthropicModelRe = regexp.MustCompile(`(?i)^anthropic/`)
+
+func modelNeedsUserSuffix(model string) bool {
+	return anthropicModelRe.MatchString(model)
+}
 
 var loggerJM = logxi.New("jobManager")
 
@@ -347,6 +354,13 @@ func injectAsyncResultFromDB(ctxKey string, ctx ChatContext, job pendingJob, net
 		Content: content,
 	}
 	AddContext(ctx.Config, ctxKey, msg, network, channel, nick)
+	if ctx.Config.NeedsUserSuffix || modelNeedsUserSuffix(ctx.Config.Model) {
+		userMsg := ChatMessage{
+			Role:    RoleUser,
+			Content: "Respond to the user based on the above background task result.",
+		}
+		AddContext(ctx.Config, ctxKey, userMsg, network, channel, nick)
+	}
 }
 
 func recoverPendingJobs() {

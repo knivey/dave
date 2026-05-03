@@ -754,6 +754,75 @@ func TestInjectAsyncResultFromDB(t *testing.T) {
 	assert.Equal(t, "system", dbMsgs[0].Role, "DB message role")
 }
 
+func TestInjectAsyncResultFromDB_AnthropicUserSuffix(t *testing.T) {
+	setupJMTestDB(t)
+
+	cfg := makeTestAIConfig()
+	cfg.Model = "anthropic/claude-sonnet-4.6"
+	ctxKey := "testnet#testuser"
+
+	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+
+	chatContextsMap[ctxKey] = ChatContext{
+		Messages:  []ChatMessage{{Role: "system", Content: "sys"}},
+		Config:    cfg,
+		SessionID: sid,
+	}
+
+	result := "image url: http://example.com/test.png"
+	pj := pendingJob{
+		SessionID: &sid,
+		JobID:     "job-1",
+		ToolName:  "generate_image_async",
+		MCPServer: "img-mcp",
+		Status:    "completed",
+		Result:    &result,
+	}
+
+	ctx := chatContextsMap[ctxKey]
+	injectAsyncResultFromDB(ctxKey, ctx, pj, "testnet", "#test", "testuser")
+
+	ctx = chatContextsMap[ctxKey]
+	require.Len(t, ctx.Messages, 3, "expected 3 messages (sys + system result + user suffix)")
+	assert.Equal(t, "system", ctx.Messages[1].Role)
+	assert.Contains(t, ctx.Messages[1].Content, "Background task completed")
+	assert.Equal(t, "user", ctx.Messages[2].Role, "last message should be user suffix")
+	assert.Contains(t, ctx.Messages[2].Content, "Respond to the user based on the above background task result.")
+}
+
+func TestInjectAsyncResultFromDB_NeedsUserSuffixConfig(t *testing.T) {
+	setupJMTestDB(t)
+
+	cfg := makeTestAIConfig()
+	cfg.NeedsUserSuffix = true
+	ctxKey := "testnet#testuser"
+
+	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+
+	chatContextsMap[ctxKey] = ChatContext{
+		Messages:  []ChatMessage{{Role: "system", Content: "sys"}},
+		Config:    cfg,
+		SessionID: sid,
+	}
+
+	result := "image url: http://example.com/test.png"
+	pj := pendingJob{
+		SessionID: &sid,
+		JobID:     "job-1",
+		ToolName:  "generate_image_async",
+		MCPServer: "img-mcp",
+		Status:    "completed",
+		Result:    &result,
+	}
+
+	ctx := chatContextsMap[ctxKey]
+	injectAsyncResultFromDB(ctxKey, ctx, pj, "testnet", "#test", "testuser")
+
+	ctx = chatContextsMap[ctxKey]
+	require.Len(t, ctx.Messages, 3, "expected 3 messages (sys + system result + user suffix)")
+	assert.Equal(t, "user", ctx.Messages[2].Role, "last message should be user suffix")
+}
+
 func TestInjectAsyncResultFromDB_NilResult(t *testing.T) {
 	setupJMTestDB(t)
 
@@ -782,6 +851,30 @@ func TestInjectAsyncResultFromDB_NilResult(t *testing.T) {
 	ctx = chatContextsMap[ctxKey]
 	lastMsg := ctx.Messages[len(ctx.Messages)-1]
 	assert.Contains(t, lastMsg.Content, "Background task completed", "injected message missing expected text even with nil result")
+}
+
+func TestModelNeedsUserSuffix(t *testing.T) {
+	tests := []struct {
+		model    string
+		expected bool
+	}{
+		{"anthropic/claude-sonnet-4.6", true},
+		{"anthropic/claude-opus-4.6", true},
+		{"anthropic/claude-sonnet-4.5", true},
+		{"anthropic/claude-3.5-sonnet", true},
+		{"Anthropic/Claude-Sonnet-4.6", true},
+		{"openai/gpt-4o", false},
+		{"test-model", false},
+		{"google/gemini-pro", false},
+		{"", false},
+		{"anthropic", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.model, func(t *testing.T) {
+			assert.Equal(t, tc.expected, modelNeedsUserSuffix(tc.model))
+		})
+	}
 }
 
 func TestOnAsyncJobCompleted_RemovesJobFromMap(t *testing.T) {

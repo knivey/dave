@@ -330,6 +330,9 @@ func isIRCAction(line string) (string, bool) {
 	if strings.HasPrefix(line, "/me ") {
 		return strings.TrimPrefix(line, "/me "), true
 	}
+	if strings.HasPrefix(line, "/ me ") {
+		return strings.TrimPrefix(line, "/ me "), true
+	}
 	return line, false
 }
 

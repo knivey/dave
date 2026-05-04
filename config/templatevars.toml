@@ -11,6 +11,57 @@ AllowedTopics = "programming, technology, gaming, music"
 
 IRCFormatting = "Bold: \\x02text\\x02 | Underline: \\x1Ftext\\x1F | Color: \\x03code\\x03text\\x03"
 
+IrcFormattingExtended = """\
+IRC formatting:
+- To color text start with a \u0003 character followed by a color code then end the color with another \u0003
+- Background color: \u0003FG,BG (e.g. \u000306,14 magenta on grey)
+- Keep in mind IRC formatting is reset on every new line
+Standard Color Codes:
+- 00 White, 01 Black, 02 Blue, 03 Green, 04 Red, 05 Brown, 06 Magenta, 07 Orange
+- 08 Yellow, 09 Light Green, 10 Cyan, 11 Light Cyan, 12 Light Blue, 13 Pink, 14 Grey, 15 Light Grey
+Extended Color Codes (16-98):
+Dark Shades:
+- 16 Deep Maroon, 17 Dark Rust, 18 Dark Olive
+- 19 Forest, 20 Deep Green, 21 Dark Teal
+- 22 Dark Cyan, 23 Navy Teal, 24 Navy
+- 25 Dark Indigo, 26 Dark Purple, 27 Dark Plum
+Dark Colors:
+- 28 Maroon, 29 Rust, 30 Olive
+- 31 Olive Drab, 32 Green, 33 Teal
+- 34 Cyan, 35 Steel Blue, 36 Dark Blue
+- 37 Purple, 38 Violet, 39 Dark Rose
+Vivid Colors:
+- 40 Red, 41 Orange, 42 Olive Yellow
+- 43 Lime, 44 Green, 45 Turquoise
+- 46 Teal, 47 Azure, 48 Blue
+- 49 Violet, 50 Magenta, 51 Hot Pink
+Bright Colors:
+- 52 Bright Red, 53 Orange, 54 Yellow
+- 55 Chartreuse, 56 Lime, 57 Spring Green
+- 58 Cyan, 59 Sky Blue, 60 Blue
+- 61 Purple, 62 Fuchsia, 63 Deep Pink
+Light Colors:
+- 64 Salmon, 65 Peach, 66 Light Yellow
+- 67 Pale Lime, 68 Pale Green, 69 Aquamarine
+- 70 Light Cyan, 71 Light Blue, 72 Periwinkle
+- 73 Lavender, 74 Pink, 75 Rose
+Pastel Colors:
+- 76 Light Salmon, 77 Peach Puff, 78 Pale Yellow
+- 79 Pale Lime, 80 Mint, 81 Pale Teal
+- 82 Pale Cyan, 83 Pale Blue, 84 Pale Lavender
+- 85 Pale Purple, 86 Light Pink, 87 Light Rose
+Grayscale:
+- 88 Black, 89 Near Black, 90 Charcoal
+- 91 Dark Charcoal, 92 Dark Gray, 93 Medium Gray
+- 94 Gray, 95 Light Gray, 96 Silver
+- 97 Near White, 98 White
+avoid using black (01, 88-89) or blue (02, 24, 36) unless absolutely needed
+for example \u000304this text is red\u0003 this is plain
+another example \u000306,14 this text is magenta with a grey background
+If you are writing source code you MUST NOT use raw IRC codes in the source, instead use \\x03 or whatever is appropriate.
+Do not ever try to use ANSI control sequences.
+"""
+
 SystemPromptIntro = """\
 You are an IRC chatbot that responds using plain text and IRC formatting.
 Be concise and helpful. Avoid markdown unless explicitly requested.

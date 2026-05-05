@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestMain(m *testing.M) {
@@ -21,7 +21,7 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func setupTestDB(t *testing.T) (*sqlx.DB, func()) {
+func setupTestDB(t *testing.T) (*gorm.DB, func()) {
 	t.Helper()
 	chatContextsMutex.Lock()
 	chatContextsMap = make(map[string]ChatContext)
@@ -36,7 +36,10 @@ func setupTestDB(t *testing.T) (*sqlx.DB, func()) {
 	theDB = db
 	return db, func() {
 		theDB = oldDB
-		db.Close()
+		sqlDB, _ := db.DB()
+		if sqlDB != nil {
+			sqlDB.Close()
+		}
 	}
 }
 
@@ -115,7 +118,8 @@ func TestDBCleanupByAge(t *testing.T) {
 	require.NoError(t, err, "failed to create session")
 	insertDBMessage(sid, "user", "hello", nil, nil, nil)
 
-	theDB.Exec("UPDATE sessions SET last_active = datetime('now', '-100 days') WHERE id = ?", sid)
+	pastTime := time.Now().AddDate(0, 0, -100)
+	theDB.Model(&Session{}).Where("id = ?", sid).Update("last_active", pastTime)
 
 	affected, err := cleanupDBSessions(90)
 	require.NoError(t, err, "cleanup failed")
@@ -231,17 +235,20 @@ func TestDatabaseConfigDefaults(t *testing.T) {
 	cfg := DatabaseConfig{}
 	cfg.SetDefaults()
 
+	assert.Equal(t, "sqlite", cfg.Driver, "default driver")
 	assert.Equal(t, "data/dave.db", cfg.Path, "default path")
 	assert.Equal(t, 90, cfg.MaxAgeDays, "default MaxAgeDays")
 }
 
 func TestDatabaseConfigNoOverwrite(t *testing.T) {
 	cfg := DatabaseConfig{
+		Driver:     "postgres",
 		Path:       "custom/path.db",
 		MaxAgeDays: 30,
 	}
 	cfg.SetDefaults()
 
+	assert.Equal(t, "postgres", cfg.Driver, "driver")
 	assert.Equal(t, "custom/path.db", cfg.Path, "path")
 	assert.Equal(t, 30, cfg.MaxAgeDays, "MaxAgeDays")
 }

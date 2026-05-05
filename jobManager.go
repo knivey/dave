@@ -327,7 +327,7 @@ func switchToSession(job *asyncJob) string {
 	apiLogger.RestoreSession(job.SessionID, job.CtxKey)
 
 	if theDB != nil {
-		theDB.Exec("UPDATE sessions SET status = 'active' WHERE id = ?", job.SessionID)
+		theDB.Model(&Session{}).Where("id = ?", job.SessionID).Update("status", "active")
 	}
 
 	var switchMsg string
@@ -343,7 +343,7 @@ func switchToSession(job *asyncJob) string {
 	return switchMsg
 }
 
-func injectAsyncResultFromDB(ctxKey string, ctx ChatContext, job pendingJob, network, channel, nick string) {
+func injectAsyncResultFromDB(ctxKey string, ctx ChatContext, job PendingJob, network, channel, nick string) {
 	resultText := ""
 	if job.Result != nil {
 		resultText = *job.Result
@@ -607,10 +607,7 @@ func recoverToolPendingJobs() {
 		}
 
 		if j.Result != nil {
-			submittedAt := time.Now()
-			if t, err := time.Parse("2006-01-02 15:04:05", j.CreatedAt); err == nil {
-				submittedAt = t
-			}
+			submittedAt := j.CreatedAt
 			queueMgr.EnqueueAt(network, channel, nick, "", j.ToolName, submittedAt,
 				func(ctx context.Context, output chan<- string) {
 					job := &toolAsyncJob{

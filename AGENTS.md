@@ -10,6 +10,7 @@ Go IRC chatbot for OpenAI-compatible APIs, Stable Diffusion, ComfyUI image gen. 
 ```bash
 go build -o dave .
 go build -o mcps/img-mcp/img-mcp ./mcps/img-mcp
+go build -o tools/migrate-sqlite-to-pgsql/migrate-sqlite-to-pgsql ./tools/migrate-sqlite-to-pgsql
 
 ./dave              # config/ directory
 ./dave prod         # prod/ directory
@@ -18,6 +19,9 @@ go build -o mcps/img-mcp/img-mcp ./mcps/img-mcp
 ./mcps/img-mcp/img-mcp              # uses mcps/img-mcp/config.toml (stdio, all tools)
 ./mcps/img-mcp/img-mcp prod.toml    # uses specified config (relative to binary dir)
 ./mcps/img-mcp/img-mcp --http       # HTTP mode (dual paths: /sync + /async)
+
+./tools/migrate-sqlite-to-pgsql/migrate-sqlite-to-pgsql --sqlite data/dave.db --postgres "postgres://user:pass@localhost:5432/dave?sslmode=disable"
+./tools/migrate-sqlite-to-pgsql/migrate-sqlite-to-pgsql --dry-run --sqlite data/dave.db --postgres "postgres://user:pass@localhost:5432/dave?sslmode=disable"
 
 go test ./...                    # all tests
 go test ./MarkdownToIRC/...      # markdown tests only
@@ -63,11 +67,11 @@ No Makefile, no linter config. Use `go fmt` + `go vet`.
 - Networks inherit root `trigger`/`quitmsg`; cycle multiple servers on reconnect. TUI commands (`/join`, `/part`, `/nick`) update `bot.Network` in-memory (not persisted); `bot.mu` (sync.Mutex) protects access. RPL_WELCOME and reconnect loop reference `bot.Network` (not captured `network` value) so runtime changes survive reconnect.
 - Service `maxhistory` defaults to 8.
 - ComfyConfig requires `workflow_path`, `clientid`, `output_node`, `prompt_node`.
-- Context store: dirty flag, atomic (`.tmp`+rename), timer, age+count cleanup. Tests mock via `persistCfg.FilePath`.
+- `db.go`: GORM database layer. `DatabaseConfig` has `Driver` (sqlite/postgres), `Path` (sqlite), `DSN` (postgres), `MaxAgeDays`. `initDB` opens with appropriate GORM dialector and runs AutoMigrate. All query functions use GORM API (no raw SQL except complex updates). Structs: `Session`, `Message`, `PendingJob`, `TurnUsage` (with `time.Time` timestamps). `theDB` is `*gorm.DB` global.
 - Tests: table-driven + `t.Run()`, using `github.com/stretchr/testify` (`assert`/`require`). MarkdownToIRC uses shared `runTests()` helper with contain/notContain checks. Root has context/config/ai tests. Config tests use `createTestConfigDir` helper for directory-based configs. Hand-rolled mocks (`mockChatRunner`, `mockContextStore`, `mockRateLimiter`) use function fields for per-test behavior — not converted to `testify/mock` since function-field pattern is more flexible for dynamic behavior.
 - MCP tests (`TestMCPConfigValidation`, `TestMCPConfigTimeoutDefault`) run `go run . <dir>` as subprocess. MCP config is in `mcps.toml` (not in `config.toml`).
 - MCP reconnection: `callMCPTool`, `readMCPResource`, `getMCPPrompt` all retry once after reconnect on failure. Backoff: `2^count * 1s` with jitter, capped at 60s. SDK `KeepAlive` (default 30s for HTTP) proactively detects dead sessions. `MCPServer.reconnectMu` serializes reconnect attempts per server. `reconnectCount` resets to 0 on success. `MCPConfig.KeepAlive` field in `mcps.toml`.
-- Responses API: `responses_api` (AIConfig, per-command in `chats.toml`) enables `POST /v1/responses` instead of Chat Completions. Supported by OpenAI and xAI/Grok. `previous_response_id` chains responses via server-side context storage (only sends new messages). Both default `false`. Implementation in `responses.go` bypasses `sashabaranov/go-openai` SDK (which lacks Responses API support) and makes direct HTTP calls via `chatRunner.httpClient` (shares `daveTransport` for extra_body/header injection and API logging). Response ID stored in `ChatContext.ResponseID` and persisted in `sessions.response_id` column (DB migration 004). Tool call loop retained locally — `function_call` output items mapped to/from `gogpt.ToolCall`. Graceful fallback on expired/invalid `previous_response_id`.
+- Responses API: `responses_api` (AIConfig, per-command in `chats.toml`) enables `POST /v1/responses` instead of Chat Completions. Supported by OpenAI and xAI/Grok. `previous_response_id` chains responses via server-side context storage (only sends new messages). Both default `false`. Implementation in `responses.go` bypasses `sashabaranov/go-openai` SDK (which lacks Responses API support) and makes direct HTTP calls via `chatRunner.httpClient` (shares `daveTransport` for extra_body/header injection and API logging). Response ID stored in `ChatContext.ResponseID` and persisted in `sessions.response_id` column. Tool call loop retained locally — `function_call` output items mapped to/from `gogpt.ToolCall`. Graceful fallback on expired/invalid `previous_response_id`.
 
 ## Code Style
 - Imports: stdlib, blank, third-party.

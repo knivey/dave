@@ -728,7 +728,7 @@ func TestInjectAsyncResultFromDB(t *testing.T) {
 	}
 
 	result := "image url: http://example.com/test.png"
-	pj := pendingJob{
+	pj := PendingJob{
 		SessionID: &sid,
 		JobID:     "job-1",
 		ToolName:  "generate_image_async",
@@ -770,7 +770,7 @@ func TestInjectAsyncResultFromDB_AnthropicUserSuffix(t *testing.T) {
 	}
 
 	result := "image url: http://example.com/test.png"
-	pj := pendingJob{
+	pj := PendingJob{
 		SessionID: &sid,
 		JobID:     "job-1",
 		ToolName:  "generate_image_async",
@@ -806,7 +806,7 @@ func TestInjectAsyncResultFromDB_NeedsUserSuffixConfig(t *testing.T) {
 	}
 
 	result := "image url: http://example.com/test.png"
-	pj := pendingJob{
+	pj := PendingJob{
 		SessionID: &sid,
 		JobID:     "job-1",
 		ToolName:  "generate_image_async",
@@ -837,7 +837,7 @@ func TestInjectAsyncResultFromDB_NilResult(t *testing.T) {
 		SessionID: sid,
 	}
 
-	pj := pendingJob{
+	pj := PendingJob{
 		SessionID: &sid,
 		JobID:     "job-1",
 		ToolName:  "generate_image_async",
@@ -935,10 +935,10 @@ func TestOnAsyncJobCompleted_MarksCompletedInDB(t *testing.T) {
 
 	onAsyncJobCompleted(job, "the image result")
 
-	var pj pendingJob
+	var pj PendingJob
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		require.NoError(t, theDB.Get(&pj, "SELECT * FROM pending_jobs WHERE job_id = ?", "job-1"), "query job")
+		require.NoError(t, theDB.Where("job_id = ?", "job-1").First(&pj).Error, "query job")
 		if pj.Status == "delivered" {
 			break
 		}
@@ -977,8 +977,8 @@ func TestDeliverAsyncResult_MarksJobsDelivered(t *testing.T) {
 	output := make(chan string, 100)
 	deliverAsyncResult(job, context.Background(), output)
 
-	var pj pendingJob
-	require.NoError(t, theDB.Get(&pj, "SELECT * FROM pending_jobs WHERE job_id = ?", "job-1"), "query job")
+	var pj PendingJob
+	require.NoError(t, theDB.Where("job_id = ?", "job-1").First(&pj).Error, "query job")
 	assert.Equal(t, "delivered", pj.Status, "job status")
 }
 

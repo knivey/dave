@@ -11,7 +11,9 @@
 #   sessions_display_limit (int, default: 10)   Max sessions shown in sessions list command
 #
 # [database] options:
-#   path                (string, default: "data/dave.db")  SQLite database path
+#   driver              (string, default: "sqlite")        Database driver: "sqlite" or "postgres"
+#   path                (string, default: "data/dave.db")  SQLite database path (used when driver=sqlite)
+#   dsn                 (string)                           PostgreSQL DSN, e.g. "postgres://user:pass@localhost:5432/dave?sslmode=disable" (used when driver=postgres)
 #   max_age_days        (int, default: 90)                 Max age for context history
 #
 # [tui] options:
@@ -130,7 +132,9 @@ ratemsgs = [
 ]
 
 [database]
+# driver = "sqlite"       # Uncomment to use PostgreSQL: driver = "postgres"
 path = "data/dave.db"
+# dsn = ""                # Set when driver = "postgres"
 max_age_days = 90
 
 [tui]

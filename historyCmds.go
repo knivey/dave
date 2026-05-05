@@ -58,8 +58,8 @@ func historySessions(network Network, c *girc.Client, e girc.Event, ctx context.
 			icon = "\x0304○\x0F"
 		}
 
-		var msgCount int
-		theDB.Get(&msgCount, "SELECT COUNT(*) FROM messages WHERE session_id = ?", s.ID)
+		var msgCount int64
+		theDB.Model(&Message{}).Where("session_id = ?", s.ID).Count(&msgCount)
 
 		idStr := fmt.Sprintf("#%d", s.ID)
 		msgStr := fmt.Sprintf("%d msgs", msgCount)
@@ -146,7 +146,7 @@ func historyShow(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 		return
 	}
 
-	var visible []dbMessage
+	var visible []Message
 	for _, m := range messages {
 		if m.Role == "system" || m.Role == "tool" {
 			continue
@@ -163,16 +163,16 @@ func historyShow(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 		return
 	}
 
-	var shown []dbMessage
+	var shown []Message
 	if len(visible) <= 4 {
 		shown = visible
 	} else {
-		shown = make([]dbMessage, 4)
+		shown = make([]Message, 4)
 		copy(shown[:2], visible[:2])
 		copy(shown[2:], visible[len(visible)-2:])
 	}
 
-	sendHistoryMsg := func(m dbMessage) {
+	sendHistoryMsg := func(m Message) {
 		var roleIcon string
 		switch m.Role {
 		case "user":
@@ -367,35 +367,24 @@ func historyResume(network Network, c *girc.Client, e girc.Event, args ...string
 	apiLogger.RestoreSession(sessionID, ctxKey)
 
 	if theDB != nil {
-		theDB.Exec("UPDATE sessions SET status = 'active' WHERE id = ?", sessionID)
+		theDB.Model(&Session{}).Where("id = ?", sessionID).Update("status", "active")
 	}
 
 	c.Cmd.Reply(e, fmt.Sprintf("Resumed session #%d (%s) with %d messages.", sessionID, session.ChatCommand, len(messages)))
 }
 
-func formatTimeAgo(dbTime string) string {
-	for _, layout := range []string{
-		"2006-01-02T15:04:05Z07:00",
-		"2006-01-02T15:04:05Z",
-		"2006-01-02 15:04:05",
-		time.RFC3339,
-		time.RFC3339Nano,
-	} {
-		if t, err := time.Parse(layout, dbTime); err == nil {
-			d := time.Since(t)
-			if d < time.Minute {
-				return "just now"
-			}
-			if d < time.Hour {
-				return fmt.Sprintf("%dm", int(d.Minutes()))
-			}
-			if d < 24*time.Hour {
-				return fmt.Sprintf("%dh", int(d.Hours()))
-			}
-			return fmt.Sprintf("%dd", int(d.Hours()/24))
-		}
+func formatTimeAgo(t time.Time) string {
+	d := time.Since(t)
+	if d < time.Minute {
+		return "just now"
 	}
-	return dbTime
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	if d < 24*time.Hour {
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	}
+	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }
 
 func historyJobs(network Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, args ...string) {

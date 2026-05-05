@@ -1,31 +1,32 @@
 package main
 
 import (
-	"database/sql"
-	"embed"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
 
-	"github.com/jmoiron/sqlx"
+	"github.com/glebarez/sqlite"
 	logxi "github.com/mgutz/logxi/v1"
-	"github.com/pressly/goose/v3"
-	_ "modernc.org/sqlite"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
-//go:embed migrations/*.sql
-var embedMigrations embed.FS
-
-var theDB *sqlx.DB
+var theDB *gorm.DB
 var loggerDB = logxi.New("db")
 
 type DatabaseConfig struct {
+	Driver     string `toml:"driver"`
 	Path       string `toml:"path"`
+	DSN        string `toml:"dsn"`
 	MaxAgeDays int    `toml:"max_age_days"`
 }
 
 func (c *DatabaseConfig) SetDefaults() {
+	if c.Driver == "" {
+		c.Driver = "sqlite"
+	}
 	if c.Path == "" {
 		c.Path = "data/dave.db"
 	}
@@ -34,137 +35,160 @@ func (c *DatabaseConfig) SetDefaults() {
 	}
 }
 
-func initDB(cfg DatabaseConfig) (*sqlx.DB, error) {
-	dbPath := cfg.Path
-	dir := filepath.Dir(dbPath)
-	if dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return nil, fmt.Errorf("creating database directory %s: %w", dir, err)
+type Session struct {
+	ID           int64   `gorm:"primaryKey;autoIncrement"`
+	ContextKey   string  `gorm:"column:context_key;not null;index:idx_sessions_context_key"`
+	Network      string  `gorm:"not null;index:idx_sessions_user"`
+	Channel      string  `gorm:"not null;index:idx_sessions_user"`
+	Nick         string  `gorm:"not null;index:idx_sessions_user"`
+	ChatCommand  string  `gorm:"column:chat_command;not null"`
+	FirstMessage string  `gorm:"column:first_message;not null;default:''"`
+	ConvID       *string `gorm:"column:conv_id;index:idx_sessions_conv_id"`
+	ResponseID   *string `gorm:"column:response_id;index:idx_sessions_response_id"`
+	Service      string  `gorm:"not null;default:''"`
+	Model        string  `gorm:"not null;default:''"`
+	Status       string  `gorm:"not null;default:'active';index:idx_sessions_status"`
+	CreatedAt    time.Time
+	LastActive   time.Time `gorm:"column:last_active;index:idx_sessions_last_active"`
+}
+
+type Message struct {
+	ID               int64   `gorm:"primaryKey;autoIncrement"`
+	SessionID        int64   `gorm:"not null;index:idx_messages_session"`
+	Role             string  `gorm:"not null"`
+	Content          string  `gorm:"not null;type:text"`
+	ToolCalls        *string `gorm:"type:text"`
+	ToolCallID       *string
+	ReasoningContent *string `gorm:"type:text"`
+	IsAsyncResult    bool    `gorm:"default:false"`
+	CreatedAt        time.Time
+}
+
+type PendingJob struct {
+	ID          int64   `gorm:"primaryKey;autoIncrement"`
+	SessionID   *int64  `gorm:"index:idx_pending_jobs_session"`
+	JobID       string  `gorm:"not null;index:idx_pending_jobs_tool_job"`
+	ToolName    string  `gorm:"not null"`
+	MCPServer   string  `gorm:"not null"`
+	Status      string  `gorm:"not null;default:'pending';index:idx_pending_jobs_status"`
+	Result      *string `gorm:"type:text"`
+	Network     *string
+	Channel     *string
+	Nick        *string
+	CreatedAt   time.Time
+	CompletedAt *time.Time
+}
+
+type TurnUsage struct {
+	ID               int64  `gorm:"primaryKey;autoIncrement"`
+	SessionID        int64  `gorm:"not null;index:idx_turn_usage_session_id"`
+	PromptTokens     int    `gorm:"not null;default:0"`
+	CompletionTokens int    `gorm:"not null;default:0"`
+	CachedTokens     int    `gorm:"not null;default:0"`
+	ReasoningTokens  int    `gorm:"not null;default:0"`
+	FinishReason     string `gorm:"not null;default:''"`
+	APIPath          string `gorm:"not null;default:''"`
+	DurationMs       int    `gorm:"not null;default:0"`
+	CreatedAt        time.Time
+}
+
+func (PendingJob) TableName() string { return "pending_jobs" }
+
+func (TurnUsage) TableName() string { return "turn_usage" }
+
+func initDB(cfg DatabaseConfig) (*gorm.DB, error) {
+	var dialector gorm.Dialector
+	switch cfg.Driver {
+	case "postgres":
+		dialector = postgres.Open(cfg.DSN)
+	default:
+		dir := filepath.Dir(cfg.Path)
+		if dir != "" && dir != "." {
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				return nil, fmt.Errorf("creating database directory %s: %w", dir, err)
+			}
 		}
+		dialector = sqlite.Open(cfg.Path + "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
 	}
 
-	sqldb, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
+	db, err := gorm.Open(dialector, &gorm.Config{})
 	if err != nil {
-		return nil, fmt.Errorf("opening database %s: %w", dbPath, err)
+		return nil, fmt.Errorf("opening database: %w", err)
 	}
 
-	sqldb.SetMaxOpenConns(1)
-
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		sqldb.Close()
-		return nil, fmt.Errorf("setting goose dialect: %w", err)
+	if cfg.Driver == "sqlite" || cfg.Driver == "" {
+		sqlDB, err := db.DB()
+		if err != nil {
+			return nil, fmt.Errorf("getting underlying db: %w", err)
+		}
+		sqlDB.SetMaxOpenConns(1)
 	}
 
-	goose.SetBaseFS(embedMigrations)
-
-	if err := goose.Up(sqldb, "migrations"); err != nil {
-		sqldb.Close()
+	if err := db.AutoMigrate(&Session{}, &Message{}, &PendingJob{}, &TurnUsage{}); err != nil {
 		return nil, fmt.Errorf("running migrations: %w", err)
 	}
 
-	db := sqlx.NewDb(sqldb, "sqlite")
-
-	loggerDB.Info("Database initialized", "path", dbPath)
+	loggerDB.Info("Database initialized", "driver", cfg.Driver, "path", cfg.Path)
 	return db, nil
 }
 
-func closeDB(db *sqlx.DB) {
+func closeDB(db *gorm.DB) {
 	if db != nil {
-		db.Close()
+		sqlDB, err := db.DB()
+		if err == nil {
+			sqlDB.Close()
+		}
 		loggerDB.Info("Database closed")
 	}
 }
 
-type dbSession struct {
-	ID           int64   `db:"id"`
-	ContextKey   string  `db:"context_key"`
-	Network      string  `db:"network"`
-	Channel      string  `db:"channel"`
-	Nick         string  `db:"nick"`
-	ChatCommand  string  `db:"chat_command"`
-	FirstMessage string  `db:"first_message"`
-	ConvID       *string `db:"conv_id"`
-	ResponseID   *string `db:"response_id"`
-	Service      string  `db:"service"`
-	Model        string  `db:"model"`
-	Status       string  `db:"status"`
-	CreatedAt    string  `db:"created_at"`
-	LastActive   string  `db:"last_active"`
-}
-
-type dbTurnUsage struct {
-	ID               int64  `db:"id"`
-	SessionID        int64  `db:"session_id"`
-	PromptTokens     int    `db:"prompt_tokens"`
-	CompletionTokens int    `db:"completion_tokens"`
-	CachedTokens     int    `db:"cached_tokens"`
-	ReasoningTokens  int    `db:"reasoning_tokens"`
-	FinishReason     string `db:"finish_reason"`
-	APIPath          string `db:"api_path"`
-	DurationMs       int    `db:"duration_ms"`
-	CreatedAt        string `db:"created_at"`
-}
-
-type dbMessage struct {
-	ID               int64   `db:"id"`
-	SessionID        int64   `db:"session_id"`
-	Role             string  `db:"role"`
-	Content          string  `db:"content"`
-	ToolCalls        *string `db:"tool_calls"`
-	ToolCallID       *string `db:"tool_call_id"`
-	ReasoningContent *string `db:"reasoning_content"`
-	IsAsyncResult    bool    `db:"is_async_result"`
-	CreatedAt        string  `db:"created_at"`
-}
-
 func createDBSession(contextKey, network, channel, nick, chatCommand, convID, service, model string) (int64, error) {
-	result, err := theDB.Exec(
-		"INSERT INTO sessions (context_key, network, channel, nick, chat_command, conv_id, service, model, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')",
-		contextKey, network, channel, nick, chatCommand, convID, service, model,
-	)
-	if err != nil {
+	session := Session{
+		ContextKey:  contextKey,
+		Network:     network,
+		Channel:     channel,
+		Nick:        nick,
+		ChatCommand: chatCommand,
+		ConvID:      strPtrOrNil(convID),
+		Service:     service,
+		Model:       model,
+		Status:      "active",
+	}
+	if err := theDB.Create(&session).Error; err != nil {
 		return 0, err
 	}
-	return result.LastInsertId()
+	return session.ID, nil
 }
 
 func updateDBSessionFirstMessage(sessionID int64, firstMessage string) error {
-	_, err := theDB.Exec(
-		"UPDATE sessions SET first_message = ? WHERE id = ? AND first_message = ''",
-		firstMessage, sessionID,
-	)
-	return err
+	return theDB.Model(&Session{}).Where("id = ? AND first_message = ''", sessionID).
+		Update("first_message", firstMessage).Error
 }
 
 func updateDBSessionConvID(sessionID int64, convID string) error {
-	_, err := theDB.Exec(
-		"UPDATE sessions SET conv_id = ? WHERE id = ? AND (conv_id IS NULL OR conv_id = '')",
-		convID, sessionID,
-	)
-	return err
+	return theDB.Model(&Session{}).Where("id = ? AND (conv_id IS NULL OR conv_id = '')", sessionID).
+		Update("conv_id", convID).Error
 }
 
 func updateDBSessionResponseID(sessionID int64, responseID *string) error {
-	_, err := theDB.Exec(
-		"UPDATE sessions SET response_id = ? WHERE id = ?",
-		responseID, sessionID,
-	)
-	return err
+	return theDB.Model(&Session{}).Where("id = ?", sessionID).
+		Update("response_id", responseID).Error
 }
 
 func insertDBMessage(sessionID int64, role, content string, toolCallsJSON *string, toolCallID *string, reasoningContent *string) error {
-	_, err := theDB.Exec(
-		"INSERT INTO messages (session_id, role, content, tool_calls, tool_call_id, reasoning_content) VALUES (?, ?, ?, ?, ?, ?)",
-		sessionID, role, content, toolCallsJSON, toolCallID, reasoningContent,
-	)
-	if err != nil {
+	msg := Message{
+		SessionID:        sessionID,
+		Role:             role,
+		Content:          content,
+		ToolCalls:        toolCallsJSON,
+		ToolCallID:       toolCallID,
+		ReasoningContent: reasoningContent,
+	}
+	if err := theDB.Create(&msg).Error; err != nil {
 		return err
 	}
-	_, err = theDB.Exec(
-		"UPDATE sessions SET last_active = CURRENT_TIMESTAMP WHERE id = ?",
-		sessionID,
-	)
-	return err
+	return theDB.Model(&Session{}).Where("id = ?", sessionID).
+		Update("last_active", time.Now()).Error
 }
 
 func insertDBTurnUsage(sessionID int64, usage *Usage, finishReason, apiPath string, durationMs int) error {
@@ -178,38 +202,37 @@ func insertDBTurnUsage(sessionID int64, usage *Usage, finishReason, apiPath stri
 	if usage.CompletionTokensDetails != nil {
 		reasoningTokens = int(usage.CompletionTokensDetails.ReasoningTokens)
 	}
-	_, err := theDB.Exec(
-		"INSERT INTO turn_usage (session_id, prompt_tokens, completion_tokens, cached_tokens, reasoning_tokens, finish_reason, api_path, duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-		sessionID, usage.PromptTokens, usage.CompletionTokens, cachedTokens, reasoningTokens, finishReason, apiPath, durationMs,
-	)
-	return err
+	turnUsage := TurnUsage{
+		SessionID:        sessionID,
+		PromptTokens:     int(usage.PromptTokens),
+		CompletionTokens: int(usage.CompletionTokens),
+		CachedTokens:     cachedTokens,
+		ReasoningTokens:  reasoningTokens,
+		FinishReason:     finishReason,
+		APIPath:          apiPath,
+		DurationMs:       durationMs,
+	}
+	return theDB.Create(&turnUsage).Error
 }
 
 func completeDBSession(sessionID int64) error {
 	_, file, line, _ := runtime.Caller(1)
 	loggerDB.Info("completing session", "id", sessionID, "caller", fmt.Sprintf("%s:%d", file, line))
-	_, err := theDB.Exec(
-		"UPDATE sessions SET status = 'completed' WHERE id = ?",
-		sessionID,
-	)
-	return err
+	return theDB.Model(&Session{}).Where("id = ?", sessionID).
+		Update("status", "completed").Error
 }
 
 func completeDBOrphanedSessions() (int64, error) {
-	result, err := theDB.Exec(`
-		UPDATE sessions SET status = 'completed'
-		WHERE status = 'active'
-		AND id NOT IN (
-			SELECT MAX(id) FROM sessions WHERE status = 'active' GROUP BY context_key
-		)`)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
+	result := theDB.Model(&Session{}).
+		Where("status = ? AND id NOT IN (?)", "active",
+			theDB.Model(&Session{}).Select("MAX(id)").Where("status = ?", "active").Group("context_key"),
+		).
+		Update("status", "completed")
+	return result.RowsAffected, result.Error
 }
 
 func reactivateDBStrandedSessions() (int64, error) {
-	result, err := theDB.Exec(`
+	result := theDB.Exec(`
 		UPDATE sessions SET status = 'active'
 		WHERE id IN (
 			SELECT MAX(id) FROM sessions GROUP BY context_key
@@ -217,47 +240,39 @@ func reactivateDBStrandedSessions() (int64, error) {
 		AND context_key IN (
 			SELECT context_key FROM sessions GROUP BY context_key HAVING SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) = 0
 		)`)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
+	return result.RowsAffected, result.Error
 }
 
-func loadActiveDBSessions() ([]dbSession, error) {
-	var sessions []dbSession
-	err := theDB.Select(&sessions, "SELECT * FROM sessions WHERE status = 'active' ORDER BY last_active DESC")
+func loadActiveDBSessions() ([]Session, error) {
+	var sessions []Session
+	err := theDB.Where("status = ?", "active").Order("last_active DESC").Find(&sessions).Error
 	return sessions, err
 }
 
-func loadDBSessionMessages(sessionID int64) ([]dbMessage, error) {
-	var messages []dbMessage
-	err := theDB.Select(&messages, "SELECT * FROM messages WHERE session_id = ? ORDER BY id ASC", sessionID)
+func loadDBSessionMessages(sessionID int64) ([]Message, error) {
+	var messages []Message
+	err := theDB.Where("session_id = ?", sessionID).Order("id ASC").Find(&messages).Error
 	return messages, err
 }
 
 func cleanupDBSessions(maxAgeDays int) (int64, error) {
-	result, err := theDB.Exec(
-		"UPDATE sessions SET status = 'completed' WHERE status = 'active' AND last_active < datetime('now', ? || ' days')",
-		fmt.Sprintf("-%d", maxAgeDays),
-	)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
+	cutoff := time.Now().AddDate(0, 0, -maxAgeDays)
+	result := theDB.Model(&Session{}).
+		Where("status = ? AND last_active < ?", "active", cutoff).
+		Update("status", "completed")
+	return result.RowsAffected, result.Error
 }
 
-func getUserDBSessions(network, channel, nick string, limit int) ([]dbSession, error) {
-	var sessions []dbSession
-	err := theDB.Select(&sessions,
-		"SELECT * FROM sessions WHERE network = ? AND channel = ? AND nick = ? ORDER BY last_active DESC LIMIT ?",
-		network, channel, nick, limit,
-	)
+func getUserDBSessions(network, channel, nick string, limit int) ([]Session, error) {
+	var sessions []Session
+	err := theDB.Where("network = ? AND channel = ? AND nick = ?", network, channel, nick).
+		Order("last_active DESC").Limit(limit).Find(&sessions).Error
 	return sessions, err
 }
 
-func getDBSessionByID(id int64) (*dbSession, error) {
-	var session dbSession
-	err := theDB.Get(&session, "SELECT * FROM sessions WHERE id = ?", id)
+func getDBSessionByID(id int64) (*Session, error) {
+	var session Session
+	err := theDB.Where("id = ?", id).First(&session).Error
 	if err != nil {
 		return nil, err
 	}
@@ -265,127 +280,119 @@ func getDBSessionByID(id int64) (*dbSession, error) {
 }
 
 func deleteDBSession(id int64) error {
-	_, err := theDB.Exec("DELETE FROM sessions WHERE id = ?", id)
-	return err
+	return theDB.Where("id = ?", id).Delete(&Session{}).Error
 }
 
 func deleteUserDBSessions(network, channel, nick string) (int64, error) {
-	result, err := theDB.Exec(
-		"DELETE FROM sessions WHERE network = ? AND channel = ? AND nick = ?",
-		network, channel, nick,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected()
+	result := theDB.Where("network = ? AND channel = ? AND nick = ?", network, channel, nick).
+		Delete(&Session{})
+	return result.RowsAffected, result.Error
 }
 
-func getUserDBStats(network, channel, nick string) (sessionCount int, messageCount int, err error) {
-	err = theDB.Get(&sessionCount,
-		"SELECT COUNT(*) FROM sessions WHERE network = ? AND channel = ? AND nick = ?",
-		network, channel, nick,
-	)
+func getUserDBStats(network, channel, nick string) (int, int, error) {
+	var sessionCount int64
+	err := theDB.Model(&Session{}).
+		Where("network = ? AND channel = ? AND nick = ?", network, channel, nick).
+		Count(&sessionCount).Error
 	if err != nil {
 		return 0, 0, err
 	}
-	err = theDB.Get(&messageCount,
-		`SELECT COUNT(*) FROM messages WHERE session_id IN (
-			SELECT id FROM sessions WHERE network = ? AND channel = ? AND nick = ?
-		)`,
-		network, channel, nick,
-	)
-	return sessionCount, messageCount, err
-}
-
-type pendingJob struct {
-	ID          int64   `db:"id"`
-	SessionID   *int64  `db:"session_id"`
-	JobID       string  `db:"job_id"`
-	ToolName    string  `db:"tool_name"`
-	MCPServer   string  `db:"mcp_server"`
-	Status      string  `db:"status"`
-	Result      *string `db:"result"`
-	Network     *string `db:"network"`
-	Channel     *string `db:"channel"`
-	Nick        *string `db:"nick"`
-	CreatedAt   string  `db:"created_at"`
-	CompletedAt *string `db:"completed_at"`
+	var sessionIDs []int64
+	err = theDB.Model(&Session{}).
+		Where("network = ? AND channel = ? AND nick = ?", network, channel, nick).
+		Pluck("id", &sessionIDs).Error
+	if err != nil {
+		return int(sessionCount), 0, err
+	}
+	if len(sessionIDs) == 0 {
+		return int(sessionCount), 0, nil
+	}
+	var messageCount int64
+	err = theDB.Model(&Message{}).
+		Where("session_id IN ?", sessionIDs).
+		Count(&messageCount).Error
+	return int(sessionCount), int(messageCount), err
 }
 
 func createPendingJob(sessionID int64, jobID, toolName, mcpServer string) error {
-	_, err := theDB.Exec(
-		"INSERT INTO pending_jobs (session_id, job_id, tool_name, mcp_server, status) VALUES (?, ?, ?, ?, 'pending')",
-		sessionID, jobID, toolName, mcpServer,
-	)
-	return err
+	job := PendingJob{
+		SessionID: int64Ptr(sessionID),
+		JobID:     jobID,
+		ToolName:  toolName,
+		MCPServer: mcpServer,
+		Status:    "pending",
+	}
+	return theDB.Create(&job).Error
 }
 
 func completePendingJob(jobID, resultText string) error {
-	_, err := theDB.Exec(
-		"UPDATE pending_jobs SET status = 'completed', result = ?, completed_at = CURRENT_TIMESTAMP WHERE job_id = ?",
-		resultText, jobID,
-	)
-	return err
+	now := time.Now()
+	return theDB.Model(&PendingJob{}).Where("job_id = ?", jobID).
+		Updates(map[string]interface{}{"status": "completed", "result": resultText, "completed_at": &now}).Error
 }
 
 func markPendingJobDelivered(jobID string) error {
-	_, err := theDB.Exec(
-		"UPDATE pending_jobs SET status = 'delivered' WHERE job_id = ?",
-		jobID,
-	)
-	return err
+	return theDB.Model(&PendingJob{}).Where("job_id = ?", jobID).
+		Update("status", "delivered").Error
 }
 
-func getCompletedPendingJobs(sessionID int64) ([]pendingJob, error) {
-	var jobs []pendingJob
-	err := theDB.Select(&jobs,
-		"SELECT * FROM pending_jobs WHERE session_id = ? AND status = 'completed' ORDER BY completed_at ASC",
-		sessionID,
-	)
+func getCompletedPendingJobs(sessionID int64) ([]PendingJob, error) {
+	var jobs []PendingJob
+	err := theDB.Where("session_id = ? AND status = ?", sessionID, "completed").
+		Order("completed_at ASC").Find(&jobs).Error
 	return jobs, err
 }
 
-func getPendingJobsForUser(network, channel, nick string) ([]pendingJob, error) {
-	var jobs []pendingJob
-	err := theDB.Select(&jobs,
-		`SELECT p.* FROM pending_jobs p
-		JOIN sessions s ON p.session_id = s.id
-		WHERE s.network = ? AND s.channel = ? AND s.nick = ?
-		AND p.status IN ('pending', 'running', 'completed')
-		ORDER BY p.created_at DESC`,
-		network, channel, nick,
-	)
+func getPendingJobsForUser(network, channel, nick string) ([]PendingJob, error) {
+	var jobs []PendingJob
+	err := theDB.Joins("JOIN sessions ON sessions.id = pending_jobs.session_id").
+		Where("sessions.network = ? AND sessions.channel = ? AND sessions.nick = ?", network, channel, nick).
+		Where("pending_jobs.status IN ?", []string{"pending", "running", "completed"}).
+		Order("pending_jobs.created_at DESC").
+		Find(&jobs).Error
 	return jobs, err
 }
 
-func getPendingJobsForRecovery() ([]pendingJob, error) {
-	var jobs []pendingJob
-	err := theDB.Select(&jobs,
-		"SELECT * FROM pending_jobs WHERE status IN ('pending', 'running') AND session_id IS NOT NULL",
-	)
+func getPendingJobsForRecovery() ([]PendingJob, error) {
+	var jobs []PendingJob
+	err := theDB.Where("status IN ? AND session_id IS NOT NULL", []string{"pending", "running"}).
+		Find(&jobs).Error
 	return jobs, err
 }
 
 func createToolPendingJob(jobID, toolName, mcpServer, network, channel, nick string) error {
-	_, err := theDB.Exec(
-		"INSERT INTO pending_jobs (session_id, job_id, tool_name, mcp_server, status, network, channel, nick) VALUES (NULL, ?, ?, ?, 'pending', ?, ?, ?)",
-		jobID, toolName, mcpServer, network, channel, nick,
-	)
-	return err
+	job := PendingJob{
+		JobID:     jobID,
+		ToolName:  toolName,
+		MCPServer: mcpServer,
+		Status:    "pending",
+		Network:   &network,
+		Channel:   &channel,
+		Nick:      &nick,
+	}
+	return theDB.Create(&job).Error
 }
 
 func completeToolPendingJob(jobID, resultText string) error {
-	_, err := theDB.Exec(
-		"UPDATE pending_jobs SET status = 'completed', result = ?, completed_at = CURRENT_TIMESTAMP WHERE job_id = ?",
-		resultText, jobID,
-	)
-	return err
+	now := time.Now()
+	return theDB.Model(&PendingJob{}).Where("job_id = ?", jobID).
+		Updates(map[string]interface{}{"status": "completed", "result": resultText, "completed_at": &now}).Error
 }
 
-func getToolPendingJobsForRecovery() ([]pendingJob, error) {
-	var jobs []pendingJob
-	err := theDB.Select(&jobs,
-		"SELECT * FROM pending_jobs WHERE status IN ('pending', 'running') AND session_id IS NULL",
-	)
+func getToolPendingJobsForRecovery() ([]PendingJob, error) {
+	var jobs []PendingJob
+	err := theDB.Where("status IN ? AND session_id IS NULL", []string{"pending", "running"}).
+		Find(&jobs).Error
 	return jobs, err
+}
+
+func strPtrOrNil(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+func int64Ptr(i int64) *int64 {
+	return &i
 }

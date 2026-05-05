@@ -37,8 +37,9 @@ type Config struct {
 }
 
 type PastebinConfig struct {
-	URL    string `toml:"url"`
-	APIKey string `toml:"api_key"`
+	URL                  string `toml:"url"`
+	APIKey               string `toml:"api_key"`
+	PastebinPreviewLines *int   `toml:"pastebin_preview_lines"`
 }
 
 type TUIConfig struct {
@@ -56,9 +57,10 @@ type TUIScrollbarConfig struct {
 }
 
 type ChannelConfig struct {
-	Key      string `toml:"key"`
-	Pastebin bool   `toml:"pastebin"`
-	MaxLines int    `toml:"max_lines"`
+	Key                  string `toml:"key"`
+	Pastebin             bool   `toml:"pastebin"`
+	MaxLines             int    `toml:"max_lines"`
+	PastebinPreviewLines *int   `toml:"pastebin_preview_lines"`
 }
 
 func (c ChannelConfig) GetMaxLines() int {
@@ -66,6 +68,32 @@ func (c ChannelConfig) GetMaxLines() int {
 		return 5
 	}
 	return c.MaxLines
+}
+
+func (c ChannelConfig) GetPastebinPreviewLines(pastebinCfg PastebinConfig) int {
+	maxLines := c.GetMaxLines()
+	var value int
+	var isSet bool
+
+	if c.PastebinPreviewLines != nil {
+		value = *c.PastebinPreviewLines
+		isSet = true
+	} else if pastebinCfg.PastebinPreviewLines != nil {
+		value = *pastebinCfg.PastebinPreviewLines
+		isSet = true
+	}
+
+	if !isSet {
+		value = 3
+	}
+
+	if value < 0 {
+		return 0
+	}
+	if value >= maxLines {
+		return maxLines - 1
+	}
+	return value
 }
 
 type Network struct {

@@ -587,7 +587,7 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 							}
 							cr.sendIRC("... (full output could not be pasted)")
 						} else {
-							preview := 3
+							preview := chCfg.GetPastebinPreviewLines(config.Pastebin)
 							if preview > len(lines) {
 								preview = len(lines)
 							}
@@ -945,7 +945,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 							}
 							cr.sendIRC("... (full output could not be pasted)")
 						} else {
-							preview := 3
+							preview := chCfg.GetPastebinPreviewLines(config.Pastebin)
 							if preview > len(lines) {
 								preview = len(lines)
 							}

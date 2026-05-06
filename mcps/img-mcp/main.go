@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net/http"
@@ -12,6 +13,12 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+type reloadResponse struct {
+	Status   string   `json:"status"`
+	Warnings []string `json:"warnings,omitempty"`
+	Message  string   `json:"message,omitempty"`
+}
 
 func main() {
 	httpMode := flag.Bool("http", false, "use HTTP transport instead of stdio")
@@ -65,20 +72,50 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	shutdownCh := make(chan os.Signal, 1)
+	reloadCh := make(chan os.Signal, 1)
+	signal.Notify(shutdownCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(reloadCh, syscall.SIGHUP)
+
 	go func() {
-		<-sigCh
+		<-shutdownCh
 		queue.Stop()
 		cancel()
 	}()
 
+	go func() {
+		for range reloadCh {
+			resp := doReload(configPath, handlers, queue)
+			if resp.Status == "error" {
+				logger.Error("config reload failed", "error", resp.Message)
+			} else {
+				logger.Info("config reloaded")
+				for _, w := range resp.Warnings {
+					logger.Warn("non-reloadable field changed", "warning", w)
+				}
+			}
+		}
+	}()
 	if *httpMode {
-		serveHTTP(ctx, cfg, handlers)
+		serveHTTP(ctx, cfg, handlers, queue, configPath)
 	} else {
 		server := createFullServer(cfg, handlers)
 		serveStdio(ctx, server)
 	}
+}
+
+func doReload(configPath string, handlers *ToolHandlers, queue *JobQueue) reloadResponse {
+	newCfg, warnings, err := reloadConfigFromFile(configPath, handlers.getConfig())
+	if err != nil {
+		return reloadResponse{Status: "error", Message: err.Error()}
+	}
+	handlers.setConfig(newCfg)
+	queue.setConfig(newCfg)
+	resp := reloadResponse{Status: "ok"}
+	if len(warnings) > 0 {
+		resp.Warnings = warnings
+	}
+	return resp
 }
 
 func serveStdio(ctx context.Context, server *mcp.Server) {
@@ -91,7 +128,27 @@ func serveStdio(ctx context.Context, server *mcp.Server) {
 	}
 }
 
-func serveHTTP(ctx context.Context, cfg Config, handlers *ToolHandlers) {
+func serveHTTP(ctx context.Context, cfg Config, handlers *ToolHandlers, queue *JobQueue, configPath string) {
+	mux := buildHTTPHandler(cfg, handlers, queue, configPath)
+
+	httpServer := &http.Server{
+		Addr:    cfg.Server.Addr,
+		Handler: mux,
+	}
+
+	go func() {
+		<-ctx.Done()
+		httpServer.Shutdown(context.Background())
+	}()
+
+	logger.Info("HTTP server listening", "addr", cfg.Server.Addr)
+	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		fmt.Fprintf(os.Stderr, "HTTP server error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func buildHTTPHandler(cfg Config, handlers *ToolHandlers, queue *JobQueue, configPath string) http.Handler {
 	syncServer := createSyncServer(cfg, handlers)
 	asyncServer := createAsyncServer(cfg, handlers)
 
@@ -104,22 +161,14 @@ func serveHTTP(ctx context.Context, cfg Config, handlers *ToolHandlers) {
 	}, &mcp.StreamableHTTPOptions{JSONResponse: true})
 
 	mux := http.NewServeMux()
-	mux.Handle(cfg.Server.SyncPath, syncHandler)
-	mux.Handle(cfg.Server.AsyncPath, asyncHandler)
+	mux.Handle("/sync", syncHandler)
+	mux.Handle("/async", asyncHandler)
 
-	httpServer := &http.Server{
-		Addr:    cfg.Server.Addr,
-		Handler: mux,
-	}
+	mux.HandleFunc("POST /admin/reload", func(w http.ResponseWriter, r *http.Request) {
+		resp := doReload(configPath, handlers, queue)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
+	})
 
-	go func() {
-		<-ctx.Done()
-		httpServer.Shutdown(context.Background())
-	}()
-
-	logger.Info("HTTP server listening", "addr", cfg.Server.Addr, "sync", cfg.Server.SyncPath, "async", cfg.Server.AsyncPath)
-	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		fmt.Fprintf(os.Stderr, "HTTP server error: %v\n", err)
-		os.Exit(1)
-	}
+	return mux
 }

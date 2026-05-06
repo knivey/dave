@@ -20,11 +20,9 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Name      string `toml:"name"`
-	Version   string `toml:"version"`
-	Addr      string `toml:"addr"`
-	SyncPath  string `toml:"sync_path"`
-	AsyncPath string `toml:"async_path"`
+	Name    string `toml:"name"`
+	Version string `toml:"version"`
+	Addr    string `toml:"addr"`
 }
 
 type DatabaseConfig struct {
@@ -85,15 +83,6 @@ func loadConfig(configFile string) (Config, error) {
 	cfg.Server.Name = defaultString(cfg.Server.Name, "img-mcp")
 	cfg.Server.Version = defaultString(cfg.Server.Version, "0.1.0")
 	cfg.Server.Addr = defaultString(cfg.Server.Addr, ":8080")
-	cfg.Server.SyncPath = defaultString(cfg.Server.SyncPath, "/sync")
-	cfg.Server.AsyncPath = defaultString(cfg.Server.AsyncPath, "/async")
-
-	if cfg.Server.SyncPath == cfg.Server.AsyncPath {
-		return cfg, fmt.Errorf("server.sync_path and server.async_path must differ")
-	}
-	if cfg.Server.SyncPath[0] != '/' || cfg.Server.AsyncPath[0] != '/' {
-		return cfg, fmt.Errorf("server paths must start with '/'")
-	}
 
 	if cfg.Comfy.BaseURL == "" {
 		return cfg, fmt.Errorf("comfy.baseurl is required")
@@ -192,4 +181,47 @@ func resolvePath(baseDir, path string) string {
 		return path
 	}
 	return filepath.Join(baseDir, path)
+}
+
+func reloadConfigFromFile(configFile string, current Config) (Config, []string, error) {
+	newCfg, err := loadConfig(configFile)
+	if err != nil {
+		return current, nil, err
+	}
+
+	newCfg.Database.Resolved = current.Database.Resolved
+
+	warnings := compareNonReloadable(current, newCfg)
+
+	newCfg.Server = current.Server
+	newCfg.Database = current.Database
+	newCfg.Queue.MaxWorkers = current.Queue.MaxWorkers
+	newCfg.Queue.MaxDepth = current.Queue.MaxDepth
+
+	return newCfg, warnings, nil
+}
+
+func compareNonReloadable(current, newCfg Config) []string {
+	var warnings []string
+
+	if current.Server.Name != newCfg.Server.Name {
+		warnings = append(warnings, fmt.Sprintf("server.name changed from %q to %q: requires restart", current.Server.Name, newCfg.Server.Name))
+	}
+	if current.Server.Version != newCfg.Server.Version {
+		warnings = append(warnings, fmt.Sprintf("server.version changed from %q to %q: requires restart", current.Server.Version, newCfg.Server.Version))
+	}
+	if current.Server.Addr != newCfg.Server.Addr {
+		warnings = append(warnings, fmt.Sprintf("server.addr changed from %q to %q: requires restart", current.Server.Addr, newCfg.Server.Addr))
+	}
+	if current.Database.Path != newCfg.Database.Path {
+		warnings = append(warnings, fmt.Sprintf("database.path changed from %q to %q: requires restart", current.Database.Path, newCfg.Database.Path))
+	}
+	if current.Queue.MaxWorkers != newCfg.Queue.MaxWorkers {
+		warnings = append(warnings, fmt.Sprintf("queue.max_workers changed from %d to %d: requires restart", current.Queue.MaxWorkers, newCfg.Queue.MaxWorkers))
+	}
+	if current.Queue.MaxDepth != newCfg.Queue.MaxDepth {
+		warnings = append(warnings, fmt.Sprintf("queue.max_depth changed from %d to %d: requires restart", current.Queue.MaxDepth, newCfg.Queue.MaxDepth))
+	}
+
+	return warnings
 }

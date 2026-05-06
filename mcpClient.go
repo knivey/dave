@@ -4,11 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"math/rand/v2"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -27,6 +31,7 @@ type MCPServer struct {
 	Tools     []*mcp.Tool
 	Resources []*mcp.Resource
 	Prompts   []*mcp.Prompt
+	cmd       *exec.Cmd
 
 	reconnectMu    sync.Mutex
 	reconnectCount int
@@ -54,8 +59,9 @@ func connectMCPServer(name string, mcpCfg MCPConfig) (*MCPServer, error) {
 	client := mcp.NewClient(&mcp.Implementation{Name: "dave-irc", Version: "1.0.0"}, clientOpts)
 
 	var transport mcp.Transport
+	var cmd *exec.Cmd
 	if mcpCfg.Transport == "stdio" {
-		cmd := exec.Command(mcpCfg.Command, mcpCfg.Args...)
+		cmd = exec.Command(mcpCfg.Command, mcpCfg.Args...)
 		if len(mcpCfg.Env) > 0 {
 			cmd.Env = append(os.Environ(), mcpCfg.Env...)
 		}
@@ -73,6 +79,7 @@ func connectMCPServer(name string, mcpCfg MCPConfig) (*MCPServer, error) {
 		Config:  mcpCfg,
 		Client:  client,
 		Session: session,
+		cmd:     cmd,
 	}
 
 	if session.InitializeResult().Capabilities.Tools != nil {
@@ -175,6 +182,71 @@ func reloadMCPClients(newMCPs map[string]MCPConfig) {
 	closeAndClearMCPClients()
 	config.MCPs = newMCPs
 	initMCPClients()
+}
+
+type ReloadMCPServerResult struct {
+	Warnings []string
+}
+
+func signalMCPServer(name string) (*ReloadMCPServerResult, error) {
+	mcpServersMu.Lock()
+	srv, ok := mcpServers[name]
+	mcpServersMu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("unknown MCP server: %s", name)
+	}
+
+	if srv.Config.Transport == "stdio" {
+		if srv.cmd == nil || srv.cmd.Process == nil {
+			return nil, fmt.Errorf("MCP server %s has no process (not stdio or not started)", name)
+		}
+		if err := srv.cmd.Process.Signal(syscall.SIGHUP); err != nil {
+			return nil, fmt.Errorf("failed to send SIGHUP to %s: %w", name, err)
+		}
+		return &ReloadMCPServerResult{}, nil
+	}
+
+	return signalMCPServerHTTP(name, srv)
+}
+
+func signalMCPServerHTTP(name string, srv *MCPServer) (*ReloadMCPServerResult, error) {
+	parsed, err := url.Parse(srv.Config.URL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse MCP URL for %s: %w", name, err)
+	}
+
+	adminPath := "/admin"
+	reloadURL := fmt.Sprintf("%s://%s%s/reload", parsed.Scheme, parsed.Host, adminPath)
+
+	resp, err := http.Post(reloadURL, "application/json", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to POST reload to %s: %w", name, err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read reload response from %s: %w", name, err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("reload endpoint returned status %d for %s: %s", resp.StatusCode, name, string(body))
+	}
+
+	var result struct {
+		Status   string   `json:"status"`
+		Warnings []string `json:"warnings"`
+		Message  string   `json:"message"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse reload response from %s: %w", name, err)
+	}
+
+	if result.Status == "error" {
+		return nil, fmt.Errorf("reload failed for %s: %s", name, result.Message)
+	}
+
+	return &ReloadMCPServerResult{Warnings: result.Warnings}, nil
 }
 
 func waitForMCPReady() {

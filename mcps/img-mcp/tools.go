@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -180,6 +181,7 @@ type ServerStatusOutput struct {
 }
 
 type ToolHandlers struct {
+	cfgMu sync.RWMutex
 	cfg   Config
 	queue *JobQueue
 }
@@ -188,14 +190,27 @@ func NewToolHandlers(cfg Config, queue *JobQueue) *ToolHandlers {
 	return &ToolHandlers{cfg: cfg, queue: queue}
 }
 
+func (h *ToolHandlers) getConfig() Config {
+	h.cfgMu.RLock()
+	defer h.cfgMu.RUnlock()
+	return h.cfg
+}
+
+func (h *ToolHandlers) setConfig(cfg Config) {
+	h.cfgMu.Lock()
+	defer h.cfgMu.Unlock()
+	h.cfg = cfg
+}
+
 func (h *ToolHandlers) resolveWorkflow(name string) (string, error) {
+	cfg := h.getConfig()
 	if name == "" || name == "default" {
-		name = h.cfg.Comfy.DefaultWorkflow
+		name = cfg.Comfy.DefaultWorkflow
 	}
 	if name == "" {
 		return "", fmt.Errorf("no workflow specified and no default_workflow configured")
 	}
-	if _, ok := h.cfg.Workflows[name]; !ok {
+	if _, ok := cfg.Workflows[name]; !ok {
 		return "", fmt.Errorf("workflow %q not found", name)
 	}
 	return name, nil
@@ -207,7 +222,7 @@ func (h *ToolHandlers) handleEnhancePrompt(ctx context.Context, req *mcp.CallToo
 		enhancementName = "default"
 	}
 
-	result, err := enhancePrompt(ctx, h.cfg, enhancementName, input.Prompt)
+	result, err := enhancePrompt(ctx, h.getConfig(), enhancementName, input.Prompt)
 	if err != nil {
 		return nil, EnhancePromptOutput{}, err
 	}
@@ -367,10 +382,11 @@ func (h *ToolHandlers) handleJobStatus(ctx context.Context, req *mcp.CallToolReq
 }
 
 func (h *ToolHandlers) handleListWorkflows(ctx context.Context, req *mcp.CallToolRequest, input ListWorkflowsInput) (*mcp.CallToolResult, ListWorkflowsOutput, error) {
+	cfg := h.getConfig()
 	out := ListWorkflowsOutput{
-		Default: h.cfg.Comfy.DefaultWorkflow,
+		Default: cfg.Comfy.DefaultWorkflow,
 	}
-	for name, wc := range h.cfg.Workflows {
+	for name, wc := range cfg.Workflows {
 		info := WorkflowInfo{
 			Name:        name,
 			Description: wc.Description,
@@ -404,10 +420,11 @@ func (h *ToolHandlers) handleCancelJob(ctx context.Context, req *mcp.CallToolReq
 }
 
 func (h *ToolHandlers) handleListEnhancements(ctx context.Context, req *mcp.CallToolRequest, input ListEnhancementsInput) (*mcp.CallToolResult, ListEnhancementsOutput, error) {
+	cfg := h.getConfig()
 	out := ListEnhancementsOutput{
 		Default: "default",
 	}
-	for name, ec := range h.cfg.Enhancements {
+	for name, ec := range cfg.Enhancements {
 		out.Enhancements = append(out.Enhancements, EnhancementInfo{
 			Name:        name,
 			Description: ec.Description,
@@ -456,7 +473,7 @@ func (h *ToolHandlers) handleUploadImage(ctx context.Context, req *mcp.CallToolR
 		return nil, UploadImageOutput{}, fmt.Errorf("decoding base64: %w", err)
 	}
 
-	url, err := uploadImage(h.cfg, data, input.Filename)
+	url, err := uploadImage(h.getConfig(), data, input.Filename)
 	if err != nil {
 		return nil, UploadImageOutput{}, err
 	}

@@ -392,16 +392,30 @@ func handleTUICommand(text string) {
 		fmt.Fprintf(logView, "[white]Commands:\n")
 		fmt.Fprintf(logView, "  /help                        - Show this help\n")
 		fmt.Fprintf(logView, "  /reload                      - Reload config from disk\n")
+		fmt.Fprintf(logView, "  /reload <mcp-name>           - Reload MCP server config (SIGHUP/HTTP)\n")
 		fmt.Fprintf(logView, "  /quit, /exit                 - Shut down\n")
 		fmt.Fprintf(logView, "  /join <network> <channel>    - Join a channel\n")
 		fmt.Fprintf(logView, "  /part <network> <channel> [message]\n")
 		fmt.Fprintf(logView, "                               - Leave a channel\n")
 		fmt.Fprintf(logView, "  /nick <network> <nick>       - Change nickname\n")
 	case "/reload":
-		if err := reloadAll(); err != nil {
-			fmt.Fprintf(logView, "[red]Reload failed: %s[white]\n", err)
+		if len(parts) >= 2 {
+			mcpName := parts[1]
+			result, err := signalMCPServer(mcpName)
+			if err != nil {
+				fmt.Fprintf(logView, "[red]Reload %s failed: %s[white]\n", mcpName, err)
+			} else {
+				fmt.Fprintf(logView, "[green]Reload signal sent to %s[white]\n", mcpName)
+				for _, w := range result.Warnings {
+					fmt.Fprintf(logView, "[yellow]Warning: %s[white]\n", w)
+				}
+			}
 		} else {
-			fmt.Fprintf(logView, "[green]Reloaded commands, services, and prompt enhancements[white]\n")
+			if err := reloadAll(); err != nil {
+				fmt.Fprintf(logView, "[red]Reload failed: %s[white]\n", err)
+			} else {
+				fmt.Fprintf(logView, "[green]Reloaded commands, services, and prompt enhancements[white]\n")
+			}
 		}
 	case "/quit", "/exit":
 		requestShutdown()

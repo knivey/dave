@@ -312,3 +312,40 @@ func TestJobQueue_IsReady_WithDB(t *testing.T) {
 
 	require.True(t, q.IsReady(), "expected IsReady true after NewJobQueue with DB (recovery is synchronous)")
 }
+
+func TestJobQueue_ConfigSwap(t *testing.T) {
+	cfg := testConfig("http://127.0.0.1:0")
+	cfg.Queue.MaxWorkers = 0
+	cfg.Queue.ResultTTL = 1 * time.Hour
+
+	db := setupTestDB(t)
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	q := &JobQueue{
+		cfg:     cfg,
+		db:      db,
+		pending: make(chan *Job, cfg.Queue.MaxDepth),
+		results: make(map[string]*Job),
+		cancel:  cancel,
+	}
+
+	got := q.getConfig()
+	assert.Equal(t, 1*time.Hour, got.Queue.ResultTTL)
+	assert.Contains(t, got.Workflows, "test")
+
+	newCfg := cfg
+	newCfg.Queue.ResultTTL = 30 * time.Minute
+	newCfg.Workflows = map[string]WorkflowConfig{
+		"other": {ClientID: "other", OutputNode: "out", PromptNode: "in", Timeout: 60},
+	}
+
+	q.setConfig(newCfg)
+
+	got = q.getConfig()
+	assert.Equal(t, 30*time.Minute, got.Queue.ResultTTL)
+	assert.NotContains(t, got.Workflows, "test")
+	assert.Contains(t, got.Workflows, "other")
+
+	assert.Equal(t, cfg.Queue.MaxWorkers, got.Queue.MaxWorkers, "non-reloadable fields preserved")
+	assert.Equal(t, cfg.Queue.MaxDepth, got.Queue.MaxDepth, "non-reloadable fields preserved")
+}

@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -698,4 +700,213 @@ func TestConcurrentReconnect(t *testing.T) {
 	}
 
 	assert.Greater(t, successCount, 0, "expected at least one successful tool call after concurrent reconnect")
+}
+
+func saveAndResetMCPServers(t *testing.T) {
+	t.Helper()
+	mcpServersMu.Lock()
+	oldServers := mcpServers
+	oldToolMap := mcpToolToServer
+	mcpServersMu.Unlock()
+	t.Cleanup(func() {
+		mcpServersMu.Lock()
+		mcpServers = oldServers
+		mcpToolToServer = oldToolMap
+		mcpServersMu.Unlock()
+	})
+	mcpServers = make(map[string]*MCPServer)
+	mcpToolToServer = make(map[string]string)
+}
+
+func TestSignalMCPServer_UnknownServer(t *testing.T) {
+	saveAndResetMCPServers(t)
+
+	_, err := signalMCPServer("nonexistent")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown MCP server")
+}
+
+func TestSignalMCPServer_Stdio_SendsSIGHUP(t *testing.T) {
+	saveAndResetMCPServers(t)
+
+	cmd := exec.Command("sleep", "999")
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() { cmd.Process.Kill() })
+
+	srv := &MCPServer{
+		Config: MCPConfig{Transport: "stdio"},
+		cmd:    cmd,
+	}
+	mcpServersMu.Lock()
+	mcpServers["img-mcp"] = srv
+	mcpServersMu.Unlock()
+
+	result, err := signalMCPServer("img-mcp")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Empty(t, result.Warnings)
+}
+
+func TestSignalMCPServer_Stdio_NoProcess(t *testing.T) {
+	saveAndResetMCPServers(t)
+
+	srv := &MCPServer{
+		Config: MCPConfig{Transport: "stdio"},
+		cmd:    nil,
+	}
+	mcpServersMu.Lock()
+	mcpServers["img-mcp"] = srv
+	mcpServersMu.Unlock()
+
+	_, err := signalMCPServer("img-mcp")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no process")
+}
+
+func TestSignalMCPServerHTTP_Success(t *testing.T) {
+	saveAndResetMCPServers(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/admin/reload", r.URL.Path)
+		assert.Equal(t, http.MethodPost, r.Method)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"status":"ok"}`)
+	}))
+	defer server.Close()
+
+	srv := &MCPServer{
+		Config: MCPConfig{Transport: "http", URL: server.URL + "/mcp"},
+	}
+	mcpServersMu.Lock()
+	mcpServers["img-mcp"] = srv
+	mcpServersMu.Unlock()
+
+	result, err := signalMCPServer("img-mcp")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Empty(t, result.Warnings)
+}
+
+func TestSignalMCPServerHTTP_WithWarnings(t *testing.T) {
+	saveAndResetMCPServers(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"status":"ok","warnings":["queue.max_workers changed from 1 to 4: requires restart"]}`)
+	}))
+	defer server.Close()
+
+	srv := &MCPServer{
+		Config: MCPConfig{Transport: "http", URL: server.URL + "/mcp"},
+	}
+	mcpServersMu.Lock()
+	mcpServers["img-mcp"] = srv
+	mcpServersMu.Unlock()
+
+	result, err := signalMCPServer("img-mcp")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, result.Warnings, 1)
+	assert.Contains(t, result.Warnings[0], "max_workers")
+}
+
+func TestSignalMCPServerHTTP_ErrorResponse(t *testing.T) {
+	saveAndResetMCPServers(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"status":"error","message":"config error: comfy.baseurl is required"}`)
+	}))
+	defer server.Close()
+
+	srv := &MCPServer{
+		Config: MCPConfig{Transport: "http", URL: server.URL + "/mcp"},
+	}
+	mcpServersMu.Lock()
+	mcpServers["img-mcp"] = srv
+	mcpServersMu.Unlock()
+
+	_, err := signalMCPServer("img-mcp")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "config error")
+}
+
+func TestSignalMCPServerHTTP_ConnectionFailed(t *testing.T) {
+	saveAndResetMCPServers(t)
+
+	srv := &MCPServer{
+		Config: MCPConfig{Transport: "http", URL: "http://127.0.0.1:1/mcp"},
+	}
+	mcpServersMu.Lock()
+	mcpServers["img-mcp"] = srv
+	mcpServersMu.Unlock()
+
+	_, err := signalMCPServer("img-mcp")
+	require.Error(t, err)
+}
+
+func TestSignalMCPServerHTTP_Non200Status(t *testing.T) {
+	saveAndResetMCPServers(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		fmt.Fprintf(w, "internal error")
+	}))
+	defer server.Close()
+
+	srv := &MCPServer{
+		Config: MCPConfig{Transport: "http", URL: server.URL + "/mcp"},
+	}
+	mcpServersMu.Lock()
+	mcpServers["img-mcp"] = srv
+	mcpServersMu.Unlock()
+
+	_, err := signalMCPServer("img-mcp")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "500")
+}
+
+func TestMCPServerCmd_Stdio(t *testing.T) {
+	saveAndResetMCPServers(t)
+
+	origImpl := connectMCPServerImpl
+	defer func() { connectMCPServerImpl = origImpl }()
+
+	var capturedCmd *exec.Cmd
+	connectMCPServerImpl = func(name string, cfg MCPConfig) (*MCPServer, error) {
+		srv := &MCPServer{
+			Config: cfg,
+		}
+		if cfg.Transport == "stdio" {
+			cmd := exec.Command("echo", "test")
+			srv.cmd = cmd
+			capturedCmd = cmd
+		}
+		return srv, nil
+	}
+
+	mcpCfg := MCPConfig{Transport: "stdio", Command: "echo", Args: []string{"test"}}
+	srv, err := connectMCPServerImpl("test", mcpCfg)
+	require.NoError(t, err)
+	assert.NotNil(t, srv.cmd, "cmd should be set for stdio transport")
+	assert.NotNil(t, capturedCmd)
+}
+
+func TestMCPServerCmd_HTTP(t *testing.T) {
+	saveAndResetMCPServers(t)
+
+	origImpl := connectMCPServerImpl
+	defer func() { connectMCPServerImpl = origImpl }()
+
+	connectMCPServerImpl = func(name string, cfg MCPConfig) (*MCPServer, error) {
+		srv := &MCPServer{
+			Config: cfg,
+		}
+		return srv, nil
+	}
+
+	mcpCfg := MCPConfig{Transport: "http", URL: "http://localhost:8080/mcp"}
+	srv, err := connectMCPServerImpl("test", mcpCfg)
+	require.NoError(t, err)
+	assert.Nil(t, srv.cmd, "cmd should be nil for http transport")
 }

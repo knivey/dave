@@ -51,8 +51,8 @@ No Makefile, no linter config. Use `go fmt` + `go vet`.
     - Workflows: `mcps/img-mcp/workflows/*.json`
     - Config path is relative to binary directory by default
     - Built via: `go build -o mcps/img-mcp/img-mcp ./mcps/img-mcp`
-    - **HTTP mode**: serves two MCP servers on one port with path routing (`/sync` and `/async`, configurable). Both share the same `JobQueue`. Sync path exposes blocking tools (`generate_image`, `enhance_and_generate`). Async path exposes non-blocking tools (`generate_image_async`, `wait_for_job`, `cancel_job`, etc.). Stdio mode exposes all tools (backward compatible).
-    - **Config reload**: `SIGHUP` triggers hot reload of `comfy.*`, `upload.*`, `enhancements`, `workflows`, `queue.result_ttl`. Non-reloadable fields (`server.*`, `database.*`, `queue.max_workers`, `queue.max_depth`) are preserved from startup; warnings logged if they changed. HTTP mode also exposes `POST /admin/reload` (path configurable via `server.admin_path`, default `"/admin"`).
+    - **HTTP mode**: serves two MCP servers on one port with hardcoded path routing (`/sync` and `/async`). Both share the same `JobQueue`. Sync path exposes blocking tools (`generate_image`, `enhance_and_generate`). Async path exposes non-blocking tools (`generate_image_async`, `wait_for_job`, `cancel_job`, etc.). Stdio mode exposes all tools (backward compatible). Admin endpoint at `/admin/reload`.
+    - **Config reload**: `SIGHUP` triggers hot reload of `comfy.*`, `upload.*`, `enhancements`, `workflows`, `queue.result_ttl`. Non-reloadable fields (`server.*`, `database.*`, `queue.max_workers`, `queue.max_depth`) are preserved from startup; warnings logged if they changed. HTTP mode also exposes `POST /admin/reload`.
     - `server.go`: three server builders — `createSyncServer`, `createAsyncServer`, `createFullServer` (stdio).
     - Config access: `ToolHandlers` and `JobQueue` use `getConfig()`/`setConfig()` with `sync.RWMutex` for atomic config swaps during reload.
     - Dave connects via two MCP entries in `mcps.toml`: `[img-mcp]` (sync path) and `[img-mcp-async]` (async path).

@@ -67,8 +67,9 @@ type ImageData struct {
 }
 
 type JobQueue struct {
-	cfg Config
-	db  *sqlx.DB
+	cfgMu sync.RWMutex
+	cfg   Config
+	db    *sqlx.DB
 
 	pending chan *Job
 	results map[string]*Job
@@ -86,6 +87,18 @@ type JobQueue struct {
 	shutdownCtx    context.Context
 	shutdownCancel context.CancelFunc
 	ready          atomic.Bool
+}
+
+func (q *JobQueue) getConfig() Config {
+	q.cfgMu.RLock()
+	defer q.cfgMu.RUnlock()
+	return q.cfg
+}
+
+func (q *JobQueue) setConfig(cfg Config) {
+	q.cfgMu.Lock()
+	defer q.cfgMu.Unlock()
+	q.cfg = cfg
 }
 
 func NewJobQueue(cfg Config, db *sqlx.DB) *JobQueue {
@@ -128,7 +141,8 @@ func (q *JobQueue) IsReady() bool {
 }
 
 func (q *JobQueue) Submit(jobType JobType, workflow string, input JobInput) (*Job, error) {
-	_, ok := q.cfg.Workflows[workflow]
+	cfg := q.getConfig()
+	_, ok := cfg.Workflows[workflow]
 	if !ok {
 		return nil, fmt.Errorf("workflow %q not found", workflow)
 	}
@@ -163,7 +177,7 @@ func (q *JobQueue) Submit(jobType JobType, workflow string, input JobInput) (*Jo
 
 		return job, nil
 	default:
-		return nil, fmt.Errorf("queue is full (%d jobs pending)", q.cfg.Queue.MaxDepth)
+		return nil, fmt.Errorf("queue is full (%d jobs pending)", cfg.Queue.MaxDepth)
 	}
 }
 
@@ -230,7 +244,7 @@ func (q *JobQueue) Cancel(jobID string) bool {
 		}
 		if job.ComfyPromptID != "" {
 			interruptCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			if err := interruptComfyPrompt(interruptCtx, q.cfg, job.ComfyPromptID); err != nil {
+			if err := interruptComfyPrompt(interruptCtx, q.getConfig(), job.ComfyPromptID); err != nil {
 				loggerQueue.Warn("failed to interrupt comfy prompt", "prompt_id", job.ComfyPromptID, "job_id", jobID, "error", err)
 			}
 			cancel()
@@ -336,10 +350,11 @@ func (q *JobQueue) Status() QueueStatusResult {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
 
+	cfg := q.getConfig()
 	now := time.Now().UTC()
 	result := QueueStatusResult{
-		MaxWorkers: q.cfg.Queue.MaxWorkers,
-		MaxDepth:   q.cfg.Queue.MaxDepth,
+		MaxWorkers: cfg.Queue.MaxWorkers,
+		MaxDepth:   cfg.Queue.MaxDepth,
 	}
 
 	runningJobs := make([]*Job, 0)
@@ -385,7 +400,8 @@ func (q *JobQueue) Status() QueueStatusResult {
 }
 
 func (q *JobQueue) calcRemainingETA(job *Job, now time.Time) *int {
-	wc := q.cfg.Workflows[job.Workflow]
+	cfg := q.getConfig()
+	wc := cfg.Workflows[job.Workflow]
 	if wc.TypicalTime == 0 || job.StartedAt == nil {
 		return nil
 	}
@@ -398,11 +414,12 @@ func (q *JobQueue) calcRemainingETA(job *Job, now time.Time) *int {
 }
 
 func (q *JobQueue) calcQueuedETA(job *Job, position int, queuedJobs []*Job, runningJobs []*Job, now time.Time) *int {
-	wc := q.cfg.Workflows[job.Workflow]
+	cfg := q.getConfig()
+	wc := cfg.Workflows[job.Workflow]
 
 	runningRemaining := time.Duration(0)
 	for _, rj := range runningJobs {
-		rwc := q.cfg.Workflows[rj.Workflow]
+		rwc := cfg.Workflows[rj.Workflow]
 		if rwc.TypicalTime > 0 && rj.StartedAt != nil {
 			remaining := rwc.TypicalTime - now.Sub(*rj.StartedAt)
 			if remaining > 0 {
@@ -413,7 +430,7 @@ func (q *JobQueue) calcQueuedETA(job *Job, position int, queuedJobs []*Job, runn
 
 	aheadTime := time.Duration(0)
 	for i := 0; i < position; i++ {
-		qwc := q.cfg.Workflows[queuedJobs[i].Workflow]
+		qwc := cfg.Workflows[queuedJobs[i].Workflow]
 		if qwc.TypicalTime > 0 {
 			aheadTime += qwc.TypicalTime
 		}
@@ -464,6 +481,8 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 	job.cancelCtx = cancel
 	defer cancel()
 
+	cfg := q.getConfig()
+
 	now := time.Now().UTC()
 	job.Status = StatusRunning
 	job.StartedAt = &now
@@ -501,7 +520,7 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 			enhancementName = "default"
 		}
 
-		result, err := enhancePrompt(jobCtx, q.cfg, enhancementName, job.Input.Prompt)
+		result, err := enhancePrompt(jobCtx, cfg, enhancementName, job.Input.Prompt)
 		if err != nil {
 			if jobCtx.Err() != nil {
 				return
@@ -515,13 +534,13 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 		}
 	}
 
-	workflow, err := prepareComfyWorkflow(q.cfg, job.Workflow, prompt, negativePrompt, job.Input.Seed)
+	workflow, err := prepareComfyWorkflow(cfg, job.Workflow, prompt, negativePrompt, job.Input.Seed)
 	if err != nil {
 		q.failJob(job, fmt.Sprintf("workflow preparation failed: %v", err))
 		return
 	}
 
-	promptID, err := submitComfyPrompt(jobCtx, q.cfg, job.Workflow, workflow)
+	promptID, err := submitComfyPrompt(jobCtx, cfg, job.Workflow, workflow)
 	if err != nil {
 		if jobCtx.Err() != nil {
 			return
@@ -538,7 +557,7 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 		}
 	}
 
-	comfyResult, err := monitorComfyGeneration(jobCtx, q.cfg, job.Workflow, promptID)
+	comfyResult, err := monitorComfyGeneration(jobCtx, cfg, job.Workflow, promptID)
 	if err != nil {
 		if job.Status == StatusCancelled {
 			return
@@ -565,7 +584,7 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 
 		switch outputFormat {
 		case "url":
-			url, err := uploadImage(q.cfg, img.Data, img.Filename)
+			url, err := uploadImage(cfg, img.Data, img.Filename)
 			if err != nil {
 				q.failJob(job, fmt.Sprintf("upload failed: %v", err))
 				return
@@ -574,7 +593,7 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 		case "base64":
 			imgData.Base64 = encodeBase64(img.Data)
 		case "both":
-			url, err := uploadImage(q.cfg, img.Data, img.Filename)
+			url, err := uploadImage(cfg, img.Data, img.Filename)
 			if err != nil {
 				q.failJob(job, fmt.Sprintf("upload failed: %v", err))
 				return
@@ -624,15 +643,16 @@ func (q *JobQueue) cleanup() {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
+	cfg := q.getConfig()
 	now := time.Now()
 	for id, job := range q.results {
-		if job.CompletedAt != nil && now.Sub(*job.CompletedAt) > q.cfg.Queue.ResultTTL {
+		if job.CompletedAt != nil && now.Sub(*job.CompletedAt) > cfg.Queue.ResultTTL {
 			delete(q.results, id)
 		}
 	}
 
 	if q.db != nil {
-		if _, err := dbCleanupExpiredJobs(q.db, q.cfg.Queue.ResultTTL); err != nil {
+		if _, err := dbCleanupExpiredJobs(q.db, cfg.Queue.ResultTTL); err != nil {
 			loggerQueue.Error("error cleaning up expired jobs from DB", "error", err)
 		}
 	}
@@ -716,7 +736,7 @@ func (q *JobQueue) recoverJobs(ctx context.Context) {
 		}
 	}
 
-	completed, err := dbLoadRecentCompletedJobs(q.db, q.cfg.Queue.ResultTTL)
+	completed, err := dbLoadRecentCompletedJobs(q.db, q.getConfig().Queue.ResultTTL)
 	if err != nil {
 		loggerQueue.Error("error loading recent completed jobs", "error", err)
 		return
@@ -752,10 +772,11 @@ func (q *JobQueue) recoverJobs(ctx context.Context) {
 func (q *JobQueue) recoverRunningJob(_ context.Context, job *Job, comfyPromptID string) {
 	defer q.wg.Done()
 
-	recoverCtx, recoverCancel := context.WithTimeout(context.Background(), time.Duration(q.cfg.Comfy.Timeout)*time.Second)
+	cfg := q.getConfig()
+	recoverCtx, recoverCancel := context.WithTimeout(context.Background(), time.Duration(cfg.Comfy.Timeout)*time.Second)
 	defer recoverCancel()
 
-	comfyResult, err := resumeComfyGeneration(recoverCtx, q.cfg, job.Workflow, comfyPromptID)
+	comfyResult, err := resumeComfyGeneration(recoverCtx, cfg, job.Workflow, comfyPromptID)
 	if err != nil {
 		loggerQueue.Error("failed to recover job", "job_id", job.ID, "error", err)
 		q.mu.Lock()
@@ -787,7 +808,7 @@ func (q *JobQueue) recoverRunningJob(_ context.Context, job *Job, comfyPromptID 
 
 		switch outputFormat {
 		case "url":
-			url, err := uploadImage(q.cfg, img.Data, img.Filename)
+			url, err := uploadImage(cfg, img.Data, img.Filename)
 			if err != nil {
 				q.mu.Lock()
 				q.failJob(job, fmt.Sprintf("upload failed during recovery: %v", err))
@@ -798,7 +819,7 @@ func (q *JobQueue) recoverRunningJob(_ context.Context, job *Job, comfyPromptID 
 		case "base64":
 			imgData.Base64 = encodeBase64(img.Data)
 		case "both":
-			url, err := uploadImage(q.cfg, img.Data, img.Filename)
+			url, err := uploadImage(cfg, img.Data, img.Filename)
 			if err != nil {
 				q.mu.Lock()
 				q.failJob(job, fmt.Sprintf("upload failed during recovery: %v", err))

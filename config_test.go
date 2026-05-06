@@ -512,6 +512,99 @@ func boolPtr(b bool) *bool {
 	return &b
 }
 
+func intPtr(i int) *int {
+	return &i
+}
+
+func TestGetPastebinPreviewLines(t *testing.T) {
+	tests := []struct {
+		name     string
+		chCfg    ChannelConfig
+		pastebin PastebinConfig
+		want     int
+	}{
+		{
+			name:     "defaults to 3 when nothing set",
+			chCfg:    ChannelConfig{},
+			pastebin: PastebinConfig{},
+			want:     3,
+		},
+		{
+			name:     "channel overrides pastebin config",
+			chCfg:    ChannelConfig{PastebinPreviewLines: intPtr(1)},
+			pastebin: PastebinConfig{PastebinPreviewLines: intPtr(5)},
+			want:     1,
+		},
+		{
+			name:     "falls back to pastebin config when channel not set",
+			chCfg:    ChannelConfig{},
+			pastebin: PastebinConfig{PastebinPreviewLines: intPtr(3)},
+			want:     3,
+		},
+		{
+			name:     "falls back to pastebin config clamped by default maxLines",
+			chCfg:    ChannelConfig{},
+			pastebin: PastebinConfig{PastebinPreviewLines: intPtr(7)},
+			want:     4,
+		},
+		{
+			name:     "pastebin config with explicit maxLines not clamped",
+			chCfg:    ChannelConfig{MaxLines: 10},
+			pastebin: PastebinConfig{PastebinPreviewLines: intPtr(7)},
+			want:     7,
+		},
+		{
+			name:     "zero disables preview",
+			chCfg:    ChannelConfig{PastebinPreviewLines: intPtr(0)},
+			pastebin: PastebinConfig{},
+			want:     0,
+		},
+		{
+			name:     "negative value clamped to 0",
+			chCfg:    ChannelConfig{PastebinPreviewLines: intPtr(-5)},
+			pastebin: PastebinConfig{},
+			want:     0,
+		},
+		{
+			name:     "value equal to maxLines clamped to maxLines-1",
+			chCfg:    ChannelConfig{MaxLines: 5, PastebinPreviewLines: intPtr(5)},
+			pastebin: PastebinConfig{},
+			want:     4,
+		},
+		{
+			name:     "value greater than maxLines clamped to maxLines-1",
+			chCfg:    ChannelConfig{MaxLines: 3, PastebinPreviewLines: intPtr(10)},
+			pastebin: PastebinConfig{},
+			want:     2,
+		},
+		{
+			name:     "maxLines defaults to 5 when clamping",
+			chCfg:    ChannelConfig{PastebinPreviewLines: intPtr(5)},
+			pastebin: PastebinConfig{},
+			want:     4,
+		},
+		{
+			name:     "pastebin config value also clamped by maxLines",
+			chCfg:    ChannelConfig{MaxLines: 2},
+			pastebin: PastebinConfig{PastebinPreviewLines: intPtr(10)},
+			want:     1,
+		},
+		{
+			name:     "channel zero disables even when pastebin config set",
+			chCfg:    ChannelConfig{PastebinPreviewLines: intPtr(0)},
+			pastebin: PastebinConfig{PastebinPreviewLines: intPtr(5)},
+			want:     0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.chCfg.GetPastebinPreviewLines(tt.pastebin)
+			assert.Equal(t, tt.want, got, "GetPastebinPreviewLines()")
+		})
+	}
+}
+
 func TestParallelToolCallsCascading(t *testing.T) {
 	tests := []struct {
 		name   string

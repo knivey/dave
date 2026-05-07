@@ -77,11 +77,11 @@ var support_re = regexp.MustCompile("^support$")
 type CmdMap map[*regexp.Regexp]CmdFunc
 
 func errorMsg(msg string) string {
-	return "\x0304❗ " + msg
+	return noticeErrorPrefix.Load().(string) + msg
 }
 
 func warnMsg(msg string) string {
-	return "\x0308⚠️ " + msg
+	return noticeWarnPrefix.Load().(string) + msg
 }
 
 var builtInCmds = CmdMap{
@@ -180,6 +180,7 @@ func reloadAll() error {
 	registerCommandsLocked(config.Commands)
 	if queueMgr != nil {
 		queueMgr.UpdateServiceLimits(config.Services)
+		queueMgr.UpdateNotices(config.Notices)
 	}
 	loadIgnores(filepath.Join(configDir, "ignores.txt"))
 	return nil
@@ -225,7 +226,7 @@ func main() {
 	LoadContextStore()
 	CleanupContexts()
 	initMCPClients()
-	queueMgr = NewQueueManager(config.QueueMsgs, config.StartedMsg, config.MaxQueueDepth)
+	queueMgr = NewQueueManager(config.Notices, config.MaxQueueDepth)
 	queueMgr.UpdateServiceLimits(config.Services)
 	queueMgr.Start()
 	startJobManager()
@@ -454,12 +455,14 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 		}
 		if !ContextExists(ctx_key) {
 			logger.Info("Ignoring message due to no existing chat context")
-			client.Cmd.Reply(event, warnMsg("you dont have a chat context, start one with one of my many fabulous chat commands. After starting, just reply to my nick to continue the conversation"))
+			var noCtxMsg string
+			readConfig(func() { noCtxMsg = config.Notices.Context.NoContext })
+			client.Cmd.Reply(event, warnMsg(noCtxMsg))
 			return
 		}
 		if !checkRate(network, event.Params[0]) {
 			var rateMsg string
-			readConfig(func() { rateMsg = config.Ratemsg() })
+			readConfig(func() { rateMsg = config.Notices.Ratemsg() })
 			client.Cmd.Reply(event, warnMsg(rateMsg))
 			return
 		}
@@ -474,7 +477,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 			})
 		if position > 0 {
 			var queueMsg string
-			readConfig(func() { queueMsg = config.QueueMsg(position, 0) })
+			readConfig(func() { queueMsg = config.Notices.QueueMsg(position, 0) })
 			client.Cmd.Reply(event, queueMsg)
 		}
 		return
@@ -503,7 +506,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 
 			if !checkRate(network, event.Params[0]) {
 				var rateMsg string
-				readConfig(func() { rateMsg = config.Ratemsg() })
+				readConfig(func() { rateMsg = config.Notices.Ratemsg() })
 				client.Cmd.Reply(event, warnMsg(rateMsg))
 				return
 			}
@@ -519,7 +522,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 				})
 			if position > 0 {
 				var queueMsg string
-				readConfig(func() { queueMsg = config.QueueMsg(position, 0) })
+				readConfig(func() { queueMsg = config.Notices.QueueMsg(position, 0) })
 				client.Cmd.Reply(event, queueMsg)
 			}
 			return
@@ -538,7 +541,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 
 			if !checkRate(network, event.Params[0]) {
 				var rateMsg string
-				readConfig(func() { rateMsg = config.Ratemsg() })
+				readConfig(func() { rateMsg = config.Notices.Ratemsg() })
 				client.Cmd.Reply(event, warnMsg(rateMsg))
 				return
 			}
@@ -576,7 +579,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 				})
 			if position > 0 {
 				var queueMsg string
-				readConfig(func() { queueMsg = config.QueueMsg(position, 0) })
+				readConfig(func() { queueMsg = config.Notices.QueueMsg(position, 0) })
 				client.Cmd.Reply(event, queueMsg)
 			}
 			return

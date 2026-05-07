@@ -18,7 +18,7 @@ func newTestQM(t *testing.T) *QueueManager {
 	botReadyFn = func(_, _ string) bool { return true }
 	t.Cleanup(func() { botReadyFn = origBotReady })
 
-	qm := NewQueueManager([]string{"queued (position {position})"}, "started", 5)
+	qm := NewQueueManager(NoticesConfig{Queue: QueueNotices{Msg: "queued (position {position})", Started: "started"}}, 5)
 	qm.UpdateServiceLimits(map[string]Service{"svc": {Parallel: 1}})
 	qm.Start()
 	t.Cleanup(func() { qm.Stop() })
@@ -179,7 +179,7 @@ func TestQueueManager_StopCurrentStartsNext(t *testing.T) {
 }
 
 func TestQueueManager_DifferentChannelsParallel(t *testing.T) {
-	qm := NewQueueManager([]string{"queued"}, "started", 5)
+	qm := NewQueueManager(NoticesConfig{Queue: QueueNotices{Msg: "queued", Started: "started"}}, 5)
 	qm.UpdateServiceLimits(map[string]Service{"svc": {Parallel: 2}})
 	qm.Start()
 	t.Cleanup(func() { qm.Stop() })
@@ -415,7 +415,7 @@ func TestQueueManager_CrossUserFIFOOrder(t *testing.T) {
 }
 
 func TestQueueManager_ConcurrentExecutionFIFODelivery(t *testing.T) {
-	qm := NewQueueManager([]string{"queued"}, "started", 5)
+	qm := NewQueueManager(NoticesConfig{Queue: QueueNotices{Msg: "queued", Started: "started"}}, 5)
 	qm.UpdateServiceLimits(map[string]Service{"svc": {Parallel: 2}})
 	qm.Start()
 	t.Cleanup(func() { qm.Stop() })
@@ -484,7 +484,7 @@ func TestQueueManager_ServiceParallel1(t *testing.T) {
 }
 
 func TestQueueManager_ServiceParallel0(t *testing.T) {
-	qm := NewQueueManager([]string{"queued"}, "started", 5)
+	qm := NewQueueManager(NoticesConfig{Queue: QueueNotices{Msg: "queued", Started: "started"}}, 5)
 	qm.UpdateServiceLimits(map[string]Service{"svc": {Parallel: 0}})
 	qm.Start()
 	t.Cleanup(func() { qm.Stop() })
@@ -537,7 +537,7 @@ func TestQueueManager_CancellationPropagation(t *testing.T) {
 }
 
 func TestQueueManager_SchedulerFairness(t *testing.T) {
-	qm := NewQueueManager([]string{"queued"}, "started", 5)
+	qm := NewQueueManager(NoticesConfig{Queue: QueueNotices{Msg: "queued", Started: "started"}}, 5)
 	qm.UpdateServiceLimits(map[string]Service{"svc": {Parallel: 1}})
 	qm.Start()
 	t.Cleanup(func() { qm.Stop() })

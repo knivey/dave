@@ -21,10 +21,7 @@ type Config struct {
 	Networks             map[string]Network
 	Services             map[string]Service
 	Commands             Commands
-	QueueMsgs            []string `toml:"queue_msgs"`
-	StartedMsg           string   `toml:"started_msg"`
-	MaxQueueDepth        int      `toml:"max_queue_depth"`
-	Ratemsgs             []string
+	MaxQueueDepth        int    `toml:"max_queue_depth"`
 	UploadURL            string `toml:"uploadurl"`
 	Database             DatabaseConfig
 	MCPs                 map[string]MCPConfig `toml:"mcps"`
@@ -34,6 +31,7 @@ type Config struct {
 	Pastebin             PastebinConfig    `toml:"pastebin"`
 	TemplateVars         map[string]string `toml:"-"`
 	SessionsDisplayLimit int               `toml:"sessions_display_limit"`
+	Notices              NoticesConfig     `toml:"-"`
 }
 
 type PastebinConfig struct {
@@ -241,10 +239,6 @@ func validateSystemPromptTemplate(tmpl *template.Template) error {
 	return tmpl.Execute(&buf, dummy)
 }
 
-func (c *Config) Ratemsg() string {
-	return c.Ratemsgs[globalRand.Intn(len(c.Ratemsgs))]
-}
-
 func (cfg *AIConfig) ApplyDefaults(service Service) {
 	if cfg.MaxTokens == 0 {
 		cfg.MaxTokens = service.MaxTokens
@@ -365,17 +359,8 @@ func loadConfigDir(dir string) (Config, error) {
 		return config, fmt.Errorf("loading %s: %w", mainFile, err)
 	}
 
-	if len(config.QueueMsgs) == 0 {
-		config.QueueMsgs = []string{"queued (position {position})"}
-	}
-	if config.StartedMsg == "" {
-		config.StartedMsg = "\x0306\u25b6 {nick}: Processing your request (waited {wait})...{prompt}\x0f"
-	}
 	if config.MaxQueueDepth <= 0 {
 		config.MaxQueueDepth = 5
-	}
-	if len(config.Ratemsgs) == 0 {
-		config.Ratemsgs = []string{"hold on you're going to fast"}
 	}
 	if config.TUI.ScrollbackLines == 0 {
 		config.TUI.ScrollbackLines = 5000
@@ -416,6 +401,10 @@ func loadConfigDir(dir string) (Config, error) {
 	}
 
 	if err := loadTemplateVarsFile(dir, &config); err != nil {
+		return config, err
+	}
+
+	if err := loadNoticesFile(dir, &config); err != nil {
 		return config, err
 	}
 
@@ -515,10 +504,15 @@ func loadReloadableDir(dir string, config *Config) error {
 		return err
 	}
 
+	if err := loadNoticesFile(dir, &tmpConfig); err != nil {
+		return err
+	}
+
 	config.MCPs = tmpConfig.MCPs
 	config.Services = tmpConfig.Services
 	config.Commands = commands
 	config.TemplateVars = tmpConfig.TemplateVars
+	config.Notices = tmpConfig.Notices
 
 	return nil
 }

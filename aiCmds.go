@@ -282,7 +282,7 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 
 	for {
 		if iterations >= maxToolIterations {
-			cr.sendIRC("\x0308⚠️ Tool call limit reached, stopping.\x0F")
+			cr.sendIRC(getNotices().Tools.CallLimit)
 			cr.logger.Warn("max tool iterations reached", "limit", maxToolIterations)
 			return messages, true
 		}
@@ -576,8 +576,9 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 					if len(lines) >= chCfg.GetMaxLines() {
 						pasteTitle := cr.cfg.Service + "/" + cr.cfg.Model
 						url, err := uploadToPastebin(rawText, pasteTitle)
+						n := getNotices()
 						if err != nil {
-							cr.sendIRC(errorMsg("pastebin: " + err.Error()))
+							cr.sendIRC(errorMsg(expandNotice(n.DB.PastebinUpload, map[string]string{"error": err.Error()})))
 							preview := chCfg.GetMaxLines()
 							if preview > len(lines) {
 								preview = len(lines)
@@ -585,7 +586,7 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 							for i := 0; i < preview; i++ {
 								cr.sendIRC(lines[i])
 							}
-							cr.sendIRC("... (full output could not be pasted)")
+							cr.sendIRC(n.Pastebin.Failed)
 						} else {
 							preview := chCfg.GetPastebinPreviewLines(config.Pastebin)
 							if preview > len(lines) {
@@ -594,7 +595,7 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 							for i := 0; i < preview; i++ {
 								cr.sendIRC(lines[i])
 							}
-							cr.sendIRC(fmt.Sprintf("... ( full output: %s )", url))
+							cr.sendIRC(expandNotice(n.Pastebin.Link, map[string]string{"url": url}))
 						}
 						return messages, true
 					}
@@ -642,7 +643,7 @@ func (cr *chatRunner) executeToolCalls(messages []ChatMessage, toolCalls []ToolC
 		}
 		if cr.cfg.ToolVerbose == nil || *cr.cfg.ToolVerbose {
 			serverName := getMCPServerForTool(tc.Function.Name)
-			cr.sendIRC(fmt.Sprintf("\x0315🔧 ToolCall: %s > %s", serverName, tc.Function.Name))
+			cr.sendIRC(expandNotice(getNotices().Tools.Call, map[string]string{"server": serverName, "tool": tc.Function.Name}))
 		}
 		var toolArgs map[string]any
 		json.Unmarshal([]byte(tc.Function.Arguments), &toolArgs)
@@ -934,8 +935,9 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 					if len(lines) >= chCfg.GetMaxLines() {
 						pasteTitle := cr.cfg.Service + "/" + cr.cfg.Model
 						url, err := uploadToPastebin(rawText, pasteTitle)
+						n := getNotices()
 						if err != nil {
-							cr.sendIRC(errorMsg("pastebin: " + err.Error()))
+							cr.sendIRC(errorMsg(expandNotice(n.DB.PastebinUpload, map[string]string{"error": err.Error()})))
 							preview := chCfg.GetMaxLines()
 							if preview > len(lines) {
 								preview = len(lines)
@@ -943,7 +945,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 							for i := 0; i < preview; i++ {
 								cr.sendIRC(lines[i])
 							}
-							cr.sendIRC("... (full output could not be pasted)")
+							cr.sendIRC(n.Pastebin.Failed)
 						} else {
 							preview := chCfg.GetPastebinPreviewLines(config.Pastebin)
 							if preview > len(lines) {
@@ -952,7 +954,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 							for i := 0; i < preview; i++ {
 								cr.sendIRC(lines[i])
 							}
-							cr.sendIRC(fmt.Sprintf("... ( full output: %s )", url))
+							cr.sendIRC(expandNotice(n.Pastebin.Link, map[string]string{"url": url}))
 						}
 						return messages, true
 					}
@@ -994,7 +996,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 		}
 	}
 
-	cr.sendIRC("\x0308⚠️ Tool call limit reached, stopping.\x0F")
+	cr.sendIRC(getNotices().Tools.CallLimit)
 	cr.logger.Warn("max tool iterations reached")
 	return messages, true
 }
@@ -1089,7 +1091,7 @@ func (cr *chatRunner) callResponsesStream(ctx context.Context, params responses.
 			case "response.output_item.done":
 				if event.Item.Type == "function_call" && (cr.cfg.ToolVerbose == nil || *cr.cfg.ToolVerbose) {
 					serverName := getMCPServerForTool(event.Item.Name)
-					cr.sendIRC(fmt.Sprintf("\x0315🔧 ToolCall: %s > %s", serverName, event.Item.Name))
+					cr.sendIRC(expandNotice(getNotices().Tools.Call, map[string]string{"server": serverName, "tool": event.Item.Name}))
 				}
 
 			case "response.completed":
@@ -1189,21 +1191,22 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 		if len(imageUrls) > 0 {
 			existingImages := countContextImages(messages)
 			remaining := cfg.MaxContextImages - existingImages
+			n := getNotices()
 
 			if remaining <= 0 {
-				runner.sendWarning(fmt.Sprintf("image limit reached (%d max in context), send text only", cfg.MaxContextImages))
+				runner.sendWarning(expandNotice(n.Images.LimitReached, map[string]string{"max": fmt.Sprintf("%d", cfg.MaxContextImages)}))
 				return
 			}
 
 			if len(imageUrls) > remaining {
-				runner.sendWarning(fmt.Sprintf("only %d more image(s) allowed in this context (%d/%d used)", remaining, existingImages, cfg.MaxContextImages))
+				runner.sendWarning(expandNotice(n.Images.PartialLimit, map[string]string{"remaining": fmt.Sprintf("%d", remaining), "used": fmt.Sprintf("%d", existingImages), "max": fmt.Sprintf("%d", cfg.MaxContextImages)}))
 				return
 			}
 
 			var err error
 			userMsg, err = buildImageMessage(cleanText, imageUrls, cfg.MaxImages, cfg.ImageFormat, cfg.ImageQuality, cfg.MaxImageWidth, cfg.MaxImageHeight)
 			if err != nil {
-				runner.sendError("failed to process images: " + err.Error())
+				runner.sendError(expandNotice(n.DB.ProcessImages, map[string]string{"error": err.Error()}))
 				return
 			}
 		} else {

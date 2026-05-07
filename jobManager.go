@@ -334,8 +334,13 @@ func switchToSession(job *asyncJob) string {
 	if currentCtx.SessionID != 0 {
 		bot := getBotFn(job.Network)
 		if bot != nil && bot.Client != nil {
-			switchMsg = fmt.Sprintf("\x02Switched %s's session to #%d\x02. Use %sresume %d to go back.",
-				job.Nick, job.SessionID, bot.Network.Trigger, currentCtx.SessionID)
+			n := getNotices()
+			switchMsg = expandNotice(n.Sessions.Switched, map[string]string{
+				"nick":    job.Nick,
+				"id":      fmt.Sprintf("%d", job.SessionID),
+				"trigger": bot.Network.Trigger,
+				"old_id":  fmt.Sprintf("%d", currentCtx.SessionID),
+			})
 		}
 	}
 
@@ -503,8 +508,9 @@ func onToolAsyncJobCompleted(job *toolAsyncJob, resultText string) {
 		}
 	}
 
+	startedOverride := getNotices().Tools.ToolAsyncStarted
 	queueMgr.EnqueueAtWithPrompt(job.Network, job.Channel, job.Nick, "", job.ToolName, job.Prompt,
-		"\x0306\u25b6 {nick}: Processed your image request (waited {wait})...{prompt}\x0f",
+		startedOverride,
 		job.SubmittedAt,
 		func(ctx context.Context, output chan<- string) {
 			deliverToolAsyncResult(job, resultText, ctx, output)
@@ -523,6 +529,7 @@ type waitForJobInner struct {
 }
 
 func deliverToolAsyncResult(job *toolAsyncJob, resultText string, ctx context.Context, output chan<- string) {
+	n := getNotices()
 	var waitResult waitForJobResult
 	if err := json.Unmarshal([]byte(resultText), &waitResult); err == nil {
 		if waitResult.Error != "" {
@@ -544,12 +551,16 @@ func deliverToolAsyncResult(job *toolAsyncJob, resultText string, ctx context.Co
 			}
 		} else if waitResult.Status == "completed" {
 			select {
-			case output <- fmt.Sprintf("\x02%s\x02's image job completed but returned no images.", job.Nick):
+			case output <- expandNotice(n.Images.NoImages, map[string]string{"nick": job.Nick}):
 			case <-ctx.Done():
 			}
 		} else {
 			select {
-			case output <- fmt.Sprintf("\x02%s\x02's image job %s: %s", job.Nick, waitResult.Status, waitResult.Error):
+			case output <- expandNotice(n.Images.JobStatus, map[string]string{
+				"nick":   job.Nick,
+				"status": waitResult.Status,
+				"error":  waitResult.Error,
+			}):
 			case <-ctx.Done():
 			}
 		}

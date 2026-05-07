@@ -41,9 +41,10 @@ No Makefile, no linter config. Use `go fmt` + `go vet`.
 - `tui.go`: tview-based TUI with scrolling log view and command input (`/help`, `/reload`, `/join`, `/part`, `/nick`, `/quit`).
 - `config.go`: directory-based config loading with error-returning validation (reload-safe).
 - `mcpClient.go`: MCP client lifecycle — `initMCPClients`, `closeMCPClients`, `closeAndClearMCPClients`, `reloadMCPClients`, `signalMCPServer`. Automatic reconnection with exponential backoff on tool/resource/prompt call failure. `connectMCPServer` creates a single server connection (stores `exec.Cmd` for stdio processes); `reconnectMCPServer` handles reconnect with per-server mutex and backoff state. `connectMCPServerImpl` is a package-level var (overridable in tests). `signalMCPServer` sends SIGHUP to stdio processes or POSTs to the HTTP admin reload endpoint.
-- Config in TOML directory: `config/config.toml` (main), `config/services.toml`, `config/promptenhancements.toml`, `config/mcps.toml`, `config/completions.toml`, `config/chats.toml`, `config/sd.toml`, `config/comfy.toml`.
-  - Missing command/service/promptenhancement/mcps files = empty maps (not fatal).
+- Config in TOML directory: `config/config.toml` (main), `config/services.toml`, `config/promptenhancements.toml`, `config/mcps.toml`, `config/completions.toml`, `config/chats.toml`, `config/sd.toml`, `config/comfy.toml`, `config/notices.toml`.
+  - Missing command/service/promptenhancement/mcps/notices files = empty maps/defaults (not fatal).
   - `ignores.txt` (see `.example`) for host ignores (wildcard).
+- `notices.go`: Templatizable user-facing notice/reply system. All IRC messages (errors, warnings, queue status, session management, tool calls, pastebin, etc.) use `{placeholder}` templates loaded from `notices.toml`. Missing fields use hardcoded defaults via `setNoticesDefaults()`. Reloadable via `/reload`. `getNotices()` helper reads config under RLock. `expandNotice(tmpl, vars)` does `{key}` → value replacement. `errorMsg()`/`warnMsg()` use cached prefix globals (`noticeErrorPrefix`/`noticeWarnPrefix`) updated on config load/reload.
 - MCP servers are self-contained packages in `mcps/<mcp-name>/`. Each MCP includes its own source code, binary, config files, and resources (e.g., workflows).
   - `mcps/img-mcp/`: ComfyUI image generation MCP with prompt enhancement.
     - Binary: `mcps/img-mcp/img-mcp`
@@ -61,7 +62,7 @@ No Makefile, no linter config. Use `go fmt` + `go vet`.
 ## High-Signal Gotchas
 - Config validation: `loadConfigDirOrDie` calls `os.Exit(1)` on any error at startup. `loadCommandsDir` and `loadReloadableDir` return errors for hot-reload (no exit).
 - Command registration: `builtInCmds` contains static built-in commands (stop, help), never modified. `configCmds` is atomically replaced on reload. Dispatch merges both maps (built-ins first for priority). `commandsMutex` (RWMutex) protects concurrent access.
-- `/reload` in TUI reloads MCPs, services, prompt enhancements, and command definitions. Hot-swaps `config.MCPs`, `config.Services`, `config.PromptEnhancements`, and atomically replaces `configCmds` (no in-place mutation). MCP clients are closed and reconnected on reload. `/reload <mcp-name>` sends a reload signal to a specific MCP server (SIGHUP for stdio, HTTP POST to `/admin/reload` for HTTP).
+- `/reload` in TUI reloads MCPs, services, prompt enhancements, notices, and command definitions. Hot-swaps `config.MCPs`, `config.Services`, `config.PromptEnhancements`, `config.Notices`, and atomically replaces `configCmds` (no in-place mutation). MCP clients are closed and reconnected on reload. Queue manager notices updated via `UpdateNotices()`. `/reload <mcp-name>` sends a reload signal to a specific MCP server (SIGHUP for stdio, HTTP POST to `/admin/reload` for HTTP).
 - Config directory expected as CLI arg (default: `config`). Previously was a single `.toml` file.
 - TUI captures stdout/stderr via `os.Pipe()` after config loading. Log output (logxi) displayed in tview TextView with ANSI stripping.
 - `tview.TranslateANSI()` is used for log output in TUI, preceded by `tview.Escape()` to prevent IRC text with brackets from being interpreted as tview color tags.

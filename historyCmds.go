@@ -12,13 +12,20 @@ import (
 	"github.com/lrstanley/girc"
 )
 
+func getNotices() NoticesConfig {
+	var n NoticesConfig
+	readConfig(func() { n = config.Notices })
+	return n
+}
+
 func historySessions(network Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, args ...string) {
+	n := getNotices()
 	var maxHistory int
 	readConfig(func() { maxHistory = config.SessionsDisplayLimit })
 	sessions, err := getUserDBSessions(network.Name, e.Params[0], e.Source.Name, maxHistory)
 	if err != nil {
 		select {
-		case output <- errorMsg("failed to query sessions: " + err.Error()):
+		case output <- errorMsg(expandNotice(n.DB.QuerySessions, map[string]string{"error": err.Error()})):
 		case <-ctx.Done():
 		}
 		return
@@ -26,14 +33,14 @@ func historySessions(network Network, c *girc.Client, e girc.Event, ctx context.
 
 	if len(sessions) == 0 {
 		select {
-		case output <- "No session history found.":
+		case output <- n.Sessions.None:
 		case <-ctx.Done():
 		}
 		return
 	}
 
 	select {
-	case output <- fmt.Sprintf("\x02Session History (%s on %s):\x02", e.Source.Name, network.Name):
+	case output <- expandNotice(n.Sessions.Header, map[string]string{"nick": e.Source.Name, "network": network.Name}):
 	case <-ctx.Done():
 		return
 	}
@@ -107,6 +114,7 @@ func historySessions(network Network, c *girc.Client, e girc.Event, ctx context.
 }
 
 func historyShow(network Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, args ...string) {
+	n := getNotices()
 	sendErr := func(msg string) {
 		select {
 		case output <- msg:
@@ -114,35 +122,35 @@ func historyShow(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 		}
 	}
 	if theDB == nil {
-		sendErr(errorMsg("database not available"))
+		sendErr(errorMsg(n.DB.NotAvailable))
 		return
 	}
 
 	if len(args) == 0 || args[0] == "" {
-		sendErr(errorMsg("usage: " + network.Trigger + "history <session-id>"))
+		sendErr(errorMsg(expandNotice(n.Sessions.HistoryUsage, map[string]string{"trigger": network.Trigger})))
 		return
 	}
 
 	sessionID, err := strconv.ParseInt(args[0], 10, 64)
 	if err != nil {
-		sendErr(errorMsg("invalid session id"))
+		sendErr(errorMsg(n.Sessions.InvalidID))
 		return
 	}
 
 	session, err := getDBSessionByID(sessionID)
 	if err != nil {
-		sendErr(errorMsg("session not found"))
+		sendErr(errorMsg(n.Sessions.NotFound))
 		return
 	}
 
 	if session.Network != network.Name || session.Channel != e.Params[0] || session.Nick != e.Source.Name {
-		sendErr(errorMsg("that session doesn't belong to you"))
+		sendErr(errorMsg(n.Sessions.NotOwned))
 		return
 	}
 
 	messages, err := loadDBSessionMessages(sessionID)
 	if err != nil {
-		sendErr(errorMsg("failed to load messages: " + err.Error()))
+		sendErr(errorMsg(expandNotice(n.DB.LoadMessages, map[string]string{"error": err.Error()})))
 		return
 	}
 
@@ -158,7 +166,7 @@ func historyShow(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 	}
 
 	select {
-	case output <- fmt.Sprintf("\x02Session #%d (%s) — %d messages:\x02", sessionID, session.ChatCommand, len(visible)):
+	case output <- expandNotice(n.Sessions.DetailHeader, map[string]string{"id": fmt.Sprintf("%d", sessionID), "command": session.ChatCommand, "count": fmt.Sprintf("%d", len(visible))}):
 	case <-ctx.Done():
 		return
 	}
@@ -203,7 +211,7 @@ func historyShow(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 		sendHistoryMsg(shown[0])
 		sendHistoryMsg(shown[1])
 		select {
-		case output <- fmt.Sprintf("  \x0314... (%d more) ...\x0F", len(visible)-4):
+		case output <- expandNotice(n.Sessions.Truncated, map[string]string{"count": fmt.Sprintf("%d", len(visible)-4)}):
 		case <-ctx.Done():
 			return
 		}
@@ -217,53 +225,54 @@ func historyShow(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 }
 
 func historyStats(network Network, c *girc.Client, e girc.Event, args ...string) {
+	n := getNotices()
 	if theDB == nil {
-		c.Cmd.Reply(e, errorMsg("database not available"))
+		c.Cmd.Reply(e, errorMsg(n.DB.NotAvailable))
 		return
 	}
 
 	sessionCount, messageCount, err := getUserDBStats(network.Name, e.Params[0], e.Source.Name)
 	if err != nil {
-		c.Cmd.Reply(e, errorMsg("failed to query stats: "+err.Error()))
+		c.Cmd.Reply(e, errorMsg(expandNotice(n.DB.QueryStats, map[string]string{"error": err.Error()})))
 		return
 	}
 
-	c.Cmd.Reply(e, fmt.Sprintf("\x02Your stats on %s/%s:\x02 %d sessions, %d total messages",
-		network.Name, e.Params[0], sessionCount, messageCount))
+	c.Cmd.Reply(e, expandNotice(n.Sessions.StatsFormat, map[string]string{"network": network.Name, "channel": e.Params[0], "sessions": fmt.Sprintf("%d", sessionCount), "messages": fmt.Sprintf("%d", messageCount)}))
 }
 
 func historyDelete(network Network, c *girc.Client, e girc.Event, args ...string) {
+	n := getNotices()
 	if theDB == nil {
-		c.Cmd.Reply(e, errorMsg("database not available"))
+		c.Cmd.Reply(e, errorMsg(n.DB.NotAvailable))
 		return
 	}
 
 	if len(args) == 0 || args[0] == "" {
-		c.Cmd.Reply(e, errorMsg("usage: "+network.Trigger+"delete <session-id>"))
+		c.Cmd.Reply(e, errorMsg(expandNotice(n.Sessions.DeleteUsage, map[string]string{"trigger": network.Trigger})))
 		return
 	}
 
 	sessionID, err := strconv.ParseInt(args[0], 10, 64)
 	if err != nil {
-		c.Cmd.Reply(e, errorMsg("invalid session id"))
+		c.Cmd.Reply(e, errorMsg(n.Sessions.InvalidID))
 		return
 	}
 
 	session, err := getDBSessionByID(sessionID)
 	if err != nil {
-		c.Cmd.Reply(e, errorMsg("session not found"))
+		c.Cmd.Reply(e, errorMsg(n.Sessions.NotFound))
 		return
 	}
 
 	if session.Network != network.Name || session.Channel != e.Params[0] || session.Nick != e.Source.Name {
-		c.Cmd.Reply(e, errorMsg("that session doesn't belong to you"))
+		c.Cmd.Reply(e, errorMsg(n.Sessions.NotOwned))
 		return
 	}
 
 	cancelAsyncJobsForSession(sessionID)
 
 	if err := deleteDBSession(sessionID); err != nil {
-		c.Cmd.Reply(e, errorMsg("failed to delete session: "+err.Error()))
+		c.Cmd.Reply(e, errorMsg(expandNotice(n.DB.DeleteFailed, map[string]string{"error": err.Error()})))
 		return
 	}
 
@@ -273,34 +282,35 @@ func historyDelete(network Network, c *girc.Client, e girc.Event, args ...string
 	}
 	chatContextsMutex.Unlock()
 
-	c.Cmd.Reply(e, fmt.Sprintf("Deleted session #%d.", sessionID))
+	c.Cmd.Reply(e, expandNotice(n.Sessions.Deleted, map[string]string{"id": fmt.Sprintf("%d", sessionID)}))
 }
 
 func historyResume(network Network, c *girc.Client, e girc.Event, args ...string) {
+	n := getNotices()
 	if theDB == nil {
-		c.Cmd.Reply(e, errorMsg("database not available"))
+		c.Cmd.Reply(e, errorMsg(n.DB.NotAvailable))
 		return
 	}
 
 	if len(args) == 0 || args[0] == "" {
-		c.Cmd.Reply(e, errorMsg("usage: "+network.Trigger+"resume <session-id>"))
+		c.Cmd.Reply(e, errorMsg(expandNotice(n.Sessions.ResumeUsage, map[string]string{"trigger": network.Trigger})))
 		return
 	}
 
 	sessionID, err := strconv.ParseInt(args[0], 10, 64)
 	if err != nil {
-		c.Cmd.Reply(e, errorMsg("invalid session id"))
+		c.Cmd.Reply(e, errorMsg(n.Sessions.InvalidID))
 		return
 	}
 
 	session, err := getDBSessionByID(sessionID)
 	if err != nil {
-		c.Cmd.Reply(e, errorMsg("session not found"))
+		c.Cmd.Reply(e, errorMsg(n.Sessions.NotFound))
 		return
 	}
 
 	if session.Network != network.Name || session.Channel != e.Params[0] || session.Nick != e.Source.Name {
-		c.Cmd.Reply(e, errorMsg("that session doesn't belong to you"))
+		c.Cmd.Reply(e, errorMsg(n.Sessions.NotOwned))
 		return
 	}
 
@@ -310,13 +320,13 @@ func historyResume(network Network, c *girc.Client, e girc.Event, args ...string
 		currentCfg, cfgOk = config.Commands.Chats[session.ChatCommand]
 	})
 	if !cfgOk {
-		c.Cmd.Reply(e, errorMsg(fmt.Sprintf("chat command %q no longer exists, cannot resume", session.ChatCommand)))
+		c.Cmd.Reply(e, errorMsg(expandNotice(n.Sessions.CommandGone, map[string]string{"command": session.ChatCommand})))
 		return
 	}
 
 	dbMsgs, err := loadDBSessionMessages(sessionID)
 	if err != nil {
-		c.Cmd.Reply(e, errorMsg("failed to load messages: "+err.Error()))
+		c.Cmd.Reply(e, errorMsg(expandNotice(n.DB.LoadMessages, map[string]string{"error": err.Error()})))
 		return
 	}
 
@@ -342,7 +352,7 @@ func historyResume(network Network, c *girc.Client, e girc.Event, args ...string
 	}
 
 	if len(messages) == 0 {
-		c.Cmd.Reply(e, errorMsg("session has no messages"))
+		c.Cmd.Reply(e, errorMsg(n.Sessions.NoMessages))
 		return
 	}
 
@@ -354,7 +364,7 @@ func historyResume(network Network, c *girc.Client, e girc.Event, args ...string
 		if theDB != nil {
 			completeDBSession(oldCtx.SessionID)
 		}
-		c.Cmd.Reply(e, fmt.Sprintf("Paused your previous session #%d.", oldCtx.SessionID))
+		c.Cmd.Reply(e, expandNotice(n.Sessions.Paused, map[string]string{"id": fmt.Sprintf("%d", oldCtx.SessionID)}))
 	}
 	messages = TruncateHistory(messages, currentCfg.MaxHistory)
 	chatContextsMap[ctxKey] = ChatContext{
@@ -370,7 +380,7 @@ func historyResume(network Network, c *girc.Client, e girc.Event, args ...string
 		theDB.Model(&Session{}).Where("id = ?", sessionID).Update("status", "active")
 	}
 
-	c.Cmd.Reply(e, fmt.Sprintf("Resumed session #%d (%s) with %d messages.", sessionID, session.ChatCommand, len(messages)))
+	c.Cmd.Reply(e, expandNotice(n.Sessions.Resumed, map[string]string{"id": fmt.Sprintf("%d", sessionID), "command": session.ChatCommand, "count": fmt.Sprintf("%d", len(messages))}))
 }
 
 func formatTimeAgo(t time.Time) string {
@@ -388,6 +398,7 @@ func formatTimeAgo(t time.Time) string {
 }
 
 func historyJobs(network Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, args ...string) {
+	n := getNotices()
 	nick := e.Source.Name
 	channel := e.Params[0]
 	hasOutput := false
@@ -407,7 +418,7 @@ func historyJobs(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 		current, pending := queueMgr.QueueStatus(network.Name, channel, nick)
 		if current != nil || len(pending) > 0 {
 			hasOutput = true
-			if !sendLine("\x02Queue:\x02") {
+			if !sendLine(n.Jobs.QueueHeader) {
 				return
 			}
 			if current != nil {
@@ -416,7 +427,7 @@ func historyJobs(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 				if desc == "" {
 					desc = "processing"
 				}
-				line := fmt.Sprintf("  \x0303▶\x0F %s (%s elapsed)", desc, elapsed)
+				line := expandNotice(n.Jobs.QueueRunning, map[string]string{"desc": desc, "elapsed": elapsed.String()})
 				if !sendLine(line) {
 					return
 				}
@@ -428,7 +439,7 @@ func historyJobs(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 					if desc == "" {
 						desc = "queued"
 					}
-					line := fmt.Sprintf("  \x0308%d.\x0F %s (waiting %s)", i+1, desc, wait)
+					line := expandNotice(n.Jobs.QueuePending, map[string]string{"position": fmt.Sprintf("%d", i+1), "desc": desc, "wait": wait.String()})
 					if !sendLine(line) {
 						return
 					}
@@ -440,7 +451,7 @@ func historyJobs(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 	if theDB == nil {
 		if !hasOutput {
 			select {
-			case output <- "No active jobs or queue items.":
+			case output <- n.Jobs.NoJobs:
 			case <-ctx.Done():
 			}
 		}
@@ -450,7 +461,7 @@ func historyJobs(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 	jobs, err := getPendingJobsForUser(network.Name, channel, nick)
 	if err != nil {
 		select {
-		case output <- errorMsg("failed to query jobs: " + err.Error()):
+		case output <- errorMsg(expandNotice(n.DB.QueryJobs, map[string]string{"error": err.Error()})):
 		case <-ctx.Done():
 		}
 		return
@@ -459,14 +470,14 @@ func historyJobs(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 	if len(jobs) == 0 {
 		if !hasOutput {
 			select {
-			case output <- "No active jobs or queue items.":
+			case output <- n.Jobs.NoJobs:
 			case <-ctx.Done():
 			}
 		}
 		return
 	}
 
-	if !sendLine("\x02Background jobs:\x02") {
+	if !sendLine(n.Jobs.BgHeader) {
 		return
 	}
 	for _, j := range jobs {
@@ -480,7 +491,7 @@ func historyJobs(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 			statusIcon = "·"
 		}
 		elapsed := formatTimeAgo(j.CreatedAt)
-		line := fmt.Sprintf("  %s %s [%s/%s] %s, %s ago", statusIcon, j.JobID, j.ToolName, j.MCPServer, j.Status, elapsed)
+		line := expandNotice(n.Jobs.BgLine, map[string]string{"icon": statusIcon, "job_id": j.JobID, "tool": j.ToolName, "server": j.MCPServer, "status": j.Status, "elapsed": elapsed})
 		if !sendLine(line) {
 			return
 		}

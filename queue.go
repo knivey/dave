@@ -111,20 +111,14 @@ type QueueManager struct {
 	changed      chan struct{}
 	idCounter    atomic.Int64
 	maxDepth     int
-	queueMsgs    []string
+	queueMsg     string
 	startedMsg   string
 	running      atomic.Bool
 }
 
 var queueMgr *QueueManager
 
-func NewQueueManager(queueMsgs []string, startedMsg string, maxDepth int) *QueueManager {
-	if len(queueMsgs) == 0 {
-		queueMsgs = []string{"queued (position {position})"}
-	}
-	if startedMsg == "" {
-		startedMsg = "\x0306\u25b6 {nick}: Processing your request (waited {wait})...{prompt}\x0f"
-	}
+func NewQueueManager(notices NoticesConfig, maxDepth int) *QueueManager {
 	if maxDepth <= 0 {
 		maxDepth = 5
 	}
@@ -134,8 +128,8 @@ func NewQueueManager(queueMsgs []string, startedMsg string, maxDepth int) *Queue
 		deliverySlot: make(map[string]*deliverySlot),
 		changed:      make(chan struct{}, 1),
 		maxDepth:     maxDepth,
-		queueMsgs:    queueMsgs,
-		startedMsg:   startedMsg,
+		queueMsg:     notices.Queue.Msg,
+		startedMsg:   notices.Queue.Started,
 	}
 }
 
@@ -477,8 +471,9 @@ func (qm *QueueManager) runJob(item *QueueItem) {
 		defer func() {
 			if r := recover(); r != nil {
 				loggerQM.Error("execute panicked", "id", item.ID, "error", r)
+				n := getNotices()
 				select {
-				case item.outputCh <- errorMsg(fmt.Sprintf("internal error: %v", r)):
+				case item.outputCh <- errorMsg(expandNotice(n.DB.InternalError, map[string]string{"error": fmt.Sprintf("%v", r)})):
 				case <-item.ctx.Done():
 				default:
 				}
@@ -583,6 +578,13 @@ func (ds *deliverySlot) remove(item *QueueItem) {
 	}
 }
 
+func (qm *QueueManager) UpdateNotices(notices NoticesConfig) {
+	qm.mu.Lock()
+	defer qm.mu.Unlock()
+	qm.queueMsg = notices.Queue.Msg
+	qm.startedMsg = notices.Queue.Started
+}
+
 func (qm *QueueManager) formatStartedMsg(nick string, waitTime time.Duration, prompt, override string) string {
 	s := qm.startedMsg
 	if override != "" {
@@ -602,14 +604,4 @@ func (qm *QueueManager) formatStartedMsg(nick string, waitTime time.Duration, pr
 		s = strings.ReplaceAll(s, "{prompt}", "")
 	}
 	return strings.TrimRight(s, " \t")
-}
-
-func (c *Config) QueueMsg(position int, eta time.Duration) string {
-	if len(c.QueueMsgs) == 0 {
-		return fmt.Sprintf("queued (position %d)", position)
-	}
-	s := c.QueueMsgs[globalRand.Intn(len(c.QueueMsgs))]
-	s = strings.ReplaceAll(s, "{position}", fmt.Sprintf("%d", position))
-	s = strings.ReplaceAll(s, "{eta}", eta.Round(time.Second).String())
-	return s
 }

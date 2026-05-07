@@ -164,9 +164,10 @@ func help(network Network, client *girc.Client, event girc.Event, ctx context.Co
 		wrappedLines := wrapForIRC(rawText)
 		if len(wrappedLines) >= chCfg.GetMaxLines() {
 			url, err := uploadToPastebin("```\n"+rawText+"\n```", "Dave's Help")
+			n := getNotices()
 			if err != nil {
 				select {
-				case output <- errorMsg("pastebin: " + err.Error()):
+				case output <- errorMsg(expandNotice(n.DB.PastebinUpload, map[string]string{"error": err.Error()})):
 				case <-ctx.Done():
 					return
 				}
@@ -182,7 +183,7 @@ func help(network Network, client *girc.Client, event girc.Event, ctx context.Co
 					}
 				}
 				select {
-				case output <- "... (full output could not be pasted)":
+				case output <- n.Pastebin.Failed:
 				case <-ctx.Done():
 					return
 				}
@@ -200,7 +201,7 @@ func help(network Network, client *girc.Client, event girc.Event, ctx context.Co
 				}
 			}
 			select {
-			case output <- fmt.Sprintf("... ( full output: %s )", url):
+			case output <- expandNotice(n.Pastebin.Link, map[string]string{"url": url}):
 			case <-ctx.Done():
 				return
 			}

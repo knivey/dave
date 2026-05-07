@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 
 	"github.com/lrstanley/girc"
@@ -29,10 +28,11 @@ type mcpAsyncSubmitResult struct {
 func mcpCmd(network Network, c *girc.Client, e girc.Event, cfg MCPCommandConfig, ctx context.Context, output chan<- string, args ...string) {
 	log := logxi.New(network.Name + ".mcp." + cfg.Name)
 	log.SetLevel(logxi.LevelAll)
+	n := getNotices()
 
 	if cfg.Arg != "" && len(args) == 0 {
 		select {
-		case output <- "Usage: <" + cfg.Arg + ">":
+		case output <- expandNotice(n.Tools.Usage, map[string]string{"arg": cfg.Arg}):
 		case <-ctx.Done():
 		}
 		return
@@ -58,7 +58,7 @@ func mcpCmd(network Network, c *girc.Client, e girc.Event, cfg MCPCommandConfig,
 	result, err := callMCPToolWithTimeoutContext(ctx, cfg.Tool, toolArgs, cfg.Timeout)
 	if err != nil {
 		select {
-		case output <- errorMsg(fmt.Sprintf("MCP tool call failed: %s", err)):
+		case output <- errorMsg(expandNotice(n.Tools.Failed, map[string]string{"error": err.Error()})):
 		case <-ctx.Done():
 		}
 		log.Error("MCP tool call failed", "error", err.Error())
@@ -78,6 +78,7 @@ func mcpCmd(network Network, c *girc.Client, e girc.Event, cfg MCPCommandConfig,
 }
 
 func mcpCmdAsync(network Network, c *girc.Client, e girc.Event, cfg MCPCommandConfig, ctx context.Context, output chan<- string, toolArgs map[string]any, prompt string, log logxi.Logger) {
+	n := getNotices()
 	asyncTool := cfg.GetAsyncTool()
 	channel := e.Params[0]
 	nick := e.Source.Name
@@ -87,7 +88,7 @@ func mcpCmdAsync(network Network, c *girc.Client, e girc.Event, cfg MCPCommandCo
 	result, err := callMCPToolWithTimeoutContext(ctx, asyncTool, toolArgs, cfg.Timeout)
 	if err != nil {
 		select {
-		case output <- errorMsg(fmt.Sprintf("MCP tool call failed: %s", err)):
+		case output <- errorMsg(expandNotice(n.Tools.Failed, map[string]string{"error": err.Error()})):
 		case <-ctx.Done():
 		}
 		log.Error("async MCP tool call failed", "error", err.Error())
@@ -107,7 +108,7 @@ func mcpCmdAsync(network Network, c *girc.Client, e girc.Event, cfg MCPCommandCo
 	if err := json.Unmarshal([]byte(text), &submitResult); err != nil || submitResult.JobID == "" {
 		log.Error("failed to parse async job_id from result", "text", text, "error", err)
 		select {
-		case output <- errorMsg("Failed to submit async job: unexpected response"):
+		case output <- errorMsg(n.Tools.Unexpected):
 		case <-ctx.Done():
 		}
 		return
@@ -116,7 +117,7 @@ func mcpCmdAsync(network Network, c *girc.Client, e girc.Event, cfg MCPCommandCo
 	log.Info("async job submitted", "job_id", submitResult.JobID, "tool", asyncTool)
 
 	select {
-	case output <- fmt.Sprintf("\x0303🎨 Generating image for \x02%s\x02... I'll send the result when it's ready.", nick):
+	case output <- expandNotice(n.Queue.AsyncSubmitted, map[string]string{"nick": nick}):
 	case <-ctx.Done():
 		return
 	}

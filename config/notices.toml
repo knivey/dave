@@ -1,0 +1,159 @@
+# notices.toml — Override default bot notice/reply templates.
+# All fields are optional. Missing fields use hardcoded defaults.
+# Placeholders are {key} style, expanded at runtime.
+#
+# [queue] options:
+#   msg              (string)    Queue position notice. Placeholders: {position}, {eta}
+#   started          (string)    Processing started notice. Placeholders: {nick}, {wait}, {prompt}, {position}, {eta}
+#   async_submitted  (string)    Async image job submitted notice. Placeholders: {nick}
+#
+# [rate] options:
+#   msgs             (string[])  Random pick for rate-limit notice
+#
+# [format] options:
+#   error_prefix     (string)    IRC format prefix for error messages
+#   warn_prefix      (string)    IRC format prefix for warning messages
+#
+# [context] options:
+#   no_context       (string)    No active chat context. Placeholders: (none)
+#
+# [sessions] options:
+#   header           (string)    Session list header. Placeholders: {nick}, {network}
+#   none             (string)    No sessions found
+#   detail_header    (string)    Session detail header. Placeholders: {id}, {command}, {count}
+#   truncated        (string)    Truncated messages indicator. Placeholders: {count}
+#   not_found        (string)    Session not found
+#   not_owned        (string)    Session belongs to another user
+#   invalid_id       (string)    Invalid session ID
+#   no_messages      (string)    Session has no messages
+#   command_gone     (string)    Chat command no longer exists. Placeholders: {command}
+#   deleted          (string)    Session deleted. Placeholders: {id}
+#   paused           (string)    Previous session paused. Placeholders: {id}
+#   resumed          (string)    Session resumed. Placeholders: {id}, {command}, {count}
+#   switched         (string)    Session auto-switched. Placeholders: {nick}, {id}, {trigger}, {old_id}
+#   stats_format     (string)    User stats. Placeholders: {network}, {channel}, {sessions}, {messages}
+#   history_usage    (string)    Usage hint. Placeholders: {trigger}
+#   delete_usage     (string)    Usage hint. Placeholders: {trigger}
+#   resume_usage     (string)    Usage hint. Placeholders: {trigger}
+#
+# [db] options:
+#   not_available    (string)    Database unavailable
+#   query_sessions   (string)    Query sessions error. Placeholders: {error}
+#   load_messages    (string)    Load messages error. Placeholders: {error}
+#   delete_failed    (string)    Delete session error. Placeholders: {error}
+#   query_stats      (string)    Query stats error. Placeholders: {error}
+#   query_jobs       (string)    Query jobs error. Placeholders: {error}
+#   process_images   (string)    Image processing error. Placeholders: {error}
+#   pastebin_upload  (string)    Pastebin upload error. Placeholders: {error}
+#   internal_error   (string)    Internal/panic error. Placeholders: {error}
+#
+# [images] options:
+#   limit_reached    (string)    Image context limit hit. Placeholders: {max}
+#   partial_limit    (string)    Partial image limit. Placeholders: {remaining}, {used}, {max}
+#   no_images        (string)    Job returned no images. Placeholders: {nick}
+#   job_status       (string)    Job non-completed status. Placeholders: {nick}, {status}, {error}
+#
+# [tools] options:
+#   call             (string)    Tool call notification. Placeholders: {server}, {tool}
+#   call_limit       (string)    Tool iteration limit reached
+#   failed           (string)    MCP tool call failed. Placeholders: {error}
+#   usage            (string)    Missing argument usage. Placeholders: {arg}
+#   unexpected       (string)    Unexpected async response
+#   tool_async_started (string)  Started override for async tool job delivery. Placeholders: {nick}, {wait}, {prompt}, {position}, {eta}
+#
+# [pastebin] options:
+#   link             (string)    Pastebin URL link. Placeholders: {url}
+#   failed           (string)    Pastebin fallback when upload fails
+#
+# [jobs] options:
+#   no_jobs          (string)    No active jobs
+#   queue_header     (string)    Queue section header
+#   queue_running    (string)    Running queue item. Placeholders: {desc}, {elapsed}
+#   queue_pending    (string)    Pending queue item. Placeholders: {position}, {desc}, {wait}
+#   bg_header        (string)    Background jobs section header
+#   bg_line          (string)    Background job line. Placeholders: {icon}, {job_id}, {tool}, {server}, {status}, {elapsed}
+#
+# support           (string)     Support message
+#
+# Example with all options set to defaults:
+# [queue]
+# msg = "\x0308⏳ Queued (position {position})\x0F"
+# started = "\x0306▶ {nick}: Processing your request (waited {wait})...{prompt}\x0f"
+# async_submitted = "\x0303🎨 Generating image for \x02{nick}\x02... I'll send the result when it's ready."
+#
+# [rate]
+# msgs = ["hold on you're going to fast"]
+#
+# [format]
+# error_prefix = "\x0304❗ "
+# warn_prefix = "\x0308⚠️ "
+#
+# [context]
+# no_context = "you dont have a chat context, start one with one of my many fabulous chat commands. After starting, just reply to my nick to continue the conversation"
+#
+# [sessions]
+# header = "\x02Session History ({nick} on {network}):\x02"
+# none = "No session history found."
+# detail_header = "\x02Session #{id} ({command}) — {count} messages:\x02"
+# truncated = "  \x0314... ({count} more) ...\x0F"
+# not_found = "session not found"
+# not_owned = "that session doesn't belong to you"
+# invalid_id = "invalid session id"
+# no_messages = "session has no messages"
+# command_gone = "chat command {command} no longer exists, cannot resume"
+# deleted = "Deleted session #{id}."
+# paused = "Paused your previous session #{id}."
+# resumed = "Resumed session #{id} ({command}) with {count} messages."
+# switched = "\x02Switched {nick}'s session to #{id}\x02. Use {trigger}resume {old_id} to go back."
+# stats_format = "\x02Your stats on {network}/{channel}:\x02 {sessions} sessions, {messages} total messages"
+# history_usage = "usage: {trigger}history <session-id>"
+# delete_usage = "usage: {trigger}delete <session-id>"
+# resume_usage = "usage: {trigger}resume <session-id>"
+#
+# [db]
+# not_available = "database not available"
+# query_sessions = "failed to query sessions: {error}"
+# load_messages = "failed to load messages: {error}"
+# delete_failed = "failed to delete session: {error}"
+# query_stats = "failed to query stats: {error}"
+# query_jobs = "failed to query jobs: {error}"
+# process_images = "failed to process images: {error}"
+# pastebin_upload = "pastebin: {error}"
+# internal_error = "internal error: {error}"
+#
+# [images]
+# limit_reached = "image limit reached ({max} max in context), send text only"
+# partial_limit = "only {remaining} more image(s) allowed in this context ({used}/{max} used)"
+# no_images = "\x02{nick}\x02's image job completed but returned no images."
+# job_status = "\x02{nick}\x02's image job {status}: {error}"
+#
+# [tools]
+# call = "\x0315🔧 ToolCall: {server} > {tool}"
+# call_limit = "\x0308⚠️ Tool call limit reached, stopping.\x0F"
+# failed = "MCP tool call failed: {error}"
+# usage = "Usage: <{arg}>"
+# unexpected = "Failed to submit async job: unexpected response"
+# tool_async_started = "\x0306▶ {nick}: Processed your image request (waited {wait})...{prompt}\x0f"
+#
+# [pastebin]
+# link = "... ( full output: {url} )"
+# failed = "... (full output could not be pasted)"
+#
+# [jobs]
+# no_jobs = "No active jobs or queue items."
+# queue_header = "\x02Queue:\x02"
+# queue_running = "  \x0303▶\x0F {desc} ({elapsed} elapsed)"
+# queue_pending = "  \x0308{position}.\x0F {desc} (waiting {wait})"
+# bg_header = "\x02Background jobs:\x02"
+# bg_line = "  {icon} {job_id} [{tool}/{server}] {status}, {elapsed} ago"
+#
+# support = "If you enjoy using dave, consider supporting development at https://patreon.com/shrew269 ❤️"
+
+# Live config below:
+[queue]
+msg = "queued (position {position})"
+
+[rate]
+msgs = [
+    "whoa!! slow down!!!1~ AHHHHHHHHHHHHHHHH AHhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhA HHHHHHHHHHHHHhhhhhhhhhhhhhhhhhhhAAAAAAAAAAAAAAAAAAHhhhhhhhhhhhhhhhh"
+]

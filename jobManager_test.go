@@ -28,7 +28,7 @@ func setupJMTestDB(t *testing.T) {
 
 func setupTestJobManager(t *testing.T) {
 	t.Helper()
-	queueMgr = NewQueueManager([]string{"queued"}, "started", 5)
+	queueMgr = NewQueueManager(NoticesConfig{Queue: QueueNotices{Msg: "queued", Started: "started"}}, 5)
 	queueMgr.UpdateServiceLimits(map[string]Service{"testsvc": {Parallel: 1}})
 	queueMgr.Start()
 	chatContextsMap = make(map[string]ChatContext)

@@ -802,7 +802,30 @@ func (cr *chatRunner) handleRegisterBackgroundJob(messages []ChatMessage, tc Too
 		return messages
 	}
 
-	registerAsyncJob(args.JobID, sessionID, cr.ctxKey, args.ToolName, args.ServerName, cr.network.Name, cr.channel, cr.nick)
+	job := registerAsyncJob(args.JobID, sessionID, cr.ctxKey, args.ToolName, args.ServerName, cr.network.Name, cr.channel, cr.nick)
+	if job != nil {
+		select {
+		case resultText := <-job.inlineResultCh:
+			toolMsg := ChatMessage{
+				Role:       RoleTool,
+				Content:    resultText,
+				ToolCallID: tc.ID,
+			}
+			messages = append(messages, toolMsg)
+			AddContext(cr.cfg, cr.ctxKey, toolMsg, cr.network.Name, cr.channel, cr.nick)
+			return messages
+		case <-time.After(500 * time.Millisecond):
+		case <-cr.ctx.Done():
+			toolMsg := ChatMessage{
+				Role:       RoleTool,
+				Content:    "error: context cancelled while waiting for job result",
+				ToolCallID: tc.ID,
+			}
+			messages = append(messages, toolMsg)
+			AddContext(cr.cfg, cr.ctxKey, toolMsg, cr.network.Name, cr.channel, cr.nick)
+			return messages
+		}
+	}
 
 	toolMsg := ChatMessage{
 		Role:       RoleTool,

@@ -1527,3 +1527,168 @@ func TestWaitForAsyncJob_CleanupOnCancel(t *testing.T) {
 	jobMgr.mu.Unlock()
 	assert.False(t, exists, "cancelled job should be removed from jobMgr.jobs")
 }
+
+func setupImmediateResultMCP(t *testing.T, resultText string) {
+	t.Helper()
+
+	ctx := context.Background()
+	server := mcp.NewServer(&mcp.Implementation{Name: "test-mcp-immediate", Version: "1.0.0"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "wait_for_job", Description: "wait for a job"}, func(ctx context.Context, req *mcp.CallToolRequest, input struct {
+		JobID string `json:"job_id"`
+	}) (*mcp.CallToolResult, struct {
+		JobID  string `json:"job_id"`
+		Status string `json:"status"`
+	}, error) {
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: resultText}}}, struct {
+			JobID  string `json:"job_id"`
+			Status string `json:"status"`
+		}{JobID: input.JobID, Status: "completed"}, nil
+	})
+
+	t1, t2 := mcp.NewInMemoryTransports()
+
+	_, err := server.Connect(ctx, t1, nil)
+	require.NoError(t, err)
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
+	session, err := client.Connect(ctx, t2, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { session.Close() })
+
+	origServers := mcpServers
+	origToolMap := mcpToolToServer
+
+	mcpServers = make(map[string]*MCPServer)
+	mcpToolToServer = make(map[string]string)
+
+	srv := &MCPServer{
+		Config:  MCPConfig{Timeout: 10 * time.Second},
+		Client:  client,
+		Session: session,
+	}
+	for tool, err := range session.Tools(ctx, nil) {
+		require.NoError(t, err)
+		srv.Tools = append(srv.Tools, tool)
+	}
+
+	mcpServers["img-mcp"] = srv
+	mcpToolToServer["wait_for_job"] = "img-mcp"
+
+	t.Cleanup(func() {
+		mcpServers = origServers
+		mcpToolToServer = origToolMap
+	})
+}
+
+func TestWaitForAsyncJob_InlineDelivery(t *testing.T) {
+	setupJMTestDB(t)
+	setupTestJobManager(t)
+	setupImmediateResultMCP(t, `{"job_id":"inline-1","status":"completed","result":{"images":[{"url":"http://example.com/img.png"}]}}`)
+
+	sid := createTestSession(t, "testnet#testuser", "testnet", "#test", "testuser", "testchat")
+	require.NoError(t, createPendingJob(sid, "inline-1", "generate_image_async", "img-mcp"), "createPendingJob")
+
+	job := registerAsyncJob("inline-1", sid, "testnet#testuser", "generate_image_async", "img-mcp", "testnet", "#test", "testuser")
+	require.NotNil(t, job, "registerAsyncJob should return job")
+
+	var inlineResult string
+	received := make(chan struct{})
+	go func() {
+		select {
+		case inlineResult = <-job.inlineResultCh:
+			close(received)
+		case <-time.After(3 * time.Second):
+		}
+	}()
+
+	select {
+	case <-received:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for inline result")
+	}
+
+	assert.Contains(t, inlineResult, "inline-1", "inline result should contain job_id")
+	assert.Contains(t, inlineResult, "completed", "inline result should contain status")
+
+	jobMgr.mu.Lock()
+	_, exists := jobMgr.jobs["inline-1"]
+	jobMgr.mu.Unlock()
+	assert.False(t, exists, "job should be removed from jobMgr.jobs after inline delivery")
+
+	var pj PendingJob
+	err := theDB.Where("job_id = ?", "inline-1").First(&pj).Error
+	require.NoError(t, err, "find pending job")
+	assert.Equal(t, "delivered", pj.Status, "job should be delivered directly (skipping completed state)")
+}
+
+func TestWaitForAsyncJob_AsyncDeliveryWhenNotWaiting(t *testing.T) {
+	setupJMTestDB(t)
+	setupTestJobManager(t)
+	setupImmediateResultMCP(t, `{"job_id":"async-1","status":"completed"}`)
+	_ = setupMockDeps(t)
+
+	queueMgr.UpdateServiceLimits(map[string]Service{"testsvc": {Parallel: 1}, "": {Parallel: 1}})
+
+	sid := createTestSession(t, "testnet#testuser", "testnet", "#test", "testuser", "testchat")
+	insertTestMessage(t, sid, "system", "sys")
+	chatContextsMap["testnet#testuser"] = ChatContext{
+		Messages:  []ChatMessage{{Role: "system", Content: "sys"}},
+		Config:    makeTestAIConfig(),
+		SessionID: sid,
+	}
+
+	require.NoError(t, createPendingJob(sid, "async-1", "generate_image_async", "img-mcp"), "createPendingJob")
+
+	job := registerAsyncJob("async-1", sid, "testnet#testuser", "generate_image_async", "img-mcp", "testnet", "#test", "testuser")
+	require.NotNil(t, job, "registerAsyncJob should return job")
+
+	time.Sleep(500 * time.Millisecond)
+
+	select {
+	case <-job.inlineResultCh:
+		t.Fatal("inlineResultCh should not receive when no one is waiting")
+	default:
+	}
+
+	var pj PendingJob
+	err := theDB.Where("job_id = ?", "async-1").First(&pj).Error
+	require.NoError(t, err)
+	assert.Equal(t, "delivered", pj.Status, "job should be fully delivered via onAsyncJobCompleted + queue path")
+}
+
+func TestDeliverInlinePendingJob_SkipsCompletedState(t *testing.T) {
+	setupJMTestDB(t)
+
+	sid := createTestSession(t, "testnet#testuser", "testnet", "#test", "testuser", "testchat")
+	require.NoError(t, createPendingJob(sid, "inline-db-1", "generate_image_async", "img-mcp"), "createPendingJob")
+
+	var pj PendingJob
+	err := theDB.Where("job_id = ?", "inline-db-1").First(&pj).Error
+	require.NoError(t, err)
+	assert.Equal(t, "pending", pj.Status, "initial status should be pending")
+
+	require.NoError(t, deliverInlinePendingJob("inline-db-1", "result text"), "deliverInlinePendingJob")
+
+	err = theDB.Where("job_id = ?", "inline-db-1").First(&pj).Error
+	require.NoError(t, err)
+	assert.Equal(t, "delivered", pj.Status, "status should go directly to delivered")
+	require.NotNil(t, pj.Result, "result should be set")
+	assert.Equal(t, "result text", *pj.Result, "result text should match")
+	require.NotNil(t, pj.CompletedAt, "completed_at should be set")
+}
+
+func TestDeliverInlinePendingJob_IdempotentOnWrongStatus(t *testing.T) {
+	setupJMTestDB(t)
+
+	sid := createTestSession(t, "testnet#testuser", "testnet", "#test", "testuser", "testchat")
+	require.NoError(t, createPendingJob(sid, "inline-db-2", "generate_image_async", "img-mcp"), "createPendingJob")
+	require.NoError(t, completePendingJob("inline-db-2", "already done"), "completePendingJob")
+
+	err := deliverInlinePendingJob("inline-db-2", "result text")
+	assert.NoError(t, err, "should not error when status is not pending")
+
+	var pj PendingJob
+	err = theDB.Where("job_id = ?", "inline-db-2").First(&pj).Error
+	require.NoError(t, err)
+	assert.Equal(t, "completed", pj.Status, "status should remain completed (unchanged)")
+}

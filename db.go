@@ -336,6 +336,12 @@ func markPendingJobDelivered(jobID string) error {
 		Update("status", "delivered").Error
 }
 
+func deliverInlinePendingJob(jobID, resultText string) error {
+	now := time.Now()
+	return theDB.Model(&PendingJob{}).Where("job_id = ? AND status = ?", jobID, "pending").
+		Updates(map[string]interface{}{"status": "delivered", "result": resultText, "completed_at": &now}).Error
+}
+
 func getCompletedPendingJobs(sessionID int64) ([]PendingJob, error) {
 	var jobs []PendingJob
 	err := theDB.Where("session_id = ? AND status = ?", sessionID, "completed").

@@ -23,15 +23,16 @@ func modelNeedsUserSuffix(model string) bool {
 var loggerJM = logxi.New("jobManager")
 
 type asyncJob struct {
-	JobID     string
-	SessionID int64
-	CtxKey    string
-	ToolName  string
-	MCPServer string
-	Network   string
-	Channel   string
-	Nick      string
-	cancel    context.CancelFunc
+	JobID          string
+	SessionID      int64
+	CtxKey         string
+	ToolName       string
+	MCPServer      string
+	Network        string
+	Channel        string
+	Nick           string
+	cancel         context.CancelFunc
+	inlineResultCh chan string
 }
 
 var jobMgr struct {
@@ -137,31 +138,33 @@ func cancelAsyncJobsForSession(sessionID int64) {
 	}
 }
 
-func registerAsyncJob(jobID string, sessionID int64, ctxKey, toolName, mcpServer, network, channel, nick string) {
+func registerAsyncJob(jobID string, sessionID int64, ctxKey, toolName, mcpServer, network, channel, nick string) *asyncJob {
 	jobMgr.mu.Lock()
 	defer jobMgr.mu.Unlock()
 
 	if _, exists := jobMgr.jobs[jobID]; exists {
 		loggerJM.Warn("job already registered", "job_id", jobID)
-		return
+		return nil
 	}
 
 	ctx, cancel := context.WithCancel(jobMgr.ctx)
 	job := &asyncJob{
-		JobID:     jobID,
-		SessionID: sessionID,
-		CtxKey:    ctxKey,
-		ToolName:  toolName,
-		MCPServer: mcpServer,
-		Network:   network,
-		Channel:   channel,
-		Nick:      nick,
-		cancel:    cancel,
+		JobID:          jobID,
+		SessionID:      sessionID,
+		CtxKey:         ctxKey,
+		ToolName:       toolName,
+		MCPServer:      mcpServer,
+		Network:        network,
+		Channel:        channel,
+		Nick:           nick,
+		cancel:         cancel,
+		inlineResultCh: make(chan string),
 	}
 	jobMgr.jobs[jobID] = job
 
 	go waitForAsyncJob(ctx, job)
 	loggerJM.Info("registered async job", "job_id", jobID, "server", mcpServer, "tool", toolName)
+	return job
 }
 
 func waitForAsyncJob(ctx context.Context, job *asyncJob) {
@@ -184,7 +187,17 @@ func waitForAsyncJob(ctx context.Context, job *asyncJob) {
 		loggerJM.Info("job completed", "job_id", job.JobID, "result_len", len(resultText))
 	}
 
-	onAsyncJobCompleted(job, resultText)
+	select {
+	case job.inlineResultCh <- resultText:
+		jobMgr.mu.Lock()
+		delete(jobMgr.jobs, job.JobID)
+		jobMgr.mu.Unlock()
+		if err := deliverInlinePendingJob(job.JobID, resultText); err != nil {
+			loggerJM.Error("failed to deliver inline job in DB", "job_id", job.JobID, "error", err)
+		}
+	default:
+		onAsyncJobCompleted(job, resultText)
+	}
 }
 
 func onAsyncJobCompleted(job *asyncJob, resultText string) {

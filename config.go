@@ -32,6 +32,8 @@ type Config struct {
 	TemplateVars         map[string]string `toml:"-"`
 	SessionsDisplayLimit int               `toml:"sessions_display_limit"`
 	Notices              NoticesConfig     `toml:"-"`
+	HiddenTools          []string          `toml:"hidden_tools"`
+	DisabledBuiltins     []string          `toml:"disabled_builtins"`
 }
 
 type PastebinConfig struct {
@@ -177,23 +179,25 @@ type AIConfig struct {
 	MaxImageWidth       int    `toml:"-"`
 	MaxImageHeight      int    `toml:"-"`
 	Description         string
-	MCPs                []string       `toml:"mcps"`
-	TopP                float32        `toml:"topp"`
-	Stop                []string       `toml:"stop"`
-	PresencePenalty     float32        `toml:"presencepenalty"`
-	FrequencyPenalty    float32        `toml:"frequencypenalty"`
-	ParallelToolCalls   *bool          `toml:"paralleltoolcalls"`
-	ReasoningEffort     string         `toml:"reasoningeffort"`
-	ServiceTier         string         `toml:"servicetier"`
-	Verbosity           string         `toml:"verbosity"`
-	ChatTemplateKwargs  map[string]any `toml:"chat_template_kwargs"`
-	ExtraBody           map[string]any `toml:"extra_body"`
-	Timeout             time.Duration  `toml:"timeout"`
-	StreamTimeout       time.Duration  `toml:"streamtimeout"`
-	ToolVerbose         *bool          `toml:"toolverbose"`
-	ResponsesAPI        bool           `toml:"responses_api"`
-	PreviousResponseID  bool           `toml:"previous_response_id"`
-	NeedsUserSuffix     bool           `toml:"needsusersuffix"`
+	MCPs                []string           `toml:"mcps"`
+	TopP                float32            `toml:"topp"`
+	Stop                []string           `toml:"stop"`
+	PresencePenalty     float32            `toml:"presencepenalty"`
+	FrequencyPenalty    float32            `toml:"frequencypenalty"`
+	ParallelToolCalls   *bool              `toml:"paralleltoolcalls"`
+	ReasoningEffort     string             `toml:"reasoningeffort"`
+	ServiceTier         string             `toml:"servicetier"`
+	Verbosity           string             `toml:"verbosity"`
+	ChatTemplateKwargs  map[string]any     `toml:"chat_template_kwargs"`
+	ExtraBody           map[string]any     `toml:"extra_body"`
+	Timeout             time.Duration      `toml:"timeout"`
+	StreamTimeout       time.Duration      `toml:"streamtimeout"`
+	ToolVerbose         *bool              `toml:"toolverbose"`
+	ResponsesAPI        bool               `toml:"responses_api"`
+	PreviousResponseID  bool               `toml:"previous_response_id"`
+	NeedsUserSuffix     bool               `toml:"needsusersuffix"`
+	APIUser             string             `toml:"api_user"`
+	apiUserTmpl         *template.Template `json:"-"`
 }
 
 type Service struct {
@@ -212,6 +216,7 @@ type Service struct {
 	ToolVerbose         *bool         `toml:"toolverbose"`
 	ParallelToolCalls   *bool         `toml:"paralleltoolcalls"`
 	Parallel            int           `toml:"parallel"`
+	APIUser             string        `toml:"api_user"`
 }
 
 type MCPConfig struct {
@@ -230,11 +235,18 @@ type SystemPromptData struct {
 	Channel   string
 	Network   string
 	ChanNicks string
+	Date      string
 	Vars      map[string]string
 }
 
 func validateSystemPromptTemplate(tmpl *template.Template) error {
-	dummy := SystemPromptData{Nick: "dummy", BotNick: "dummy", Channel: "dummy", Network: "dummy", ChanNicks: `["dummy1","dummy2"]`, Vars: map[string]string{"example": "test"}}
+	dummy := SystemPromptData{Nick: "dummy", BotNick: "dummy", Channel: "dummy", Network: "dummy", ChanNicks: `["dummy1","dummy2"]`, Date: "2025-01-01", Vars: map[string]string{"example": "test"}}
+	var buf strings.Builder
+	return tmpl.Execute(&buf, dummy)
+}
+
+func validateAPIUserTemplate(tmpl *template.Template) error {
+	dummy := SystemPromptData{Nick: "dummy", BotNick: "dummy", Channel: "dummy", Network: "dummy", ChanNicks: `["dummy1","dummy2"]`, Date: "2025-01-01", Vars: map[string]string{"example": "test"}}
 	var buf strings.Builder
 	return tmpl.Execute(&buf, dummy)
 }
@@ -297,6 +309,9 @@ func (cfg *AIConfig) ApplyDefaults(service Service) {
 	if cfg.ParallelToolCalls == nil {
 		defaultTrue := true
 		cfg.ParallelToolCalls = &defaultTrue
+	}
+	if cfg.APIUser == "" {
+		cfg.APIUser = service.APIUser
 	}
 }
 
@@ -361,6 +376,9 @@ func loadConfigDir(dir string) (Config, error) {
 
 	if config.MaxQueueDepth <= 0 {
 		config.MaxQueueDepth = 5
+	}
+	if len(config.HiddenTools) == 0 {
+		config.HiddenTools = []string{"register_background_job"}
 	}
 	if config.TUI.ScrollbackLines == 0 {
 		config.TUI.ScrollbackLines = 5000
@@ -566,6 +584,16 @@ func validateCommands(commands *Commands, config *Config) error {
 		if err := validateMCPRefsFor("completions", name, cfg.MCPs, config); err != nil {
 			return err
 		}
+		if cfg.APIUser != "" {
+			tmpl, err := template.New(name + "_api_user").Parse(cfg.APIUser)
+			if err != nil {
+				return fmt.Errorf("commands.completions.%s api_user template parse error: %w", name, err)
+			}
+			if err := validateAPIUserTemplate(tmpl); err != nil {
+				return fmt.Errorf("commands.completions.%s api_user template validation error: %w", name, err)
+			}
+			cfg.apiUserTmpl = tmpl
+		}
 		commands.Completions[name] = cfg
 	}
 
@@ -607,6 +635,16 @@ func validateCommands(commands *Commands, config *Config) error {
 		}
 		if err := validateMCPRefsFor("chats", name, cfg.MCPs, config); err != nil {
 			return err
+		}
+		if cfg.APIUser != "" {
+			tmpl, err := template.New(name + "_api_user").Parse(cfg.APIUser)
+			if err != nil {
+				return fmt.Errorf("commands.chats.%s api_user template parse error: %w", name, err)
+			}
+			if err := validateAPIUserTemplate(tmpl); err != nil {
+				return fmt.Errorf("commands.chats.%s api_user template validation error: %w", name, err)
+			}
+			cfg.apiUserTmpl = tmpl
 		}
 		commands.Chats[name] = cfg
 	}

@@ -228,7 +228,7 @@ func TestBuildChatRequest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := buildChatCompletionParams(tt.cfg, tt.messages, nil)
+			req := buildChatCompletionParams(tt.cfg, tt.messages, nil, "testuser")
 			tt.check(t, req)
 		})
 	}

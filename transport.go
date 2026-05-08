@@ -95,6 +95,10 @@ func (t *daveTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		req.Header.Set(k, v)
 	}
 
+	if ua := req.Header.Get("User-Agent"); ua != "" {
+		req.Header.Set("User-Agent", "dave-irc/1.0 "+ua)
+	}
+
 	resp, err := t.base.RoundTrip(req)
 	if err != nil {
 		return resp, err

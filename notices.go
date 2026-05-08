@@ -29,6 +29,7 @@ type QueueNotices struct {
 	Msg            string `toml:"msg"`
 	Started        string `toml:"started"`
 	AsyncSubmitted string `toml:"async_submitted"`
+	Stopped        string `toml:"stopped"`
 }
 
 type RateNotices struct {
@@ -85,6 +86,7 @@ type ImageNotices struct {
 
 type ToolNotices struct {
 	Call             string `toml:"call"`
+	CallMulti        string `toml:"call_multi"`
 	CallLimit        string `toml:"call_limit"`
 	Failed           string `toml:"failed"`
 	Usage            string `toml:"usage"`
@@ -125,6 +127,9 @@ func setNoticesDefaults(n *NoticesConfig) {
 	}
 	if n.Queue.AsyncSubmitted == "" {
 		n.Queue.AsyncSubmitted = "\x0303🎨 Generating image for \x02{nick}\x02... I'll send the result when it's ready."
+	}
+	if n.Queue.Stopped == "" {
+		n.Queue.Stopped = "\x0315⏹ Generation stopped."
 	}
 	if len(n.Rate.Msgs) == 0 {
 		n.Rate.Msgs = []string{"hold on you're going to fast"}
@@ -230,6 +235,9 @@ func setNoticesDefaults(n *NoticesConfig) {
 	}
 	if n.Tools.Call == "" {
 		n.Tools.Call = "\x0315🔧 ToolCall: {server} > {tool}"
+	}
+	if n.Tools.CallMulti == "" {
+		n.Tools.CallMulti = "\x0315🔧 ToolCalls: {tools}\x0F"
 	}
 	if n.Tools.CallLimit == "" {
 		n.Tools.CallLimit = "\x0308⚠️ Tool call limit reached, stopping.\x0F"

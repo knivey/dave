@@ -337,7 +337,7 @@ func TestBuildResponseParams(t *testing.T) {
 		responses.ResponseInputItemParamOfMessage("hello", responses.EasyInputMessageRoleUser),
 	}
 
-	params := buildResponseParams(cfg, input, nil, "resp_prev")
+	params := buildResponseParams(cfg, input, nil, "resp_prev", "testuser")
 	assert.Equal(t, "gpt-4o", params.Model, "Model")
 	assert.Equal(t, openai.String("resp_prev"), params.PreviousResponseID, "PreviousResponseID")
 }

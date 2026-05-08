@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"sort"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -773,4 +775,44 @@ func getMCPToolInfo(serverNames []string) string {
 		return ""
 	}
 	return "MCP tools: " + joinStrings(parts, " ")
+}
+
+func getMCPServerNames(serverNames []string) string {
+	var found []string
+	for _, serverName := range serverNames {
+		mcpServersMu.Lock()
+		_, ok := mcpServers[serverName]
+		mcpServersMu.Unlock()
+		if ok {
+			found = append(found, serverName)
+		}
+	}
+	if len(found) == 0 {
+		return ""
+	}
+	return "MCP servers: " + joinStrings(found, ", ")
+}
+
+func getAllMCPServerInfo() []string {
+	mcpServersMu.Lock()
+	defer mcpServersMu.Unlock()
+	var lines []string
+	names := make([]string, 0, len(mcpServers))
+	for name := range mcpServers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		srv := mcpServers[name]
+		var toolNames []string
+		for _, t := range srv.Tools {
+			toolNames = append(toolNames, t.Name)
+		}
+		if len(toolNames) == 0 {
+			lines = append(lines, fmt.Sprintf("  \x02%s\x02 (no tools)", name))
+		} else {
+			lines = append(lines, fmt.Sprintf("  \x02%s\x02: %s", name, strings.Join(toolNames, ", ")))
+		}
+	}
+	return lines
 }

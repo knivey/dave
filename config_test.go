@@ -160,6 +160,34 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 				return cfg
 			},
 		},
+		{
+			name: "api_user inherits from service when empty",
+			cfg:  AIConfig{},
+			svc:  Service{APIUser: "dave/{{.Network}}/{{.Nick}}"},
+			expect: func(cfg AIConfig) AIConfig {
+				cfg.APIUser = "dave/{{.Network}}/{{.Nick}}"
+				cfg.MaxImages = 5
+				cfg.MaxContextImages = 5
+				cfg.ImageFormat = "jpg"
+				cfg.ImageQuality = 75
+				cfg.MaxImageSize = "1024x1024"
+				return cfg
+			},
+		},
+		{
+			name: "api_user preserves command-level value",
+			cfg:  AIConfig{APIUser: "irc:{{.Nick}}"},
+			svc:  Service{APIUser: "dave/{{.Network}}/{{.Nick}}"},
+			expect: func(cfg AIConfig) AIConfig {
+				cfg.APIUser = "irc:{{.Nick}}"
+				cfg.MaxImages = 5
+				cfg.MaxContextImages = 5
+				cfg.ImageFormat = "jpg"
+				cfg.ImageQuality = 75
+				cfg.MaxImageSize = "1024x1024"
+				return cfg
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -176,6 +204,7 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 			assert.Equal(t, want.ImageFormat, cfg.ImageFormat, "ImageFormat")
 			assert.Equal(t, want.ImageQuality, cfg.ImageQuality, "ImageQuality")
 			assert.Equal(t, want.MaxImageSize, cfg.MaxImageSize, "MaxImageSize")
+			assert.Equal(t, want.APIUser, cfg.APIUser, "APIUser")
 		})
 	}
 }
@@ -675,4 +704,111 @@ func TestParallelToolCallsCascading(t *testing.T) {
 			assert.Equal(t, tt.expect, got, "ParallelToolCalls")
 		})
 	}
+}
+
+func TestLoadCommandsDirAPIUser(t *testing.T) {
+	t.Run("valid api_user template parses correctly", func(t *testing.T) {
+		mainTOML := `
+trigger = "."
+`
+		chatsTOML := `
+[-test]
+service = "svc"
+model = "m"
+api_user = "dave/{{.Network}}/{{.Nick}}"
+`
+		servicesTOML := `
+[svc]
+baseurl = "http://localhost"
+`
+		dir := createTestConfigDir(t, mainTOML, map[string]string{
+			"chats.toml":    chatsTOML,
+			"services.toml": servicesTOML,
+		})
+		defer os.RemoveAll(dir)
+
+		config := loadConfigDirOrDie(dir)
+		cfg, ok := config.Commands.Chats["-test"]
+		require.True(t, ok)
+		assert.Equal(t, "dave/{{.Network}}/{{.Nick}}", cfg.APIUser)
+		assert.NotNil(t, cfg.apiUserTmpl)
+	})
+
+	t.Run("invalid api_user template fails to load", func(t *testing.T) {
+		mainTOML := `
+trigger = "."
+`
+		chatsTOML := `
+[-test]
+service = "svc"
+model = "m"
+api_user = "{{.BadField"
+`
+		servicesTOML := `
+[svc]
+baseurl = "http://localhost"
+`
+		dir := createTestConfigDir(t, mainTOML, map[string]string{
+			"chats.toml":    chatsTOML,
+			"services.toml": servicesTOML,
+		})
+		defer os.RemoveAll(dir)
+
+		_, err := loadConfigDir(dir)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "api_user template parse error")
+	})
+
+	t.Run("empty api_user does not create template", func(t *testing.T) {
+		mainTOML := `
+trigger = "."
+`
+		chatsTOML := `
+[-test]
+service = "svc"
+model = "m"
+`
+		servicesTOML := `
+[svc]
+baseurl = "http://localhost"
+`
+		dir := createTestConfigDir(t, mainTOML, map[string]string{
+			"chats.toml":    chatsTOML,
+			"services.toml": servicesTOML,
+		})
+		defer os.RemoveAll(dir)
+
+		config := loadConfigDirOrDie(dir)
+		cfg, ok := config.Commands.Chats["-test"]
+		require.True(t, ok)
+		assert.Equal(t, "", cfg.APIUser)
+		assert.Nil(t, cfg.apiUserTmpl)
+	})
+
+	t.Run("api_user inherits from service", func(t *testing.T) {
+		mainTOML := `
+trigger = "."
+`
+		chatsTOML := `
+[-test]
+service = "svc"
+model = "m"
+`
+		servicesTOML := `
+[svc]
+baseurl = "http://localhost"
+api_user = "svc/{{.Nick}}"
+`
+		dir := createTestConfigDir(t, mainTOML, map[string]string{
+			"chats.toml":    chatsTOML,
+			"services.toml": servicesTOML,
+		})
+		defer os.RemoveAll(dir)
+
+		config := loadConfigDirOrDie(dir)
+		cfg, ok := config.Commands.Chats["-test"]
+		require.True(t, ok)
+		assert.Equal(t, "svc/{{.Nick}}", cfg.APIUser)
+		assert.NotNil(t, cfg.apiUserTmpl)
+	})
 }

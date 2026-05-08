@@ -155,12 +155,15 @@ func parseSDKResponseOutput(resp responses.Response) (text string, reasoning str
 	return text, reasoning, toolCalls
 }
 
-func buildResponseParams(cfg AIConfig, input []responses.ResponseInputItemUnionParam, tools []responses.ToolUnionParam, previousResponseID string) responses.ResponseNewParams {
+func buildResponseParams(cfg AIConfig, input []responses.ResponseInputItemUnionParam, tools []responses.ToolUnionParam, previousResponseID string, user string) responses.ResponseNewParams {
 	params := responses.ResponseNewParams{
 		Model: cfg.Model,
 		Input: responses.ResponseNewParamsInputUnion{
 			OfInputItemList: input,
 		},
+	}
+	if user != "" {
+		params.User = openai.String(user)
 	}
 	if cfg.MaxCompletionTokens > 0 {
 		params.MaxOutputTokens = openai.Int(int64(cfg.MaxCompletionTokens))

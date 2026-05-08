@@ -6,6 +6,7 @@
 #   msg              (string)    Queue position notice. Placeholders: {position}, {eta}
 #   started          (string)    Processing started notice. Placeholders: {nick}, {wait}, {prompt}, {position}, {eta}
 #   async_submitted  (string)    Async image job submitted notice. Placeholders: {nick}
+#   stopped          (string)    Generation stopped by user
 #
 # [rate] options:
 #   msgs             (string[])  Random pick for rate-limit notice
@@ -54,7 +55,8 @@
 #   job_status       (string)    Job non-completed status. Placeholders: {nick}, {status}, {error}
 #
 # [tools] options:
-#   call             (string)    Tool call notification. Placeholders: {server}, {tool}
+#   call             (string)    Tool call notification (single). Placeholders: {server}, {tool}
+#   call_multi       (string)    Tool call notification (multiple parallel). Placeholders: {tools}
 #   call_limit       (string)    Tool iteration limit reached
 #   failed           (string)    MCP tool call failed. Placeholders: {error}
 #   usage            (string)    Missing argument usage. Placeholders: {arg}
@@ -80,6 +82,7 @@
 # msg = "\x0308⏳ Queued (position {position})\x0F"
 # started = "\x0306▶ {nick}: Processing your request (waited {wait})...{prompt}\x0f"
 # async_submitted = "\x0303🎨 Generating image for \x02{nick}\x02... I'll send the result when it's ready."
+# stopped = "\x0315⏹ Generation stopped."
 #
 # [rate]
 # msgs = ["hold on you're going to fast"]
@@ -129,6 +132,7 @@
 #
 # [tools]
 # call = "\x0315🔧 ToolCall: {server} > {tool}"
+# call_multi = "\x0315🔧 ToolCalls: {tools}\x0F"
 # call_limit = "\x0308⚠️ Tool call limit reached, stopping.\x0F"
 # failed = "MCP tool call failed: {error}"
 # usage = "Usage: <{arg}>"

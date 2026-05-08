@@ -1,7 +1,8 @@
 # Chat commands support templating in the system prompt using Go's text/template.
 # Available variables: {{.Nick}} (caller's nickname), {{.BotNick}} (bot's nickname), {{.Channel}} (channel name),
 #   {{.Network}} (network name - exactly as defined in config.toml under [networks.*]),
-#   {{.ChanNicks}} (JSON array of ALL nicknames in {{.Channel}}), {{.Vars.*}} (custom variables from templatevars.toml)
+#   {{.ChanNicks}} (JSON array of ALL nicknames in {{.Channel}}), {{.Date}} (current date, YYYY-MM-DD),
+#   {{.Vars.*}} (custom variables from templatevars.toml)
 # Templates are processed when starting a new chat context. Invalid templates will cause the bot to fail at startup.
 # Template logic supported: conditionals ({{if}} {{else}}), comparisons (eq, ne, lt, gt), logical operators (and, or, not)
 # Example: system = "You are {{.BotNick}} chatting with {{.Nick}} in {{.Channel}} on {{.Network}}."
@@ -41,6 +42,7 @@
 #   previous_response_id (bool, default: false)      Chain responses via server-side context (requires responses_api)
 #   needsusersuffix      (bool, default: false)      Append user message after system messages (auto-detected for anthropic/ models)
 #                                                Fix for: "This model does not support assistant message prefill. The conversation must end with a user message."
+#   api_user             (string, cascades from service)  Go template for API "user" field. Variables: {{.Nick}}, {{.BotNick}}, {{.Channel}}, {{.Network}}, {{.Date}}, {{.Vars.*}}. Empty = not sent.
 #
 # /me action support: The LLM can use "/me <action text>" on its own line to send IRC CTCP ACTION messages.
 # Add {{.Vars.IRCActionNote}} to the system prompt to instruct the LLM how to use this feature.
@@ -82,6 +84,7 @@
 # responses_api = false
 # previous_response_id = false
 # needsusersuffix = false
+# api_user = "irc:{{.Network}}:{{.Channel}}:{{.Nick}}"
 
 [chat]
 description = "General IRC-aware chat"

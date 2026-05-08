@@ -252,6 +252,34 @@ func (cr *chatRunner) sendError(msg string) {
 	}
 }
 
+func (cr *chatRunner) renderAPIUser() string {
+	if cr.cfg.apiUserTmpl == nil {
+		return ""
+	}
+	data := SystemPromptData{
+		Nick:    cr.nick,
+		BotNick: cr.network.Nick,
+		Channel: cr.channel,
+		Network: cr.network.Name,
+		Date:    time.Now().Format("2006-01-02"),
+	}
+	var templateVars map[string]string
+	readConfig(func() {
+		templateVars = make(map[string]string, len(config.TemplateVars))
+		for k, v := range config.TemplateVars {
+			templateVars[k] = v
+		}
+	})
+	data.Vars = templateVars
+
+	var buf strings.Builder
+	if err := cr.cfg.apiUserTmpl.Execute(&buf, data); err != nil {
+		cr.logger.Error("api_user template execution error", "error", err)
+		return ""
+	}
+	return buf.String()
+}
+
 func (cr *chatRunner) logAPIIncident(err error, messages []ChatMessage, iteration int, apiPath string) {
 	if incidentLogger != nil {
 		incidentLogger.logIncident(cr, err, messages, iteration, apiPath)
@@ -271,7 +299,7 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 	}
 	mcpTools := getMCPTools(cr.cfg.MCPs)
 	if len(mcpTools) > 0 {
-		mcpTools = append(mcpTools, registerBackgroundJobTool())
+		mcpTools = append(mcpTools, getBuiltinToolDefs()...)
 	}
 
 	ctx, cancel := context.WithTimeout(cr.ctx, cr.cfg.Timeout)
@@ -288,7 +316,7 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 		}
 		iterations++
 
-		params := buildChatCompletionParams(cr.cfg, messages, mcpTools)
+		params := buildChatCompletionParams(cr.cfg, messages, mcpTools, cr.renderAPIUser())
 
 		if cr.cfg.Streaming {
 			stream := cr.openaiClient.Chat.Completions.NewStreaming(ctx, params)
@@ -635,13 +663,44 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 
 func (cr *chatRunner) executeToolCalls(messages []ChatMessage, toolCalls []ToolCall) ([]ChatMessage, bool) {
 	registeredJob := false
+
+	verbose := cr.cfg.ToolVerbose == nil || *cr.cfg.ToolVerbose
+	type toolEntry struct {
+		server string
+		tool   string
+	}
+	var visibleTools []toolEntry
+	if verbose && len(toolCalls) > 1 {
+		for _, tc := range toolCalls {
+			if _, ok := builtinTools[tc.Function.Name]; ok {
+				continue
+			}
+			visibleTools = append(visibleTools, toolEntry{
+				server: getMCPServerForTool(tc.Function.Name),
+				tool:   tc.Function.Name,
+			})
+		}
+		if len(visibleTools) > 1 {
+			parts := make([]string, len(visibleTools))
+			for i, e := range visibleTools {
+				parts[i] = "[" + e.server + "] " + e.tool
+			}
+			cr.sendIRC(expandNotice(getNotices().Tools.CallMulti, map[string]string{
+				"tools": strings.Join(parts, ", "),
+			}))
+		}
+	}
+
 	for _, tc := range toolCalls {
-		if tc.Function.Name == backgroundJobToolName {
-			messages = cr.handleRegisterBackgroundJob(messages, tc)
-			registeredJob = true
+		if entry, ok := builtinTools[tc.Function.Name]; ok {
+			var registered bool
+			messages, registered = entry.handler(cr, messages, tc)
+			if registered {
+				registeredJob = true
+			}
 			continue
 		}
-		if cr.cfg.ToolVerbose == nil || *cr.cfg.ToolVerbose {
+		if verbose && len(visibleTools) <= 1 {
 			serverName := getMCPServerForTool(tc.Function.Name)
 			cr.sendIRC(expandNotice(getNotices().Tools.Call, map[string]string{"server": serverName, "tool": tc.Function.Name}))
 		}
@@ -762,7 +821,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 
 	mcpTools := getMCPTools(cr.cfg.MCPs)
 	if len(mcpTools) > 0 {
-		mcpTools = append(mcpTools, registerBackgroundJobTool())
+		mcpTools = append(mcpTools, getBuiltinToolDefs()...)
 	}
 	responseTools := toolsToResponseToolParams(mcpTools)
 
@@ -785,7 +844,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 	const maxToolIterations = 20
 
 	for iteration := 1; iteration <= maxToolIterations; iteration++ {
-		params := buildResponseParams(cr.cfg, input, responseTools, currentResponseID)
+		params := buildResponseParams(cr.cfg, input, responseTools, currentResponseID, cr.renderAPIUser())
 
 		if cr.cfg.Streaming {
 			apiStart := time.Now()
@@ -1089,11 +1148,7 @@ func (cr *chatRunner) callResponsesStream(ctx context.Context, params responses.
 				// accumulated via response.completed
 
 			case "response.output_item.done":
-				if event.Item.Type == "function_call" && (cr.cfg.ToolVerbose == nil || *cr.cfg.ToolVerbose) {
-					serverName := getMCPServerForTool(event.Item.Name)
-					cr.sendIRC(expandNotice(getNotices().Tools.Call, map[string]string{"server": serverName, "tool": event.Item.Name}))
-				}
-
+				// Tool call notifications handled by executeToolCalls batch logic
 			case "response.completed":
 				completedResponse = &event.Response
 			}
@@ -1153,6 +1208,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 				Channel:   e.Params[0],
 				Network:   network.Name,
 				ChanNicks: "",
+				Date:      time.Now().Format("2006-01-02"),
 				Vars:      templateVars,
 			}
 
@@ -1278,32 +1334,63 @@ func ExtractFinalText(text string) string {
 
 const backgroundJobToolName = "register_background_job"
 
-func registerBackgroundJobTool() Tool {
-	return Tool{
-		Type: "function",
-		Function: &FunctionDefinition{
-			Name:        backgroundJobToolName,
-			Description: "Register a background job for monitoring. When an async tool (e.g. generate_image_async) returns a job_id, call this to have the system monitor the job. You will be notified with the result when it completes. Do not poll or wait for results. Continue the conversation normally.",
-			Parameters: map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"job_id": map[string]any{
-						"type":        "string",
-						"description": "The job_id returned by the async tool",
+type builtinToolHandler func(cr *chatRunner, messages []ChatMessage, tc ToolCall) ([]ChatMessage, bool)
+
+type builtinToolEntry struct {
+	handler builtinToolHandler
+	def     Tool
+}
+
+var builtinTools = map[string]builtinToolEntry{
+	backgroundJobToolName: {
+		handler: func(cr *chatRunner, messages []ChatMessage, tc ToolCall) ([]ChatMessage, bool) {
+			return cr.handleRegisterBackgroundJob(messages, tc), true
+		},
+		def: Tool{
+			Type: "function",
+			Function: &FunctionDefinition{
+				Name:        backgroundJobToolName,
+				Description: "Register a background job for monitoring. When an async tool (e.g. generate_image_async) returns a job_id, call this to have the system monitor the job. You will be notified with the result when it completes. Do not poll or wait for results. Continue the conversation normally.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"job_id": map[string]any{
+							"type":        "string",
+							"description": "The job_id returned by the async tool",
+						},
+						"tool_name": map[string]any{
+							"type":        "string",
+							"description": "Name of the async tool that started the job (e.g. 'generate_image_async')",
+						},
+						"server_name": map[string]any{
+							"type":        "string",
+							"description": "Name of the MCP server running the job",
+						},
 					},
-					"tool_name": map[string]any{
-						"type":        "string",
-						"description": "Name of the async tool that started the job (e.g. 'generate_image_async')",
-					},
-					"server_name": map[string]any{
-						"type":        "string",
-						"description": "Name of the MCP server running the job",
-					},
+					"required": []string{"job_id", "tool_name", "server_name"},
 				},
-				"required": []string{"job_id", "tool_name", "server_name"},
 			},
 		},
+	},
+}
+
+func getBuiltinToolDefs() []Tool {
+	tools := make([]Tool, 0, len(builtinTools))
+	for _, entry := range builtinTools {
+		tools = append(tools, entry.def)
 	}
+	return tools
+}
+
+func isToolHidden(toolName string) bool {
+	var hidden []string
+	readConfig(func() { hidden = config.HiddenTools })
+	for _, h := range hidden {
+		if h == toolName {
+			return true
+		}
+	}
+	return false
 }
 
 func logStreamCompletion(sessionID int64, model, content, reasoning string, toolCalls []ToolCall, usage *Usage, role string) {

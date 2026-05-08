@@ -158,6 +158,14 @@ func help(network Network, client *girc.Client, event girc.Event, ctx context.Co
 		}
 	}
 
+	mcpLines := getAllMCPServerInfo()
+	if len(mcpLines) > 0 {
+		lines = append(lines, "\x02MCP Servers:\x02")
+		for _, l := range mcpLines {
+			lines = append(lines, l)
+		}
+	}
+
 	chCfg := network.GetChannelConfig(event.Params[0])
 	if chCfg.Pastebin {
 		rawText := strings.Join(lines, "\n")
@@ -246,7 +254,7 @@ func findCommandHelp(network Network, cmdName string) (helpEntry, bool) {
 				cmd:     formatCmd(network.Trigger, c.Regex, c.Name),
 				info:    formatModelInfo(c.Service, c.Model, c.DetectImages),
 				desc:    formatDesc(c.Description, false),
-				mcpInfo: getMCPToolInfo(c.MCPs),
+				mcpInfo: getMCPServerNames(c.MCPs),
 			}, true
 		}
 		if c.Regex != c.Name {
@@ -256,7 +264,7 @@ func findCommandHelp(network Network, cmdName string) (helpEntry, bool) {
 					cmd:     formatCmd(network.Trigger, c.Regex, c.Name),
 					info:    formatModelInfo(c.Service, c.Model, c.DetectImages),
 					desc:    formatDesc(c.Description, false),
-					mcpInfo: getMCPToolInfo(c.MCPs),
+					mcpInfo: getMCPServerNames(c.MCPs),
 				}, true
 			}
 		}
@@ -267,7 +275,7 @@ func findCommandHelp(network Network, cmdName string) (helpEntry, bool) {
 				cmd:     formatCmd(network.Trigger, c.Regex, c.Name),
 				info:    formatModelInfo(c.Service, c.Model, c.DetectImages),
 				desc:    formatDesc(c.Description, false),
-				mcpInfo: getMCPToolInfo(c.MCPs),
+				mcpInfo: getMCPServerNames(c.MCPs),
 			}, true
 		}
 		if c.Regex != c.Name {
@@ -277,7 +285,7 @@ func findCommandHelp(network Network, cmdName string) (helpEntry, bool) {
 					cmd:     formatCmd(network.Trigger, c.Regex, c.Name),
 					info:    formatModelInfo(c.Service, c.Model, c.DetectImages),
 					desc:    formatDesc(c.Description, false),
-					mcpInfo: getMCPToolInfo(c.MCPs),
+					mcpInfo: getMCPServerNames(c.MCPs),
 				}, true
 			}
 		}

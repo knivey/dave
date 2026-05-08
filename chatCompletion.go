@@ -85,10 +85,13 @@ func toolsToChatCompletionToolParams(tools []Tool) []openai.ChatCompletionToolUn
 	return result
 }
 
-func buildChatCompletionParams(cfg AIConfig, messages []ChatMessage, tools []Tool) openai.ChatCompletionNewParams {
+func buildChatCompletionParams(cfg AIConfig, messages []ChatMessage, tools []Tool, user string) openai.ChatCompletionNewParams {
 	params := openai.ChatCompletionNewParams{
 		Model:    cfg.Model,
 		Messages: messagesToChatCompletionParams(messages),
+	}
+	if user != "" {
+		params.User = openai.String(user)
 	}
 	if cfg.MaxCompletionTokens > 0 {
 		params.MaxCompletionTokens = openai.Int(int64(cfg.MaxCompletionTokens))

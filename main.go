@@ -117,6 +117,29 @@ var configCmds CmdMap
 var rateExemptCmds map[*regexp.Regexp]bool
 var chatCmds map[*regexp.Regexp]bool
 
+var builtInNames = map[*regexp.Regexp]string{
+	stop_re:     "stop",
+	help_re:     "help",
+	sessions_re: "sessions",
+	history_re:  "history",
+	stats_re:    "mystats",
+	delete_re:   "delete",
+	resume_re:   "resume",
+	jobs_re:     "jobs",
+	support_re:  "support",
+}
+
+func isBuiltinDisabled(name string) bool {
+	var disabled []string
+	readConfig(func() { disabled = config.DisabledBuiltins })
+	for _, d := range disabled {
+		if d == name {
+			return true
+		}
+	}
+	return false
+}
+
 func registerCommands(cmds Commands) {
 	commandsMutex.Lock()
 	defer commandsMutex.Unlock()
@@ -351,9 +374,13 @@ func sendToOutput(out string, output chan<- string, ctx context.Context) {
 }
 
 // DO NOT DELETE — stop is only for stopping the current text output, not for cancelling async jobs
-func stop(network Network, _ *girc.Client, m girc.Event, _ interface{}, _ ...string) {
+func stop(network Network, client *girc.Client, m girc.Event, _ interface{}, _ ...string) {
 	logger.Info("stop requested")
-	queueMgr.StopCurrent(network.Name, m.Params[0])
+	if queueMgr.StopCurrent(network.Name, m.Params[0]) {
+		var stoppedMsg string
+		readConfig(func() { stoppedMsg = config.Notices.Queue.Stopped })
+		client.Cmd.Reply(m, stoppedMsg)
+	}
 }
 
 func loadIgnores(path string) {
@@ -491,6 +518,10 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 
 	for r, cmd := range builtInCmds {
 		if r.Match([]byte(msg)) {
+			if isBuiltinDisabled(builtInNames[r]) {
+				commandsMutex.RUnlock()
+				return
+			}
 			var args []string
 			for i, m := range r.FindSubmatch([]byte(msg)) {
 				if i != 0 && len(m) > 0 {

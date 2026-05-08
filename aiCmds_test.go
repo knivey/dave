@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"text/template"
 	"time"
 
 	logxi "github.com/mgutz/logxi/v1"
@@ -17,6 +18,247 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func setupNoticesDefaults(t *testing.T) {
+	t.Helper()
+	var n NoticesConfig
+	setNoticesDefaults(&n)
+	configMu.Lock()
+	config.Notices = n
+	configMu.Unlock()
+}
+
+func TestExecuteToolCalls_SingleToolSendsCallNotice(t *testing.T) {
+	chatContextsMap = make(map[string]ChatContext)
+	setupNoticesDefaults(t)
+	mcpServersMu.Lock()
+	origToolMap := mcpToolToServer
+	origServers := mcpServers
+	mcpToolToServer = map[string]string{"tool_a": "serverA"}
+	mcpServers = map[string]*MCPServer{"serverA": {}}
+	mcpServersMu.Unlock()
+	defer func() {
+		mcpServersMu.Lock()
+		mcpToolToServer = origToolMap
+		mcpServers = origServers
+		mcpServersMu.Unlock()
+	}()
+
+	verbose := true
+	outputCh := make(chan string, 20)
+	cr := &chatRunner{
+		cfg:      AIConfig{ToolVerbose: &verbose},
+		network:  Network{Name: "testnet"},
+		channel:  "#test",
+		nick:     "test",
+		ctxKey:   "testnet#testtest",
+		logger:   logxi.New("test"),
+		ctx:      context.Background(),
+		outputCh: outputCh,
+	}
+
+	toolCalls := []ToolCall{
+		{ID: "tc1", Function: FunctionCall{Name: "tool_a", Arguments: "{}"}},
+	}
+
+	go cr.executeToolCalls(nil, toolCalls)
+
+	var msgs []string
+	timeout := time.After(2 * time.Second)
+	for len(msgs) < 1 {
+		select {
+		case m := <-outputCh:
+			msgs = append(msgs, m)
+		case <-timeout:
+			t.Fatal("timed out waiting for IRC output")
+		}
+	}
+
+	require.Len(t, msgs, 1)
+	assert.Contains(t, msgs[0], "tool_a")
+	assert.Contains(t, msgs[0], "serverA")
+}
+
+func TestExecuteToolCalls_MultipleToolsSendsCallMultiNotice(t *testing.T) {
+	chatContextsMap = make(map[string]ChatContext)
+	setupNoticesDefaults(t)
+	mcpServersMu.Lock()
+	origToolMap := mcpToolToServer
+	origServers := mcpServers
+	mcpToolToServer = map[string]string{
+		"tool_a": "serverA",
+		"tool_b": "serverB",
+	}
+	mcpServers = map[string]*MCPServer{"serverA": {}, "serverB": {}}
+	mcpServersMu.Unlock()
+	defer func() {
+		mcpServersMu.Lock()
+		mcpToolToServer = origToolMap
+		mcpServers = origServers
+		mcpServersMu.Unlock()
+	}()
+
+	verbose := true
+	outputCh := make(chan string, 20)
+	cr := &chatRunner{
+		cfg:      AIConfig{ToolVerbose: &verbose},
+		network:  Network{Name: "testnet"},
+		channel:  "#test",
+		nick:     "test",
+		ctxKey:   "testnet#testtest",
+		logger:   logxi.New("test"),
+		ctx:      context.Background(),
+		outputCh: outputCh,
+	}
+
+	toolCalls := []ToolCall{
+		{ID: "tc1", Function: FunctionCall{Name: "tool_a", Arguments: "{}"}},
+		{ID: "tc2", Function: FunctionCall{Name: "tool_b", Arguments: "{}"}},
+	}
+
+	go cr.executeToolCalls(nil, toolCalls)
+
+	var msgs []string
+	timeout := time.After(2 * time.Second)
+	for len(msgs) < 1 {
+		select {
+		case m := <-outputCh:
+			msgs = append(msgs, m)
+		case <-timeout:
+			t.Fatal("timed out waiting for IRC output")
+		}
+	}
+
+	require.Len(t, msgs, 1, "expected single batched notification, got %d: %v", len(msgs), msgs)
+	assert.Contains(t, msgs[0], "tool_a")
+	assert.Contains(t, msgs[0], "tool_b")
+	assert.Contains(t, msgs[0], "serverA")
+	assert.Contains(t, msgs[0], "serverB")
+}
+
+func TestExecuteToolCalls_MultipleWithBuiltinOnlySendsMCP(t *testing.T) {
+	chatContextsMap = make(map[string]ChatContext)
+	setupNoticesDefaults(t)
+	mcpServersMu.Lock()
+	origToolMap := mcpToolToServer
+	origServers := mcpServers
+	mcpToolToServer = map[string]string{
+		"tool_a": "serverA",
+	}
+	mcpServers = map[string]*MCPServer{"serverA": {}}
+	mcpServersMu.Unlock()
+	defer func() {
+		mcpServersMu.Lock()
+		mcpToolToServer = origToolMap
+		mcpServers = origServers
+		mcpServersMu.Unlock()
+	}()
+
+	verbose := true
+	outputCh := make(chan string, 20)
+	cr := &chatRunner{
+		cfg:      AIConfig{ToolVerbose: &verbose},
+		network:  Network{Name: "testnet"},
+		channel:  "#test",
+		nick:     "test",
+		ctxKey:   "testnet#testtest",
+		logger:   logxi.New("test"),
+		ctx:      context.Background(),
+		outputCh: outputCh,
+	}
+
+	toolCalls := []ToolCall{
+		{ID: "tc1", Function: FunctionCall{Name: "register_background_job", Arguments: `{"job_id":"j1","tool_name":"t","server_name":"s"}`}},
+		{ID: "tc2", Function: FunctionCall{Name: "tool_a", Arguments: "{}"}},
+	}
+
+	go cr.executeToolCalls(nil, toolCalls)
+
+	var msgs []string
+	timeout := time.After(2 * time.Second)
+	for len(msgs) < 1 {
+		select {
+		case m := <-outputCh:
+			msgs = append(msgs, m)
+		case <-timeout:
+			t.Fatal("timed out waiting for IRC output")
+		}
+	}
+
+	require.Len(t, msgs, 1, "expected single notification for MCP tool, got %d: %v", len(msgs), msgs)
+	assert.Contains(t, msgs[0], "tool_a")
+	assert.NotContains(t, msgs[0], "register_background_job")
+}
+
+func TestRenderAPIUser(t *testing.T) {
+	tests := []struct {
+		name     string
+		template string
+		nick     string
+		channel  string
+		network  string
+		expected string
+	}{
+		{
+			name:     "simple nick",
+			template: "{{.Nick}}",
+			nick:     "alice",
+			expected: "alice",
+		},
+		{
+			name:     "network and nick",
+			template: "dave/{{.Network}}/{{.Nick}}",
+			nick:     "bob",
+			network:  "libera",
+			expected: "dave/libera/bob",
+		},
+		{
+			name:     "all fields",
+			template: "irc:{{.Network}}:{{.Channel}}:{{.Nick}}",
+			nick:     "carol",
+			channel:  "#dev",
+			network:  "testnet",
+			expected: "irc:testnet:#dev:carol",
+		},
+		{
+			name:     "with bot nick",
+			template: "{{.BotNick}}-{{.Nick}}",
+			nick:     "dave",
+			expected: "testbot-dave",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpl, err := template.New("test").Parse(tt.template)
+			require.NoError(t, err)
+
+			cr := &chatRunner{
+				cfg:     AIConfig{apiUserTmpl: tmpl},
+				nick:    tt.nick,
+				channel: tt.channel,
+				network: Network{Name: tt.network, Nick: "testbot"},
+				ctx:     context.Background(),
+				logger:  logxi.New("test"),
+			}
+
+			result := cr.renderAPIUser()
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestRenderAPIUser_NoTemplate(t *testing.T) {
+	cr := &chatRunner{
+		cfg:     AIConfig{},
+		nick:    "alice",
+		channel: "#test",
+		network: Network{Name: "testnet"},
+		ctx:     context.Background(),
+		logger:  logxi.New("test"),
+	}
+	assert.Equal(t, "", cr.renderAPIUser())
+}
 
 func makeResponsesAPIResponse(id, text string) map[string]any {
 	return map[string]any{

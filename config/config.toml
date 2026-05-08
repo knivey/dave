@@ -6,6 +6,8 @@
 #   uploadurl           (string)              URL prefix for paste uploads
 #   max_queue_depth     (int, default: 5)     Max queued requests per network
 #   sessions_display_limit (int, default: 10) Max sessions shown in sessions list command
+#   hidden_tools        (string array)        Builtin tool names to hide from IRC notifications (default: ["register_background_job"])
+#   disabled_builtins   (string array)        Builtin commands to disable (e.g. ["support", "mystats"])
 #
 # [database] options:
 #   driver              (string, default: "sqlite")        Database driver: "sqlite" or "postgres"
@@ -65,6 +67,8 @@
 # uploadurl = "https://upload.example.com"
 # max_queue_depth = 5
 # sessions_display_limit = 10
+# hidden_tools = ["register_background_job"]
+# disabled_builtins = []
 #
 # [database]
 # path = "data/dave.db"
@@ -121,6 +125,7 @@ quitmsg = "unplugged"
 uploadurl = "https://upload.beer"
 
 max_queue_depth = 5
+hidden_tools = ["register_background_job"]
 
 [database]
 # driver = "sqlite"       # Uncomment to use PostgreSQL: driver = "postgres"

@@ -113,6 +113,7 @@ func TestSetNoticesDefaults(t *testing.T) {
 	assert.NotEmpty(t, n.Images.NoImages)
 	assert.NotEmpty(t, n.Images.JobStatus)
 	assert.NotEmpty(t, n.Tools.Call)
+	assert.NotEmpty(t, n.Tools.CallMulti)
 	assert.NotEmpty(t, n.Tools.CallLimit)
 	assert.NotEmpty(t, n.Tools.Failed)
 	assert.NotEmpty(t, n.Tools.Usage)

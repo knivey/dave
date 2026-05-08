@@ -336,6 +336,18 @@ func switchToSession(job *asyncJob) string {
 		Messages:  messages,
 		Config:    currentCfg,
 		SessionID: job.SessionID,
+		ConvID: func() string {
+			if session.ConvID != nil {
+				return *session.ConvID
+			}
+			return ""
+		}(),
+		ResponseID: func() string {
+			if session.ResponseID != nil {
+				return *session.ResponseID
+			}
+			return ""
+		}(),
 	}
 	apiLogger.RestoreSession(job.SessionID, job.CtxKey)
 

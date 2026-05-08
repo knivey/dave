@@ -35,9 +35,7 @@ var _ ChatContextStore = (*globalContextStore)(nil)
 
 type globalContextStore struct{}
 
-func (s *globalContextStore) Add(key string, config AIConfig, message ChatMessage) []ChatMessage {
-	chatContextsMutex.Lock()
-	defer chatContextsMutex.Unlock()
+func addToMapLocked(key string, config AIConfig, message ChatMessage) {
 	context := chatContextsMap[key]
 	context.Config = config
 	if context.ConvID == "" {
@@ -49,7 +47,14 @@ func (s *globalContextStore) Add(key string, config AIConfig, message ChatMessag
 		context.Messages = append(newMsgs, context.Messages[len(context.Messages)-config.MaxHistory:]...)
 	}
 	chatContextsMap[key] = context
-	return chatContextsMap[key].Messages
+}
+
+func (s *globalContextStore) Add(key string, config AIConfig, message ChatMessage) []ChatMessage {
+	chatContextsMutex.Lock()
+	addToMapLocked(key, config, message)
+	msgs := chatContextsMap[key].Messages
+	chatContextsMutex.Unlock()
+	return msgs
 }
 
 func (s *globalContextStore) Get(key string) ChatContext {

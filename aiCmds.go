@@ -133,7 +133,7 @@ func (cr *chatRunner) storeUsage(usage *Usage, apiPath string, durationMs int) {
 	if theDB == nil || usage == nil {
 		return
 	}
-	sid := GetContext(cr.ctxKey).SessionID
+	sid := cr.getSessionID()
 	if sid == 0 {
 		return
 	}
@@ -157,6 +157,9 @@ type chatRunner struct {
 	logger       logxi.Logger
 	ctx          context.Context
 	outputCh     chan<- string
+	sessionID    int64
+	convID       string
+	detached     bool
 }
 
 func newChatRunner(network Network, client *girc.Client, cfg AIConfig) *chatRunner {
@@ -221,14 +224,19 @@ func (cr *chatRunner) setChannel(channel, nick string) {
 }
 
 func (cr *chatRunner) syncAPISessionID() {
-	sessionID := GetContext(cr.ctxKey).SessionID
+	sessionID := cr.getSessionID()
 	cr.transport.setAPILogger(apiLogger, sessionID)
 }
 
 func (cr *chatRunner) syncConvID() {
-	ctx := GetContext(cr.ctxKey)
-	if ctx.ConvID != "" {
-		cr.transport.setExtraHeaders(map[string]string{"x-grok-conv-id": ctx.ConvID})
+	var convID string
+	if cr.convID != "" {
+		convID = cr.convID
+	} else {
+		convID = GetContext(cr.ctxKey).ConvID
+	}
+	if convID != "" {
+		cr.transport.setExtraHeaders(map[string]string{"x-grok-conv-id": convID})
 	}
 }
 
@@ -250,6 +258,61 @@ func (cr *chatRunner) sendError(msg string) {
 	case cr.outputCh <- errorMsg(msg):
 	case <-cr.ctx.Done():
 	}
+}
+
+func (cr *chatRunner) getSessionID() int64 {
+	if cr.sessionID != 0 {
+		return cr.sessionID
+	}
+	return GetContext(cr.ctxKey).SessionID
+}
+
+func (cr *chatRunner) writeToDBOnly(msg ChatMessage) {
+	if theDB == nil || cr.sessionID == 0 {
+		return
+	}
+	var toolCallsJSON *string
+	if len(msg.ToolCalls) > 0 {
+		if tcData, err := json.Marshal(msg.ToolCalls); err == nil {
+			s := string(tcData)
+			toolCallsJSON = &s
+		}
+	}
+	var toolCallID *string
+	if msg.ToolCallID != "" {
+		toolCallID = &msg.ToolCallID
+	}
+	var reasoningContent *string
+	if msg.ReasoningContent != "" {
+		reasoningContent = &msg.ReasoningContent
+	}
+	if err := insertDBMessage(cr.sessionID, msg.Role, msg.Content, toolCallsJSON, toolCallID, reasoningContent); err != nil {
+		cr.logger.Error("Failed to insert message (detached)", "session", cr.sessionID, "error", err)
+	}
+}
+
+func (cr *chatRunner) addContext(msg ChatMessage) {
+	if cr.sessionID == 0 {
+		AddContext(cr.cfg, cr.ctxKey, msg, cr.network.Name, cr.channel, cr.nick)
+		return
+	}
+
+	chatContextsMutex.Lock()
+	ctx := chatContextsMap[cr.ctxKey]
+
+	if ctx.SessionID != cr.sessionID {
+		cr.detached = true
+		chatContextsMutex.Unlock()
+		cr.writeToDBOnly(msg)
+		return
+	}
+
+	addToMapLocked(cr.ctxKey, cr.cfg, msg)
+	updatedCtx := chatContextsMap[cr.ctxKey]
+	chatContextsMutex.Unlock()
+
+	SetContextLastActive(cr.ctxKey)
+	addContextDBWrites(cr.ctxKey, updatedCtx, msg, cr.network.Name, cr.channel, cr.nick)
 }
 
 func (cr *chatRunner) renderAPIUser() string {
@@ -492,11 +555,11 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 				if content == "" && reasoningBuffer == "" {
 					content = "..."
 				}
-				AddContext(cr.cfg, cr.ctxKey, ChatMessage{
+				cr.addContext(ChatMessage{
 					Role:             RoleAssistant,
 					Content:          content,
 					ReasoningContent: reasoningBuffer,
-				}, cr.network.Name, cr.channel, cr.nick)
+				})
 				if streamingRenderer != nil {
 					for _, line := range streamingRenderer.Process("") {
 						logBuf.WriteString(line)
@@ -544,7 +607,7 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 				cr.sendIRC(text)
 			}
 
-			AddContext(cr.cfg, cr.ctxKey, assistantMsg, cr.network.Name, cr.channel, cr.nick)
+			cr.addContext(assistantMsg)
 
 			messages, _ = cr.executeToolCalls(messages, accumulatedToolCalls)
 			continue
@@ -578,11 +641,11 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 			if content == "" && reasoning == "" {
 				content = "..."
 			}
-			AddContext(cr.cfg, cr.ctxKey, ChatMessage{
+			cr.addContext(ChatMessage{
 				Role:             RoleAssistant,
 				Content:          content,
 				ReasoningContent: reasoning,
-			}, cr.network.Name, cr.channel, cr.nick)
+			})
 			out := FormatOutput(content)
 			cr.logger.Info(out)
 			text := ExtractFinalText(content)
@@ -645,7 +708,7 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 		}
 		messages = append(messages, assistantMsg)
 
-		AddContext(cr.cfg, cr.ctxKey, assistantMsg, cr.network.Name, cr.channel, cr.nick)
+		cr.addContext(assistantMsg)
 		if content != "" {
 			text := ExtractFinalText(content)
 			if cr.cfg.RenderMarkdown {
@@ -714,7 +777,7 @@ func (cr *chatRunner) executeToolCalls(messages []ChatMessage, toolCalls []ToolC
 				ToolCallID: tc.ID,
 			}
 			messages = append(messages, toolMsg)
-			AddContext(cr.cfg, cr.ctxKey, toolMsg, cr.network.Name, cr.channel, cr.nick)
+			cr.addContext(toolMsg)
 			continue
 		}
 		toolText := mcpToolResultToText(result)
@@ -725,7 +788,7 @@ func (cr *chatRunner) executeToolCalls(messages []ChatMessage, toolCalls []ToolC
 			ToolCallID: tc.ID,
 		}
 		messages = append(messages, toolMsg)
-		AddContext(cr.cfg, cr.ctxKey, toolMsg, cr.network.Name, cr.channel, cr.nick)
+		cr.addContext(toolMsg)
 	}
 	return messages, registeredJob
 }
@@ -743,7 +806,7 @@ func (cr *chatRunner) handleRegisterBackgroundJob(messages []ChatMessage, tc Too
 			ToolCallID: tc.ID,
 		}
 		messages = append(messages, toolMsg)
-		AddContext(cr.cfg, cr.ctxKey, toolMsg, cr.network.Name, cr.channel, cr.nick)
+		cr.addContext(toolMsg)
 		return messages
 	}
 
@@ -754,7 +817,7 @@ func (cr *chatRunner) handleRegisterBackgroundJob(messages []ChatMessage, tc Too
 			ToolCallID: tc.ID,
 		}
 		messages = append(messages, toolMsg)
-		AddContext(cr.cfg, cr.ctxKey, toolMsg, cr.network.Name, cr.channel, cr.nick)
+		cr.addContext(toolMsg)
 		return messages
 	}
 
@@ -768,16 +831,13 @@ func (cr *chatRunner) handleRegisterBackgroundJob(messages []ChatMessage, tc Too
 			ToolCallID: tc.ID,
 		}
 		messages = append(messages, toolMsg)
-		AddContext(cr.cfg, cr.ctxKey, toolMsg, cr.network.Name, cr.channel, cr.nick)
+		cr.addContext(toolMsg)
 		return messages
 	}
 
 	cr.logger.Info("registering background job", "job_id", args.JobID, "tool", args.ToolName, "server", args.ServerName)
 
-	chatContextsMutex.Lock()
-	ctx := chatContextsMap[cr.ctxKey]
-	sessionID := ctx.SessionID
-	chatContextsMutex.Unlock()
+	sessionID := cr.getSessionID()
 
 	if sessionID == 0 {
 		toolMsg := ChatMessage{
@@ -786,7 +846,7 @@ func (cr *chatRunner) handleRegisterBackgroundJob(messages []ChatMessage, tc Too
 			ToolCallID: tc.ID,
 		}
 		messages = append(messages, toolMsg)
-		AddContext(cr.cfg, cr.ctxKey, toolMsg, cr.network.Name, cr.channel, cr.nick)
+		cr.addContext(toolMsg)
 		return messages
 	}
 
@@ -798,7 +858,7 @@ func (cr *chatRunner) handleRegisterBackgroundJob(messages []ChatMessage, tc Too
 			ToolCallID: tc.ID,
 		}
 		messages = append(messages, toolMsg)
-		AddContext(cr.cfg, cr.ctxKey, toolMsg, cr.network.Name, cr.channel, cr.nick)
+		cr.addContext(toolMsg)
 		return messages
 	}
 
@@ -812,7 +872,7 @@ func (cr *chatRunner) handleRegisterBackgroundJob(messages []ChatMessage, tc Too
 				ToolCallID: tc.ID,
 			}
 			messages = append(messages, toolMsg)
-			AddContext(cr.cfg, cr.ctxKey, toolMsg, cr.network.Name, cr.channel, cr.nick)
+			cr.addContext(toolMsg)
 			return messages
 		case <-time.After(500 * time.Millisecond):
 		case <-cr.ctx.Done():
@@ -822,7 +882,7 @@ func (cr *chatRunner) handleRegisterBackgroundJob(messages []ChatMessage, tc Too
 				ToolCallID: tc.ID,
 			}
 			messages = append(messages, toolMsg)
-			AddContext(cr.cfg, cr.ctxKey, toolMsg, cr.network.Name, cr.channel, cr.nick)
+			cr.addContext(toolMsg)
 			return messages
 		}
 	}
@@ -833,7 +893,7 @@ func (cr *chatRunner) handleRegisterBackgroundJob(messages []ChatMessage, tc Too
 		ToolCallID: tc.ID,
 	}
 	messages = append(messages, toolMsg)
-	AddContext(cr.cfg, cr.ctxKey, toolMsg, cr.network.Name, cr.channel, cr.nick)
+	cr.addContext(toolMsg)
 	return messages
 }
 
@@ -922,7 +982,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 					assistantMsg.Content = text
 				}
 				messages = append(messages, assistantMsg)
-				AddContext(cr.cfg, cr.ctxKey, assistantMsg, cr.network.Name, cr.channel, cr.nick)
+				cr.addContext(assistantMsg)
 				cr.logger.Info(FormatOutput(text))
 				cr.storeUsage(sdkResponseUsageToUsage(resp.Usage, string(resp.Status)), "responses_stream", durationMs)
 				if reasoning != "" {
@@ -933,7 +993,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 
 			assistantMsg.ToolCalls = toolCalls
 			messages = append(messages, assistantMsg)
-			AddContext(cr.cfg, cr.ctxKey, assistantMsg, cr.network.Name, cr.channel, cr.nick)
+			cr.addContext(assistantMsg)
 			cr.logger.Info("assistant made tool calls", "count", len(toolCalls))
 			cr.storeUsage(sdkResponseUsageToUsage(resp.Usage, string(resp.Status)), "responses_stream", durationMs)
 
@@ -996,7 +1056,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 				Content:          content,
 				ReasoningContent: reasoning,
 			}
-			AddContext(cr.cfg, cr.ctxKey, assistantMsg, cr.network.Name, cr.channel, cr.nick)
+			cr.addContext(assistantMsg)
 			out := FormatOutput(content)
 			cr.logger.Info(out)
 			textFinal := ExtractFinalText(content)
@@ -1055,7 +1115,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 			ToolCalls:        toolCalls,
 		}
 		messages = append(messages, assistantMsg)
-		AddContext(cr.cfg, cr.ctxKey, assistantMsg, cr.network.Name, cr.channel, cr.nick)
+		cr.addContext(assistantMsg)
 		if text != "" {
 			t := ExtractFinalText(text)
 			if cr.cfg.RenderMarkdown {
@@ -1302,14 +1362,21 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 	}
 
 	messages = AddContext(cfg, ctx_key, userMsg, network.Name, e.Params[0], e.Source.Name)
+
+	chatContextsMutex.Lock()
+	capturedCtx := chatContextsMap[ctx_key]
+	chatContextsMutex.Unlock()
+	runner.sessionID = capturedCtx.SessionID
+	runner.convID = capturedCtx.ConvID
+
 	runner.syncAPISessionID()
 	runner.logger.Debug("running completion", "summary", summarizeMessages(messages))
 	runner.syncConvID()
 
 	messages, _ = runner.runTurn(messages)
-	runner.logger.Debug("completion finished", "api_log", apiLogger.GetSessionFilePath(GetContext(runner.ctxKey).SessionID))
+	runner.logger.Debug("completion finished", "api_log", apiLogger.GetSessionFilePath(runner.getSessionID()))
 
-	if theDB != nil {
+	if theDB != nil && !runner.detached {
 		chatContextsMutex.Lock()
 		chatCtx := chatContextsMap[ctx_key]
 		chatContextsMutex.Unlock()

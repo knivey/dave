@@ -1085,6 +1085,43 @@ func TestSwitchToSession_NoCurrentSession_NoSwitchMessage(t *testing.T) {
 	_ = cfg
 }
 
+func TestSwitchToSession_RestoresConvIDAndResponseID(t *testing.T) {
+	setupJMTestDB(t)
+	setupTestJobManager(t)
+	_ = setupMockDeps(t)
+
+	ctxKey := "testnet#testuser"
+
+	sidA := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	insertTestMessage(t, sidA, "system", "sys")
+	require.NoError(t, updateDBSessionConvID(sidA, "grok-conv-123"), "updateDBSessionConvID")
+	respID := "resp-abc-456"
+	require.NoError(t, updateDBSessionResponseID(sidA, &respID), "updateDBSessionResponseID")
+
+	sidB := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	insertTestMessage(t, sidB, "system", "sys2")
+	chatContextsMap[ctxKey] = ChatContext{
+		Messages:  []ChatMessage{{Role: "system", Content: "sys2"}},
+		Config:    makeTestAIConfig(),
+		SessionID: sidB,
+	}
+
+	job := &asyncJob{
+		JobID: "job-1", SessionID: sidA, CtxKey: ctxKey,
+		Network: "testnet", Channel: "#test", Nick: "testuser",
+	}
+
+	switchToSession(job)
+
+	chatContextsMutex.Lock()
+	ctx := chatContextsMap[ctxKey]
+	chatContextsMutex.Unlock()
+
+	assert.Equal(t, sidA, ctx.SessionID, "should have switched to session A")
+	assert.Equal(t, "grok-conv-123", ctx.ConvID, "should restore ConvID from DB session")
+	assert.Equal(t, "resp-abc-456", ctx.ResponseID, "should restore ResponseID from DB session")
+}
+
 func TestRecoverPendingJobs(t *testing.T) {
 	setupJMTestDB(t)
 	setupTestJobManager(t)

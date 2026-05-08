@@ -32,63 +32,67 @@ func ClearContext(key string) {
 	DeleteContextLastActive(key)
 }
 
+func addContextDBWrites(key string, ctx ChatContext, message ChatMessage, network, channel, nick string) {
+	if theDB == nil {
+		return
+	}
+	sid := ctx.SessionID
+	if sid == 0 {
+		var err error
+		sid, err = createDBSession(key, network, channel, nick, ctx.Config.Name, ctx.ConvID, ctx.Config.Service, ctx.Config.Model)
+		if err != nil {
+			loggerCS.Error("Failed to create session", "error", err)
+		} else {
+			chatContextsMutex.Lock()
+			if c, ok := chatContextsMap[key]; ok {
+				c.SessionID = sid
+				chatContextsMap[key] = c
+			}
+			chatContextsMutex.Unlock()
+			apiLogger.RestoreSession(sid, key)
+		}
+	} else if ctx.ConvID != "" {
+		if err := updateDBSessionConvID(sid, ctx.ConvID); err != nil {
+			loggerCS.Error("Failed to update conv_id", "session", sid, "error", err)
+		}
+	}
+
+	if sid != 0 {
+		if message.Role == "user" {
+			if err := updateDBSessionFirstMessage(sid, message.Content); err != nil {
+				loggerCS.Error("Failed to update first message", "session", sid, "error", err)
+			}
+		}
+
+		var toolCallsJSON *string
+		if len(message.ToolCalls) > 0 {
+			if tcData, err := json.Marshal(message.ToolCalls); err == nil {
+				s := string(tcData)
+				toolCallsJSON = &s
+			}
+		}
+		var toolCallID *string
+		if message.ToolCallID != "" {
+			toolCallID = &message.ToolCallID
+		}
+		var reasoningContent *string
+		if message.ReasoningContent != "" {
+			reasoningContent = &message.ReasoningContent
+		}
+		if err := insertDBMessage(sid, message.Role, message.Content, toolCallsJSON, toolCallID, reasoningContent); err != nil {
+			loggerCS.Error("Failed to insert message", "session", sid, "error", err)
+		}
+	}
+}
+
 func AddContext(config AIConfig, key string, message ChatMessage, network, channel, nick string) []ChatMessage {
 	msgs := chatContexts.Add(key, config, message)
 	SetContextLastActive(key)
 
-	if theDB != nil {
-		chatContextsMutex.Lock()
-		ctx := chatContextsMap[key]
-		sid := ctx.SessionID
-		chatContextsMutex.Unlock()
-
-		if sid == 0 {
-			var err error
-			sid, err = createDBSession(key, network, channel, nick, config.Name, ctx.ConvID, config.Service, config.Model)
-			if err != nil {
-				loggerCS.Error("Failed to create session", "error", err)
-			} else {
-				chatContextsMutex.Lock()
-				if c, ok := chatContextsMap[key]; ok {
-					c.SessionID = sid
-					chatContextsMap[key] = c
-				}
-				chatContextsMutex.Unlock()
-				apiLogger.RestoreSession(sid, key)
-			}
-		} else if ctx.ConvID != "" {
-			if err := updateDBSessionConvID(sid, ctx.ConvID); err != nil {
-				loggerCS.Error("Failed to update conv_id", "session", sid, "error", err)
-			}
-		}
-
-		if sid != 0 {
-			if message.Role == "user" {
-				if err := updateDBSessionFirstMessage(sid, message.Content); err != nil {
-					loggerCS.Error("Failed to update first message", "session", sid, "error", err)
-				}
-			}
-
-			var toolCallsJSON *string
-			if len(message.ToolCalls) > 0 {
-				if tcData, err := json.Marshal(message.ToolCalls); err == nil {
-					s := string(tcData)
-					toolCallsJSON = &s
-				}
-			}
-			var toolCallID *string
-			if message.ToolCallID != "" {
-				toolCallID = &message.ToolCallID
-			}
-			var reasoningContent *string
-			if message.ReasoningContent != "" {
-				reasoningContent = &message.ReasoningContent
-			}
-			if err := insertDBMessage(sid, message.Role, message.Content, toolCallsJSON, toolCallID, reasoningContent); err != nil {
-				loggerCS.Error("Failed to insert message", "session", sid, "error", err)
-			}
-		}
-	}
+	chatContextsMutex.Lock()
+	ctx := chatContextsMap[key]
+	chatContextsMutex.Unlock()
+	addContextDBWrites(key, ctx, message, network, channel, nick)
 
 	return msgs
 }

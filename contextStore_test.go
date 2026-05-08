@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	logxi "github.com/mgutz/logxi/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -363,4 +365,253 @@ func TestContextLastActive(t *testing.T) {
 	DeleteContextLastActive(key)
 	_, ok := contextLastActive[key]
 	assert.False(t, ok, "expected key to be deleted")
+}
+
+func makeTestChatRunner(t *testing.T, cfg AIConfig) *chatRunner {
+	t.Helper()
+	return &chatRunner{
+		cfg:     cfg,
+		network: Network{Name: "testnet", Nick: "dave"},
+		channel: "#chan",
+		nick:    "testuser",
+		ctxKey:  "testnet#chantestuser",
+		ctx:     context.Background(),
+		logger:  logxi.New("test"),
+	}
+}
+
+func TestAddContext_OwnedSessionWritesToMap(t *testing.T) {
+	_, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctxKey := "testnet#chanuser"
+	cfg := AIConfig{Name: "testcmd", MaxHistory: 10}
+
+	AddContext(cfg, ctxKey, ChatMessage{Role: "system", Content: "sys"}, "testnet", "#chan", "user")
+
+	chatContextsMutex.Lock()
+	sid := chatContextsMap[ctxKey].SessionID
+	chatContextsMutex.Unlock()
+	require.NotZero(t, sid, "session should be created")
+
+	runner := makeTestChatRunner(t, cfg)
+	runner.ctxKey = ctxKey
+	runner.sessionID = sid
+
+	msg := ChatMessage{Role: "assistant", Content: "hello"}
+	runner.addContext(msg)
+
+	chatContextsMutex.Lock()
+	ctx := chatContextsMap[ctxKey]
+	chatContextsMutex.Unlock()
+
+	assert.False(t, runner.detached, "should not be detached")
+	assert.Equal(t, sid, ctx.SessionID, "session ID should match")
+	assert.Len(t, ctx.Messages, 2, "should have system + assistant")
+
+	var dbMsgs []Message
+	require.NoError(t, theDB.Where("session_id = ?", sid).Find(&dbMsgs).Error)
+	assert.Len(t, dbMsgs, 2, "should have 2 DB messages")
+}
+
+func TestAddContext_DetachedWhenSessionReplaced(t *testing.T) {
+	_, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctxKey := "testnet#chanuser"
+	cfg := AIConfig{Name: "testcmd", MaxHistory: 10}
+
+	AddContext(cfg, ctxKey, ChatMessage{Role: "system", Content: "sys"}, "testnet", "#chan", "user")
+
+	chatContextsMutex.Lock()
+	sidA := chatContextsMap[ctxKey].SessionID
+	chatContextsMutex.Unlock()
+	require.NotZero(t, sidA, "session A should be created")
+
+	runner := makeTestChatRunner(t, cfg)
+	runner.ctxKey = ctxKey
+	runner.sessionID = sidA
+
+	ClearContext(ctxKey)
+
+	chatContextsMutex.Lock()
+	clearedCtx := chatContextsMap[ctxKey]
+	chatContextsMutex.Unlock()
+	assert.Equal(t, int64(0), clearedCtx.SessionID, "session ID should be 0 after ClearContext")
+	assert.False(t, ContextExists(ctxKey), "context should not exist after ClearContext")
+
+	msg := ChatMessage{Role: "assistant", Content: "detached msg"}
+	runner.addContext(msg)
+
+	assert.True(t, runner.detached, "should be detached after ClearContext")
+
+	chatContextsMutex.Lock()
+	ctx := chatContextsMap[ctxKey]
+	chatContextsMutex.Unlock()
+	assert.Equal(t, int64(0), ctx.SessionID, "shared map should NOT have the detached message")
+	assert.Empty(t, ctx.Messages, "shared map messages should be empty")
+
+	var dbMsgs []Message
+	require.NoError(t, theDB.Where("session_id = ?", sidA).Order("id").Find(&dbMsgs).Error)
+	assert.Len(t, dbMsgs, 2, "DB should have system + detached assistant message")
+	if len(dbMsgs) >= 2 {
+		assert.Equal(t, "assistant", dbMsgs[1].Role)
+		assert.Equal(t, "detached msg", dbMsgs[1].Content)
+	}
+}
+
+func TestAddContext_DetachedDoesNotPolluteNewSession(t *testing.T) {
+	_, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctxKey := "testnet#chanuser"
+	cfg := AIConfig{Name: "testcmd", MaxHistory: 10}
+
+	AddContext(cfg, ctxKey, ChatMessage{Role: "system", Content: "sys A"}, "testnet", "#chan", "user")
+	chatContextsMutex.Lock()
+	sidA := chatContextsMap[ctxKey].SessionID
+	chatContextsMutex.Unlock()
+	require.NotZero(t, sidA)
+
+	runnerA := makeTestChatRunner(t, cfg)
+	runnerA.ctxKey = ctxKey
+	runnerA.sessionID = sidA
+
+	ClearContext(ctxKey)
+
+	AddContext(cfg, ctxKey, ChatMessage{Role: "system", Content: "sys B"}, "testnet", "#chan", "user")
+	chatContextsMutex.Lock()
+	sidB := chatContextsMap[ctxKey].SessionID
+	chatContextsMutex.Unlock()
+	require.NotZero(t, sidB)
+	require.NotEqual(t, sidA, sidB, "should be different sessions")
+
+	detachedMsg := ChatMessage{Role: "assistant", Content: "from runner A"}
+	runnerA.addContext(detachedMsg)
+
+	assert.True(t, runnerA.detached)
+
+	chatContextsMutex.Lock()
+	ctxB := chatContextsMap[ctxKey]
+	chatContextsMutex.Unlock()
+	assert.Equal(t, sidB, ctxB.SessionID, "active session should be B")
+	assert.Len(t, ctxB.Messages, 1, "session B should only have its own system message")
+
+	var msgsA []Message
+	require.NoError(t, theDB.Where("session_id = ?", sidA).Order("id").Find(&msgsA).Error)
+	assert.Len(t, msgsA, 2, "session A DB should have system + detached msg")
+
+	var msgsB []Message
+	require.NoError(t, theDB.Where("session_id = ?", sidB).Order("id").Find(&msgsB).Error)
+	assert.Len(t, msgsB, 1, "session B DB should have only its own system msg")
+}
+
+func TestAddContext_SessionIDZeroFallsThrough(t *testing.T) {
+	_, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctxKey := "testnet#chanuser_new"
+	cfg := AIConfig{Name: "testcmd", MaxHistory: 10}
+
+	runner := makeTestChatRunner(t, cfg)
+	runner.ctxKey = ctxKey
+	assert.Equal(t, int64(0), runner.sessionID, "sessionID should start at 0")
+
+	msg := ChatMessage{Role: "system", Content: "sys"}
+	runner.addContext(msg)
+
+	assert.False(t, runner.detached, "should not be detached when sessionID is 0")
+	assert.True(t, ContextExists(ctxKey), "context should exist after add")
+}
+
+func TestGetSessionID(t *testing.T) {
+	_, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctxKey := "testnet#chanuser"
+	cfg := AIConfig{Name: "testcmd", MaxHistory: 10}
+
+	runner := makeTestChatRunner(t, cfg)
+	runner.ctxKey = ctxKey
+
+	assert.Equal(t, int64(0), runner.getSessionID(), "should return 0 when no session")
+
+	AddContext(cfg, ctxKey, ChatMessage{Role: "system", Content: "sys"}, "testnet", "#chan", "user")
+	chatContextsMutex.Lock()
+	sid := chatContextsMap[ctxKey].SessionID
+	chatContextsMutex.Unlock()
+
+	runner.sessionID = sid
+	assert.Equal(t, sid, runner.getSessionID(), "should return captured sessionID")
+
+	ClearContext(ctxKey)
+	assert.Equal(t, sid, runner.getSessionID(), "should still return captured sessionID after clear")
+}
+
+func TestWriteToDBOnly(t *testing.T) {
+	_, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctxKey := "testnet#chanuser"
+	cfg := AIConfig{Name: "testcmd", MaxHistory: 10}
+
+	AddContext(cfg, ctxKey, ChatMessage{Role: "system", Content: "sys"}, "testnet", "#chan", "user")
+	chatContextsMutex.Lock()
+	sid := chatContextsMap[ctxKey].SessionID
+	chatContextsMutex.Unlock()
+	require.NotZero(t, sid)
+
+	runner := makeTestChatRunner(t, cfg)
+	runner.ctxKey = ctxKey
+	runner.sessionID = sid
+
+	runner.writeToDBOnly(ChatMessage{Role: "assistant", Content: "db only msg"})
+
+	chatContextsMutex.Lock()
+	ctx := chatContextsMap[ctxKey]
+	chatContextsMutex.Unlock()
+	assert.Len(t, ctx.Messages, 1, "shared map should NOT have the DB-only message")
+
+	var msgs []Message
+	require.NoError(t, theDB.Where("session_id = ?", sid).Order("id").Find(&msgs).Error)
+	assert.Len(t, msgs, 2, "DB should have system + db-only msg")
+	assert.Equal(t, "db only msg", msgs[1].Content)
+}
+
+func TestWriteToDBOnly_WithToolCalls(t *testing.T) {
+	_, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	ctxKey := "testnet#chanuser"
+	cfg := AIConfig{Name: "testcmd", MaxHistory: 10}
+
+	AddContext(cfg, ctxKey, ChatMessage{Role: "system", Content: "sys"}, "testnet", "#chan", "user")
+	chatContextsMutex.Lock()
+	sid := chatContextsMap[ctxKey].SessionID
+	chatContextsMutex.Unlock()
+	require.NotZero(t, sid)
+
+	runner := makeTestChatRunner(t, cfg)
+	runner.ctxKey = ctxKey
+	runner.sessionID = sid
+
+	runner.writeToDBOnly(ChatMessage{
+		Role:    "tool",
+		Content: "result text",
+		ToolCalls: []ToolCall{
+			{ID: "call_123", Function: FunctionCall{Name: "test_tool", Arguments: `{"k":"v"}`}},
+		},
+		ToolCallID:       "call_123",
+		ReasoningContent: "thinking...",
+	})
+
+	var msgs []Message
+	require.NoError(t, theDB.Where("session_id = ? AND role = ?", sid, "tool").Find(&msgs).Error)
+	require.Len(t, msgs, 1)
+	assert.Equal(t, "result text", msgs[0].Content)
+	assert.NotNil(t, msgs[0].ToolCallID)
+	assert.Equal(t, "call_123", *msgs[0].ToolCallID)
+	assert.NotNil(t, msgs[0].ToolCalls)
+	assert.NotNil(t, msgs[0].ReasoningContent)
+	assert.Equal(t, "thinking...", *msgs[0].ReasoningContent)
 }

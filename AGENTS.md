@@ -6,6 +6,9 @@ Go IRC chatbot for OpenAI-compatible APIs, Stable Diffusion, ComfyUI image gen. 
 **Module**: `github.com/knivey/dave`
 **Go**: 1.25.0
 
+## Design Docs
+- [Queue & Session System](docs/queue-and-sessions.md) — how queue delivery, parallel execution, sessions, and async background tasks are intended to work
+
 ## Commands
 ```bash
 go build -o dave .

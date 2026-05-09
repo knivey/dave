@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/lrstanley/girc"
+	logxi "github.com/mgutz/logxi/v1"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -17,12 +18,14 @@ import (
 
 func setupJMTestDB(t *testing.T) {
 	t.Helper()
-	db, err := initDB(DatabaseConfig{Path: t.TempDir() + "/test.db"})
+	db, err := initDB(DatabaseConfig{Path: t.TempDir() + "/test.db"}, logxi.New("test"))
 	require.NoError(t, err, "initDB")
 	theDB = db
+	sessionMgr = NewSessionManager(db)
 	t.Cleanup(func() {
 		closeDB(theDB)
 		theDB = nil
+		sessionMgr = nil
 	})
 }
 
@@ -31,8 +34,6 @@ func setupTestJobManager(t *testing.T) {
 	queueMgr = NewQueueManager(NoticesConfig{Queue: QueueNotices{Msg: "queued", Started: "started"}}, 5)
 	queueMgr.UpdateServiceLimits(map[string]Service{"testsvc": {Parallel: 1}})
 	queueMgr.Start()
-	chatContextsMap = make(map[string]ChatContext)
-	contextLastActive = make(map[string]int64)
 	jobMgr.jobs = make(map[string]*asyncJob)
 	jobMgr.ctx, jobMgr.cancel = context.WithCancel(context.Background())
 	t.Cleanup(func() {
@@ -45,10 +46,10 @@ func setupTestJobManager(t *testing.T) {
 	})
 }
 
-func createTestSession(t *testing.T, ctxKey, network, channel, nick, chatCmd string) int64 {
+func createTestSession(t *testing.T, network, channel, nick, chatCmd string) int64 {
 	t.Helper()
-	sid, err := createDBSession(ctxKey, network, channel, nick, chatCmd, "", "", "")
-	require.NoError(t, err, "createDBSession")
+	sid, err := sessionMgr.CreateSession(network, channel, nick, chatCmd, "", "")
+	require.NoError(t, err, "CreateSession")
 	return sid
 }
 
@@ -80,6 +81,9 @@ func (m *mockChatRunner) setChannel(channel, nick string) {
 	m.setChannelCalled = true
 	m.setChannelCh = channel
 	m.setChannelNick = nick
+}
+
+func (m *mockChatRunner) setSessionInfo(sessionID int64, convID string) {
 }
 
 func (m *mockChatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
@@ -171,18 +175,9 @@ func TestDeliverAsyncResult_SameSession(t *testing.T) {
 	setupTestJobManager(t)
 	mb := setupMockDeps(t)
 
-	cfg := makeTestAIConfig()
-	ctxKey := "testnet#testuser"
-
-	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sid, "system", "you are helpful")
 	insertTestMessage(t, sid, "user", "draw me a picture")
-
-	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []ChatMessage{{Role: "system", Content: "sys"}, {Role: "user", Content: "draw"}},
-		Config:    cfg,
-		SessionID: sid,
-	}
 
 	require.NoError(t, createPendingJob(sid, "job-1", "generate_image_async", "img-mcp"), "createPendingJob")
 	require.NoError(t, completePendingJob("job-1", "image generated successfully"), "completePendingJob")
@@ -190,7 +185,6 @@ func TestDeliverAsyncResult_SameSession(t *testing.T) {
 	job := &asyncJob{
 		JobID:     "job-1",
 		SessionID: sid,
-		CtxKey:    ctxKey,
 		ToolName:  "generate_image_async",
 		MCPServer: "img-mcp",
 		Network:   "testnet",
@@ -201,11 +195,11 @@ func TestDeliverAsyncResult_SameSession(t *testing.T) {
 	output := make(chan string, 100)
 	deliverAsyncResult(job, context.Background(), output)
 
-	ctx := chatContextsMap[ctxKey]
-	assert.Equal(t, sid, ctx.SessionID, "SessionID")
+	msgs, err := sessionMgr.GetMessages(sid, 20)
+	require.NoError(t, err)
 
 	hasAsyncMsg := false
-	for _, m := range ctx.Messages {
+	for _, m := range msgs {
 		if m.Role == "system" && strings.Contains(m.Content, "Background task completed") {
 			hasAsyncMsg = true
 			assert.Contains(t, m.Content, "image generated successfully", "async result message missing result text")
@@ -220,22 +214,13 @@ func TestDeliverAsyncResult_DifferentSession(t *testing.T) {
 	setupTestJobManager(t)
 	mb := setupMockDeps(t)
 
-	cfg := makeTestAIConfig()
-	ctxKey := "testnet#testuser"
-
-	sessionA := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sessionA := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sessionA, "system", "you are helpful")
 	insertTestMessage(t, sessionA, "user", "draw me a picture")
 
-	sessionB := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sessionB := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sessionB, "system", "you are helpful")
 	insertTestMessage(t, sessionB, "user", "tell me a joke")
-
-	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []ChatMessage{{Role: "system", Content: "sys"}, {Role: "user", Content: "joke"}},
-		Config:    cfg,
-		SessionID: sessionB,
-	}
 
 	require.NoError(t, createPendingJob(sessionA, "job-1", "generate_image_async", "img-mcp"), "createPendingJob")
 	require.NoError(t, completePendingJob("job-1", "image url: http://example.com/img.png"), "completePendingJob")
@@ -243,7 +228,6 @@ func TestDeliverAsyncResult_DifferentSession(t *testing.T) {
 	job := &asyncJob{
 		JobID:     "job-1",
 		SessionID: sessionA,
-		CtxKey:    ctxKey,
 		ToolName:  "generate_image_async",
 		MCPServer: "img-mcp",
 		Network:   "testnet",
@@ -254,8 +238,9 @@ func TestDeliverAsyncResult_DifferentSession(t *testing.T) {
 	output := make(chan string, 100)
 	deliverAsyncResult(job, context.Background(), output)
 
-	ctx := chatContextsMap[ctxKey]
-	assert.Equal(t, sessionA, ctx.SessionID, "should have switched back to session A")
+	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", "testuser")
+	require.NotNil(t, activeSession)
+	assert.Equal(t, sessionA, activeSession.ID, "should have switched back to session A")
 
 	sessB, err := getDBSessionByID(sessionB)
 	require.NoError(t, err, "getDBSessionByID")
@@ -265,8 +250,10 @@ func TestDeliverAsyncResult_DifferentSession(t *testing.T) {
 	require.NoError(t, err, "getDBSessionByID")
 	assert.Equal(t, "active", sessA.Status, "session A status")
 
+	msgs, err := sessionMgr.GetMessages(sessionA, 20)
+	require.NoError(t, err)
 	hasAsyncMsg := false
-	for _, m := range ctx.Messages {
+	for _, m := range msgs {
 		if m.Role == "system" && strings.Contains(m.Content, "Background task completed") {
 			hasAsyncMsg = true
 		}
@@ -282,22 +269,13 @@ func TestOnAsyncJobCompleted_UserBusyWaitsThenDelivers(t *testing.T) {
 
 	queueMgr.UpdateServiceLimits(map[string]Service{"testsvc": {Parallel: 1}, "": {Parallel: 1}})
 
-	cfg := makeTestAIConfig()
-	ctxKey := "testnet#testuser"
-
-	sessionA := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sessionA := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sessionA, "system", "you are helpful")
 	insertTestMessage(t, sessionA, "user", "draw me a picture")
 
-	sessionB := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sessionB := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sessionB, "system", "you are helpful")
 	insertTestMessage(t, sessionB, "user", "tell me a joke")
-
-	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []ChatMessage{{Role: "system", Content: "sys"}, {Role: "user", Content: "joke"}},
-		Config:    cfg,
-		SessionID: sessionB,
-	}
 
 	require.NoError(t, createPendingJob(sessionA, "job-1", "generate_image_async", "img-mcp"), "createPendingJob")
 
@@ -311,7 +289,6 @@ func TestOnAsyncJobCompleted_UserBusyWaitsThenDelivers(t *testing.T) {
 	job := &asyncJob{
 		JobID:     "job-1",
 		SessionID: sessionA,
-		CtxKey:    ctxKey,
 		ToolName:  "generate_image_async",
 		MCPServer: "img-mcp",
 		Network:   "testnet",
@@ -322,12 +299,15 @@ func TestOnAsyncJobCompleted_UserBusyWaitsThenDelivers(t *testing.T) {
 	onAsyncJobCompleted(job, "result text")
 	time.Sleep(100 * time.Millisecond)
 
-	assert.NotEqual(t, sessionA, chatContextsMap[ctxKey].SessionID, "session should NOT have switched while blocking job holds the slot")
+	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", "testuser")
+	if activeSession != nil {
+		assert.NotEqual(t, sessionA, activeSession.ID, "session should NOT have switched while blocking job holds the slot")
+	}
 
 	close(blockDone)
 	time.Sleep(300 * time.Millisecond)
 
-	assert.Equal(t, sessionA, chatContextsMap[ctxKey].SessionID, "session should have switched to session A after delivery completed")
+	waitForActiveSession(t, "testnet", "#test", "testuser", sessionA, 5*time.Second)
 }
 
 func TestOnAsyncJobCompleted_MultipleJobsWhileBusy(t *testing.T) {
@@ -335,22 +315,13 @@ func TestOnAsyncJobCompleted_MultipleJobsWhileBusy(t *testing.T) {
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	cfg := makeTestAIConfig()
-	ctxKey := "testnet#testuser"
-
-	sessionA := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sessionA := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sessionA, "system", "you are helpful")
 	insertTestMessage(t, sessionA, "user", "draw me a picture")
 
-	sessionB := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sessionB := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sessionB, "system", "you are helpful")
 	insertTestMessage(t, sessionB, "user", "tell me a joke")
-
-	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []ChatMessage{{Role: "system", Content: "sys"}, {Role: "user", Content: "joke"}},
-		Config:    cfg,
-		SessionID: sessionB,
-	}
 
 	createPendingJob(sessionA, "job-1", "generate_image_async", "img-mcp")
 	createPendingJob(sessionA, "job-2", "generate_image_async", "img-mcp")
@@ -363,12 +334,12 @@ func TestOnAsyncJobCompleted_MultipleJobsWhileBusy(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	job1 := &asyncJob{
-		JobID: "job-1", SessionID: sessionA, CtxKey: ctxKey,
+		JobID: "job-1", SessionID: sessionA,
 		ToolName: "generate_image_async", MCPServer: "img-mcp",
 		Network: "testnet", Channel: "#test", Nick: "testuser",
 	}
 	job2 := &asyncJob{
-		JobID: "job-2", SessionID: sessionA, CtxKey: ctxKey,
+		JobID: "job-2", SessionID: sessionA,
 		ToolName: "generate_image_async", MCPServer: "img-mcp",
 		Network: "testnet", Channel: "#test", Nick: "testuser",
 	}
@@ -380,13 +351,13 @@ func TestOnAsyncJobCompleted_MultipleJobsWhileBusy(t *testing.T) {
 
 	close(blockDone)
 
-	waitForSessionSwitch(t, ctxKey, sessionA, 5*time.Second)
+	waitForActiveSession(t, "testnet", "#test", "testuser", sessionA, 5*time.Second)
 
-	ctx := chatContextsMap[ctxKey]
-	require.Equal(t, sessionA, ctx.SessionID, "SessionID")
+	msgs, err := sessionMgr.GetMessages(sessionA, 20)
+	require.NoError(t, err)
 
 	asyncCount := 0
-	for _, m := range ctx.Messages {
+	for _, m := range msgs {
 		if m.Role == "system" && strings.Contains(m.Content, "Background task completed") {
 			asyncCount++
 		}
@@ -399,32 +370,24 @@ func TestSwitchToSession_CompletesOldSession(t *testing.T) {
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	cfg := makeTestAIConfig()
-	ctxKey := "testnet#testuser"
-
-	sessionA := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sessionA := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sessionA, "system", "sys prompt A")
 	insertTestMessage(t, sessionA, "user", "hello A")
 
-	sessionB := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sessionB := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sessionB, "system", "sys prompt B")
 	insertTestMessage(t, sessionB, "user", "hello B")
 
-	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []ChatMessage{{Role: "system", Content: "sys prompt B"}},
-		Config:    cfg,
-		SessionID: sessionB,
-	}
-
 	job := &asyncJob{
-		JobID: "job-1", SessionID: sessionA, CtxKey: ctxKey,
+		JobID: "job-1", SessionID: sessionA,
 		Network: "testnet", Channel: "#test", Nick: "testuser",
 	}
 
 	switchToSession(job)
 
-	ctx := chatContextsMap[ctxKey]
-	assert.Equal(t, sessionA, ctx.SessionID, "SessionID")
+	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", "testuser")
+	require.NotNil(t, activeSession)
+	assert.Equal(t, sessionA, activeSession.ID, "active session should be A")
 
 	sessB, _ := getDBSessionByID(sessionB)
 	assert.Equal(t, "completed", sessB.Status, "session B status")
@@ -432,8 +395,10 @@ func TestSwitchToSession_CompletesOldSession(t *testing.T) {
 	sessA, _ := getDBSessionByID(sessionA)
 	assert.Equal(t, "active", sessA.Status, "session A status")
 
+	msgs, err := sessionMgr.GetMessages(sessionA, 20)
+	require.NoError(t, err)
 	foundUserMsg := false
-	for _, m := range ctx.Messages {
+	for _, m := range msgs {
 		if m.Role == "user" && m.Content == "hello A" {
 			foundUserMsg = true
 		}
@@ -446,24 +411,20 @@ func TestSwitchToSession_NoOldSession(t *testing.T) {
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	ctxKey := "testnet#testuser"
-
-	sessionA := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sessionA := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sessionA, "system", "sys prompt A")
 	insertTestMessage(t, sessionA, "user", "hello A")
 
-	chatContextsMap[ctxKey] = ChatContext{}
-
 	job := &asyncJob{
-		JobID: "job-1", SessionID: sessionA, CtxKey: ctxKey,
+		JobID: "job-1", SessionID: sessionA,
 		Network: "testnet", Channel: "#test", Nick: "testuser",
 	}
 
 	switchToSession(job)
 
-	ctx := chatContextsMap[ctxKey]
-	assert.Equal(t, sessionA, ctx.SessionID, "SessionID")
-	assert.NotEmpty(t, ctx.Messages, "expected messages to be loaded")
+	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", "testuser")
+	require.NotNil(t, activeSession)
+	assert.Equal(t, sessionA, activeSession.ID, "active session should be A")
 }
 
 func TestSwitchToSession_SameSessionIsNoop(t *testing.T) {
@@ -471,29 +432,16 @@ func TestSwitchToSession_SameSessionIsNoop(t *testing.T) {
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	cfg := makeTestAIConfig()
-	ctxKey := "testnet#testuser"
-
-	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sid, "system", "sys")
 	insertTestMessage(t, sid, "user", "hello")
 
-	originalCtx := ChatContext{
-		Messages:  []ChatMessage{{Role: "system", Content: "sys"}, {Role: "user", Content: "hello"}},
-		Config:    cfg,
-		SessionID: sid,
-	}
-	chatContextsMap[ctxKey] = originalCtx
-
 	job := &asyncJob{
-		JobID: "job-1", SessionID: sid, CtxKey: ctxKey,
+		JobID: "job-1", SessionID: sid,
 		Network: "testnet", Channel: "#test", Nick: "testuser",
 	}
 
 	switchToSession(job)
-
-	ctx := chatContextsMap[ctxKey]
-	assert.Equal(t, len(originalCtx.Messages), len(ctx.Messages), "messages count should not change")
 
 	sess, _ := getDBSessionByID(sid)
 	assert.Equal(t, "active", sess.Status, "session status")
@@ -504,27 +452,23 @@ func TestSwitchToSession_InvalidChatCommand(t *testing.T) {
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	ctxKey := "testnet#testuser"
-
-	sessionA := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "deletedcmd")
+	sessionA := createTestSession(t, "testnet", "#test", "testuser", "deletedcmd")
 	insertTestMessage(t, sessionA, "system", "sys")
 
-	sessionB := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
-	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []ChatMessage{{Role: "system", Content: "sys"}},
-		Config:    makeTestAIConfig(),
-		SessionID: sessionB,
-	}
+	sessionB := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 
 	job := &asyncJob{
-		JobID: "job-1", SessionID: sessionA, CtxKey: ctxKey,
+		JobID: "job-1", SessionID: sessionA,
 		Network: "testnet", Channel: "#test", Nick: "testuser",
 	}
 
-	switchToSession(job)
+	msg := switchToSession(job)
+	assert.Equal(t, "", msg, "should return empty string when chat command not found")
 
-	ctx := chatContextsMap[ctxKey]
-	assert.Equal(t, sessionB, ctx.SessionID, "should remain session B when chat command not found")
+	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", "testuser")
+	require.NotNil(t, activeSession)
+	assert.Equal(t, sessionB, activeSession.ID, "should remain session B when chat command not found")
+	_ = sessionB
 }
 
 func TestDeliverAsyncResult_NoContext(t *testing.T) {
@@ -532,30 +476,27 @@ func TestDeliverAsyncResult_NoContext(t *testing.T) {
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	ctxKey := "testnet#testuser"
-
-	sessionA := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sessionA := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sessionA, "system", "sys")
 	require.NoError(t, createPendingJob(sessionA, "job-1", "generate_image_async", "img-mcp"), "createPendingJob")
 	completePendingJob("job-1", "result")
 
-	delete(chatContextsMap, ctxKey)
-
 	job := &asyncJob{
-		JobID: "job-1", SessionID: sessionA, CtxKey: ctxKey,
+		JobID: "job-1", SessionID: sessionA,
 		Network: "testnet", Channel: "#test", Nick: "testuser",
 	}
 
 	output := make(chan string, 100)
 	deliverAsyncResult(job, context.Background(), output)
 
-	chatContextsMutex.Lock()
-	ctx := chatContextsMap[ctxKey]
-	chatContextsMutex.Unlock()
-	assert.Equal(t, sessionA, ctx.SessionID, "should have loaded from DB")
+	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", "testuser")
+	require.NotNil(t, activeSession)
+	assert.Equal(t, sessionA, activeSession.ID, "should have loaded from DB")
 
+	msgs, err := sessionMgr.GetMessages(sessionA, 20)
+	require.NoError(t, err)
 	hasAsyncMsg := false
-	for _, m := range ctx.Messages {
+	for _, m := range msgs {
 		if m.Role == "system" && strings.Contains(m.Content, "Background task completed") {
 			hasAsyncMsg = true
 		}
@@ -568,17 +509,8 @@ func TestDeliverAsyncResult_UsesMockRunner(t *testing.T) {
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	cfg := makeTestAIConfig()
-	ctxKey := "testnet#testuser"
-
-	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sid, "system", "sys")
-
-	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []ChatMessage{{Role: "system", Content: "sys"}},
-		Config:    cfg,
-		SessionID: sid,
-	}
 
 	createPendingJob(sid, "job-1", "generate_image_async", "img-mcp")
 	completePendingJob("job-1", "result data")
@@ -596,7 +528,7 @@ func TestDeliverAsyncResult_UsesMockRunner(t *testing.T) {
 	defer func() { newChatRunnerFn = origNewRunner }()
 
 	job := &asyncJob{
-		JobID: "job-1", SessionID: sid, CtxKey: ctxKey,
+		JobID: "job-1", SessionID: sid,
 		ToolName: "generate_image_async", MCPServer: "img-mcp",
 		Network: "testnet", Channel: "#test", Nick: "testuser",
 	}
@@ -616,17 +548,8 @@ func TestDeliverAsyncResult_RunnerSeesInjectedResult(t *testing.T) {
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	cfg := makeTestAIConfig()
-	ctxKey := "testnet#testuser"
-
-	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sid, "system", "sys")
-
-	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []ChatMessage{{Role: "system", Content: "sys"}},
-		Config:    cfg,
-		SessionID: sid,
-	}
 
 	createPendingJob(sid, "job-1", "generate_image_async", "img-mcp")
 	completePendingJob("job-1", "image url: http://example.com/img.png")
@@ -644,7 +567,7 @@ func TestDeliverAsyncResult_RunnerSeesInjectedResult(t *testing.T) {
 	defer func() { newChatRunnerFn = origNewRunner }()
 
 	job := &asyncJob{
-		JobID: "job-1", SessionID: sid, CtxKey: ctxKey,
+		JobID: "job-1", SessionID: sid,
 		ToolName: "generate_image_async", MCPServer: "img-mcp",
 		Network: "testnet", Channel: "#test", Nick: "testuser",
 	}
@@ -669,17 +592,8 @@ func TestDeliverAsyncResult_MultipleCompletedJobs(t *testing.T) {
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	cfg := makeTestAIConfig()
-	ctxKey := "testnet#testuser"
-
-	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sid, "system", "sys")
-
-	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []ChatMessage{{Role: "system", Content: "sys"}},
-		Config:    cfg,
-		SessionID: sid,
-	}
 
 	createPendingJob(sid, "job-1", "generate_image_async", "img-mcp")
 	completePendingJob("job-1", "image 1")
@@ -699,7 +613,7 @@ func TestDeliverAsyncResult_MultipleCompletedJobs(t *testing.T) {
 	defer func() { newChatRunnerFn = origNewRunner }()
 
 	job := &asyncJob{
-		JobID: "job-1", SessionID: sid, CtxKey: ctxKey,
+		JobID: "job-1", SessionID: sid,
 		ToolName: "generate_image_async", MCPServer: "img-mcp",
 		Network: "testnet", Channel: "#test", Nick: "testuser",
 	}
@@ -717,15 +631,9 @@ func TestInjectAsyncResultFromDB(t *testing.T) {
 	setupJMTestDB(t)
 
 	cfg := makeTestAIConfig()
-	ctxKey := "testnet#testuser"
 
-	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
-
-	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []ChatMessage{{Role: "system", Content: "sys"}},
-		Config:    cfg,
-		SessionID: sid,
-	}
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sessionMgr.AddMessage(sid, ChatMessage{Role: "system", Content: "sys"})
 
 	result := "image url: http://example.com/test.png"
 	pj := PendingJob{
@@ -737,21 +645,16 @@ func TestInjectAsyncResultFromDB(t *testing.T) {
 		Result:    &result,
 	}
 
-	ctx := chatContextsMap[ctxKey]
-	injectAsyncResultFromDB(ctxKey, ctx, pj, "testnet", "#test", "testuser")
+	injectAsyncResultFromDB(sid, cfg, pj, "testnet", "#test", "testuser")
 
-	ctx = chatContextsMap[ctxKey]
-	require.Len(t, ctx.Messages, 2, "expected 2 messages")
-	lastMsg := ctx.Messages[len(ctx.Messages)-1]
+	msgs, err := sessionMgr.GetMessages(sid, 20)
+	require.NoError(t, err)
+	require.Len(t, msgs, 2, "expected 2 messages")
+	lastMsg := msgs[len(msgs)-1]
 	assert.Equal(t, "system", lastMsg.Role, "injected message role")
 	assert.Contains(t, lastMsg.Content, "Background task completed", "injected message missing expected text")
 	assert.Contains(t, lastMsg.Content, "generate_image_async", "injected message missing tool name")
 	assert.Contains(t, lastMsg.Content, "http://example.com/test.png", "injected message missing result")
-
-	dbMsgs, err := loadDBSessionMessages(sid)
-	require.NoError(t, err, "loadDBSessionMessages")
-	assert.Len(t, dbMsgs, 1, "expected 1 DB message (only the injected one)")
-	assert.Equal(t, "system", dbMsgs[0].Role, "DB message role")
 }
 
 func TestInjectAsyncResultFromDB_AnthropicUserSuffix(t *testing.T) {
@@ -759,15 +662,9 @@ func TestInjectAsyncResultFromDB_AnthropicUserSuffix(t *testing.T) {
 
 	cfg := makeTestAIConfig()
 	cfg.Model = "anthropic/claude-sonnet-4.6"
-	ctxKey := "testnet#testuser"
 
-	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
-
-	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []ChatMessage{{Role: "system", Content: "sys"}},
-		Config:    cfg,
-		SessionID: sid,
-	}
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sessionMgr.AddMessage(sid, ChatMessage{Role: "system", Content: "sys"})
 
 	result := "image url: http://example.com/test.png"
 	pj := PendingJob{
@@ -779,15 +676,15 @@ func TestInjectAsyncResultFromDB_AnthropicUserSuffix(t *testing.T) {
 		Result:    &result,
 	}
 
-	ctx := chatContextsMap[ctxKey]
-	injectAsyncResultFromDB(ctxKey, ctx, pj, "testnet", "#test", "testuser")
+	injectAsyncResultFromDB(sid, cfg, pj, "testnet", "#test", "testuser")
 
-	ctx = chatContextsMap[ctxKey]
-	require.Len(t, ctx.Messages, 3, "expected 3 messages (sys + system result + user suffix)")
-	assert.Equal(t, "system", ctx.Messages[1].Role)
-	assert.Contains(t, ctx.Messages[1].Content, "Background task completed")
-	assert.Equal(t, "user", ctx.Messages[2].Role, "last message should be user suffix")
-	assert.Contains(t, ctx.Messages[2].Content, "Respond to the user based on the above background task result.")
+	msgs, err := sessionMgr.GetMessages(sid, 20)
+	require.NoError(t, err)
+	require.Len(t, msgs, 3, "expected 3 messages (sys + system result + user suffix)")
+	assert.Equal(t, "system", msgs[1].Role)
+	assert.Contains(t, msgs[1].Content, "Background task completed")
+	assert.Equal(t, "user", msgs[2].Role, "last message should be user suffix")
+	assert.Contains(t, msgs[2].Content, "Respond to the user based on the above background task result.")
 }
 
 func TestInjectAsyncResultFromDB_NeedsUserSuffixConfig(t *testing.T) {
@@ -795,15 +692,9 @@ func TestInjectAsyncResultFromDB_NeedsUserSuffixConfig(t *testing.T) {
 
 	cfg := makeTestAIConfig()
 	cfg.NeedsUserSuffix = true
-	ctxKey := "testnet#testuser"
 
-	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
-
-	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []ChatMessage{{Role: "system", Content: "sys"}},
-		Config:    cfg,
-		SessionID: sid,
-	}
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sessionMgr.AddMessage(sid, ChatMessage{Role: "system", Content: "sys"})
 
 	result := "image url: http://example.com/test.png"
 	pj := PendingJob{
@@ -815,27 +706,21 @@ func TestInjectAsyncResultFromDB_NeedsUserSuffixConfig(t *testing.T) {
 		Result:    &result,
 	}
 
-	ctx := chatContextsMap[ctxKey]
-	injectAsyncResultFromDB(ctxKey, ctx, pj, "testnet", "#test", "testuser")
+	injectAsyncResultFromDB(sid, cfg, pj, "testnet", "#test", "testuser")
 
-	ctx = chatContextsMap[ctxKey]
-	require.Len(t, ctx.Messages, 3, "expected 3 messages (sys + system result + user suffix)")
-	assert.Equal(t, "user", ctx.Messages[2].Role, "last message should be user suffix")
+	msgs, err := sessionMgr.GetMessages(sid, 20)
+	require.NoError(t, err)
+	require.Len(t, msgs, 3, "expected 3 messages (sys + system result + user suffix)")
+	assert.Equal(t, "user", msgs[2].Role, "last message should be user suffix")
 }
 
 func TestInjectAsyncResultFromDB_NilResult(t *testing.T) {
 	setupJMTestDB(t)
 
 	cfg := makeTestAIConfig()
-	ctxKey := "testnet#testuser"
 
-	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
-
-	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []ChatMessage{{Role: "system", Content: "sys"}},
-		Config:    cfg,
-		SessionID: sid,
-	}
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sessionMgr.AddMessage(sid, ChatMessage{Role: "system", Content: "sys"})
 
 	pj := PendingJob{
 		SessionID: &sid,
@@ -845,11 +730,11 @@ func TestInjectAsyncResultFromDB_NilResult(t *testing.T) {
 		Result:    nil,
 	}
 
-	ctx := chatContextsMap[ctxKey]
-	injectAsyncResultFromDB(ctxKey, ctx, pj, "testnet", "#test", "testuser")
+	injectAsyncResultFromDB(sid, cfg, pj, "testnet", "#test", "testuser")
 
-	ctx = chatContextsMap[ctxKey]
-	lastMsg := ctx.Messages[len(ctx.Messages)-1]
+	msgs, err := sessionMgr.GetMessages(sid, 20)
+	require.NoError(t, err)
+	lastMsg := msgs[len(msgs)-1]
 	assert.Contains(t, lastMsg.Content, "Background task completed", "injected message missing expected text even with nil result")
 }
 
@@ -882,24 +767,15 @@ func TestOnAsyncJobCompleted_RemovesJobFromMap(t *testing.T) {
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	cfg := makeTestAIConfig()
-	ctxKey := "testnet#testuser"
-
-	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sid, "system", "sys")
-
-	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []ChatMessage{{Role: "system", Content: "sys"}},
-		Config:    cfg,
-		SessionID: sid,
-	}
 
 	createPendingJob(sid, "job-1", "generate_image_async", "img-mcp")
 
 	jobMgr.jobs["job-1"] = &asyncJob{JobID: "job-1"}
 
 	job := &asyncJob{
-		JobID: "job-1", SessionID: sid, CtxKey: ctxKey,
+		JobID: "job-1", SessionID: sid,
 		Network: "testnet", Channel: "#test", Nick: "testuser",
 	}
 
@@ -914,22 +790,13 @@ func TestOnAsyncJobCompleted_MarksCompletedInDB(t *testing.T) {
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	cfg := makeTestAIConfig()
-	ctxKey := "testnet#testuser"
-
-	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sid, "system", "sys")
-
-	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []ChatMessage{{Role: "system", Content: "sys"}},
-		Config:    cfg,
-		SessionID: sid,
-	}
 
 	createPendingJob(sid, "job-1", "generate_image_async", "img-mcp")
 
 	job := &asyncJob{
-		JobID: "job-1", SessionID: sid, CtxKey: ctxKey,
+		JobID: "job-1", SessionID: sid,
 		Network: "testnet", Channel: "#test", Nick: "testuser",
 	}
 
@@ -954,23 +821,14 @@ func TestDeliverAsyncResult_MarksJobsDelivered(t *testing.T) {
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	cfg := makeTestAIConfig()
-	ctxKey := "testnet#testuser"
-
-	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sid, "system", "sys")
-
-	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []ChatMessage{{Role: "system", Content: "sys"}},
-		Config:    cfg,
-		SessionID: sid,
-	}
 
 	createPendingJob(sid, "job-1", "generate_image_async", "img-mcp")
 	completePendingJob("job-1", "result")
 
 	job := &asyncJob{
-		JobID: "job-1", SessionID: sid, CtxKey: ctxKey,
+		JobID: "job-1", SessionID: sid,
 		Network: "testnet", Channel: "#test", Nick: "testuser",
 	}
 
@@ -982,22 +840,22 @@ func TestDeliverAsyncResult_MarksJobsDelivered(t *testing.T) {
 	assert.Equal(t, "delivered", pj.Status, "job status")
 }
 
-func waitForSessionSwitch(t *testing.T, ctxKey string, expectedSID int64, timeout time.Duration) {
+func waitForActiveSession(t *testing.T, network, channel, nick string, expectedSID int64, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		chatContextsMutex.Lock()
-		ctx := chatContextsMap[ctxKey]
-		chatContextsMutex.Unlock()
-		if ctx.SessionID == expectedSID {
+		session, _ := sessionMgr.GetActiveSession(network, channel, nick)
+		if session != nil && session.ID == expectedSID {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	chatContextsMutex.Lock()
-	ctx := chatContextsMap[ctxKey]
-	chatContextsMutex.Unlock()
-	require.Equal(t, expectedSID, ctx.SessionID, "timed out waiting for session switch")
+	session, _ := sessionMgr.GetActiveSession(network, channel, nick)
+	sid := int64(0)
+	if session != nil {
+		sid = session.ID
+	}
+	require.Equal(t, expectedSID, sid, "timed out waiting for session switch")
 }
 
 func TestDeliverAsyncResult_NoContextLoaded_LoadsFromDB(t *testing.T) {
@@ -1005,21 +863,16 @@ func TestDeliverAsyncResult_NoContextLoaded_LoadsFromDB(t *testing.T) {
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	ctxKey := "testnet#testuser"
-
-	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sid, "system", "you are helpful")
 	insertTestMessage(t, sid, "user", "draw me a picture")
 
 	require.NoError(t, createPendingJob(sid, "job-1", "generate_image_async", "img-mcp"), "createPendingJob")
 	require.NoError(t, completePendingJob("job-1", "image url: http://example.com/img.png"), "completePendingJob")
 
-	delete(chatContextsMap, ctxKey)
-
 	job := &asyncJob{
 		JobID:     "job-1",
 		SessionID: sid,
-		CtxKey:    ctxKey,
 		ToolName:  "generate_image_async",
 		MCPServer: "img-mcp",
 		Network:   "testnet",
@@ -1030,15 +883,16 @@ func TestDeliverAsyncResult_NoContextLoaded_LoadsFromDB(t *testing.T) {
 	output := make(chan string, 100)
 	deliverAsyncResult(job, context.Background(), output)
 
-	chatContextsMutex.Lock()
-	ctx := chatContextsMap[ctxKey]
-	chatContextsMutex.Unlock()
+	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", "testuser")
+	require.NotNil(t, activeSession)
+	assert.Equal(t, sid, activeSession.ID, "should have loaded from DB")
 
-	assert.Equal(t, sid, ctx.SessionID, "should have loaded from DB")
-	assert.NotEmpty(t, ctx.Messages, "expected messages to be loaded from DB")
+	msgs, err := sessionMgr.GetMessages(sid, 20)
+	require.NoError(t, err)
+	assert.NotEmpty(t, msgs, "expected messages to be loaded from DB")
 
 	hasAsyncMsg := false
-	for _, m := range ctx.Messages {
+	for _, m := range msgs {
 		if m.Role == "system" && strings.Contains(m.Content, "Background task completed") {
 			hasAsyncMsg = true
 		}
@@ -1057,18 +911,12 @@ func TestSwitchToSession_NoCurrentSession_NoSwitchMessage(t *testing.T) {
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	cfg := makeTestAIConfig()
-	ctxKey := "testnet#testuser"
-
-	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sid, "system", "you are helpful")
-
-	delete(chatContextsMap, ctxKey)
 
 	job := &asyncJob{
 		JobID:     "job-1",
 		SessionID: sid,
-		CtxKey:    ctxKey,
 		Network:   "testnet",
 		Channel:   "#test",
 		Nick:      "testuser",
@@ -1077,12 +925,9 @@ func TestSwitchToSession_NoCurrentSession_NoSwitchMessage(t *testing.T) {
 	msg := switchToSession(job)
 	assert.Equal(t, "", msg, "switchToSession should return empty string when no prior session")
 
-	chatContextsMutex.Lock()
-	ctx := chatContextsMap[ctxKey]
-	chatContextsMutex.Unlock()
-
-	assert.Equal(t, sid, ctx.SessionID, "should have loaded from DB")
-	_ = cfg
+	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", "testuser")
+	require.NotNil(t, activeSession)
+	assert.Equal(t, sid, activeSession.ID, "should have loaded from DB")
 }
 
 func TestSwitchToSession_RestoresConvIDAndResponseID(t *testing.T) {
@@ -1090,36 +935,29 @@ func TestSwitchToSession_RestoresConvIDAndResponseID(t *testing.T) {
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	ctxKey := "testnet#testuser"
-
-	sidA := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sidA := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sidA, "system", "sys")
-	require.NoError(t, updateDBSessionConvID(sidA, "grok-conv-123"), "updateDBSessionConvID")
+	require.NoError(t, theDB.Model(&Session{}).Where("id = ?", sidA).Update("conv_id", "grok-conv-123").Error, "update conv_id")
 	respID := "resp-abc-456"
 	require.NoError(t, updateDBSessionResponseID(sidA, &respID), "updateDBSessionResponseID")
 
-	sidB := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sidB := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sidB, "system", "sys2")
-	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []ChatMessage{{Role: "system", Content: "sys2"}},
-		Config:    makeTestAIConfig(),
-		SessionID: sidB,
-	}
 
 	job := &asyncJob{
-		JobID: "job-1", SessionID: sidA, CtxKey: ctxKey,
+		JobID: "job-1", SessionID: sidA,
 		Network: "testnet", Channel: "#test", Nick: "testuser",
 	}
 
 	switchToSession(job)
 
-	chatContextsMutex.Lock()
-	ctx := chatContextsMap[ctxKey]
-	chatContextsMutex.Unlock()
-
-	assert.Equal(t, sidA, ctx.SessionID, "should have switched to session A")
-	assert.Equal(t, "grok-conv-123", ctx.ConvID, "should restore ConvID from DB session")
-	assert.Equal(t, "resp-abc-456", ctx.ResponseID, "should restore ResponseID from DB session")
+	session, err := sessionMgr.GetSession(sidA)
+	require.NoError(t, err)
+	assert.Equal(t, "active", session.Status)
+	require.NotNil(t, session.ConvID)
+	assert.Equal(t, "grok-conv-123", *session.ConvID, "should restore ConvID from DB session")
+	require.NotNil(t, session.ResponseID)
+	assert.Equal(t, "resp-abc-456", *session.ResponseID, "should restore ResponseID from DB session")
 }
 
 func TestRecoverPendingJobs(t *testing.T) {
@@ -1127,8 +965,7 @@ func TestRecoverPendingJobs(t *testing.T) {
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	ctxKey := "testnet#testuser"
-	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sid, "system", "sys")
 
 	createPendingJob(sid, "recovery-job-1", "generate_image_async", "img-mcp")
@@ -1149,6 +986,7 @@ func TestRecoverPendingJobs(t *testing.T) {
 
 func TestRecoverPendingJobs_NoDB(t *testing.T) {
 	theDB = nil
+	sessionMgr = nil
 	recoverPendingJobs()
 }
 
@@ -1157,8 +995,8 @@ func TestRegisterAsyncJob_Duplicate(t *testing.T) {
 	jobMgr.ctx, jobMgr.cancel = context.WithCancel(context.Background())
 	defer jobMgr.cancel()
 
-	registerAsyncJob("dup-job", 1, "key", "tool", "server", "net", "#chan", "user")
-	registerAsyncJob("dup-job", 1, "key", "tool", "server", "net", "#chan", "user")
+	registerAsyncJob("dup-job", 1, "tool", "server", "net", "#chan", "user")
+	registerAsyncJob("dup-job", 1, "tool", "server", "net", "#chan", "user")
 
 	jobMgr.mu.Lock()
 	count := len(jobMgr.jobs)
@@ -1171,10 +1009,7 @@ func TestSwitchToSession_DBMessagesWithToolCalls(t *testing.T) {
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	cfg := makeTestAIConfig()
-	ctxKey := "testnet#testuser"
-
-	sessionA := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sessionA := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 
 	toolCallsJSON, _ := json.Marshal([]ToolCall{
 		{ID: "tc-1", Type: "function", Function: FunctionCall{Name: "test_tool", Arguments: `{"arg":"val"}`}},
@@ -1185,25 +1020,20 @@ func TestSwitchToSession_DBMessagesWithToolCalls(t *testing.T) {
 	toolCallID := "tc-1"
 	insertDBMessage(sessionA, "tool", "tool result", nil, &toolCallID, nil)
 
-	sessionB := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
-	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []ChatMessage{{Role: "system", Content: "sys B"}},
-		Config:    cfg,
-		SessionID: sessionB,
-	}
+	_ = createTestSession(t, "testnet", "#test", "testuser", "testchat")
 
 	job := &asyncJob{
-		JobID: "job-1", SessionID: sessionA, CtxKey: ctxKey,
+		JobID: "job-1", SessionID: sessionA,
 		Network: "testnet", Channel: "#test", Nick: "testuser",
 	}
 	switchToSession(job)
 
-	ctx := chatContextsMap[ctxKey]
-	require.Equal(t, sessionA, ctx.SessionID, "SessionID")
+	msgs, err := sessionMgr.GetMessages(sessionA, 20)
+	require.NoError(t, err)
 
 	foundToolCall := false
 	foundToolCallID := false
-	for _, m := range ctx.Messages {
+	for _, m := range msgs {
 		if len(m.ToolCalls) > 0 && m.ToolCalls[0].ID == "tc-1" {
 			foundToolCall = true
 		}
@@ -1222,31 +1052,27 @@ func TestSwitchToSession_TruncatesHistory(t *testing.T) {
 
 	cfg := makeTestAIConfig()
 	cfg.MaxHistory = 3
-	ctxKey := "testnet#testuser"
 
-	sessionA := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sessionA := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sessionA, "system", "sys")
 	for i := 0; i < 10; i++ {
 		insertTestMessage(t, sessionA, "user", fmt.Sprintf("msg %d", i))
 	}
 
-	sessionB := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
-	chatContextsMap[ctxKey] = ChatContext{
-		Config:    cfg,
-		SessionID: sessionB,
-	}
+	_ = createTestSession(t, "testnet", "#test", "testuser", "testchat")
 
 	config.Commands.Chats["testchat"] = cfg
 
 	job := &asyncJob{
-		JobID: "job-1", SessionID: sessionA, CtxKey: ctxKey,
+		JobID: "job-1", SessionID: sessionA,
 		Network: "testnet", Channel: "#test", Nick: "testuser",
 	}
 	switchToSession(job)
 
-	ctx := chatContextsMap[ctxKey]
-	assert.LessOrEqual(t, len(ctx.Messages), cfg.MaxHistory+1, "messages not truncated")
-	assert.Equal(t, "system", ctx.Messages[0].Role, "first message should be system prompt after truncation")
+	msgs, err := sessionMgr.GetMessages(sessionA, cfg.MaxHistory)
+	require.NoError(t, err)
+	assert.LessOrEqual(t, len(msgs), cfg.MaxHistory+1, "messages not truncated")
+	assert.Equal(t, "system", msgs[0].Role, "first message should be system prompt after truncation")
 }
 
 func TestDeliverAsyncResult_RunningDuringTurn(t *testing.T) {
@@ -1254,17 +1080,8 @@ func TestDeliverAsyncResult_RunningDuringTurn(t *testing.T) {
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	cfg := makeTestAIConfig()
-	ctxKey := "testnet#testuser"
-
-	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sid, "system", "sys")
-
-	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  []ChatMessage{{Role: "system", Content: "sys"}},
-		Config:    cfg,
-		SessionID: sid,
-	}
 
 	createPendingJob(sid, "job-1", "generate_image_async", "img-mcp")
 	completePendingJob("job-1", "result")
@@ -1286,7 +1103,7 @@ func TestDeliverAsyncResult_RunningDuringTurn(t *testing.T) {
 	defer func() { newChatRunnerFn = origNewRunner }()
 
 	job := &asyncJob{
-		JobID: "job-1", SessionID: sid, CtxKey: ctxKey,
+		JobID: "job-1", SessionID: sid,
 		Network: "testnet", Channel: "#test", Nick: "testuser",
 	}
 
@@ -1405,13 +1222,11 @@ func TestCancelAsyncJobsForSession_CancelsMatchingJobs(t *testing.T) {
 	setupTestJobManager(t)
 	setupCancelTestMCP(t)
 
-	ctxKey := "testnet#testuser"
-	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 
 	jobMgr.jobs["job-a"] = &asyncJob{
 		JobID:     "job-a",
 		SessionID: sid,
-		CtxKey:    ctxKey,
 		Network:   "testnet",
 		Channel:   "#test",
 		Nick:      "testuser",
@@ -1420,18 +1235,16 @@ func TestCancelAsyncJobsForSession_CancelsMatchingJobs(t *testing.T) {
 	jobMgr.jobs["job-b"] = &asyncJob{
 		JobID:     "job-b",
 		SessionID: sid,
-		CtxKey:    ctxKey,
 		Network:   "testnet",
 		Channel:   "#test",
 		Nick:      "testuser",
 		cancel:    func() {},
 	}
 
-	otherSID := createTestSession(t, "testnet#otheruser", "testnet", "#test", "otheruser", "testchat")
+	otherSID := createTestSession(t, "testnet", "#test", "otheruser", "testchat")
 	jobMgr.jobs["job-c"] = &asyncJob{
 		JobID:     "job-c",
 		SessionID: otherSID,
-		CtxKey:    "testnet#otheruser",
 		Network:   "testnet",
 		Channel:   "#test",
 		Nick:      "otheruser",
@@ -1460,13 +1273,11 @@ func TestCancelAsyncJobsForSession_DeletesFromMap(t *testing.T) {
 	setupTestJobManager(t)
 	setupCancelTestMCP(t)
 
-	ctxKey := "testnet#testuser"
-	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 
 	jobMgr.jobs["job-x"] = &asyncJob{
 		JobID:     "job-x",
 		SessionID: sid,
-		CtxKey:    ctxKey,
 		Network:   "testnet",
 		Channel:   "#test",
 		Nick:      "testuser",
@@ -1542,7 +1353,6 @@ func TestWaitForAsyncJob_CleanupOnCancel(t *testing.T) {
 	job := &asyncJob{
 		JobID:     "job-cancel-test",
 		SessionID: 1,
-		CtxKey:    "testnet#testuser",
 		Network:   "testnet",
 		Channel:   "#test",
 		Nick:      "testuser",
@@ -1622,10 +1432,10 @@ func TestWaitForAsyncJob_InlineDelivery(t *testing.T) {
 	setupTestJobManager(t)
 	setupImmediateResultMCP(t, `{"job_id":"inline-1","status":"completed","result":{"images":[{"url":"http://example.com/img.png"}]}}`)
 
-	sid := createTestSession(t, "testnet#testuser", "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	require.NoError(t, createPendingJob(sid, "inline-1", "generate_image_async", "img-mcp"), "createPendingJob")
 
-	job := registerAsyncJob("inline-1", sid, "testnet#testuser", "generate_image_async", "img-mcp", "testnet", "#test", "testuser")
+	job := registerAsyncJob("inline-1", sid, "generate_image_async", "img-mcp", "testnet", "#test", "testuser")
 	require.NotNil(t, job, "registerAsyncJob should return job")
 
 	var inlineResult string
@@ -1666,17 +1476,12 @@ func TestWaitForAsyncJob_AsyncDeliveryWhenNotWaiting(t *testing.T) {
 
 	queueMgr.UpdateServiceLimits(map[string]Service{"testsvc": {Parallel: 1}, "": {Parallel: 1}})
 
-	sid := createTestSession(t, "testnet#testuser", "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sid, "system", "sys")
-	chatContextsMap["testnet#testuser"] = ChatContext{
-		Messages:  []ChatMessage{{Role: "system", Content: "sys"}},
-		Config:    makeTestAIConfig(),
-		SessionID: sid,
-	}
 
 	require.NoError(t, createPendingJob(sid, "async-1", "generate_image_async", "img-mcp"), "createPendingJob")
 
-	job := registerAsyncJob("async-1", sid, "testnet#testuser", "generate_image_async", "img-mcp", "testnet", "#test", "testuser")
+	job := registerAsyncJob("async-1", sid, "generate_image_async", "img-mcp", "testnet", "#test", "testuser")
 	require.NotNil(t, job, "registerAsyncJob should return job")
 
 	time.Sleep(500 * time.Millisecond)
@@ -1696,7 +1501,7 @@ func TestWaitForAsyncJob_AsyncDeliveryWhenNotWaiting(t *testing.T) {
 func TestDeliverInlinePendingJob_SkipsCompletedState(t *testing.T) {
 	setupJMTestDB(t)
 
-	sid := createTestSession(t, "testnet#testuser", "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	require.NoError(t, createPendingJob(sid, "inline-db-1", "generate_image_async", "img-mcp"), "createPendingJob")
 
 	var pj PendingJob
@@ -1717,7 +1522,7 @@ func TestDeliverInlinePendingJob_SkipsCompletedState(t *testing.T) {
 func TestDeliverInlinePendingJob_IdempotentOnWrongStatus(t *testing.T) {
 	setupJMTestDB(t)
 
-	sid := createTestSession(t, "testnet#testuser", "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	require.NoError(t, createPendingJob(sid, "inline-db-2", "generate_image_async", "img-mcp"), "createPendingJob")
 	require.NoError(t, completePendingJob("inline-db-2", "already done"), "completePendingJob")
 

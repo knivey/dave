@@ -65,7 +65,6 @@ type incidentInfo struct {
 	Network      string `json:"network"`
 	Channel      string `json:"channel"`
 	Nick         string `json:"nick"`
-	CtxKey       string `json:"ctx_key"`
 	SessionID    int64  `json:"session_id"`
 	CommandName  string `json:"command_name"`
 	ServiceName  string `json:"service_name"`
@@ -136,13 +135,23 @@ func (il *IncidentLogger) logIncident(cr *chatRunner, apiErr error, messages []C
 	}
 
 	ts := time.Now()
-	chatCtx := GetContext(cr.ctxKey)
 
-	incidentDirName := fmt.Sprintf("%s_%s", ts.Format("20060102-150405"), sanitizeKey(cr.ctxKey))
+	incidentDirName := fmt.Sprintf("%s_%s_%s_%s_%d", ts.Format("20060102-150405"), sanitizeKey(cr.network.Name), sanitizeKey(cr.channel), sanitizeKey(cr.nick), cr.sessionID)
 	incidentDir := filepath.Join(il.dir, incidentDirName)
 	if err := os.MkdirAll(incidentDir, 0755); err != nil {
 		cr.logger.Error("failed to create incident directory", "dir", incidentDir, "error", err)
 		return
+	}
+
+	var convID, responseID string
+	session, _ := sessionMgr.GetSession(cr.sessionID)
+	if session != nil {
+		if session.ConvID != nil {
+			convID = *session.ConvID
+		}
+		if session.ResponseID != nil {
+			responseID = *session.ResponseID
+		}
 	}
 
 	info := incidentInfo{
@@ -154,16 +163,15 @@ func (il *IncidentLogger) logIncident(cr *chatRunner, apiErr error, messages []C
 		Network:     cr.network.Name,
 		Channel:     cr.channel,
 		Nick:        cr.nick,
-		CtxKey:      cr.ctxKey,
-		SessionID:   chatCtx.SessionID,
+		SessionID:   cr.sessionID,
 		CommandName: cr.cfg.Name,
 		ServiceName: cr.cfg.Service,
 		Model:       cr.cfg.Model,
-		ConvID:      chatCtx.ConvID,
-		ResponseID:  chatCtx.ResponseID,
+		ConvID:      convID,
+		ResponseID:  responseID,
 	}
 
-	info.APILogCopied = copyAPILog(chatCtx.SessionID, incidentDir)
+	info.APILogCopied = copyAPILog(cr.sessionID, incidentDir)
 
 	if err := writeJSONFile(filepath.Join(incidentDir, "incident.json"), info); err != nil {
 		cr.logger.Error("failed to write incident.json", "error", err)

@@ -130,14 +130,10 @@ func logUsage(logger logxi.Logger, usage *Usage) {
 
 func (cr *chatRunner) storeUsage(usage *Usage, apiPath string, durationMs int) {
 	logUsage(cr.logger, usage)
-	if theDB == nil || usage == nil {
+	if theDB == nil || usage == nil || cr.sessionID == 0 {
 		return
 	}
-	sid := cr.getSessionID()
-	if sid == 0 {
-		return
-	}
-	if err := insertDBTurnUsage(sid, usage, usage.FinishReason, apiPath, durationMs); err != nil {
+	if err := insertDBTurnUsage(cr.sessionID, usage, usage.FinishReason, apiPath, durationMs); err != nil {
 		cr.logger.Error("Failed to store turn usage", "error", err)
 	}
 }
@@ -153,13 +149,11 @@ type chatRunner struct {
 	client       *girc.Client
 	channel      string
 	nick         string
-	ctxKey       string
 	logger       logxi.Logger
 	ctx          context.Context
 	outputCh     chan<- string
 	sessionID    int64
 	convID       string
-	detached     bool
 }
 
 func newChatRunner(network Network, client *girc.Client, cfg AIConfig) *chatRunner {
@@ -189,7 +183,6 @@ func newChatRunner(network Network, client *girc.Client, cfg AIConfig) *chatRunn
 		option.WithMaxRetries(2),
 	)
 
-	ctxKey := network.Name + client.GetNick()
 	logger := logxi.New(network.Name + ".completion." + cfg.Name)
 	logger.SetLevel(logxi.LevelAll)
 
@@ -203,7 +196,6 @@ func newChatRunner(network Network, client *girc.Client, cfg AIConfig) *chatRunn
 		network:      network,
 		client:       client,
 		logger:       logger,
-		ctxKey:       ctxKey,
 	}
 }
 
@@ -218,25 +210,24 @@ func isGrokService(baseURL string) bool {
 func (cr *chatRunner) setChannel(channel, nick string) {
 	cr.channel = channel
 	cr.nick = nick
-	cr.ctxKey = cr.network.Name + channel + nick
+	cr.syncAPISessionID()
+	cr.syncConvID()
+}
+
+func (cr *chatRunner) setSessionInfo(sessionID int64, convID string) {
+	cr.sessionID = sessionID
+	cr.convID = convID
 	cr.syncAPISessionID()
 	cr.syncConvID()
 }
 
 func (cr *chatRunner) syncAPISessionID() {
-	sessionID := cr.getSessionID()
-	cr.transport.setAPILogger(apiLogger, sessionID)
+	cr.transport.setAPILogger(apiLogger, cr.sessionID)
 }
 
 func (cr *chatRunner) syncConvID() {
-	var convID string
 	if cr.convID != "" {
-		convID = cr.convID
-	} else {
-		convID = GetContext(cr.ctxKey).ConvID
-	}
-	if convID != "" {
-		cr.transport.setExtraHeaders(map[string]string{"x-grok-conv-id": convID})
+		cr.transport.setExtraHeaders(map[string]string{"x-grok-conv-id": cr.convID})
 	}
 }
 
@@ -260,59 +251,14 @@ func (cr *chatRunner) sendError(msg string) {
 	}
 }
 
-func (cr *chatRunner) getSessionID() int64 {
-	if cr.sessionID != 0 {
-		return cr.sessionID
-	}
-	return GetContext(cr.ctxKey).SessionID
-}
-
-func (cr *chatRunner) writeToDBOnly(msg ChatMessage) {
-	if theDB == nil || cr.sessionID == 0 {
-		return
-	}
-	var toolCallsJSON *string
-	if len(msg.ToolCalls) > 0 {
-		if tcData, err := json.Marshal(msg.ToolCalls); err == nil {
-			s := string(tcData)
-			toolCallsJSON = &s
-		}
-	}
-	var toolCallID *string
-	if msg.ToolCallID != "" {
-		toolCallID = &msg.ToolCallID
-	}
-	var reasoningContent *string
-	if msg.ReasoningContent != "" {
-		reasoningContent = &msg.ReasoningContent
-	}
-	if err := insertDBMessage(cr.sessionID, msg.Role, msg.Content, toolCallsJSON, toolCallID, reasoningContent); err != nil {
-		cr.logger.Error("Failed to insert message (detached)", "session", cr.sessionID, "error", err)
-	}
-}
-
 func (cr *chatRunner) addContext(msg ChatMessage) {
 	if cr.sessionID == 0 {
-		AddContext(cr.cfg, cr.ctxKey, msg, cr.network.Name, cr.channel, cr.nick)
+		cr.logger.Error("addContext called with sessionID=0")
 		return
 	}
-
-	chatContextsMutex.Lock()
-	ctx := chatContextsMap[cr.ctxKey]
-
-	if ctx.SessionID != cr.sessionID {
-		cr.detached = true
-		chatContextsMutex.Unlock()
-		cr.writeToDBOnly(msg)
-		return
+	if err := sessionMgr.AddMessage(cr.sessionID, msg); err != nil {
+		cr.logger.Error("Failed to add message", "session", cr.sessionID, "error", err)
 	}
-
-	addToMapLocked(cr.ctxKey, cr.cfg, msg)
-	updatedCtx := chatContextsMap[cr.ctxKey]
-	chatContextsMutex.Unlock()
-
-	SetContextLastActive(cr.ctxKey)
-	addContextDBWrites(cr.ctxKey, updatedCtx, msg, cr.network.Name, cr.channel, cr.nick)
 }
 
 func (cr *chatRunner) renderAPIUser() string {
@@ -837,9 +783,7 @@ func (cr *chatRunner) handleRegisterBackgroundJob(messages []ChatMessage, tc Too
 
 	cr.logger.Info("registering background job", "job_id", args.JobID, "tool", args.ToolName, "server", args.ServerName)
 
-	sessionID := cr.getSessionID()
-
-	if sessionID == 0 {
+	if cr.sessionID == 0 {
 		toolMsg := ChatMessage{
 			Role:       RoleTool,
 			Content:    "error: no active session to register job against",
@@ -850,7 +794,7 @@ func (cr *chatRunner) handleRegisterBackgroundJob(messages []ChatMessage, tc Too
 		return messages
 	}
 
-	if err := createPendingJob(sessionID, args.JobID, args.ToolName, args.ServerName); err != nil {
+	if err := createPendingJob(cr.sessionID, args.JobID, args.ToolName, args.ServerName); err != nil {
 		cr.logger.Error("failed to create pending job", "error", err)
 		toolMsg := ChatMessage{
 			Role:       RoleTool,
@@ -862,7 +806,7 @@ func (cr *chatRunner) handleRegisterBackgroundJob(messages []ChatMessage, tc Too
 		return messages
 	}
 
-	job := registerAsyncJob(args.JobID, sessionID, cr.ctxKey, args.ToolName, args.ServerName, cr.network.Name, cr.channel, cr.nick)
+	job := registerAsyncJob(args.JobID, cr.sessionID, args.ToolName, args.ServerName, cr.network.Name, cr.channel, cr.nick)
 	if job != nil {
 		select {
 		case resultText := <-job.inlineResultCh:
@@ -898,7 +842,7 @@ func (cr *chatRunner) handleRegisterBackgroundJob(messages []ChatMessage, tc Too
 }
 
 func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, bool) {
-	mu, _ := responseChainMu.LoadOrStore(cr.ctxKey, &sync.Mutex{})
+	mu, _ := responseChainMu.LoadOrStore(cr.network.Name+cr.channel+cr.nick, &sync.Mutex{})
 	mu.(*sync.Mutex).Lock()
 	defer mu.(*sync.Mutex).Unlock()
 
@@ -911,8 +855,11 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 	ctx, cancel := context.WithTimeout(cr.ctx, cr.cfg.Timeout)
 	defer cancel()
 
-	chatCtx := GetContext(cr.ctxKey)
-	currentResponseID := chatCtx.ResponseID
+	session, _ := sessionMgr.GetSession(cr.sessionID)
+	currentResponseID := ""
+	if session != nil && session.ResponseID != nil {
+		currentResponseID = *session.ResponseID
+	}
 	usePrevID := cr.cfg.PreviousResponseID && currentResponseID != ""
 
 	var input []responses.ResponseInputItemUnionParam
@@ -938,7 +885,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 					cr.logAPIIncident(err, messages, iteration, "responses_stream")
 					cr.logger.Warn("previous_response_id invalid, retrying without", "response_id", currentResponseID, "error", err)
 					currentResponseID = ""
-					SetContextResponseID(cr.ctxKey, "")
+					SetContextResponseID(cr.network.Name, cr.channel, cr.nick, "")
 					usePrevID = false
 					input = messagesToResponseInputItems(messages)
 					iteration--
@@ -961,11 +908,11 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 			// See isResponseIDError() comment in responses.go for the full two-layer design.
 			if resp.ID != "" && (text != "" || len(toolCalls) > 0) {
 				currentResponseID = resp.ID
-				SetContextResponseID(cr.ctxKey, resp.ID)
+				SetContextResponseID(cr.network.Name, cr.channel, cr.nick, resp.ID)
 			} else if resp.ID != "" {
 				if currentResponseID != "" {
 					currentResponseID = ""
-					SetContextResponseID(cr.ctxKey, "")
+					SetContextResponseID(cr.network.Name, cr.channel, cr.nick, "")
 				}
 				cr.logger.Warn("response had empty output, clearing previous_response_id", "response_id", resp.ID)
 			}
@@ -1018,7 +965,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 				cr.logAPIIncident(err, messages, iteration, "responses")
 				cr.logger.Warn("previous_response_id invalid, retrying without", "response_id", currentResponseID, "error", err)
 				currentResponseID = ""
-				SetContextResponseID(cr.ctxKey, "")
+				SetContextResponseID(cr.network.Name, cr.channel, cr.nick, "")
 				usePrevID = false
 				input = messagesToResponseInputItems(messages)
 				iteration--
@@ -1037,11 +984,11 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 		// for the full two-layer design.
 		if resp.ID != "" && (text != "" || len(toolCalls) > 0) {
 			currentResponseID = resp.ID
-			SetContextResponseID(cr.ctxKey, resp.ID)
+			SetContextResponseID(cr.network.Name, cr.channel, cr.nick, resp.ID)
 		} else if resp.ID != "" {
 			if currentResponseID != "" {
 				currentResponseID = ""
-				SetContextResponseID(cr.ctxKey, "")
+				SetContextResponseID(cr.network.Name, cr.channel, cr.nick, "")
 			}
 			cr.logger.Warn("response had empty output, clearing previous_response_id", "response_id", resp.ID)
 		}
@@ -1272,10 +1219,8 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 	runner := newChatRunnerFn(network, c, cfg, ctx, output).(*chatRunner)
 	runner.setChannel(e.Params[0], e.Source.Name)
 
-	ctx_key := runner.ctxKey
-
-	var messages []ChatMessage
-	if !ContextExists(ctx_key) {
+	session, _ := sessionMgr.GetActiveSession(network.Name, e.Params[0], e.Source.Name)
+	if session == nil {
 		var systemContent string
 		if cfg.SystemTmpl != nil {
 			var templateVars map[string]string
@@ -1316,15 +1261,27 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 		} else {
 			systemContent = cfg.System
 		}
-		AddContext(cfg, ctx_key, ChatMessage{
+		sid, err := sessionMgr.CreateSession(network.Name, e.Params[0], e.Source.Name, cfg.Name, cfg.Service, cfg.Model)
+		if err != nil {
+			runner.logger.Error("Failed to create session", "error", err)
+			return
+		}
+		sessionMgr.AddMessage(sid, ChatMessage{
 			Role:    RoleSystem,
 			Content: systemContent,
-		}, network.Name, e.Params[0], e.Source.Name)
+		})
+		apiLogger.RestoreSession(sid, network.Name, e.Params[0], e.Source.Name)
+		session, err = sessionMgr.GetSession(sid)
+		if err != nil || session == nil {
+			runner.logger.Error("Failed to get session after creation", "id", sid, "error", err)
+			return
+		}
 	}
-	messages = GetContext(ctx_key).Messages
 
 	var userMsg ChatMessage
 	if cfg.DetectImages {
+		messages, _ := sessionMgr.GetMessages(session.ID, cfg.MaxHistory)
+
 		cleanText, imageUrls := detectImageURLs(args[0])
 
 		if len(imageUrls) > 0 {
@@ -1361,45 +1318,39 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 		}
 	}
 
-	messages = AddContext(cfg, ctx_key, userMsg, network.Name, e.Params[0], e.Source.Name)
+	sessionMgr.AddMessage(session.ID, userMsg)
 
-	chatContextsMutex.Lock()
-	capturedCtx := chatContextsMap[ctx_key]
-	chatContextsMutex.Unlock()
-	runner.sessionID = capturedCtx.SessionID
-	runner.convID = capturedCtx.ConvID
+	runner.sessionID = session.ID
+	if session.ConvID != nil {
+		runner.convID = *session.ConvID
+	}
 
 	runner.syncAPISessionID()
-	runner.logger.Debug("running completion", "summary", summarizeMessages(messages))
 	runner.syncConvID()
 
-	messages, _ = runner.runTurn(messages)
-	runner.logger.Debug("completion finished", "api_log", apiLogger.GetSessionFilePath(runner.getSessionID()))
+	messages, _ := sessionMgr.GetMessages(runner.sessionID, cfg.MaxHistory)
+	runner.logger.Debug("running completion", "summary", summarizeMessages(messages))
 
-	if theDB != nil && !runner.detached {
-		chatContextsMutex.Lock()
-		chatCtx := chatContextsMap[ctx_key]
-		chatContextsMutex.Unlock()
-		if chatCtx.SessionID != 0 {
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				default:
-				}
-				completedJobs, err := getCompletedPendingJobs(chatCtx.SessionID)
-				if err != nil || len(completedJobs) == 0 {
-					break
-				}
-				for _, cj := range completedJobs {
-					injectAsyncResultFromDB(ctx_key, chatCtx, cj, network.Name, e.Params[0], e.Source.Name)
-					markPendingJobDelivered(cj.JobID)
-				}
-				chatContextsMutex.Lock()
-				messages = chatContextsMap[ctx_key].Messages
-				chatContextsMutex.Unlock()
-				messages, _ = runner.runTurn(messages)
+	messages, _ = runner.runTurn(messages)
+	runner.logger.Debug("completion finished", "api_log", apiLogger.GetSessionFilePath(runner.sessionID))
+
+	if theDB != nil && sessionMgr.IsSessionActive(runner.sessionID) {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
 			}
+			completedJobs, err := getCompletedPendingJobs(runner.sessionID)
+			if err != nil || len(completedJobs) == 0 {
+				break
+			}
+			for _, cj := range completedJobs {
+				injectAsyncResultFromDB(runner.sessionID, cfg, cj, network.Name, e.Params[0], e.Source.Name)
+				markPendingJobDelivered(cj.JobID)
+			}
+			messages, _ = sessionMgr.GetMessages(runner.sessionID, cfg.MaxHistory)
+			messages, _ = runner.runTurn(messages)
 		}
 	}
 }

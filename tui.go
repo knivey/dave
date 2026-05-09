@@ -510,8 +510,6 @@ func requestShutdown() {
 			<-logFlushDone
 		}
 
-		StopPendingSave()
-		SaveContextStore()
 		if apiLogger != nil {
 			apiLogger.CloseAll()
 		}

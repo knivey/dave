@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -17,6 +18,7 @@ import (
 	"github.com/openai/openai-go/v3/option"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func setupNoticesDefaults(t *testing.T) {
@@ -28,8 +30,41 @@ func setupNoticesDefaults(t *testing.T) {
 	configMu.Unlock()
 }
 
+func setupTestDBForRunner(t *testing.T) (*gorm.DB, func()) {
+	t.Helper()
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, "test.db")
+	db, err := initDB(DatabaseConfig{Path: dbPath, MaxAgeDays: 90}, logxi.New("test"))
+	require.NoError(t, err, "failed to init test db")
+	oldDB := theDB
+	oldSM := sessionMgr
+	theDB = db
+	sessionMgr = NewSessionManager(db)
+	return db, func() {
+		sessionMgr = oldSM
+		theDB = oldDB
+		sqlDB, _ := db.DB()
+		if sqlDB != nil {
+			sqlDB.Close()
+		}
+	}
+}
+
+func setupSessionWithResponseID(t *testing.T, responseID string) (int64, func()) {
+	t.Helper()
+	db, cleanup := setupTestDBForRunner(t)
+	_ = db
+
+	sid, err := sessionMgr.CreateSession("testnet", "#101", "shrew", "testcmd", "testservice", "testmodel")
+	require.NoError(t, err)
+	if responseID != "" {
+		require.NoError(t, sessionMgr.UpdateResponseID(sid, &responseID))
+	}
+
+	return sid, cleanup
+}
+
 func TestExecuteToolCalls_SingleToolSendsCallNotice(t *testing.T) {
-	chatContextsMap = make(map[string]ChatContext)
 	setupNoticesDefaults(t)
 	mcpServersMu.Lock()
 	origToolMap := mcpToolToServer
@@ -51,7 +86,6 @@ func TestExecuteToolCalls_SingleToolSendsCallNotice(t *testing.T) {
 		network:  Network{Name: "testnet"},
 		channel:  "#test",
 		nick:     "test",
-		ctxKey:   "testnet#testtest",
 		logger:   logxi.New("test"),
 		ctx:      context.Background(),
 		outputCh: outputCh,
@@ -80,7 +114,6 @@ func TestExecuteToolCalls_SingleToolSendsCallNotice(t *testing.T) {
 }
 
 func TestExecuteToolCalls_MultipleToolsSendsCallMultiNotice(t *testing.T) {
-	chatContextsMap = make(map[string]ChatContext)
 	setupNoticesDefaults(t)
 	mcpServersMu.Lock()
 	origToolMap := mcpToolToServer
@@ -105,7 +138,6 @@ func TestExecuteToolCalls_MultipleToolsSendsCallMultiNotice(t *testing.T) {
 		network:  Network{Name: "testnet"},
 		channel:  "#test",
 		nick:     "test",
-		ctxKey:   "testnet#testtest",
 		logger:   logxi.New("test"),
 		ctx:      context.Background(),
 		outputCh: outputCh,
@@ -137,7 +169,6 @@ func TestExecuteToolCalls_MultipleToolsSendsCallMultiNotice(t *testing.T) {
 }
 
 func TestExecuteToolCalls_MultipleWithBuiltinOnlySendsMCP(t *testing.T) {
-	chatContextsMap = make(map[string]ChatContext)
 	setupNoticesDefaults(t)
 	mcpServersMu.Lock()
 	origToolMap := mcpToolToServer
@@ -161,7 +192,6 @@ func TestExecuteToolCalls_MultipleWithBuiltinOnlySendsMCP(t *testing.T) {
 		network:  Network{Name: "testnet"},
 		channel:  "#test",
 		nick:     "test",
-		ctxKey:   "testnet#testtest",
 		logger:   logxi.New("test"),
 		ctx:      context.Background(),
 		outputCh: outputCh,
@@ -283,8 +313,8 @@ func makeResponsesAPIResponse(id, text string) map[string]any {
 }
 
 func TestRunTurnResponses_ConcurrentSerialization(t *testing.T) {
-	chatContextsMap = make(map[string]ChatContext)
-	contextLastActive = make(map[string]int64)
+	_, cleanup := setupSessionWithResponseID(t, "resp-initial")
+	defer cleanup()
 
 	var (
 		mu                   sync.Mutex
@@ -320,7 +350,6 @@ func TestRunTurnResponses_ConcurrentSerialization(t *testing.T) {
 	}))
 	defer server.Close()
 
-	ctxKey := "testnet#101shrew"
 	cfg := AIConfig{
 		Model:              "test-model",
 		ResponsesAPI:       true,
@@ -329,11 +358,8 @@ func TestRunTurnResponses_ConcurrentSerialization(t *testing.T) {
 		Timeout:            10 * time.Second,
 	}
 
-	chatContextsMap[ctxKey] = ChatContext{
-		Messages:   []ChatMessage{{Role: RoleSystem, Content: "test"}},
-		Config:     cfg,
-		ResponseID: "resp-initial",
-	}
+	session, _ := sessionMgr.GetActiveSession("testnet", "#101", "shrew")
+	require.NotNil(t, session)
 
 	makeRunner := func() *chatRunner {
 		client := openai.NewClient(
@@ -349,7 +375,7 @@ func TestRunTurnResponses_ConcurrentSerialization(t *testing.T) {
 			network:      Network{Name: "testnet"},
 			channel:      "#101",
 			nick:         "shrew",
-			ctxKey:       ctxKey,
+			sessionID:    session.ID,
 			logger:       logxi.New("test"),
 			ctx:          context.Background(),
 			outputCh:     make(chan string, 100),
@@ -361,9 +387,8 @@ func TestRunTurnResponses_ConcurrentSerialization(t *testing.T) {
 
 	go func() {
 		defer wg.Done()
-		messages := GetContext(ctxKey).Messages
-		messages = append(messages, ChatMessage{Role: RoleUser, Content: "msg 1"})
-		AddContext(cfg, ctxKey, ChatMessage{Role: RoleUser, Content: "msg 1"}, "testnet", "#101", "shrew")
+		sessionMgr.AddMessage(session.ID, ChatMessage{Role: RoleUser, Content: "msg 1"})
+		messages, _ := sessionMgr.GetMessages(session.ID, cfg.MaxHistory)
 		runner := makeRunner()
 		runner.runTurn(messages)
 	}()
@@ -371,9 +396,8 @@ func TestRunTurnResponses_ConcurrentSerialization(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		time.Sleep(50 * time.Millisecond)
-		messages := GetContext(ctxKey).Messages
-		messages = append(messages, ChatMessage{Role: RoleSystem, Content: "bg job result"})
-		AddContext(cfg, ctxKey, ChatMessage{Role: RoleSystem, Content: "bg job result"}, "testnet", "#101", "shrew")
+		sessionMgr.AddMessage(session.ID, ChatMessage{Role: RoleSystem, Content: "bg job result"})
+		messages, _ := sessionMgr.GetMessages(session.ID, cfg.MaxHistory)
 		runner := makeRunner()
 		runner.runTurn(messages)
 	}()
@@ -395,8 +419,16 @@ func TestRunTurnResponses_ConcurrentSerialization(t *testing.T) {
 }
 
 func TestRunTurnResponses_DifferentCtxKeysParallel(t *testing.T) {
-	chatContextsMap = make(map[string]ChatContext)
-	contextLastActive = make(map[string]int64)
+	_, cleanup := setupTestDBForRunner(t)
+	defer cleanup()
+
+	cfg := AIConfig{
+		Model:              "test-model",
+		ResponsesAPI:       true,
+		PreviousResponseID: true,
+		MaxHistory:         20,
+		Timeout:            10 * time.Second,
+	}
 
 	var (
 		mu        sync.Mutex
@@ -425,29 +457,15 @@ func TestRunTurnResponses_DifferentCtxKeysParallel(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cfg := AIConfig{
-		Model:              "test-model",
-		ResponsesAPI:       true,
-		PreviousResponseID: true,
-		MaxHistory:         20,
-		Timeout:            10 * time.Second,
-	}
+	sid1, err := sessionMgr.CreateSession("testnet", "#101", "alice", "testcmd", "svc", "model")
+	require.NoError(t, err)
+	require.NoError(t, sessionMgr.UpdateResponseID(sid1, strPtrOrNil("resp-alice")))
 
-	key1 := "testnet#101alice"
-	key2 := "testnet#101bob"
+	sid2, err := sessionMgr.CreateSession("testnet", "#101", "bob", "testcmd", "svc", "model")
+	require.NoError(t, err)
+	require.NoError(t, sessionMgr.UpdateResponseID(sid2, strPtrOrNil("resp-bob")))
 
-	chatContextsMap[key1] = ChatContext{
-		Messages:   []ChatMessage{{Role: RoleSystem, Content: "test"}},
-		Config:     cfg,
-		ResponseID: "resp-alice",
-	}
-	chatContextsMap[key2] = ChatContext{
-		Messages:   []ChatMessage{{Role: RoleSystem, Content: "test"}},
-		Config:     cfg,
-		ResponseID: "resp-bob",
-	}
-
-	makeRunner := func(ctxKey, nick string) *chatRunner {
+	makeRunner := func(sessionID int64, nick string) *chatRunner {
 		client := openai.NewClient(
 			option.WithAPIKey("test-key"),
 			option.WithBaseURL(server.URL+"/v1"),
@@ -461,7 +479,7 @@ func TestRunTurnResponses_DifferentCtxKeysParallel(t *testing.T) {
 			network:      Network{Name: "testnet"},
 			channel:      "#101",
 			nick:         nick,
-			ctxKey:       ctxKey,
+			sessionID:    sessionID,
 			logger:       logxi.New("test"),
 			ctx:          context.Background(),
 			outputCh:     make(chan string, 100),
@@ -473,17 +491,17 @@ func TestRunTurnResponses_DifferentCtxKeysParallel(t *testing.T) {
 
 	go func() {
 		defer wg.Done()
-		AddContext(cfg, key1, ChatMessage{Role: RoleUser, Content: "msg"}, "testnet", "#101", "alice")
-		messages := GetContext(key1).Messages
-		runner := makeRunner(key1, "alice")
+		sessionMgr.AddMessage(sid1, ChatMessage{Role: RoleUser, Content: "msg"})
+		messages, _ := sessionMgr.GetMessages(sid1, cfg.MaxHistory)
+		runner := makeRunner(sid1, "alice")
 		runner.runTurn(messages)
 	}()
 
 	go func() {
 		defer wg.Done()
-		AddContext(cfg, key2, ChatMessage{Role: RoleUser, Content: "msg"}, "testnet", "#101", "bob")
-		messages := GetContext(key2).Messages
-		runner := makeRunner(key2, "bob")
+		sessionMgr.AddMessage(sid2, ChatMessage{Role: RoleUser, Content: "msg"})
+		messages, _ := sessionMgr.GetMessages(sid2, cfg.MaxHistory)
+		runner := makeRunner(sid2, "bob")
 		runner.runTurn(messages)
 	}()
 

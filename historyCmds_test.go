@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/lrstanley/girc"
@@ -44,13 +45,11 @@ func TestHistoryDelete_CancelsAsyncJobs(t *testing.T) {
 	defer cleanup()
 
 	network := Network{Name: "testnet", Trigger: "!"}
-	ctxKey := "testnet#testuser"
-	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 
 	jobMgr.jobs["job-delete-1"] = &asyncJob{
 		JobID:     "job-delete-1",
 		SessionID: sid,
-		CtxKey:    ctxKey,
 		Network:   "testnet",
 		Channel:   "#test",
 		Nick:      "testuser",
@@ -59,7 +58,6 @@ func TestHistoryDelete_CancelsAsyncJobs(t *testing.T) {
 	jobMgr.jobs["job-delete-2"] = &asyncJob{
 		JobID:     "job-delete-2",
 		SessionID: sid,
-		CtxKey:    ctxKey,
 		Network:   "testnet",
 		Channel:   "#test",
 		Nick:      "testuser",
@@ -80,8 +78,7 @@ func TestHistoryDelete_NoAsyncJobs(t *testing.T) {
 	defer cleanup()
 
 	network := Network{Name: "testnet", Trigger: "!"}
-	ctxKey := "testnet#testuser"
-	createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	createTestSession(t, "testnet", "#test", "testuser", "testchat")
 
 	client := bots["testnet"].Client
 	e := makeHistoryEvent("#test", "testuser")
@@ -89,27 +86,20 @@ func TestHistoryDelete_NoAsyncJobs(t *testing.T) {
 	historyDelete(network, client, e, "1")
 }
 
-func TestHistoryDelete_ClearsInMemoryContext(t *testing.T) {
+func TestHistoryDelete_DeletesSession(t *testing.T) {
 	_, cleanup := setupHistoryTest(t)
 	defer cleanup()
 
 	network := Network{Name: "testnet", Trigger: "!"}
-	ctxKey := "testnet#testuser"
-	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
-
-	chatContextsMutex.Lock()
-	chatContextsMap[ctxKey] = ChatContext{SessionID: sid}
-	chatContextsMutex.Unlock()
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 
 	client := bots["testnet"].Client
 	e := makeHistoryEvent("#test", "testuser")
 
-	historyDelete(network, client, e, "1")
+	historyDelete(network, client, e, fmt.Sprintf("%d", sid))
 
-	chatContextsMutex.Lock()
-	ctx := chatContextsMap[ctxKey]
-	chatContextsMutex.Unlock()
-	assert.Equal(t, int64(0), ctx.SessionID, "expected SessionID 0 after delete")
+	_, err := getDBSessionByID(sid)
+	assert.Error(t, err, "expected session to be deleted from DB")
 }
 
 func TestHistoryDelete_OwnershipCheck(t *testing.T) {
@@ -117,13 +107,11 @@ func TestHistoryDelete_OwnershipCheck(t *testing.T) {
 	defer cleanup()
 
 	network := Network{Name: "testnet", Trigger: "!"}
-	ctxKey := "testnet#testuser"
-	sid := createTestSession(t, ctxKey, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 
 	jobMgr.jobs["job-owned"] = &asyncJob{
 		JobID:     "job-owned",
 		SessionID: sid,
-		CtxKey:    ctxKey,
 		Network:   "testnet",
 		Channel:   "#test",
 		Nick:      "testuser",

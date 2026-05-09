@@ -276,12 +276,6 @@ func historyDelete(network Network, c *girc.Client, e girc.Event, args ...string
 		return
 	}
 
-	chatContextsMutex.Lock()
-	if ctx, ok := chatContextsMap[session.ContextKey]; ok && ctx.SessionID == sessionID {
-		chatContextsMap[session.ContextKey] = ChatContext{}
-	}
-	chatContextsMutex.Unlock()
-
 	c.Cmd.Reply(e, expandNotice(n.Sessions.Deleted, map[string]string{"id": fmt.Sprintf("%d", sessionID)}))
 }
 
@@ -356,29 +350,14 @@ func historyResume(network Network, c *girc.Client, e girc.Event, args ...string
 		return
 	}
 
-	ctxKey := network.Name + e.Params[0] + e.Source.Name
-
-	chatContextsMutex.Lock()
-	oldCtx := chatContextsMap[ctxKey]
-	if oldCtx.SessionID != 0 && oldCtx.SessionID != sessionID {
-		if theDB != nil {
-			completeDBSession(oldCtx.SessionID)
-		}
-		c.Cmd.Reply(e, expandNotice(n.Sessions.Paused, map[string]string{"id": fmt.Sprintf("%d", oldCtx.SessionID)}))
-	}
 	messages = TruncateHistory(messages, currentCfg.MaxHistory)
-	chatContextsMap[ctxKey] = ChatContext{
-		Messages:  messages,
-		Config:    currentCfg,
-		SessionID: sessionID,
-	}
-	chatContextsMutex.Unlock()
-	SetContextLastActive(ctxKey)
-	apiLogger.RestoreSession(sessionID, ctxKey)
 
-	if theDB != nil {
-		theDB.Model(&Session{}).Where("id = ?", sessionID).Update("status", "active")
+	oldID, _ := sessionMgr.SwitchActive(network.Name, e.Params[0], e.Source.Name, sessionID)
+	if oldID != 0 {
+		c.Cmd.Reply(e, expandNotice(n.Sessions.Paused, map[string]string{"id": fmt.Sprintf("%d", oldID)}))
 	}
+
+	apiLogger.RestoreSession(sessionID, network.Name, e.Params[0], e.Source.Name)
 
 	c.Cmd.Reply(e, expandNotice(n.Sessions.Resumed, map[string]string{"id": fmt.Sprintf("%d", sessionID), "command": session.ChatCommand, "count": fmt.Sprintf("%d", len(messages))}))
 }

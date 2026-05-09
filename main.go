@@ -240,11 +240,12 @@ func main() {
 	initIncidentLogger(config)
 
 	var dbErr error
-	theDB, dbErr = initDB(config.Database)
+	theDB, dbErr = initDB(config.Database, logger)
 	if dbErr != nil {
 		logger.Error("Failed to initialize database", "error", dbErr)
 		os.Exit(1)
 	}
+	sessionMgr = NewSessionManager(theDB)
 
 	LoadContextStore()
 	CleanupContexts()
@@ -290,8 +291,6 @@ func main() {
 			<-logFlushDone
 		}
 
-		StopPendingSave()
-		SaveContextStore()
 		if ignoreWatcher != nil {
 			ignoreWatcher.Close()
 		}
@@ -468,7 +467,6 @@ func isIgnored(host string) bool {
 }
 
 func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
-	ctx_key := network.Name + event.Params[0] + event.Source.Name
 	host := event.Source.Name + "!" + event.Source.Ident + "@" + event.Source.Host
 	msg := event.Params[len(event.Params)-1]
 	if !strings.HasPrefix(msg, network.Trigger) {
@@ -480,7 +478,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 			logger.Info("Ignoring host", host)
 			return
 		}
-		if !ContextExists(ctx_key) {
+		if !ContextExists(network.Name, event.Params[0], event.Source.Name) {
 			logger.Info("Ignoring message due to no existing chat context")
 			var noCtxMsg string
 			readConfig(func() { noCtxMsg = config.Notices.Context.NoContext })
@@ -494,13 +492,21 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 			return
 		}
 		msg = msg[len(botnick+", "):]
-		ctx := GetContext(ctx_key)
+
+		session, _ := sessionMgr.GetActiveSession(network.Name, event.Params[0], event.Source.Name)
+		if session == nil {
+			return
+		}
+		var sessionCfg AIConfig
+		readConfig(func() {
+			sessionCfg, _ = config.Commands.Chats[session.ChatCommand]
+		})
 		logger.Info("Running chat completion with existing context")
 
 		position := queueMgr.Enqueue(network.Name, event.Params[0], event.Source.Name,
-			ctx.Config.Service, "chat",
+			sessionCfg.Service, "chat",
 			func(cx context.Context, output chan<- string) {
-				chat(network, client, event, ctx.Config, cx, output, msg)
+				chat(network, client, event, sessionCfg, cx, output, msg)
 			})
 		if position > 0 {
 			var queueMsg string
@@ -579,7 +585,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 
 			if rateExemptCmds[r] {
 				if chatCmds[r] {
-					ClearContext(ctx_key)
+					ClearContext(network.Name, event.Params[0], event.Source.Name)
 				}
 				outCh := make(chan string, 200)
 				go func() {
@@ -600,7 +606,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 			}
 
 			if chatCmds[r] {
-				ClearContext(ctx_key)
+				ClearContext(network.Name, event.Params[0], event.Source.Name)
 			}
 
 			svc := getServiceForConfigCmd(r)

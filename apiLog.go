@@ -24,7 +24,7 @@ type apiLogEntry struct {
 type APISession struct {
 	file   *os.File
 	mu     sync.Mutex
-	ctxKey string
+	logKey string
 }
 
 type APILogger struct {
@@ -60,34 +60,34 @@ func NewAPILogger(cfg APILogConfig, configDir string) (*APILogger, error) {
 	}, nil
 }
 
-func apiLogFilename(ctxKey string, sessionID int64) string {
-	return fmt.Sprintf("%s_%d.jsonl", sanitizeKey(ctxKey), sessionID)
+func apiLogFilename(network, channel, nick string, sessionID int64) string {
+	return fmt.Sprintf("%s_%d.jsonl", sanitizeKey(network+"_"+channel+"_"+nick), sessionID)
 }
 
-func (l *APILogger) getSession(sessionID int64, ctxKey string) (*APISession, error) {
+func (l *APILogger) getSession(sessionID int64, network, channel, nick string) (*APISession, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if s, ok := l.sessions[sessionID]; ok {
 		return s, nil
 	}
-	if ctxKey == "" {
-		return nil, fmt.Errorf("no api log session for id %d and no ctxKey provided", sessionID)
+	if network == "" {
+		return nil, fmt.Errorf("no api log session for id %d and no network/channel/nick provided", sessionID)
 	}
-	path := filepath.Join(l.dir, apiLogFilename(ctxKey, sessionID))
+	path := filepath.Join(l.dir, apiLogFilename(network, channel, nick, sessionID))
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("creating api log file: %w", err)
 	}
-	s := &APISession{file: f, ctxKey: ctxKey}
+	s := &APISession{file: f, logKey: network + "_" + channel + "_" + nick}
 	l.sessions[sessionID] = s
 	return s, nil
 }
 
-func (l *APILogger) RestoreSession(sessionID int64, ctxKey string) {
+func (l *APILogger) RestoreSession(sessionID int64, network, channel, nick string) {
 	if l == nil || sessionID == 0 {
 		return
 	}
-	if _, err := l.getSession(sessionID, ctxKey); err != nil {
+	if _, err := l.getSession(sessionID, network, channel, nick); err != nil {
 		logger.Error("failed to restore api log session", "session_id", sessionID, "error", err)
 	}
 }
@@ -111,7 +111,7 @@ func (l *APILogger) LogRequest(sessionID int64, body []byte) {
 	if l == nil || sessionID == 0 {
 		return
 	}
-	s, err := l.getSession(sessionID, "")
+	s, err := l.getSession(sessionID, "", "", "")
 	if err != nil {
 		return
 	}
@@ -124,7 +124,7 @@ func (l *APILogger) LogResponse(sessionID int64, body []byte) {
 	if l == nil || sessionID == 0 {
 		return
 	}
-	s, err := l.getSession(sessionID, "")
+	s, err := l.getSession(sessionID, "", "", "")
 	if err != nil {
 		return
 	}
@@ -137,7 +137,7 @@ func (l *APILogger) LogStreamChunk(sessionID int64, chunk []byte) {
 	if l == nil || !l.cfg.LogRawStream || sessionID == 0 {
 		return
 	}
-	s, err := l.getSession(sessionID, "")
+	s, err := l.getSession(sessionID, "", "", "")
 	if err != nil {
 		return
 	}
@@ -150,7 +150,7 @@ func (l *APILogger) LogStreamResponse(sessionID int64, reconstructed json.RawMes
 	if l == nil || sessionID == 0 {
 		return
 	}
-	s, err := l.getSession(sessionID, "")
+	s, err := l.getSession(sessionID, "", "", "")
 	if err != nil {
 		return
 	}
@@ -188,7 +188,7 @@ func (l *APILogger) SyncSession(sessionID int64) {
 	if l == nil || sessionID == 0 {
 		return
 	}
-	s, err := l.getSession(sessionID, "")
+	s, err := l.getSession(sessionID, "", "", "")
 	if err != nil {
 		return
 	}

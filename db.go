@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"time"
 
 	"github.com/glebarez/sqlite"
@@ -14,7 +13,6 @@ import (
 )
 
 var theDB *gorm.DB
-var loggerDB = logxi.New("db")
 
 type DatabaseConfig struct {
 	Driver     string `toml:"driver"`
@@ -37,7 +35,6 @@ func (c *DatabaseConfig) SetDefaults() {
 
 type Session struct {
 	ID           int64   `gorm:"primaryKey;autoIncrement"`
-	ContextKey   string  `gorm:"column:context_key;not null;index:idx_sessions_context_key"`
 	Network      string  `gorm:"not null;index:idx_sessions_user"`
 	Channel      string  `gorm:"not null;index:idx_sessions_user"`
 	Nick         string  `gorm:"not null;index:idx_sessions_user"`
@@ -96,7 +93,7 @@ func (PendingJob) TableName() string { return "pending_jobs" }
 
 func (TurnUsage) TableName() string { return "turn_usage" }
 
-func initDB(cfg DatabaseConfig) (*gorm.DB, error) {
+func initDB(cfg DatabaseConfig, log logxi.Logger) (*gorm.DB, error) {
 	var dialector gorm.Dialector
 	switch cfg.Driver {
 	case "postgres":
@@ -111,7 +108,9 @@ func initDB(cfg DatabaseConfig) (*gorm.DB, error) {
 		dialector = sqlite.Open(cfg.Path + "?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
 	}
 
-	db, err := gorm.Open(dialector, &gorm.Config{})
+	db, err := gorm.Open(dialector, &gorm.Config{
+		Logger: newGormLogger(log),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("opening database: %w", err)
 	}
@@ -128,7 +127,15 @@ func initDB(cfg DatabaseConfig) (*gorm.DB, error) {
 		return nil, fmt.Errorf("running migrations: %w", err)
 	}
 
-	loggerDB.Info("Database initialized", "driver", cfg.Driver, "path", cfg.Path)
+	dbPath := cfg.Path
+	if cfg.Driver == "postgres" {
+		dbPath = ""
+	}
+	if err := runMigrations(db, dbPath); err != nil {
+		return nil, fmt.Errorf("running schema migrations: %w", err)
+	}
+
+	log.Info("Database initialized", "driver", cfg.Driver, "path", cfg.Path)
 	return db, nil
 }
 
@@ -138,26 +145,10 @@ func closeDB(db *gorm.DB) {
 		if err == nil {
 			sqlDB.Close()
 		}
-		loggerDB.Info("Database closed")
+		if logger != nil {
+			logger.Info("Database closed")
+		}
 	}
-}
-
-func createDBSession(contextKey, network, channel, nick, chatCommand, convID, service, model string) (int64, error) {
-	session := Session{
-		ContextKey:  contextKey,
-		Network:     network,
-		Channel:     channel,
-		Nick:        nick,
-		ChatCommand: chatCommand,
-		ConvID:      strPtrOrNil(convID),
-		Service:     service,
-		Model:       model,
-		Status:      "active",
-	}
-	if err := theDB.Create(&session).Error; err != nil {
-		return 0, err
-	}
-	return session.ID, nil
 }
 
 func updateDBSessionFirstMessage(sessionID int64, firstMessage string) error {
@@ -215,17 +206,10 @@ func insertDBTurnUsage(sessionID int64, usage *Usage, finishReason, apiPath stri
 	return theDB.Create(&turnUsage).Error
 }
 
-func completeDBSession(sessionID int64) error {
-	_, file, line, _ := runtime.Caller(1)
-	loggerDB.Info("completing session", "id", sessionID, "caller", fmt.Sprintf("%s:%d", file, line))
-	return theDB.Model(&Session{}).Where("id = ?", sessionID).
-		Update("status", "completed").Error
-}
-
 func completeDBOrphanedSessions() (int64, error) {
 	result := theDB.Model(&Session{}).
 		Where("status = ? AND id NOT IN (?)", "active",
-			theDB.Model(&Session{}).Select("MAX(id)").Where("status = ?", "active").Group("context_key"),
+			theDB.Model(&Session{}).Select("MAX(id)").Where("status = ?", "active").Group("network, channel, nick"),
 		).
 		Update("status", "completed")
 	return result.RowsAffected, result.Error
@@ -235,18 +219,12 @@ func reactivateDBStrandedSessions() (int64, error) {
 	result := theDB.Exec(`
 		UPDATE sessions SET status = 'active'
 		WHERE id IN (
-			SELECT MAX(id) FROM sessions GROUP BY context_key
+			SELECT MAX(id) FROM sessions GROUP BY network, channel, nick
 		) AND status = 'completed'
-		AND context_key IN (
-			SELECT context_key FROM sessions GROUP BY context_key HAVING SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) = 0
+		AND (network, channel, nick) IN (
+			SELECT network, channel, nick FROM sessions GROUP BY network, channel, nick HAVING SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) = 0
 		)`)
 	return result.RowsAffected, result.Error
-}
-
-func loadActiveDBSessions() ([]Session, error) {
-	var sessions []Session
-	err := theDB.Where("status = ?", "active").Order("last_active DESC").Find(&sessions).Error
-	return sessions, err
 }
 
 func loadDBSessionMessages(sessionID int64) ([]Message, error) {

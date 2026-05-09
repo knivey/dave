@@ -14,7 +14,6 @@ import (
 
 type Session struct {
 	ID           int64   `gorm:"primaryKey;autoIncrement"`
-	ContextKey   string  `gorm:"column:context_key;not null"`
 	Network      string  `gorm:"not null"`
 	Channel      string  `gorm:"not null"`
 	Nick         string  `gorm:"not null"`

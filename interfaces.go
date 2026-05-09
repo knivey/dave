@@ -3,80 +3,10 @@ package main
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
 )
-
-type ChatContext struct {
-	Messages   []ChatMessage
-	Config     AIConfig
-	SessionID  int64
-	ConvID     string
-	ResponseID string
-}
-
-type ChatContextStore interface {
-	Add(key string, config AIConfig, message ChatMessage) []ChatMessage
-	Get(key string) ChatContext
-	Clear(key string)
-	Exists(key string) bool
-}
-
-var chatContextsMutex sync.Mutex
-var chatContextsMap map[string]ChatContext
-
-func init() {
-	chatContextsMap = make(map[string]ChatContext)
-}
-
-var _ ChatContextStore = (*globalContextStore)(nil)
-
-type globalContextStore struct{}
-
-func addToMapLocked(key string, config AIConfig, message ChatMessage) {
-	context := chatContextsMap[key]
-	context.Config = config
-	if context.ConvID == "" {
-		context.ConvID = generateConvID()
-	}
-	context.Messages = append(context.Messages, message)
-	if len(context.Messages) > config.MaxHistory+1 {
-		newMsgs := []ChatMessage{context.Messages[0]}
-		context.Messages = append(newMsgs, context.Messages[len(context.Messages)-config.MaxHistory:]...)
-	}
-	chatContextsMap[key] = context
-}
-
-func (s *globalContextStore) Add(key string, config AIConfig, message ChatMessage) []ChatMessage {
-	chatContextsMutex.Lock()
-	addToMapLocked(key, config, message)
-	msgs := chatContextsMap[key].Messages
-	chatContextsMutex.Unlock()
-	return msgs
-}
-
-func (s *globalContextStore) Get(key string) ChatContext {
-	chatContextsMutex.Lock()
-	defer chatContextsMutex.Unlock()
-	return chatContextsMap[key]
-}
-
-func (s *globalContextStore) Clear(key string) {
-	chatContextsMutex.Lock()
-	defer chatContextsMutex.Unlock()
-	chatContextsMap[key] = ChatContext{}
-}
-
-func (s *globalContextStore) Exists(key string) bool {
-	chatContextsMutex.Lock()
-	defer chatContextsMutex.Unlock()
-	ctx, ok := chatContextsMap[key]
-	return ok && len(ctx.Messages) > 0
-}
-
-var chatContexts ChatContextStore = &globalContextStore{}
 
 func TruncateHistory(msgs []ChatMessage, maxHistory int) []ChatMessage {
 	if len(msgs) > maxHistory+1 {

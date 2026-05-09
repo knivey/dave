@@ -25,7 +25,6 @@ var loggerJM = logxi.New("jobManager")
 type asyncJob struct {
 	JobID          string
 	SessionID      int64
-	CtxKey         string
 	ToolName       string
 	MCPServer      string
 	Network        string
@@ -50,6 +49,7 @@ func init() {
 type chatRunnerInterface interface {
 	setChannel(channel, nick string)
 	runTurn(messages []ChatMessage) ([]ChatMessage, bool)
+	setSessionInfo(sessionID int64, convID string)
 }
 
 var newChatRunnerFn = func(network Network, client *girc.Client, cfg AIConfig, ctx context.Context, output chan<- string) chatRunnerInterface {
@@ -138,7 +138,7 @@ func cancelAsyncJobsForSession(sessionID int64) {
 	}
 }
 
-func registerAsyncJob(jobID string, sessionID int64, ctxKey, toolName, mcpServer, network, channel, nick string) *asyncJob {
+func registerAsyncJob(jobID string, sessionID int64, toolName, mcpServer, network, channel, nick string) *asyncJob {
 	jobMgr.mu.Lock()
 	defer jobMgr.mu.Unlock()
 
@@ -151,7 +151,6 @@ func registerAsyncJob(jobID string, sessionID int64, ctxKey, toolName, mcpServer
 	job := &asyncJob{
 		JobID:          jobID,
 		SessionID:      sessionID,
-		CtxKey:         ctxKey,
 		ToolName:       toolName,
 		MCPServer:      mcpServer,
 		Network:        network,
@@ -217,12 +216,9 @@ func onAsyncJobCompleted(job *asyncJob, resultText string) {
 }
 
 func deliverAsyncResult(job *asyncJob, ctx context.Context, output chan<- string) {
-	chatContextsMutex.Lock()
-	currentCtx := chatContextsMap[job.CtxKey]
-	currentSessionID := currentCtx.SessionID
-	chatContextsMutex.Unlock()
+	activeSession, _ := sessionMgr.GetActiveSession(job.Network, job.Channel, job.Nick)
 
-	if currentSessionID != job.SessionID {
+	if activeSession == nil || activeSession.ID != job.SessionID {
 		if msg := switchToSession(job); msg != "" {
 			select {
 			case output <- msg:
@@ -238,60 +234,10 @@ func deliverAsyncResult(job *asyncJob, ctx context.Context, output chan<- string
 		return
 	}
 
-	chatContextsMutex.Lock()
-	ctx2 := chatContextsMap[job.CtxKey]
-	chatContextsMutex.Unlock()
-
-	if ctx2.SessionID == 0 || len(ctx2.Messages) == 0 {
-		loggerJM.Warn("no context, skipping LLM turn", "job_id", job.JobID)
+	session, err := sessionMgr.GetSession(job.SessionID)
+	if err != nil || session == nil {
+		loggerJM.Warn("no session found, skipping LLM turn", "job_id", job.JobID)
 		return
-	}
-
-	runner := newChatRunnerFn(bot.Network, bot.Client, ctx2.Config, ctx, output)
-	runner.setChannel(job.Channel, job.Nick)
-
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		completedJobs, err := getCompletedPendingJobs(ctx2.SessionID)
-		if err != nil || len(completedJobs) == 0 {
-			break
-		}
-		for _, cj := range completedJobs {
-			injectAsyncResultFromDB(job.CtxKey, ctx2, cj, job.Network, job.Channel, job.Nick)
-			markPendingJobDelivered(cj.JobID)
-		}
-		chatContextsMutex.Lock()
-		messages := chatContextsMap[job.CtxKey].Messages
-		chatContextsMutex.Unlock()
-		var done bool
-		messages, done = runner.runTurn(messages)
-		if done {
-			break
-		}
-	}
-}
-
-func switchToSession(job *asyncJob) string {
-	chatContextsMutex.Lock()
-	defer chatContextsMutex.Unlock()
-
-	currentCtx := chatContextsMap[job.CtxKey]
-	if currentCtx.SessionID == job.SessionID {
-		return ""
-	}
-
-	if currentCtx.SessionID != 0 {
-		if err := completeDBSession(currentCtx.SessionID); err != nil {
-			loggerJM.Error("failed to complete old session", "id", currentCtx.SessionID, "error", err)
-		}
-	}
-
-	session, err := getDBSessionByID(job.SessionID)
-	if err != nil {
-		loggerJM.Error("failed to load session for switch", "id", job.SessionID, "error", err)
-		return ""
 	}
 
 	var currentCfg AIConfig
@@ -301,62 +247,64 @@ func switchToSession(job *asyncJob) string {
 	})
 	if !cfgOk {
 		loggerJM.Error("chat command not found for session", "command", session.ChatCommand)
+		return
+	}
+
+	runner := newChatRunnerFn(bot.Network, bot.Client, currentCfg, ctx, output)
+	runner.setChannel(job.Channel, job.Nick)
+	convID := ""
+	if session.ConvID != nil {
+		convID = *session.ConvID
+	}
+	runner.setSessionInfo(job.SessionID, convID)
+
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		completedJobs, err := getCompletedPendingJobs(job.SessionID)
+		if err != nil || len(completedJobs) == 0 {
+			break
+		}
+		for _, cj := range completedJobs {
+			injectAsyncResultFromDB(job.SessionID, currentCfg, cj, job.Network, job.Channel, job.Nick)
+			markPendingJobDelivered(cj.JobID)
+		}
+		messages, _ := sessionMgr.GetMessages(job.SessionID, currentCfg.MaxHistory)
+		var done bool
+		messages, done = runner.runTurn(messages)
+		if done {
+			break
+		}
+	}
+}
+
+func switchToSession(job *asyncJob) string {
+	session, err := sessionMgr.GetSession(job.SessionID)
+	if err != nil || session == nil {
+		loggerJM.Error("failed to load session for switch", "id", job.SessionID, "error", err)
 		return ""
 	}
 
-	dbMsgs, err := loadDBSessionMessages(job.SessionID)
+	var cfgOk bool
+	readConfig(func() {
+		_, cfgOk = config.Commands.Chats[session.ChatCommand]
+	})
+	if !cfgOk {
+		loggerJM.Error("chat command not found for session", "command", session.ChatCommand)
+		return ""
+	}
+
+	oldID, err := sessionMgr.SwitchActive(job.Network, job.Channel, job.Nick, job.SessionID)
 	if err != nil {
-		loggerJM.Error("failed to load session messages", "id", job.SessionID, "error", err)
+		loggerJM.Error("failed to switch session", "error", err)
 		return ""
 	}
 
-	var messages []ChatMessage
-	for _, dm := range dbMsgs {
-		msg := ChatMessage{
-			Role:    dm.Role,
-			Content: dm.Content,
-		}
-		if dm.ToolCallID != nil {
-			msg.ToolCallID = *dm.ToolCallID
-		}
-		if dm.ReasoningContent != nil {
-			msg.ReasoningContent = *dm.ReasoningContent
-		}
-		if dm.ToolCalls != nil {
-			var toolCalls []ToolCall
-			if err := json.Unmarshal([]byte(*dm.ToolCalls), &toolCalls); err == nil {
-				msg.ToolCalls = toolCalls
-			}
-		}
-		messages = append(messages, msg)
-	}
-
-	messages = TruncateHistory(messages, currentCfg.MaxHistory)
-	chatContextsMap[job.CtxKey] = ChatContext{
-		Messages:  messages,
-		Config:    currentCfg,
-		SessionID: job.SessionID,
-		ConvID: func() string {
-			if session.ConvID != nil {
-				return *session.ConvID
-			}
-			return ""
-		}(),
-		ResponseID: func() string {
-			if session.ResponseID != nil {
-				return *session.ResponseID
-			}
-			return ""
-		}(),
-	}
-	apiLogger.RestoreSession(job.SessionID, job.CtxKey)
-
-	if theDB != nil {
-		theDB.Model(&Session{}).Where("id = ?", job.SessionID).Update("status", "active")
-	}
+	apiLogger.RestoreSession(job.SessionID, job.Network, job.Channel, job.Nick)
 
 	var switchMsg string
-	if currentCtx.SessionID != 0 {
+	if oldID != 0 {
 		bot := getBotFn(job.Network)
 		if bot != nil && bot.Client != nil {
 			n := getNotices()
@@ -364,16 +312,16 @@ func switchToSession(job *asyncJob) string {
 				"nick":    job.Nick,
 				"id":      fmt.Sprintf("%d", job.SessionID),
 				"trigger": bot.Network.Trigger,
-				"old_id":  fmt.Sprintf("%d", currentCtx.SessionID),
+				"old_id":  fmt.Sprintf("%d", oldID),
 			})
 		}
 	}
 
-	loggerJM.Info("switched sessions", "from", currentCtx.SessionID, "to", job.SessionID, "nick", job.Nick)
+	loggerJM.Info("switched sessions", "from", oldID, "to", job.SessionID, "nick", job.Nick)
 	return switchMsg
 }
 
-func injectAsyncResultFromDB(ctxKey string, ctx ChatContext, job PendingJob, network, channel, nick string) {
+func injectAsyncResultFromDB(sessionID int64, cfg AIConfig, job PendingJob, network, channel, nick string) {
 	resultText := ""
 	if job.Result != nil {
 		resultText = *job.Result
@@ -383,13 +331,13 @@ func injectAsyncResultFromDB(ctxKey string, ctx ChatContext, job PendingJob, net
 		Role:    RoleSystem,
 		Content: content,
 	}
-	AddContext(ctx.Config, ctxKey, msg, network, channel, nick)
-	if ctx.Config.NeedsUserSuffix || modelNeedsUserSuffix(ctx.Config.Model) {
+	sessionMgr.AddMessage(sessionID, msg)
+	if cfg.NeedsUserSuffix || modelNeedsUserSuffix(cfg.Model) {
 		userMsg := ChatMessage{
 			Role:    RoleUser,
 			Content: "Respond to the user based on the above background task result.",
 		}
-		AddContext(ctx.Config, ctxKey, userMsg, network, channel, nick)
+		sessionMgr.AddMessage(sessionID, userMsg)
 	}
 }
 
@@ -414,7 +362,7 @@ func recoverPendingJobs() {
 			loggerJM.Warn("skipping orphaned job", "job_id", j.JobID, "error", err)
 			continue
 		}
-		registerAsyncJob(j.JobID, *j.SessionID, session.ContextKey, j.ToolName, j.MCPServer, session.Network, session.Channel, session.Nick)
+		registerAsyncJob(j.JobID, *j.SessionID, j.ToolName, j.MCPServer, session.Network, session.Channel, session.Nick)
 		loggerJM.Info("recovered pending job", "job_id", j.JobID)
 	}
 

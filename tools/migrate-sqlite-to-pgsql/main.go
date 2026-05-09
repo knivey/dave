@@ -36,7 +36,9 @@ type Message struct {
 	ToolCalls        *string `gorm:"type:text"`
 	ToolCallID       *string
 	ReasoningContent *string `gorm:"type:text"`
+	MultiContent     *string `gorm:"type:text"`
 	IsAsyncResult    bool    `gorm:"default:false"`
+	SettingsID       *int64  `gorm:"index:idx_messages_settings"`
 	CreatedAt        time.Time
 }
 

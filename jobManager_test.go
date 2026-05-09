@@ -55,7 +55,7 @@ func createTestSession(t *testing.T, network, channel, nick, chatCmd string) int
 
 func insertTestMessage(t *testing.T, sessionID int64, role, content string) {
 	t.Helper()
-	err := insertDBMessage(sessionID, role, content, nil, nil, nil)
+	err := insertDBMessage(sessionID, role, content, nil, nil, nil, nil)
 	require.NoError(t, err, "insertDBMessage")
 }
 
@@ -1015,10 +1015,10 @@ func TestSwitchToSession_DBMessagesWithToolCalls(t *testing.T) {
 		{ID: "tc-1", Type: "function", Function: FunctionCall{Name: "test_tool", Arguments: `{"arg":"val"}`}},
 	})
 	toolCallsStr := string(toolCallsJSON)
-	insertDBMessage(sessionA, "system", "sys", nil, nil, nil)
-	insertDBMessage(sessionA, "assistant", "using tool", &toolCallsStr, nil, nil)
+	insertDBMessage(sessionA, "system", "sys", nil, nil, nil, nil)
+	insertDBMessage(sessionA, "assistant", "using tool", &toolCallsStr, nil, nil, nil)
 	toolCallID := "tc-1"
-	insertDBMessage(sessionA, "tool", "tool result", nil, &toolCallID, nil)
+	insertDBMessage(sessionA, "tool", "tool result", nil, &toolCallID, nil, nil)
 
 	_ = createTestSession(t, "testnet", "#test", "testuser", "testchat")
 

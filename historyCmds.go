@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -335,23 +334,7 @@ func historyResume(network Network, c *girc.Client, e girc.Event, args ...string
 
 	var messages []ChatMessage
 	for _, dm := range dbMsgs {
-		msg := ChatMessage{
-			Role:    dm.Role,
-			Content: dm.Content,
-		}
-		if dm.ToolCallID != nil {
-			msg.ToolCallID = *dm.ToolCallID
-		}
-		if dm.ReasoningContent != nil {
-			msg.ReasoningContent = *dm.ReasoningContent
-		}
-		if dm.ToolCalls != nil {
-			var toolCalls []ToolCall
-			if err := json.Unmarshal([]byte(*dm.ToolCalls), &toolCalls); err == nil {
-				msg.ToolCalls = toolCalls
-			}
-		}
-		messages = append(messages, msg)
+		messages = append(messages, messageFromDB(dm))
 	}
 
 	if len(messages) == 0 {

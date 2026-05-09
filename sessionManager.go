@@ -80,13 +80,20 @@ func (sm *SessionManager) AddMessage(sessionID int64, msg ChatMessage) error {
 	if msg.ReasoningContent != "" {
 		reasoningContent = &msg.ReasoningContent
 	}
+	var multiContentJSON *string
+	if len(msg.MultiContent) > 0 {
+		if mcData, err := json.Marshal(msg.MultiContent); err == nil {
+			s := string(mcData)
+			multiContentJSON = &s
+		}
+	}
 
-	if err := insertDBMessage(sessionID, msg.Role, msg.Content, toolCallsJSON, toolCallID, reasoningContent); err != nil {
+	if err := insertDBMessage(sessionID, msg.Role, msg.Content, toolCallsJSON, toolCallID, reasoningContent, multiContentJSON); err != nil {
 		return err
 	}
 
 	if msg.Role == "user" {
-		if err := updateDBSessionFirstMessage(sessionID, msg.Content); err != nil {
+		if err := updateDBSessionFirstMessage(sessionID, textContentFromMessage(msg)); err != nil {
 			loggerSM.Error("Failed to update first message", "session", sessionID, "error", err)
 		}
 	}
@@ -102,23 +109,7 @@ func (sm *SessionManager) GetMessages(sessionID int64, maxHistory int) ([]ChatMe
 
 	var messages []ChatMessage
 	for _, dm := range dbMsgs {
-		msg := ChatMessage{
-			Role:    dm.Role,
-			Content: dm.Content,
-		}
-		if dm.ToolCallID != nil {
-			msg.ToolCallID = *dm.ToolCallID
-		}
-		if dm.ReasoningContent != nil {
-			msg.ReasoningContent = *dm.ReasoningContent
-		}
-		if dm.ToolCalls != nil {
-			var toolCalls []ToolCall
-			if err := json.Unmarshal([]byte(*dm.ToolCalls), &toolCalls); err == nil {
-				msg.ToolCalls = toolCalls
-			}
-		}
-		messages = append(messages, msg)
+		messages = append(messages, messageFromDB(dm))
 	}
 
 	return TruncateHistory(messages, maxHistory), nil
@@ -249,6 +240,44 @@ func (sm *SessionManager) ReactivateStranded() (int64, error) {
 
 func (sm *SessionManager) CleanupByAge(maxAgeDays int) (int64, error) {
 	return cleanupDBSessions(maxAgeDays)
+}
+
+func messageFromDB(dm Message) ChatMessage {
+	msg := ChatMessage{
+		Role:    dm.Role,
+		Content: dm.Content,
+	}
+	if dm.ToolCallID != nil {
+		msg.ToolCallID = *dm.ToolCallID
+	}
+	if dm.ReasoningContent != nil {
+		msg.ReasoningContent = *dm.ReasoningContent
+	}
+	if dm.ToolCalls != nil {
+		var toolCalls []ToolCall
+		if err := json.Unmarshal([]byte(*dm.ToolCalls), &toolCalls); err == nil {
+			msg.ToolCalls = toolCalls
+		}
+	}
+	if dm.MultiContent != nil {
+		var parts []MessagePart
+		if err := json.Unmarshal([]byte(*dm.MultiContent), &parts); err == nil {
+			msg.MultiContent = parts
+		}
+	}
+	return msg
+}
+
+func textContentFromMessage(msg ChatMessage) string {
+	if msg.Content != "" {
+		return msg.Content
+	}
+	for _, part := range msg.MultiContent {
+		if part.Type == PartTypeText && part.Text != "" {
+			return part.Text
+		}
+	}
+	return ""
 }
 
 func (sm *SessionManager) SetResponseIDForActive(network, channel, nick, responseID string) {

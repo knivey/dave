@@ -70,6 +70,7 @@ type Message struct {
 	ToolCalls        *string `gorm:"type:text"`
 	ToolCallID       *string
 	ReasoningContent *string `gorm:"type:text"`
+	MultiContent     *string `gorm:"type:text"`
 	IsAsyncResult    bool    `gorm:"default:false"`
 	SettingsID       *int64  `gorm:"index:idx_messages_settings"`
 	CreatedAt        time.Time
@@ -182,7 +183,7 @@ func updateDBSessionResponseID(sessionID int64, responseID *string) error {
 		Update("response_id", responseID).Error
 }
 
-func insertDBMessage(sessionID int64, role, content string, toolCallsJSON *string, toolCallID *string, reasoningContent *string) error {
+func insertDBMessage(sessionID int64, role, content string, toolCallsJSON *string, toolCallID *string, reasoningContent *string, multiContentJSON *string) error {
 	msg := Message{
 		SessionID:        sessionID,
 		Role:             role,
@@ -190,6 +191,7 @@ func insertDBMessage(sessionID int64, role, content string, toolCallsJSON *strin
 		ToolCalls:        toolCallsJSON,
 		ToolCallID:       toolCallID,
 		ReasoningContent: reasoningContent,
+		MultiContent:     multiContentJSON,
 	}
 	if err := theDB.Create(&msg).Error; err != nil {
 		return err

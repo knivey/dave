@@ -390,7 +390,7 @@ func TestDBToolCalls(t *testing.T) {
 	tcJSON := string(tcData)
 	toolCallID := "tc1"
 
-	err := insertDBMessage(sid, "assistant", "", &tcJSON, &toolCallID, nil)
+	err := insertDBMessage(sid, "assistant", "", &tcJSON, &toolCallID, nil, nil)
 	require.NoError(t, err, "insertDBMessage with tool calls failed")
 
 	msgs, err := loadDBSessionMessages(sid)
@@ -427,6 +427,163 @@ func TestDBFirstMessage(t *testing.T) {
 	session, err = getDBSessionByID(sid)
 	require.NoError(t, err, "getDBSessionByID failed")
 	assert.Equal(t, "hello world this is my first message", session.FirstMessage, "first_message unchanged")
+}
+
+func TestDBMultiContent(t *testing.T) {
+	_, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	sid, _ := sessionMgr.CreateSession("net", "#chan", "nick", "chat", "", "")
+
+	parts := []MessagePart{
+		{Type: PartTypeText, Text: "check this image"},
+		{Type: PartTypeImageURL, ImageURL: &ImageURL{URL: "data:image/png;base64,iVBORw==", Detail: ImageDetailAuto}},
+	}
+	msg := ChatMessage{
+		Role:         RoleUser,
+		Content:      "",
+		MultiContent: parts,
+	}
+
+	err := sessionMgr.AddMessage(sid, msg)
+	require.NoError(t, err, "AddMessage with MultiContent failed")
+
+	msgs, err := sessionMgr.GetMessages(sid, 10)
+	require.NoError(t, err, "GetMessages failed")
+	require.Len(t, msgs, 1, "messages count")
+
+	assert.Equal(t, RoleUser, msgs[0].Role)
+	assert.Equal(t, "", msgs[0].Content)
+	require.Len(t, msgs[0].MultiContent, 2, "MultiContent parts count")
+	assert.Equal(t, PartTypeText, msgs[0].MultiContent[0].Type)
+	assert.Equal(t, "check this image", msgs[0].MultiContent[0].Text)
+	assert.Equal(t, PartTypeImageURL, msgs[0].MultiContent[1].Type)
+	require.NotNil(t, msgs[0].MultiContent[1].ImageURL)
+	assert.Equal(t, "data:image/png;base64,iVBORw==", msgs[0].MultiContent[1].ImageURL.URL)
+	assert.Equal(t, ImageDetailAuto, msgs[0].MultiContent[1].ImageURL.Detail)
+}
+
+func TestDBMultiContentWithToolCalls(t *testing.T) {
+	_, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	sid, _ := sessionMgr.CreateSession("net", "#chan", "nick", "chat", "", "")
+
+	toolCalls := []ToolCall{
+		{ID: "tc1", Type: "function", Function: FunctionCall{Name: "get_weather", Arguments: `{"city":"sf"}`}},
+	}
+	parts := []MessagePart{
+		{Type: PartTypeText, Text: "describe this"},
+		{Type: PartTypeImageURL, ImageURL: &ImageURL{URL: "data:image/jpeg;base64,/9j/4AAQ", Detail: ImageDetailHigh}},
+	}
+	msg := ChatMessage{
+		Role:             RoleAssistant,
+		Content:          "",
+		MultiContent:     parts,
+		ToolCalls:        toolCalls,
+		ReasoningContent: "thinking about weather",
+	}
+
+	err := sessionMgr.AddMessage(sid, msg)
+	require.NoError(t, err)
+
+	msgs, err := sessionMgr.GetMessages(sid, 10)
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+
+	assert.Len(t, msgs[0].ToolCalls, 1)
+	assert.Equal(t, "tc1", msgs[0].ToolCalls[0].ID)
+	assert.Equal(t, "thinking about weather", msgs[0].ReasoningContent)
+	require.Len(t, msgs[0].MultiContent, 2)
+	assert.Equal(t, PartTypeImageURL, msgs[0].MultiContent[1].Type)
+	assert.Equal(t, ImageDetailHigh, msgs[0].MultiContent[1].ImageURL.Detail)
+}
+
+func TestDBFirstMessageWithMultiContent(t *testing.T) {
+	_, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	sid, err := sessionMgr.CreateSession("testnet", "#chan", "user", "testcmd", "", "")
+	require.NoError(t, err)
+
+	parts := []MessagePart{
+		{Type: PartTypeText, Text: "what is in this image"},
+		{Type: PartTypeImageURL, ImageURL: &ImageURL{URL: "data:image/png;base64,iVBORw==", Detail: ImageDetailAuto}},
+	}
+	sessionMgr.AddMessage(sid, ChatMessage{Role: "user", Content: "", MultiContent: parts})
+
+	session, err := getDBSessionByID(sid)
+	require.NoError(t, err)
+	assert.Equal(t, "what is in this image", session.FirstMessage, "first_message should use text from MultiContent")
+}
+
+func TestDBFirstMessageMultiContentNoText(t *testing.T) {
+	_, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	sid, err := sessionMgr.CreateSession("testnet", "#chan", "user", "testcmd", "", "")
+	require.NoError(t, err)
+
+	parts := []MessagePart{
+		{Type: PartTypeImageURL, ImageURL: &ImageURL{URL: "data:image/png;base64,iVBORw==", Detail: ImageDetailAuto}},
+	}
+	sessionMgr.AddMessage(sid, ChatMessage{Role: "user", Content: "", MultiContent: parts})
+
+	session, err := getDBSessionByID(sid)
+	require.NoError(t, err)
+	assert.Equal(t, "", session.FirstMessage, "first_message should be empty when MultiContent has no text part")
+}
+
+func TestMessageFromDB(t *testing.T) {
+	mcJSON := `[{"Type":"text","Text":"hello"},{"Type":"image_url","ImageURL":{"URL":"data:image/png;base64,abc","Detail":"auto"}}]`
+	tcJSON := `[{"ID":"tc1","Type":"function","Function":{"Name":"test","Arguments":"{}"}}]`
+	toolCallID := "tc1"
+	reasoning := "thinking"
+	content := "some content"
+
+	dm := Message{
+		Role:             "assistant",
+		Content:          content,
+		ToolCalls:        &tcJSON,
+		ToolCallID:       &toolCallID,
+		ReasoningContent: &reasoning,
+		MultiContent:     &mcJSON,
+	}
+
+	msg := messageFromDB(dm)
+	assert.Equal(t, "assistant", msg.Role)
+	assert.Equal(t, "some content", msg.Content)
+	assert.Equal(t, "thinking", msg.ReasoningContent)
+	assert.Equal(t, "tc1", msg.ToolCallID)
+	require.Len(t, msg.ToolCalls, 1)
+	assert.Equal(t, "tc1", msg.ToolCalls[0].ID)
+	require.Len(t, msg.MultiContent, 2)
+	assert.Equal(t, PartTypeText, msg.MultiContent[0].Type)
+	assert.Equal(t, "hello", msg.MultiContent[0].Text)
+	assert.Equal(t, PartTypeImageURL, msg.MultiContent[1].Type)
+	assert.Equal(t, "data:image/png;base64,abc", msg.MultiContent[1].ImageURL.URL)
+}
+
+func TestTextContentFromMessage(t *testing.T) {
+	t.Run("content takes priority", func(t *testing.T) {
+		msg := ChatMessage{Content: "from content", MultiContent: []MessagePart{{Type: PartTypeText, Text: "from multi"}}}
+		assert.Equal(t, "from content", textContentFromMessage(msg))
+	})
+
+	t.Run("falls back to MultiContent text", func(t *testing.T) {
+		msg := ChatMessage{Content: "", MultiContent: []MessagePart{{Type: PartTypeText, Text: "from multi"}}}
+		assert.Equal(t, "from multi", textContentFromMessage(msg))
+	})
+
+	t.Run("empty when no text anywhere", func(t *testing.T) {
+		msg := ChatMessage{Content: "", MultiContent: []MessagePart{{Type: PartTypeImageURL, ImageURL: &ImageURL{URL: "data:..."}}}}
+		assert.Equal(t, "", textContentFromMessage(msg))
+	})
+
+	t.Run("empty message", func(t *testing.T) {
+		msg := ChatMessage{}
+		assert.Equal(t, "", textContentFromMessage(msg))
+	})
 }
 
 func TestClearContextCompletesSession(t *testing.T) {

@@ -13,19 +13,32 @@ import (
 )
 
 type Session struct {
-	ID           int64   `gorm:"primaryKey;autoIncrement"`
-	Network      string  `gorm:"not null"`
-	Channel      string  `gorm:"not null"`
-	Nick         string  `gorm:"not null"`
-	ChatCommand  string  `gorm:"column:chat_command;not null"`
-	FirstMessage string  `gorm:"column:first_message;not null;default:''"`
-	ConvID       *string `gorm:"column:conv_id"`
-	ResponseID   *string `gorm:"column:response_id"`
-	Service      string  `gorm:"not null;default:''"`
-	Model        string  `gorm:"not null;default:''"`
-	Status       string  `gorm:"not null;default:'active'"`
+	ID           int64          `gorm:"primaryKey;autoIncrement"`
+	Network      string         `gorm:"not null"`
+	Channel      string         `gorm:"not null"`
+	Nick         string         `gorm:"not null"`
+	ChatCommand  string         `gorm:"column:chat_command;not null"`
+	FirstMessage string         `gorm:"column:first_message;not null;default:''"`
+	ConvID       *string        `gorm:"column:conv_id"`
+	ResponseID   *string        `gorm:"column:response_id"`
+	Service      string         `gorm:"not null;default:''"`
+	Model        string         `gorm:"not null;default:''"`
+	Status       string         `gorm:"not null;default:'active'"`
 	CreatedAt    time.Time
-	LastActive   time.Time `gorm:"column:last_active"`
+	LastActive   time.Time      `gorm:"column:last_active"`
+	DeletedAt    gorm.DeletedAt `gorm:"index"`
+	SettingsID   *int64         `gorm:"index:idx_sessions_settings"`
+}
+
+type SessionSetting struct {
+	ID               int64  `gorm:"primaryKey;autoIncrement"`
+	System           string `gorm:"type:text"`
+	Model            string
+	DetectImages     bool
+	MaxImages        int
+	MaxContextImages int
+	ReasoningEffort  string
+	CreatedAt        time.Time
 }
 
 type Message struct {
@@ -71,6 +84,8 @@ type TurnUsage struct {
 }
 
 func (TurnUsage) TableName() string { return "turn_usage" }
+
+func (SessionSetting) TableName() string { return "session_settings" }
 
 func migrateTable[T any](src, dst *gorm.DB, batchSize int, label string) error {
 	var count int64
@@ -141,7 +156,7 @@ func main() {
 	}
 
 	fmt.Println("Running AutoMigrate on PostgreSQL...")
-	if err := dstDB.AutoMigrate(&Session{}, &Message{}, &PendingJob{}, &TurnUsage{}); err != nil {
+	if err := dstDB.AutoMigrate(&Session{}, &SessionSetting{}, &Message{}, &PendingJob{}, &TurnUsage{}); err != nil {
 		fmt.Fprintf(os.Stderr, "AutoMigrate failed: %v\n", err)
 		os.Exit(1)
 	}
@@ -149,6 +164,9 @@ func main() {
 	dstDB.Exec("SET session_replication_role = 'replica'")
 
 	if err := migrateTable[Session](srcDB, dstDB, 100, "sessions"); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+	}
+	if err := migrateTable[SessionSetting](srcDB, dstDB, 100, "session_settings"); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 	}
 	if err := migrateTable[Message](srcDB, dstDB, 500, "messages"); err != nil {
@@ -163,7 +181,7 @@ func main() {
 
 	dstDB.Exec("SET session_replication_role = 'DEFAULT'")
 
-	tables := []string{"sessions", "messages", "pending_jobs", "turn_usage"}
+	tables := []string{"sessions", "session_settings", "messages", "pending_jobs", "turn_usage"}
 	for _, table := range tables {
 		dstDB.Exec(fmt.Sprintf("SELECT setval(pg_get_serial_sequence('%s', 'id'), COALESCE((SELECT MAX(id) FROM %s), 0))", table, table))
 	}

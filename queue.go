@@ -183,6 +183,23 @@ func (qm *QueueManager) Enqueue(network, channel, nick, service, desc string, fn
 	return qm.EnqueueAt(network, channel, nick, service, desc, time.Now(), fn)
 }
 
+// deliveryPosition returns the number of items ahead of the given item in the
+// delivery slot queue. This reflects how many outputs the user will see before
+// theirs, regardless of parallel execution settings.
+func (ds *deliverySlot) deliveryPosition(item *QueueItem) int {
+	pos := 0
+	for i, q := range ds.queue {
+		if q.ID == item.ID {
+			pos = i
+			break
+		}
+	}
+	if ds.current != nil {
+		pos++
+	}
+	return pos
+}
+
 func (qm *QueueManager) EnqueueAt(network, channel, nick, service, desc string, enqueuedAt time.Time, fn func(ctx context.Context, output chan<- string)) int {
 	if !qm.running.Load() {
 		return -1
@@ -194,8 +211,7 @@ func (qm *QueueManager) EnqueueAt(network, channel, nick, service, desc string, 
 	key := channelKey(network, channel)
 	cq := qm.getOrCreateChannelQueue(key)
 
-	position := len(cq.pending) + len(cq.running)
-	if position >= qm.maxDepth {
+	if len(cq.pending)+len(cq.running) >= qm.maxDepth {
 		return -1
 	}
 
@@ -218,16 +234,18 @@ func (qm *QueueManager) EnqueueAt(network, channel, nick, service, desc string, 
 	ds := qm.getDeliverySlot(network, channel)
 	ds.enqueue(item)
 
+	deliveryPos := ds.deliveryPosition(item)
+
 	slot := qm.execSlots[service]
 	if slot != nil && !slot.tryAcquire() {
 		cq.pending = append(cq.pending, item)
 		qm.notify()
-		return position
+		return deliveryPos
 	}
 
 	cq.running[item.ID] = item
 	go qm.runJob(item)
-	return 0
+	return deliveryPos
 }
 
 func (qm *QueueManager) EnqueueAtWithPrompt(network, channel, nick, service, desc, prompt, startedMsgOverride string, enqueuedAt time.Time, fn func(ctx context.Context, output chan<- string)) int {
@@ -241,8 +259,7 @@ func (qm *QueueManager) EnqueueAtWithPrompt(network, channel, nick, service, des
 	key := channelKey(network, channel)
 	cq := qm.getOrCreateChannelQueue(key)
 
-	position := len(cq.pending) + len(cq.running)
-	if position >= qm.maxDepth {
+	if len(cq.pending)+len(cq.running) >= qm.maxDepth {
 		return -1
 	}
 
@@ -267,16 +284,18 @@ func (qm *QueueManager) EnqueueAtWithPrompt(network, channel, nick, service, des
 	ds := qm.getDeliverySlot(network, channel)
 	ds.enqueue(item)
 
+	deliveryPos := ds.deliveryPosition(item)
+
 	slot := qm.execSlots[service]
 	if slot != nil && !slot.tryAcquire() {
 		cq.pending = append(cq.pending, item)
 		qm.notify()
-		return position
+		return deliveryPos
 	}
 
 	cq.running[item.ID] = item
 	go qm.runJob(item)
-	return 0
+	return deliveryPos
 }
 
 func (qm *QueueManager) StopCurrent(network, channel string) bool {
@@ -463,10 +482,6 @@ func (qm *QueueManager) runJob(item *QueueItem) {
 	}
 
 	execDone := make(chan struct{})
-	startedMsg := ""
-	if item.deliveryWaited || time.Since(item.Enqueued) > time.Second {
-		startedMsg = qm.formatStartedMsg(item.Nick, time.Since(item.Enqueued), item.Prompt, item.StartedMsg)
-	}
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -481,13 +496,6 @@ func (qm *QueueManager) runJob(item *QueueItem) {
 			close(item.outputCh)
 			close(execDone)
 		}()
-		if startedMsg != "" {
-			select {
-			case item.outputCh <- startedMsg:
-			case <-item.ctx.Done():
-				return
-			}
-		}
 		item.Execute(item.ctx, item.outputCh)
 	}()
 
@@ -526,6 +534,16 @@ func (qm *QueueManager) runJob(item *QueueItem) {
 		for range item.outputCh {
 		}
 		return
+	}
+
+	// Send "Processing" started message after acquiring delivery turn.
+	// This must happen after waitTurn() so deliveryWaited is correctly set.
+	// Sent directly to IRC (not through outputCh) to avoid the race where
+	// startedMsg was computed before waitTurn set deliveryWaited. We send
+	// before the outputCh drain loop, so ordering is: startedMsg → output.
+	if item.deliveryWaited || time.Since(item.Enqueued) > time.Second {
+		startedMsg := qm.formatStartedMsg(item.Nick, time.Since(item.Enqueued), item.Prompt, item.StartedMsg)
+		bot.Client.Cmd.Message(item.Channel, startedMsg)
 	}
 
 	throttle := bot.Network.Throttle

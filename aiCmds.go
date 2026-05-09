@@ -1304,8 +1304,14 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 		} else {
 			systemContent = cfg.System
 		}
+
+		// Per-user lock: serializes CreateSession so concurrent -commands
+		// each get their own session. See sessionCreationMu in sessionManager.go.
+		mu := getSessionCreationLock(network.Name, e.Params[0], e.Source.Name)
+		mu.Lock()
 		sid, err := sessionMgr.CreateSession(network.Name, e.Params[0], e.Source.Name, cfg.Name, cfg.Service, cfg.Model)
 		if err != nil {
+			mu.Unlock()
 			runner.logger.Error("Failed to create session", "error", err)
 			return
 		}
@@ -1318,6 +1324,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 		})
 		apiLogger.RestoreSession(sid, network.Name, e.Params[0], e.Source.Name)
 		session, err = sessionMgr.GetSession(sid)
+		mu.Unlock()
 		if err != nil || session == nil {
 			runner.logger.Error("Failed to get session after creation", "id", sid, "error", err)
 			return

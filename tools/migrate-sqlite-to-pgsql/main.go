@@ -13,17 +13,17 @@ import (
 )
 
 type Session struct {
-	ID           int64          `gorm:"primaryKey;autoIncrement"`
-	Network      string         `gorm:"not null"`
-	Channel      string         `gorm:"not null"`
-	Nick         string         `gorm:"not null"`
-	ChatCommand  string         `gorm:"column:chat_command;not null"`
-	FirstMessage string         `gorm:"column:first_message;not null;default:''"`
-	ConvID       *string        `gorm:"column:conv_id"`
-	ResponseID   *string        `gorm:"column:response_id"`
-	Service      string         `gorm:"not null;default:''"`
-	Model        string         `gorm:"not null;default:''"`
-	Status       string         `gorm:"not null;default:'active'"`
+	ID           int64   `gorm:"primaryKey;autoIncrement"`
+	Network      string  `gorm:"not null"`
+	Channel      string  `gorm:"not null"`
+	Nick         string  `gorm:"not null"`
+	ChatCommand  string  `gorm:"column:chat_command;not null"`
+	FirstMessage string  `gorm:"column:first_message;not null;default:''"`
+	ConvID       *string `gorm:"column:conv_id"`
+	ResponseID   *string `gorm:"column:response_id"`
+	Service      string  `gorm:"not null;default:''"`
+	Model        string  `gorm:"not null;default:''"`
+	Status       string  `gorm:"not null;default:'active'"`
 	CreatedAt    time.Time
 	LastActive   time.Time      `gorm:"column:last_active"`
 	DeletedAt    gorm.DeletedAt `gorm:"index"`

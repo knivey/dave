@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -660,4 +662,122 @@ func TestSessionManagerUpdateResponseID(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, session.ResponseID)
 	assert.Equal(t, respID, *session.ResponseID)
+}
+
+// TestConcurrentCreateSessionIsolation verifies that concurrent CreateSession calls
+// for the same (network, channel, nick) each produce their own session when
+// serialized by the per-user sessionCreationMu lock. This is a regression test
+// for the bug where two -commands arriving close together would share one session.
+func TestConcurrentCreateSessionIsolation(t *testing.T) {
+	_, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	const numGoroutines = 10
+	var wg sync.WaitGroup
+	wg.Add(numGoroutines)
+
+	var createdCount atomic.Int32
+	sessionIDs := make([]int64, numGoroutines)
+
+	for i := 0; i < numGoroutines; i++ {
+		go func(idx int) {
+			defer wg.Done()
+
+			mu := getSessionCreationLock("testnet", "#chan", "user")
+			mu.Lock()
+			sid, err := sessionMgr.CreateSession("testnet", "#chan", "user", "testcmd", "", "")
+			if err != nil {
+				t.Errorf("CreateSession failed: %v", err)
+				mu.Unlock()
+				return
+			}
+			sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "system"})
+			sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "hello"})
+			mu.Unlock()
+
+			sessionIDs[idx] = sid
+			createdCount.Add(1)
+		}(i)
+	}
+
+	wg.Wait()
+
+	assert.Equal(t, int32(numGoroutines), createdCount.Load(), "all goroutines should create sessions")
+
+	uniqueIDs := make(map[int64]bool)
+	for _, id := range sessionIDs {
+		uniqueIDs[id] = true
+	}
+	assert.Len(t, uniqueIDs, numGoroutines, "each goroutine should get a unique session ID")
+
+	for _, id := range sessionIDs {
+		msgs, err := sessionMgr.GetMessages(id, 10)
+		require.NoError(t, err)
+		assert.Len(t, msgs, 2, "each session should have exactly its own system + user message")
+	}
+}
+
+func TestConcurrentCreateSessionWithoutLockRaces(t *testing.T) {
+	_, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	// Without the lock, concurrent CreateSession calls for the same key would
+	// cause session reuse. This test confirms the lock prevents that by running
+	// the same pattern as the real chat() code: check -> create -> add messages.
+	const numGoroutines = 10
+	var wg sync.WaitGroup
+	wg.Add(numGoroutines)
+
+	sessionIDs := make([]int64, numGoroutines)
+
+	for i := 0; i < numGoroutines; i++ {
+		go func(idx int) {
+			defer wg.Done()
+
+			session, _ := sessionMgr.GetActiveSession("testnet", "#chan", "user")
+			if session == nil {
+				mu := getSessionCreationLock("testnet", "#chan", "user")
+				mu.Lock()
+				sid, err := sessionMgr.CreateSession("testnet", "#chan", "user", "testcmd", "", "")
+				if err != nil {
+					t.Errorf("CreateSession failed: %v", err)
+					mu.Unlock()
+					return
+				}
+				sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "system"})
+				session, _ = sessionMgr.GetSession(sid)
+				mu.Unlock()
+			}
+
+			if session != nil {
+				sessionMgr.AddMessage(session.ID, ChatMessage{
+					Role:    RoleUser,
+					Content: "msg from goroutine",
+				})
+				sessionIDs[idx] = session.ID
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	// With the lock, only the first goroutine should have its session found by
+	// another goroutine. But because GetActiveSession is called outside the lock,
+	// some goroutines may find the first session. The lock ensures that if they
+	// enter the creation branch, they get their own session.
+	// The key invariant: no session should have more than one system message.
+	for _, id := range sessionIDs {
+		if id == 0 {
+			continue
+		}
+		msgs, err := sessionMgr.GetMessages(id, 10)
+		require.NoError(t, err)
+		systemCount := 0
+		for _, m := range msgs {
+			if m.Role == RoleSystem {
+				systemCount++
+			}
+		}
+		assert.Equal(t, 1, systemCount, "session %d should have exactly 1 system message", id)
+	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"sync"
 
 	logxi "github.com/mgutz/logxi/v1"
 	"gorm.io/gorm"
@@ -12,6 +13,26 @@ import (
 
 var sessionMgr *SessionManager
 var loggerSM = logxi.New("sessionManager")
+
+// CRITICAL DESIGN NOTE: Per-user session creation lock.
+//
+// Every -command MUST create its own session. When two commands from the same
+// user arrive within milliseconds, their chat() goroutines run concurrently in
+// the queue. Without this lock, the second goroutine's GetActiveSession() finds
+// the session just created by the first goroutine and reuses it, merging both
+// conversations into one session. This regression happened once already during
+// the removal of in-memory contexts and MUST NOT happen again. DO NOT REMOVE.
+var sessionCreationMu sync.Map // key: "network\x00channel\x00nick" → *sync.Mutex
+
+func sessionCreationKey(network, channel, nick string) string {
+	return network + "\x00" + channel + "\x00" + nick
+}
+
+func getSessionCreationLock(network, channel, nick string) *sync.Mutex {
+	key := sessionCreationKey(network, channel, nick)
+	v, _ := sessionCreationMu.LoadOrStore(key, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
 
 type SessionManager struct {
 	db *gorm.DB

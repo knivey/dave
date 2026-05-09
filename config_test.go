@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 	"text/template"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -50,6 +51,7 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 				cfg.ImageFormat = "jpg"
 				cfg.ImageQuality = 75
 				cfg.MaxImageSize = "1024x1024"
+				cfg.RetryOnEmpty = intPtr(1)
 				return cfg
 			},
 		},
@@ -74,6 +76,7 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 				cfg.ImageFormat = "jpg"
 				cfg.ImageQuality = 75
 				cfg.MaxImageSize = "1024x1024"
+				cfg.RetryOnEmpty = intPtr(1)
 				return cfg
 			},
 		},
@@ -94,6 +97,7 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 				cfg.ImageFormat = "jpg"
 				cfg.ImageQuality = 75
 				cfg.MaxImageSize = "1024x1024"
+				cfg.RetryOnEmpty = intPtr(1)
 				return cfg
 			},
 		},
@@ -114,6 +118,7 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 				cfg.ImageFormat = "jpg"
 				cfg.ImageQuality = 75
 				cfg.MaxImageSize = "1024x1024"
+				cfg.RetryOnEmpty = intPtr(1)
 				return cfg
 			},
 		},
@@ -127,6 +132,7 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 				cfg.ImageFormat = "jpg"
 				cfg.ImageQuality = 75
 				cfg.MaxImageSize = "1024x1024"
+				cfg.RetryOnEmpty = intPtr(1)
 				return cfg
 			},
 		},
@@ -142,6 +148,7 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 				cfg.ImageFormat = "jpg"
 				cfg.ImageQuality = 75
 				cfg.MaxImageSize = "1024x1024"
+				cfg.RetryOnEmpty = intPtr(1)
 				return cfg
 			},
 		},
@@ -157,6 +164,7 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 				cfg.ImageFormat = "jpg"
 				cfg.ImageQuality = 75
 				cfg.MaxImageSize = "1024x1024"
+				cfg.RetryOnEmpty = intPtr(1)
 				return cfg
 			},
 		},
@@ -171,6 +179,7 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 				cfg.ImageFormat = "jpg"
 				cfg.ImageQuality = 75
 				cfg.MaxImageSize = "1024x1024"
+				cfg.RetryOnEmpty = intPtr(1)
 				return cfg
 			},
 		},
@@ -180,6 +189,35 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 			svc:  Service{APIUser: "dave/{{.Network}}/{{.Nick}}"},
 			expect: func(cfg AIConfig) AIConfig {
 				cfg.APIUser = "irc:{{.Nick}}"
+				cfg.MaxImages = 5
+				cfg.MaxContextImages = 5
+				cfg.ImageFormat = "jpg"
+				cfg.ImageQuality = 75
+				cfg.MaxImageSize = "1024x1024"
+				cfg.RetryOnEmpty = intPtr(1)
+				return cfg
+			},
+		},
+		{
+			name: "retry_on_empty preserves explicit value",
+			cfg:  AIConfig{RetryOnEmpty: intPtr(3)},
+			svc:  Service{},
+			expect: func(cfg AIConfig) AIConfig {
+				cfg.RetryOnEmpty = intPtr(3)
+				cfg.MaxImages = 5
+				cfg.MaxContextImages = 5
+				cfg.ImageFormat = "jpg"
+				cfg.ImageQuality = 75
+				cfg.MaxImageSize = "1024x1024"
+				return cfg
+			},
+		},
+		{
+			name: "retry_on_empty zero disables retry",
+			cfg:  AIConfig{RetryOnEmpty: intPtr(0)},
+			svc:  Service{},
+			expect: func(cfg AIConfig) AIConfig {
+				cfg.RetryOnEmpty = intPtr(0)
 				cfg.MaxImages = 5
 				cfg.MaxContextImages = 5
 				cfg.ImageFormat = "jpg"
@@ -205,6 +243,7 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 			assert.Equal(t, want.ImageQuality, cfg.ImageQuality, "ImageQuality")
 			assert.Equal(t, want.MaxImageSize, cfg.MaxImageSize, "MaxImageSize")
 			assert.Equal(t, want.APIUser, cfg.APIUser, "APIUser")
+			assert.Equal(t, want.RetryOnEmpty, cfg.RetryOnEmpty, "RetryOnEmpty")
 		})
 	}
 }
@@ -539,6 +578,93 @@ host = "irc.example.com"
 
 func boolPtr(b bool) *bool {
 	return &b
+}
+
+func TestLoadConfigDirNetworkIdentityDefaults(t *testing.T) {
+	t.Run("user and real_name default to nick", func(t *testing.T) {
+		mainTOML := `
+[networks.testnet]
+nick = "mybot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+		dir := createTestConfigDir(t, mainTOML, nil)
+		defer os.RemoveAll(dir)
+
+		config := loadConfigDirOrDie(dir)
+		net := config.Networks["testnet"]
+		assert.Equal(t, "mybot", net.User, "User should default to Nick")
+		assert.Equal(t, "mybot", net.RealName, "RealName should default to Nick")
+	})
+
+	t.Run("user and real_name can be set independently", func(t *testing.T) {
+		mainTOML := `
+[networks.testnet]
+nick = "mybot"
+user = "botuser"
+real_name = "The Bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+		dir := createTestConfigDir(t, mainTOML, nil)
+		defer os.RemoveAll(dir)
+
+		config := loadConfigDirOrDie(dir)
+		net := config.Networks["testnet"]
+		assert.Equal(t, "mybot", net.Nick)
+		assert.Equal(t, "botuser", net.User)
+		assert.Equal(t, "The Bot", net.RealName)
+	})
+}
+
+func TestLoadConfigDirNetworkReconnectDelay(t *testing.T) {
+	t.Run("reconnect_delay defaults to 60s", func(t *testing.T) {
+		mainTOML := `
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+		dir := createTestConfigDir(t, mainTOML, nil)
+		defer os.RemoveAll(dir)
+
+		config := loadConfigDirOrDie(dir)
+		net := config.Networks["testnet"]
+		assert.Equal(t, 60*time.Second, *net.ReconnectDelay)
+	})
+
+	t.Run("reconnect_delay can be configured", func(t *testing.T) {
+		mainTOML := `
+[networks.testnet]
+nick = "bot"
+reconnect_delay = "30s"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+		dir := createTestConfigDir(t, mainTOML, nil)
+		defer os.RemoveAll(dir)
+
+		config := loadConfigDirOrDie(dir)
+		net := config.Networks["testnet"]
+		assert.Equal(t, 30*time.Second, *net.ReconnectDelay)
+	})
+
+	t.Run("reconnect_delay can be set to 0s", func(t *testing.T) {
+		mainTOML := `
+[networks.testnet]
+nick = "bot"
+reconnect_delay = "0s"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+		dir := createTestConfigDir(t, mainTOML, nil)
+		defer os.RemoveAll(dir)
+
+		config := loadConfigDirOrDie(dir)
+		net := config.Networks["testnet"]
+		require.NotNil(t, net.ReconnectDelay)
+		assert.Equal(t, time.Duration(0), *net.ReconnectDelay)
+	})
 }
 
 func intPtr(i int) *int {

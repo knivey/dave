@@ -46,7 +46,20 @@ type Session struct {
 	Model        string  `gorm:"not null;default:''"`
 	Status       string  `gorm:"not null;default:'active';index:idx_sessions_status"`
 	CreatedAt    time.Time
-	LastActive   time.Time `gorm:"column:last_active;index:idx_sessions_last_active"`
+	LastActive   time.Time      `gorm:"column:last_active;index:idx_sessions_last_active"`
+	DeletedAt    gorm.DeletedAt `gorm:"index"`
+	SettingsID   *int64         `gorm:"index:idx_sessions_settings"`
+}
+
+type SessionSetting struct {
+	ID               int64  `gorm:"primaryKey;autoIncrement"`
+	System           string `gorm:"type:text"`
+	Model            string
+	DetectImages     bool
+	MaxImages        int
+	MaxContextImages int
+	ReasoningEffort  string
+	CreatedAt        time.Time
 }
 
 type Message struct {
@@ -58,6 +71,7 @@ type Message struct {
 	ToolCallID       *string
 	ReasoningContent *string `gorm:"type:text"`
 	IsAsyncResult    bool    `gorm:"default:false"`
+	SettingsID       *int64  `gorm:"index:idx_messages_settings"`
 	CreatedAt        time.Time
 }
 
@@ -93,6 +107,8 @@ func (PendingJob) TableName() string { return "pending_jobs" }
 
 func (TurnUsage) TableName() string { return "turn_usage" }
 
+func (SessionSetting) TableName() string { return "session_settings" }
+
 func initDB(cfg DatabaseConfig, log logxi.Logger) (*gorm.DB, error) {
 	var dialector gorm.Dialector
 	switch cfg.Driver {
@@ -123,7 +139,7 @@ func initDB(cfg DatabaseConfig, log logxi.Logger) (*gorm.DB, error) {
 		sqlDB.SetMaxOpenConns(1)
 	}
 
-	if err := db.AutoMigrate(&Session{}, &Message{}, &PendingJob{}, &TurnUsage{}); err != nil {
+	if err := db.AutoMigrate(&Session{}, &Message{}, &PendingJob{}, &TurnUsage{}, &SessionSetting{}); err != nil {
 		return nil, fmt.Errorf("running migrations: %w", err)
 	}
 
@@ -219,10 +235,10 @@ func reactivateDBStrandedSessions() (int64, error) {
 	result := theDB.Exec(`
 		UPDATE sessions SET status = 'active'
 		WHERE id IN (
-			SELECT MAX(id) FROM sessions GROUP BY network, channel, nick
+			SELECT MAX(id) FROM sessions WHERE deleted_at IS NULL GROUP BY network, channel, nick
 		) AND status = 'completed'
 		AND (network, channel, nick) IN (
-			SELECT network, channel, nick FROM sessions GROUP BY network, channel, nick HAVING SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) = 0
+			SELECT network, channel, nick FROM sessions WHERE deleted_at IS NULL GROUP BY network, channel, nick HAVING SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) = 0
 		)`)
 	return result.RowsAffected, result.Error
 }
@@ -263,6 +279,17 @@ func deleteDBSession(id int64) error {
 
 func deleteUserDBSessions(network, channel, nick string) (int64, error) {
 	result := theDB.Where("network = ? AND channel = ? AND nick = ?", network, channel, nick).
+		Delete(&Session{})
+	return result.RowsAffected, result.Error
+}
+
+// purgeDeletedDBSessions permanently removes soft-deleted sessions older than the
+// given duration. Not called automatically — intentionally left as an admin utility
+// for manual or scheduled invocation (e.g. TUI command, cron). Soft-deleted data is
+// retained indefinitely until this is called.
+func purgeDeletedDBSessions(olderThan time.Duration) (int64, error) {
+	cutoff := time.Now().Add(-olderThan)
+	result := theDB.Unscoped().Where("deleted_at IS NOT NULL AND deleted_at < ?", cutoff).
 		Delete(&Session{})
 	return result.RowsAffected, result.Error
 }
@@ -329,7 +356,7 @@ func getCompletedPendingJobs(sessionID int64) ([]PendingJob, error) {
 
 func getPendingJobsForUser(network, channel, nick string) ([]PendingJob, error) {
 	var jobs []PendingJob
-	err := theDB.Joins("JOIN sessions ON sessions.id = pending_jobs.session_id").
+	err := theDB.Joins("JOIN sessions ON sessions.id = pending_jobs.session_id AND sessions.deleted_at IS NULL").
 		Where("sessions.network = ? AND sessions.channel = ? AND sessions.nick = ?", network, channel, nick).
 		Where("pending_jobs.status IN ?", []string{"pending", "running", "completed"}).
 		Order("pending_jobs.created_at DESC").

@@ -35,14 +35,24 @@ var ignoreWatcher *fsnotify.Watcher
 var ignoreFile string
 
 type Bot struct {
-	Client    *girc.Client
-	Reconnect bool
-	Network   Network
-	mu        sync.Mutex
+	Client      *girc.Client
+	Reconnect   bool
+	Network     Network
+	connectedAt time.Time
+	reconnects  int
+	quitCh      chan struct{}
+	mu          sync.Mutex
 }
 
 func (bot *Bot) Quit() {
+	bot.mu.Lock()
 	bot.Reconnect = false
+	select {
+	case <-bot.quitCh:
+	default:
+		close(bot.quitCh)
+	}
+	bot.mu.Unlock()
 	bot.Client.Cmd.SendRawf("QUIT :%s\r\n", bot.Network.Quitmsg)
 }
 
@@ -501,6 +511,14 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 		readConfig(func() {
 			sessionCfg, _ = config.Commands.Chats[session.ChatCommand]
 		})
+		if session.SettingsID != nil {
+			settings, err := sessionMgr.GetSessionSettings(*session.SettingsID)
+			if err != nil {
+				logger.Warn("failed to load stored settings, using current", "error", err)
+			} else if settings != nil {
+				sessionCfg = ApplySettings(settings, sessionCfg)
+			}
+		}
 		logger.Info("Running chat completion with existing context")
 
 		position := queueMgr.Enqueue(network.Name, event.Params[0], event.Source.Name,
@@ -682,8 +700,8 @@ func ircClient(network Network) {
 		Port:       ircServer.GetPort(),
 		Nick:       network.Nick,
 		ServerPass: ircServer.Pass,
-		User:       network.Nick,
-		Name:       network.Nick,
+		User:       network.User,
+		Name:       network.RealName,
 		SSL:        ircServer.Ssl,
 		TLSConfig:  sslConfig,
 		AllowFlood: true,
@@ -693,6 +711,7 @@ func ircClient(network Network) {
 		Client:    client,
 		Reconnect: true,
 		Network:   network,
+		quitCh:    make(chan struct{}),
 	}
 	bots[network.Name] = &bot
 
@@ -704,6 +723,8 @@ func ircClient(network Network) {
 
 	client.Handlers.Add(girc.RPL_WELCOME, func(client *girc.Client, event girc.Event) {
 		bot.mu.Lock()
+		bot.connectedAt = time.Now()
+		bot.reconnects = 0
 		throttle := bot.Network.Throttle
 		channels := bot.Network.Channels
 		bot.mu.Unlock()
@@ -730,19 +751,48 @@ func ircClient(network Network) {
 
 	for {
 		if err := client.Connect(); err != nil {
-			log.Warn(err.Error())
+			bot.mu.Lock()
+			var uptime string
+			if !bot.connectedAt.IsZero() {
+				uptime = time.Since(bot.connectedAt).Round(time.Second).String()
+			} else {
+				uptime = "never connected"
+			}
+			bot.reconnects++
+			attempt := bot.reconnects
+			delay := *bot.Network.ReconnectDelay
+			if attempt == 1 {
+				delay = 0
+			}
+			quitCh := bot.quitCh
+			bot.mu.Unlock()
+
+			log.Warn("disconnected",
+				"error", err.Error(),
+				"uptime", uptime,
+				"attempt", attempt,
+				"retry_in", delay,
+			)
+			if delay > 0 {
+				select {
+				case <-time.After(delay):
+				case <-quitCh:
+				}
+			}
 		}
-		if !bot.Reconnect {
+		bot.mu.Lock()
+		reconnect := bot.Reconnect
+		bot.mu.Unlock()
+		if !reconnect {
 			log.Info("Reconnect not requested")
 			break
 		}
-		log.Info("Reconnecting in 60s")
-		time.Sleep(60 * time.Second)
 		ircServer, err := bot.Network.getNextServer()
 		if err != nil {
 			log.Error(err.Error())
 			break
 		}
+		log.Info("reconnecting", "host", ircServer.Host, "port", ircServer.GetPort())
 		client.Config.Server = ircServer.Host
 		client.Config.Port = ircServer.GetPort()
 		client.Config.ServerPass = ircServer.Pass

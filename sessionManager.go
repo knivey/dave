@@ -176,6 +176,65 @@ func (sm *SessionManager) GetSession(id int64) (*Session, error) {
 	return getDBSessionByID(id)
 }
 
+// CreateSessionSettings creates a session_settings row from the given config and
+// updates the session's settings_id foreign key. Returns the settings row ID.
+func (sm *SessionManager) CreateSessionSettings(sessionID int64, cfg AIConfig) (int64, error) {
+	setting := SessionSetting{
+		System:           cfg.System,
+		Model:            cfg.Model,
+		DetectImages:     cfg.DetectImages,
+		MaxImages:        cfg.MaxImages,
+		MaxContextImages: cfg.MaxContextImages,
+		ReasoningEffort:  cfg.ReasoningEffort,
+	}
+	if err := sm.db.Create(&setting).Error; err != nil {
+		return 0, fmt.Errorf("creating session settings: %w", err)
+	}
+	if err := sm.db.Model(&Session{}).Where("id = ?", sessionID).
+		Update("settings_id", setting.ID).Error; err != nil {
+		return 0, fmt.Errorf("updating session settings_id: %w", err)
+	}
+	return setting.ID, nil
+}
+
+func (sm *SessionManager) GetSessionSettings(settingsID int64) (*SessionSetting, error) {
+	var setting SessionSetting
+	if err := sm.db.Where("id = ?", settingsID).First(&setting).Error; err != nil {
+		return nil, err
+	}
+	return &setting, nil
+}
+
+// ApplySettings overlays stored settings onto a live config. Since SessionSetting
+// stores a complete snapshot, all fields always override the base config. String
+// and int zero-value fields (Model="", MaxImages=0) only override when non-empty/non-zero
+// because they may not have been meaningful values in the original config.
+// DetectImages is a plain bool and always overrides since false is a valid value.
+//
+// DESIGN NOTE: In the future, we may compare the {{.Vars.*}} template variable
+// references between stored and live settings to detect meaningful config changes,
+// rather than doing a full string comparison.
+func ApplySettings(settings *SessionSetting, baseCfg AIConfig) AIConfig {
+	cfg := baseCfg
+	if settings.System != "" {
+		cfg.System = settings.System
+	}
+	if settings.Model != "" {
+		cfg.Model = settings.Model
+	}
+	cfg.DetectImages = settings.DetectImages
+	if settings.MaxImages != 0 {
+		cfg.MaxImages = settings.MaxImages
+	}
+	if settings.MaxContextImages != 0 {
+		cfg.MaxContextImages = settings.MaxContextImages
+	}
+	if settings.ReasoningEffort != "" {
+		cfg.ReasoningEffort = settings.ReasoningEffort
+	}
+	return cfg
+}
+
 func (sm *SessionManager) DeleteSession(id int64) error {
 	return deleteDBSession(id)
 }

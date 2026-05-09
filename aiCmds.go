@@ -315,7 +315,15 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 	defer cancel()
 
 	const maxToolIterations = 20
+	// DESIGN NOTE: Both empty-response retries and previous_response_id retries
+	// count toward the maxToolIterations budget. Each retry consumes one iteration
+	// slot. Setting retry_on_empty too high (close to 20) risks hitting the limit.
 	iterations := 0
+	emptyRetries := 0
+	maxEmptyRetries := 0
+	if cr.cfg.RetryOnEmpty != nil {
+		maxEmptyRetries = *cr.cfg.RetryOnEmpty
+	}
 
 	for {
 		if iterations >= maxToolIterations {
@@ -525,10 +533,16 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 			}
 
 			if streamDone || len(accumulatedToolCalls) == 0 {
+				if fullContent == "" && reasoningBuffer == "" && len(accumulatedToolCalls) == 0 && emptyRetries < maxEmptyRetries {
+					emptyRetries++
+					cr.logger.Warn("empty response from API, retrying", "attempt", emptyRetries, "max", maxEmptyRetries)
+					continue
+				}
 				flushStreamedOutput()
 				return messages, true
 			}
 
+			emptyRetries = 0
 			cr.logger.Info("stream made tool calls", "count", len(accumulatedToolCalls))
 			cr.storeUsage(streamUsage, "chat_completions_stream", streamDurationMs)
 			logTimings(cr.logger, streamTimings)
@@ -585,6 +599,11 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 
 		if len(toolCalls) == 0 {
 			if content == "" && reasoning == "" {
+				if emptyRetries < maxEmptyRetries {
+					emptyRetries++
+					cr.logger.Warn("empty response from API, retrying", "attempt", emptyRetries, "max", maxEmptyRetries)
+					continue
+				}
 				content = "..."
 			}
 			cr.addContext(ChatMessage{
@@ -642,6 +661,7 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 			return messages, true
 		}
 
+		emptyRetries = 0
 		cr.logger.Info("assistant made tool calls", "count", len(toolCalls))
 		cr.storeUsage(usage, "chat_completions", durationMs)
 		logTimings(cr.logger, nonStreamTimings)
@@ -872,8 +892,25 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 	}
 
 	const maxToolIterations = 20
+	// DESIGN NOTE: Both empty-response retries and previous_response_id retries
+	// count toward the maxToolIterations budget. Each retry consumes one iteration
+	// slot. Setting retry_on_empty too high (close to 20) risks hitting the limit.
+	emptyRetries := 0
+	maxEmptyRetries := 0
+	if cr.cfg.RetryOnEmpty != nil {
+		maxEmptyRetries = *cr.cfg.RetryOnEmpty
+	}
 
-	for iteration := 1; iteration <= maxToolIterations; iteration++ {
+	iteration := 0
+
+	for {
+		if iteration >= maxToolIterations {
+			cr.sendIRC(getNotices().Tools.CallLimit)
+			cr.logger.Warn("max tool iterations reached", "limit", maxToolIterations)
+			return messages, true
+		}
+		iteration++
+
 		params := buildResponseParams(cr.cfg, input, responseTools, currentResponseID, cr.renderAPIUser())
 
 		if cr.cfg.Streaming {
@@ -888,7 +925,6 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 					SetContextResponseID(cr.network.Name, cr.channel, cr.nick, "")
 					usePrevID = false
 					input = messagesToResponseInputItems(messages)
-					iteration--
 					continue
 				}
 				cr.sendError(err.Error())
@@ -925,6 +961,11 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 
 			if len(toolCalls) == 0 {
 				if text == "" && reasoning == "" {
+					if emptyRetries < maxEmptyRetries {
+						emptyRetries++
+						cr.logger.Warn("empty response from API, retrying", "attempt", emptyRetries, "max", maxEmptyRetries)
+						continue
+					}
 					text = "..."
 					assistantMsg.Content = text
 				}
@@ -938,6 +979,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 				return messages, true
 			}
 
+			emptyRetries = 0
 			assistantMsg.ToolCalls = toolCalls
 			messages = append(messages, assistantMsg)
 			cr.addContext(assistantMsg)
@@ -968,7 +1010,6 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 				SetContextResponseID(cr.network.Name, cr.channel, cr.nick, "")
 				usePrevID = false
 				input = messagesToResponseInputItems(messages)
-				iteration--
 				continue
 			}
 			cr.sendError(err.Error())
@@ -996,6 +1037,11 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 		if len(toolCalls) == 0 {
 			content := text
 			if content == "" && reasoning == "" {
+				if emptyRetries < maxEmptyRetries {
+					emptyRetries++
+					cr.logger.Warn("empty response from API, retrying", "attempt", emptyRetries, "max", maxEmptyRetries)
+					continue
+				}
 				content = "..."
 			}
 			assistantMsg := ChatMessage{
@@ -1053,6 +1099,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 			return messages, true
 		}
 
+		emptyRetries = 0
 		cr.logger.Info("assistant made tool calls", "count", len(toolCalls))
 		cr.storeUsage(sdkResponseUsageToUsage(resp.Usage, string(resp.Status)), "responses", durationMs)
 		assistantMsg := ChatMessage{
@@ -1084,10 +1131,6 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 			input = messagesToResponseInputItems(messages)
 		}
 	}
-
-	cr.sendIRC(getNotices().Tools.CallLimit)
-	cr.logger.Warn("max tool iterations reached")
-	return messages, true
 }
 
 func (cr *chatRunner) callResponsesStream(ctx context.Context, params responses.ResponseNewParams) (*responses.Response, error) {
@@ -1265,6 +1308,9 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 		if err != nil {
 			runner.logger.Error("Failed to create session", "error", err)
 			return
+		}
+		if _, err := sessionMgr.CreateSessionSettings(sid, cfg); err != nil {
+			runner.logger.Warn("failed to create session settings", "error", err)
 		}
 		sessionMgr.AddMessage(sid, ChatMessage{
 			Role:    RoleSystem,

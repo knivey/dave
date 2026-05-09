@@ -313,6 +313,15 @@ func historyResume(network Network, c *girc.Client, e girc.Event, args ...string
 	readConfig(func() {
 		currentCfg, cfgOk = config.Commands.Chats[session.ChatCommand]
 	})
+	if session.SettingsID != nil {
+		settings, err := sessionMgr.GetSessionSettings(*session.SettingsID)
+		if err != nil {
+			c.Cmd.Reply(e, warnMsg("failed to load stored session config: "+err.Error()))
+		} else if settings != nil {
+			currentCfg = ApplySettings(settings, currentCfg)
+			cfgOk = true
+		}
+	}
 	if !cfgOk {
 		c.Cmd.Reply(e, errorMsg(expandNotice(n.Sessions.CommandGone, map[string]string{"command": session.ChatCommand})))
 		return

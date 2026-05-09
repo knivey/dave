@@ -245,6 +245,15 @@ func deliverAsyncResult(job *asyncJob, ctx context.Context, output chan<- string
 	readConfig(func() {
 		currentCfg, cfgOk = config.Commands.Chats[session.ChatCommand]
 	})
+	if session.SettingsID != nil {
+		settings, err := sessionMgr.GetSessionSettings(*session.SettingsID)
+		if err != nil {
+			loggerJM.Warn("failed to load stored settings", "error", err)
+		} else if settings != nil {
+			currentCfg = ApplySettings(settings, currentCfg)
+			cfgOk = true
+		}
+	}
 	if !cfgOk {
 		loggerJM.Error("chat command not found for session", "command", session.ChatCommand)
 		return
@@ -287,9 +296,18 @@ func switchToSession(job *asyncJob) string {
 	}
 
 	var cfgOk bool
-	readConfig(func() {
-		_, cfgOk = config.Commands.Chats[session.ChatCommand]
-	})
+	if session.SettingsID != nil {
+		settings, cfgErr := sessionMgr.GetSessionSettings(*session.SettingsID)
+		if cfgErr != nil {
+			loggerJM.Warn("failed to load stored settings for switch validation", "error", cfgErr)
+		}
+		cfgOk = settings != nil
+	}
+	if !cfgOk {
+		readConfig(func() {
+			_, cfgOk = config.Commands.Chats[session.ChatCommand]
+		})
+	}
 	if !cfgOk {
 		loggerJM.Error("chat command not found for session", "command", session.ChatCommand)
 		return ""

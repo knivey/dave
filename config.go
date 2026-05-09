@@ -97,15 +97,18 @@ func (c ChannelConfig) GetPastebinPreviewLines(pastebinCfg PastebinConfig) int {
 }
 
 type Network struct {
-	Name       string
-	Nick       string
-	Servers    []Server
-	nextServer int
-	Channels   map[string]ChannelConfig
-	Enabled    *bool
-	Throttle   time.Duration
-	Trigger    string
-	Quitmsg    string
+	Name           string
+	Nick           string
+	User           string `toml:"user"`
+	RealName       string `toml:"real_name"`
+	Servers        []Server
+	nextServer     int
+	Channels       map[string]ChannelConfig
+	Enabled        *bool
+	Throttle       time.Duration
+	ReconnectDelay *time.Duration `toml:"reconnect_delay"`
+	Trigger        string
+	Quitmsg        string
 }
 
 func (n *Network) GetChannelConfig(channel string) ChannelConfig {
@@ -197,6 +200,7 @@ type AIConfig struct {
 	PreviousResponseID  bool               `toml:"previous_response_id"`
 	NeedsUserSuffix     bool               `toml:"needsusersuffix"`
 	APIUser             string             `toml:"api_user"`
+	RetryOnEmpty        *int               `toml:"retry_on_empty"`
 	apiUserTmpl         *template.Template `json:"-"`
 }
 
@@ -313,6 +317,10 @@ func (cfg *AIConfig) ApplyDefaults(service Service) {
 	if cfg.APIUser == "" {
 		cfg.APIUser = service.APIUser
 	}
+	if cfg.RetryOnEmpty == nil {
+		defaultRetry := 1
+		cfg.RetryOnEmpty = &defaultRetry
+	}
 }
 
 func (cfg AIConfig) MarshalJSON() ([]byte, error) {
@@ -397,6 +405,16 @@ func loadConfigDir(dir string) (Config, error) {
 	}
 	for name, network := range config.Networks {
 		network.Name = name
+		if network.User == "" {
+			network.User = network.Nick
+		}
+		if network.RealName == "" {
+			network.RealName = network.Nick
+		}
+		if network.ReconnectDelay == nil {
+			defaultDelay := 60 * time.Second
+			network.ReconnectDelay = &defaultDelay
+		}
 		if network.Trigger == "" {
 			network.Trigger = config.Trigger
 		}

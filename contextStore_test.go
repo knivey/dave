@@ -64,6 +64,163 @@ func TestDBSessionRoundtrip(t *testing.T) {
 	assert.Equal(t, "You are a helpful assistant", loaded[0].Content, "system prompt")
 }
 
+func TestDBCreateSessionSettings(t *testing.T) {
+	_, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	cfg := AIConfig{
+		Name:             "chat",
+		Service:          "openai",
+		Model:            "gpt-4o",
+		System:           "You are {{.Nick}}'s helper",
+		DetectImages:     true,
+		MaxImages:        5,
+		MaxContextImages: 3,
+		ReasoningEffort:  "high",
+	}
+
+	sid, err := sessionMgr.CreateSession("net", "#chan", "user", "chat", "openai", "gpt-4o")
+	require.NoError(t, err)
+
+	settingsID, err := sessionMgr.CreateSessionSettings(sid, cfg)
+	require.NoError(t, err)
+	require.NotZero(t, settingsID)
+
+	settings, err := sessionMgr.GetSessionSettings(settingsID)
+	require.NoError(t, err)
+	require.NotNil(t, settings)
+
+	assert.Equal(t, "You are {{.Nick}}'s helper", settings.System)
+	assert.Equal(t, "gpt-4o", settings.Model)
+	assert.True(t, settings.DetectImages)
+	assert.Equal(t, 5, settings.MaxImages)
+	assert.Equal(t, 3, settings.MaxContextImages)
+	assert.Equal(t, "high", settings.ReasoningEffort)
+
+	session, err := sessionMgr.GetSession(sid)
+	require.NoError(t, err)
+	require.NotNil(t, session.SettingsID)
+	assert.Equal(t, settingsID, *session.SettingsID)
+}
+
+func TestDBApplySettings(t *testing.T) {
+	tests := []struct {
+		name     string
+		settings SessionSetting
+		baseCfg  AIConfig
+		expected AIConfig
+	}{
+		{
+			name: "all fields override",
+			settings: SessionSetting{
+				System:           "stored system",
+				Model:            "stored-model",
+				DetectImages:     true,
+				MaxImages:        3,
+				MaxContextImages: 2,
+				ReasoningEffort:  "low",
+			},
+			baseCfg: AIConfig{
+				Name:             "chat",
+				Service:          "openai",
+				Model:            "base-model",
+				System:           "base system",
+				DetectImages:     false,
+				MaxImages:        5,
+				MaxContextImages: 5,
+				ReasoningEffort:  "medium",
+			},
+			expected: AIConfig{
+				Name:             "chat",
+				Service:          "openai",
+				Model:            "stored-model",
+				System:           "stored system",
+				DetectImages:     true,
+				MaxImages:        3,
+				MaxContextImages: 2,
+				ReasoningEffort:  "low",
+			},
+		},
+		{
+			name: "zero values in settings override base",
+			settings: SessionSetting{
+				System:           "stored system",
+				Model:            "",
+				DetectImages:     false,
+				MaxImages:        0,
+				MaxContextImages: 0,
+				ReasoningEffort:  "",
+			},
+			baseCfg: AIConfig{
+				Name:             "chat",
+				Model:            "base-model",
+				System:           "base system",
+				DetectImages:     true,
+				MaxImages:        5,
+				MaxContextImages: 10,
+				ReasoningEffort:  "medium",
+			},
+			expected: AIConfig{
+				Name:             "chat",
+				Model:            "base-model",
+				System:           "stored system",
+				DetectImages:     false,
+				MaxImages:        5,
+				MaxContextImages: 10,
+				ReasoningEffort:  "medium",
+			},
+		},
+		{
+			name: "detect_images false in settings overrides true in base",
+			settings: SessionSetting{
+				DetectImages: false,
+				Model:        "other",
+				System:       "sys",
+			},
+			baseCfg: AIConfig{
+				Model:            "base-model",
+				System:           "base system",
+				DetectImages:     true,
+				MaxImages:        5,
+				MaxContextImages: 5,
+			},
+			expected: AIConfig{
+				Model:            "other",
+				System:           "sys",
+				DetectImages:     false,
+				MaxImages:        5,
+				MaxContextImages: 5,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := ApplySettings(&tt.settings, tt.baseCfg)
+			assert.Equal(t, tt.expected.Model, result.Model)
+			assert.Equal(t, tt.expected.System, result.System)
+			assert.Equal(t, tt.expected.DetectImages, result.DetectImages)
+			assert.Equal(t, tt.expected.MaxImages, result.MaxImages)
+			assert.Equal(t, tt.expected.MaxContextImages, result.MaxContextImages)
+			assert.Equal(t, tt.expected.ReasoningEffort, result.ReasoningEffort)
+			assert.Equal(t, tt.expected.Name, result.Name, "Name should come from baseCfg")
+			assert.Equal(t, tt.expected.Service, result.Service, "Service should come from baseCfg")
+		})
+	}
+}
+
+func TestDBSessionSettingsNilWhenNone(t *testing.T) {
+	_, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	sid, err := sessionMgr.CreateSession("net", "#chan", "user", "chat", "openai", "gpt-4o")
+	require.NoError(t, err)
+
+	session, err := sessionMgr.GetSession(sid)
+	require.NoError(t, err)
+	assert.Nil(t, session.SettingsID, "settings_id should be nil when no settings created")
+}
+
 func TestDBCleanupByAge(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
@@ -176,6 +333,26 @@ func TestDBDeleteUserSessions(t *testing.T) {
 
 	sessions, _ := getUserDBSessions("net", "#chan", "nick", 10)
 	assert.Len(t, sessions, 0, "sessions for nick after delete")
+}
+
+func TestDBSoftDeletePreservesData(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	sid, _ := sessionMgr.CreateSession("net", "#chan", "nick", "chat", "", "")
+	sessionMgr.AddMessage(sid, ChatMessage{Role: "user", Content: "hello"})
+
+	err := deleteDBSession(sid)
+	require.NoError(t, err, "deleteDBSession failed")
+
+	_, err = getDBSessionByID(sid)
+	assert.Error(t, err, "normal query should not find soft-deleted session")
+
+	var session Session
+	err = db.Unscoped().Where("id = ?", sid).First(&session).Error
+	require.NoError(t, err, "unscoped query should find soft-deleted session")
+	assert.NotNil(t, session.DeletedAt, "deleted_at should be set")
+	assert.Equal(t, "chat", session.ChatCommand, "data should be preserved")
 }
 
 func TestDatabaseConfigDefaults(t *testing.T) {

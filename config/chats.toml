@@ -43,6 +43,7 @@
 #   needsusersuffix      (bool, default: false)      Append user message after system messages (auto-detected for anthropic/ models)
 #                                                Fix for: "This model does not support assistant message prefill. The conversation must end with a user message."
 #   api_user             (string, cascades from service)  Go template for API "user" field. Variables: {{.Nick}}, {{.BotNick}}, {{.Channel}}, {{.Network}}, {{.Date}}, {{.Vars.*}}. Empty = not sent.
+#   retry_on_empty       (int, default: 1)           Number of retries when API returns empty response (0 = disabled)
 #
 # /me action support: The LLM can use "/me <action text>" on its own line to send IRC CTCP ACTION messages.
 # Add {{.Vars.IRCActionNote}} to the system prompt to instruct the LLM how to use this feature.
@@ -85,6 +86,7 @@
 # previous_response_id = false
 # needsusersuffix = false
 # api_user = "irc:{{.Network}}:{{.Channel}}:{{.Nick}}"
+# retry_on_empty = 1
 
 [chat]
 description = "General IRC-aware chat"

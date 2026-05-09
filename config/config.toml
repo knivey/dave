@@ -42,7 +42,10 @@
 # [networks.<name>] options:
 #   enabled            (bool, default: true)   Enable this network
 #   nick               (string)                Bot nickname
+#   user               (string, default: nick) IRC username/ident
+#   real_name          (string, default: nick) IRC realname/GECOS
 #   throttle           (duration)              Minimum time between messages (e.g. "750ms")
+#   reconnect_delay    (duration, default: "60s") Delay between reconnection attempts (first reconnect is immediate; "0s" = no delay)
 #   quitmsg            (string, inherits root) Network-specific quit message
 #   trigger            (string, inherits root) Network-specific command trigger
 #
@@ -101,7 +104,10 @@
 # [networks.example]
 # enabled = true
 # nick = "mybot"
+# user = "mybot"
+# real_name = "mybot"
 # throttle = "750ms"
+# reconnect_delay = "60s"
 # quitmsg = "bye"
 # trigger = "."
 #

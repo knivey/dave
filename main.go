@@ -586,6 +586,34 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 	}
 	userID := resolvedUser.ID
 
+	if isTrigger {
+		stripped := strings.TrimPrefix(msg, network.Trigger)
+		if stripped == "amibanned" {
+			bans := getActiveBansForUser(theDB, userID, network.Name)
+			n := getNotices()
+			if len(bans) == 0 {
+				client.Cmd.Reply(event, n.Bans.AmIBannedNone)
+			} else {
+				for _, ban := range bans {
+					remainingStr := "never"
+					if !ban.ExpiresAt.IsZero() {
+						remaining := time.Until(ban.ExpiresAt).Round(time.Minute)
+						if remaining < 0 {
+							remaining = 0
+						}
+						remainingStr = formatDuration(remaining)
+					}
+					client.Cmd.Reply(event, expandNotice(n.Bans.AmIBanned, map[string]string{
+						"reason":    ban.Reason,
+						"remaining": remainingStr,
+						"banner":    ban.BannerNick,
+					}))
+				}
+			}
+			return
+		}
+	}
+
 	if isBanned(theDB, userID, network.Name, channel, "") {
 		logger.Info("User is banned", "user_id", userID, "nick", event.Source.Name)
 		return

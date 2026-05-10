@@ -82,6 +82,8 @@
 #   ban_history      (string)    Ban history line. Placeholders: {id}, {active}, {reason}, {duration}, {banner}
 #   unbanned         (string)    User unbanned notice. Placeholders: {nick}
 #   user_not_found   (string)    User not found for ban operation. Placeholders: {nick}
+#   amibanned        (string)    Per-ban line for !amibanned. Placeholders: {reason}, {remaining}, {banner}
+#   amibanned_none   (string)    No active bans for !amibanned
 #
 # support           (string)     Support message
 #
@@ -166,6 +168,8 @@
 # ban_history = "#{id} {active} {reason} ({duration}) by {banner}"
 # unbanned = "\x0303✓ Unbanned {nick}\x0F"
 # user_not_found = "User {nick} not found."
+# amibanned = "\x0304🚫 Banned: {reason} (expires in {remaining}, by {banner})\x0F"
+# amibanned_none = "You are not currently banned."
 #
 # support = "If you enjoy using dave, consider supporting development at https://patreon.com/shrew269 ❤️"
 

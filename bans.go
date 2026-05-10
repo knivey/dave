@@ -72,6 +72,24 @@ func deactivateBansForUser(db *gorm.DB, userID int64, network string) error {
 		Updates(map[string]interface{}{"active": false, "deactivated_at": &now}).Error
 }
 
+func getActiveBansForUser(db *gorm.DB, userID int64, network string) []Ban {
+	if db == nil {
+		return nil
+	}
+	now := time.Now()
+	var bans []Ban
+	db.Where("user_id = ? AND active = ? AND network = ?", userID, true, network).Order("created_at DESC").Find(&bans)
+	var active []Ban
+	for i := range bans {
+		if !bans[i].ExpiresAt.IsZero() && bans[i].ExpiresAt.Before(now) {
+			deactivateBan(db, bans[i].ID)
+			continue
+		}
+		active = append(active, bans[i])
+	}
+	return active
+}
+
 func getActiveBans(db *gorm.DB, network string) ([]Ban, error) {
 	var bans []Ban
 	err := db.Where("network = ? AND active = ?", network, true).Order("created_at DESC").Find(&bans).Error

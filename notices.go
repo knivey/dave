@@ -110,12 +110,14 @@ type JobNotices struct {
 }
 
 type BanNotices struct {
-	BanCreated   string `toml:"ban_created"`
-	BanList      string `toml:"ban_list"`
-	BanListEmpty string `toml:"ban_list_empty"`
-	BanHistory   string `toml:"ban_history"`
-	Unbanned     string `toml:"unbanned"`
-	UserNotFound string `toml:"user_not_found"`
+	BanCreated    string `toml:"ban_created"`
+	BanList       string `toml:"ban_list"`
+	BanListEmpty  string `toml:"ban_list_empty"`
+	BanHistory    string `toml:"ban_history"`
+	Unbanned      string `toml:"unbanned"`
+	UserNotFound  string `toml:"user_not_found"`
+	AmIBanned     string `toml:"amibanned"`
+	AmIBannedNone string `toml:"amibanned_none"`
 }
 
 var (
@@ -305,6 +307,12 @@ func setNoticesDefaults(n *NoticesConfig) {
 	}
 	if n.Bans.UserNotFound == "" {
 		n.Bans.UserNotFound = "User {nick} not found."
+	}
+	if n.Bans.AmIBanned == "" {
+		n.Bans.AmIBanned = "\x0304🚫 Banned: {reason} (expires in {remaining}, by {banner})\x0F"
+	}
+	if n.Bans.AmIBannedNone == "" {
+		n.Bans.AmIBannedNone = "You are not currently banned."
 	}
 	if n.Support == "" {
 		n.Support = "If you enjoy using dave, consider supporting development at https://patreon.com/shrew269 ❤️"

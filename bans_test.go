@@ -324,6 +324,71 @@ func TestIsBannedServiceScope(t *testing.T) {
 	assert.False(t, isBanned(theDB, userID, "testnet", "#test", ""), "empty service scope does not match specific scope")
 }
 
+func TestGetActiveBansForUser(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	userID := ensureTestUser(t, "testnet", "BadUser")
+	otherUser := ensureTestUser(t, "testnet", "OtherUser")
+
+	_, err := createBan(theDB, userID, "testnet", "", "", "spamming", 1*time.Hour, nil, "admin")
+	require.NoError(t, err)
+	_, err = createBan(theDB, userID, "testnet", "#test", "", "abuse", 2*time.Hour, nil, "bot")
+	require.NoError(t, err)
+	_, err = createBan(theDB, otherUser, "testnet", "", "", "unrelated", 1*time.Hour, nil, "admin")
+	require.NoError(t, err)
+
+	bans := getActiveBansForUser(theDB, userID, "testnet")
+	assert.Len(t, bans, 2)
+	for _, b := range bans {
+		assert.Equal(t, userID, b.UserID)
+		assert.True(t, b.Active)
+	}
+}
+
+func TestGetActiveBansForUserExpired(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	userID := ensureTestUser(t, "testnet", "BadUser")
+
+	_, err := createBan(theDB, userID, "testnet", "", "", "spamming", 1*time.Nanosecond, nil, "admin")
+	require.NoError(t, err)
+
+	time.Sleep(10 * time.Millisecond)
+
+	bans := getActiveBansForUser(theDB, userID, "testnet")
+	assert.Len(t, bans, 0, "expired ban should not be returned")
+}
+
+func TestGetActiveBansForUserDifferentNetwork(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	userID := ensureTestUser(t, "testnet", "BadUser")
+
+	_, err := createBan(theDB, userID, "testnet", "", "", "spamming", 1*time.Hour, nil, "admin")
+	require.NoError(t, err)
+
+	bans := getActiveBansForUser(theDB, userID, "othernet")
+	assert.Len(t, bans, 0)
+}
+
+func TestGetActiveBansForUserNilDB(t *testing.T) {
+	bans := getActiveBansForUser(nil, 1, "testnet")
+	assert.Nil(t, bans)
+}
+
+func TestGetActiveBansForUserNone(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	userID := ensureTestUser(t, "testnet", "GoodUser")
+
+	bans := getActiveBansForUser(theDB, userID, "testnet")
+	assert.Len(t, bans, 0)
+}
+
 func TestMultipleBansOneActive(t *testing.T) {
 	cleanup := setupUserTestDB(t)
 	defer cleanup()

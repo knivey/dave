@@ -2,7 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -342,11 +345,52 @@ func TestBuildResponseParams(t *testing.T) {
 	assert.Equal(t, openai.String("resp_prev"), params.PreviousResponseID, "PreviousResponseID")
 }
 
+func newAPIError(statusCode int, code string, message string) *openai.Error {
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	resp := &http.Response{StatusCode: statusCode, Status: http.StatusText(statusCode)}
+	return &openai.Error{
+		StatusCode: statusCode,
+		Code:       code,
+		Message:    message,
+		Request:    req,
+		Response:   resp,
+	}
+}
+
 func TestIsResponseIDError(t *testing.T) {
-	assert.True(t, isResponseIDError(fmt.Errorf(`"code":"response_not_found"`)), "should match response_not_found")
-	assert.True(t, isResponseIDError(fmt.Errorf(`"code":"invalid_previous_response_id"`)), "should match invalid_previous_response_id")
-	assert.True(t, isResponseIDError(fmt.Errorf("previous_response_id abc not found")), "should match previous_response_id not found")
-	assert.True(t, isResponseIDError(fmt.Errorf(`Invalid request content: Each message must have at least one content element.`)), "should match empty content element error")
-	assert.False(t, isResponseIDError(fmt.Errorf("rate limit exceeded")), "should not match generic error")
-	assert.False(t, isResponseIDError(nil), "nil should not match")
+	tests := []struct {
+		name  string
+		err   error
+		match bool
+	}{
+		{"nil", nil, false},
+		{"generic error", fmt.Errorf("rate limit exceeded"), false},
+		{"openai.Error 404", newAPIError(http.StatusNotFound, "", "Response with id=abc not found"), true},
+		{"openai.Error 404 with code", newAPIError(http.StatusNotFound, "response_not_found", "not found"), true},
+		{"openai.Error code response_not_found", newAPIError(http.StatusBadRequest, "response_not_found", "response not found"), true},
+		{"openai.Error code invalid_previous_response_id", newAPIError(http.StatusBadRequest, "invalid_previous_response_id", "bad id"), true},
+		{"openai.Error 400 empty content", newAPIError(http.StatusBadRequest, "", "Each message must have at least one content element."), true},
+		{"openai.Error 400 other", newAPIError(http.StatusBadRequest, "invalid_request", "something else"), false},
+		{"openai.Error 401", newAPIError(http.StatusUnauthorized, "invalid_api_key", "bad key"), false},
+		{"openai.Error 429", newAPIError(http.StatusTooManyRequests, "rate_limit_exceeded", "slow down"), false},
+		{"wrapped openai.Error 404", fmt.Errorf("wrapped: %w", newAPIError(http.StatusNotFound, "", "Response with id=abc not found")), true},
+		{"string fallback response_not_found", fmt.Errorf(`"code":"response_not_found"`), true},
+		{"string fallback invalid_previous_response_id", fmt.Errorf(`"code":"invalid_previous_response_id"`), true},
+		{"string fallback previous_response_id not found", fmt.Errorf("previous_response_id abc not found"), true},
+		{"string fallback empty content", fmt.Errorf("Invalid request content: Each message must have at least one content element."), true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.err == nil {
+				assert.False(t, isResponseIDError(nil))
+				return
+			}
+			result := isResponseIDError(tt.err)
+			assert.Equal(t, tt.match, result)
+			if tt.match {
+				assert.True(t, errors.Is(tt.err, tt.err), "error should support errors.As chain")
+			}
+		})
+	}
 }

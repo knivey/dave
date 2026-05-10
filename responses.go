@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"net/http"
 	"strings"
 
 	openai "github.com/openai/openai-go/v3"
@@ -227,6 +229,14 @@ func sdkResponseUsageToUsage(u responses.ResponseUsage, status string) *Usage {
 // isResponseIDError checks if an API error is caused by an invalid or unusable
 // previous_response_id chain, so the caller can retry without it.
 //
+// Primary detection uses the structured openai.Error type (StatusCode + Code fields),
+// which is provider-agnostic. A 404 on POST /v1/responses when previous_response_id
+// was sent always means the response ID is gone/expired, regardless of how the
+// provider words the error message.
+//
+// String matching on err.Error() is kept as a fallback for errors that don't
+// type-assert to *openai.Error (e.g. mid-stream StreamError from the SDK).
+//
 // DESIGN NOTE — "Each message must have at least one content element":
 // This is technically a request validation error, not an invalid response ID.
 // However, it occurs when chaining via previous_response_id to a response that
@@ -240,6 +250,23 @@ func isResponseIDError(err error) bool {
 	if err == nil {
 		return false
 	}
+
+	var apiErr *openai.Error
+	if errors.As(err, &apiErr) {
+		switch {
+		case apiErr.StatusCode == http.StatusNotFound:
+			return true
+		case apiErr.Code == "response_not_found":
+			return true
+		case apiErr.Code == "invalid_previous_response_id":
+			return true
+		case apiErr.StatusCode == http.StatusBadRequest &&
+			strings.Contains(apiErr.Message, "Each message must have at least one content element"):
+			return true
+		}
+		return false
+	}
+
 	s := err.Error()
 	return strings.Contains(s, `"code":"response_not_found"`) ||
 		strings.Contains(s, `"code":"invalid_previous_response_id"`) ||

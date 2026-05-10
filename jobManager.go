@@ -30,6 +30,7 @@ type asyncJob struct {
 	Network        string
 	Channel        string
 	Nick           string
+	UserID         int64
 	cancel         context.CancelFunc
 	inlineResultCh chan string
 }
@@ -47,7 +48,7 @@ func init() {
 }
 
 type chatRunnerInterface interface {
-	setChannel(channel, nick string)
+	setChannel(channel, nick string, userID int64)
 	runTurn(messages []ChatMessage) ([]ChatMessage, bool)
 	setSessionInfo(sessionID int64, convID string)
 }
@@ -60,7 +61,8 @@ var newChatRunnerFn = func(network Network, client *girc.Client, cfg AIConfig, c
 }
 
 var getBotFn = func(network string) *Bot {
-	return bots[network]
+	bot, _ := getBot(network)
+	return bot
 }
 
 var botReadyFn = func(network, channel string) bool {
@@ -138,7 +140,7 @@ func cancelAsyncJobsForSession(sessionID int64) {
 	}
 }
 
-func registerAsyncJob(jobID string, sessionID int64, toolName, mcpServer, network, channel, nick string) *asyncJob {
+func registerAsyncJob(jobID string, sessionID int64, toolName, mcpServer, network, channel, nick string, userID int64) *asyncJob {
 	jobMgr.mu.Lock()
 	defer jobMgr.mu.Unlock()
 
@@ -156,6 +158,7 @@ func registerAsyncJob(jobID string, sessionID int64, toolName, mcpServer, networ
 		Network:        network,
 		Channel:        channel,
 		Nick:           nick,
+		UserID:         userID,
 		cancel:         cancel,
 		inlineResultCh: make(chan string),
 	}
@@ -209,14 +212,14 @@ func onAsyncJobCompleted(job *asyncJob, resultText string) {
 		return
 	}
 
-	queueMgr.Enqueue(job.Network, job.Channel, job.Nick, "", job.ToolName,
+	queueMgr.Enqueue(job.Network, job.Channel, job.UserID, job.Nick, "", job.ToolName,
 		func(ctx context.Context, output chan<- string) {
 			deliverAsyncResult(job, ctx, output)
 		})
 }
 
 func deliverAsyncResult(job *asyncJob, ctx context.Context, output chan<- string) {
-	activeSession, _ := sessionMgr.GetActiveSession(job.Network, job.Channel, job.Nick)
+	activeSession, _ := sessionMgr.GetActiveSession(job.Network, job.Channel, job.UserID)
 
 	if activeSession == nil || activeSession.ID != job.SessionID {
 		if msg := switchToSession(job); msg != "" {
@@ -260,7 +263,7 @@ func deliverAsyncResult(job *asyncJob, ctx context.Context, output chan<- string
 	}
 
 	runner := newChatRunnerFn(bot.Network, bot.Client, currentCfg, ctx, output)
-	runner.setChannel(job.Channel, job.Nick)
+	runner.setChannel(job.Channel, job.Nick, job.UserID)
 	convID := ""
 	if session.ConvID != nil {
 		convID = *session.ConvID
@@ -313,7 +316,7 @@ func switchToSession(job *asyncJob) string {
 		return ""
 	}
 
-	oldID, err := sessionMgr.SwitchActive(job.Network, job.Channel, job.Nick, job.SessionID)
+	oldID, err := sessionMgr.SwitchActive(job.Network, job.Channel, job.UserID, job.SessionID)
 	if err != nil {
 		loggerJM.Error("failed to switch session", "error", err)
 		return ""
@@ -380,7 +383,15 @@ func recoverPendingJobs() {
 			loggerJM.Warn("skipping orphaned job", "job_id", j.JobID, "error", err)
 			continue
 		}
-		registerAsyncJob(j.JobID, *j.SessionID, j.ToolName, j.MCPServer, session.Network, session.Channel, session.Nick)
+		var userID int64
+		var nick string
+		if session.UserID != nil {
+			userID = *session.UserID
+			if u, err := getUserByID(userID); err == nil {
+				nick = u.CurrentNick
+			}
+		}
+		registerAsyncJob(j.JobID, *j.SessionID, j.ToolName, j.MCPServer, session.Network, session.Channel, nick, userID)
 		loggerJM.Info("recovered pending job", "job_id", j.JobID)
 	}
 
@@ -396,6 +407,7 @@ type toolAsyncJob struct {
 	Network     string
 	Channel     string
 	Nick        string
+	UserID      int64
 	Prompt      string
 	SubmittedAt time.Time
 	cancel      context.CancelFunc
@@ -424,23 +436,23 @@ func stopToolJobManager() {
 	}
 }
 
-func registerToolAsyncJob(jobID, toolName, mcpServer, network, channel, nick, prompt string) {
-	if !registerToolAsyncJobMem(jobID, toolName, mcpServer, network, channel, nick, prompt) {
+func registerToolAsyncJob(jobID, toolName, mcpServer, network, channel, nick, prompt string, userID int64) {
+	if !registerToolAsyncJobMem(jobID, toolName, mcpServer, network, channel, nick, prompt, userID) {
 		return
 	}
 
 	if theDB != nil {
-		if err := createToolPendingJob(jobID, toolName, mcpServer, network, channel, nick); err != nil {
+		if err := createToolPendingJob(jobID, toolName, mcpServer, network, channel, nick, userID); err != nil {
 			loggerJM.Error("failed to persist tool job in DB", "job_id", jobID, "error", err)
 		}
 	}
 }
 
-func recoverToolAsyncJob(jobID, toolName, mcpServer, network, channel, nick, prompt string) {
-	registerToolAsyncJobMem(jobID, toolName, mcpServer, network, channel, nick, prompt)
+func recoverToolAsyncJob(jobID, toolName, mcpServer, network, channel, nick, prompt string, userID int64) {
+	registerToolAsyncJobMem(jobID, toolName, mcpServer, network, channel, nick, prompt, userID)
 }
 
-func registerToolAsyncJobMem(jobID, toolName, mcpServer, network, channel, nick, prompt string) bool {
+func registerToolAsyncJobMem(jobID, toolName, mcpServer, network, channel, nick, prompt string, userID int64) bool {
 	toolJobMgr.mu.Lock()
 	defer toolJobMgr.mu.Unlock()
 
@@ -457,6 +469,7 @@ func registerToolAsyncJobMem(jobID, toolName, mcpServer, network, channel, nick,
 		Network:     network,
 		Channel:     channel,
 		Nick:        nick,
+		UserID:      userID,
 		Prompt:      prompt,
 		SubmittedAt: time.Now(),
 		cancel:      cancel,
@@ -500,7 +513,7 @@ func onToolAsyncJobCompleted(job *toolAsyncJob, resultText string) {
 	}
 
 	startedOverride := getNotices().Tools.ToolAsyncStarted
-	queueMgr.EnqueueAtWithPrompt(job.Network, job.Channel, job.Nick, "", job.ToolName, job.Prompt,
+	queueMgr.EnqueueAtWithPrompt(job.Network, job.Channel, job.UserID, job.Nick, "", job.ToolName, job.Prompt,
 		startedOverride,
 		job.SubmittedAt,
 		func(ctx context.Context, output chan<- string) {
@@ -598,6 +611,7 @@ func recoverToolPendingJobs() {
 		network := ""
 		channel := ""
 		nick := ""
+		var userID int64
 		if j.Network != nil {
 			network = *j.Network
 		}
@@ -607,10 +621,13 @@ func recoverToolPendingJobs() {
 		if j.Nick != nil {
 			nick = *j.Nick
 		}
+		if j.UserID != nil {
+			userID = *j.UserID
+		}
 
 		if j.Result != nil {
 			submittedAt := j.CreatedAt
-			queueMgr.EnqueueAt(network, channel, nick, "", j.ToolName, submittedAt,
+			queueMgr.EnqueueAt(network, channel, userID, nick, "", j.ToolName, submittedAt,
 				func(ctx context.Context, output chan<- string) {
 					job := &toolAsyncJob{
 						JobID:     j.JobID,
@@ -619,6 +636,7 @@ func recoverToolPendingJobs() {
 						Network:   network,
 						Channel:   channel,
 						Nick:      nick,
+						UserID:    userID,
 					}
 					deliverToolAsyncResult(job, *j.Result, ctx, output)
 				})
@@ -626,7 +644,7 @@ func recoverToolPendingJobs() {
 			continue
 		}
 
-		recoverToolAsyncJob(j.JobID, j.ToolName, j.MCPServer, network, channel, nick, "")
+		recoverToolAsyncJob(j.JobID, j.ToolName, j.MCPServer, network, channel, nick, "", userID)
 		loggerJM.Info("recovered pending tool job", "job_id", j.JobID)
 	}
 

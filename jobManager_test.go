@@ -48,7 +48,8 @@ func setupTestJobManager(t *testing.T) {
 
 func createTestSession(t *testing.T, network, channel, nick, chatCmd string) int64 {
 	t.Helper()
-	sid, err := sessionMgr.CreateSession(network, channel, nick, chatCmd, "", "")
+	userID := ensureTestUser(t, network, nick)
+	sid, err := sessionMgr.CreateSession(network, channel, userID, chatCmd, "", "")
 	require.NoError(t, err, "CreateSession")
 	return sid
 }
@@ -77,7 +78,7 @@ type mockChatRunner struct {
 	runTurnFn        func(messages []ChatMessage) ([]ChatMessage, bool)
 }
 
-func (m *mockChatRunner) setChannel(channel, nick string) {
+func (m *mockChatRunner) setChannel(channel, nick string, userID int64) {
 	m.setChannelCalled = true
 	m.setChannelCh = channel
 	m.setChannelNick = nick
@@ -233,12 +234,13 @@ func TestDeliverAsyncResult_DifferentSession(t *testing.T) {
 		Network:   "testnet",
 		Channel:   "#test",
 		Nick:      "testuser",
+		UserID:    ensureTestUser(t, "testnet", "testuser"),
 	}
 
 	output := make(chan string, 100)
 	deliverAsyncResult(job, context.Background(), output)
 
-	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", "testuser")
+	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", ensureTestUser(t, "testnet", "testuser"))
 	require.NotNil(t, activeSession)
 	assert.Equal(t, sessionA, activeSession.ID, "should have switched back to session A")
 
@@ -280,7 +282,7 @@ func TestOnAsyncJobCompleted_UserBusyWaitsThenDelivers(t *testing.T) {
 	require.NoError(t, createPendingJob(sessionA, "job-1", "generate_image_async", "img-mcp"), "createPendingJob")
 
 	blockDone := make(chan struct{})
-	queueMgr.Enqueue("testnet", "#test", "testuser", "", "",
+	queueMgr.Enqueue("testnet", "#test", ensureTestUser(t, "testnet", "testuser"), "testuser", "", "",
 		func(ctx context.Context, output chan<- string) {
 			<-blockDone
 		})
@@ -294,12 +296,13 @@ func TestOnAsyncJobCompleted_UserBusyWaitsThenDelivers(t *testing.T) {
 		Network:   "testnet",
 		Channel:   "#test",
 		Nick:      "testuser",
+		UserID:    ensureTestUser(t, "testnet", "testuser"),
 	}
 
 	onAsyncJobCompleted(job, "result text")
 	time.Sleep(100 * time.Millisecond)
 
-	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", "testuser")
+	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", ensureTestUser(t, "testnet", "testuser"))
 	if activeSession != nil {
 		assert.NotEqual(t, sessionA, activeSession.ID, "session should NOT have switched while blocking job holds the slot")
 	}
@@ -307,7 +310,7 @@ func TestOnAsyncJobCompleted_UserBusyWaitsThenDelivers(t *testing.T) {
 	close(blockDone)
 	time.Sleep(300 * time.Millisecond)
 
-	waitForActiveSession(t, "testnet", "#test", "testuser", sessionA, 5*time.Second)
+	waitForActiveSession(t, "testnet", "#test", ensureTestUser(t, "testnet", "testuser"), sessionA, 5*time.Second)
 }
 
 func TestOnAsyncJobCompleted_MultipleJobsWhileBusy(t *testing.T) {
@@ -327,7 +330,7 @@ func TestOnAsyncJobCompleted_MultipleJobsWhileBusy(t *testing.T) {
 	createPendingJob(sessionA, "job-2", "generate_image_async", "img-mcp")
 
 	blockDone := make(chan struct{})
-	queueMgr.Enqueue("testnet", "#test", "testuser", "testsvc", "",
+	queueMgr.Enqueue("testnet", "#test", ensureTestUser(t, "testnet", "testuser"), "testuser", "testsvc", "",
 		func(ctx context.Context, output chan<- string) {
 			<-blockDone
 		})
@@ -351,7 +354,7 @@ func TestOnAsyncJobCompleted_MultipleJobsWhileBusy(t *testing.T) {
 
 	close(blockDone)
 
-	waitForActiveSession(t, "testnet", "#test", "testuser", sessionA, 5*time.Second)
+	waitForActiveSession(t, "testnet", "#test", ensureTestUser(t, "testnet", "testuser"), sessionA, 5*time.Second)
 
 	msgs, err := sessionMgr.GetMessages(sessionA, 20)
 	require.NoError(t, err)
@@ -381,11 +384,12 @@ func TestSwitchToSession_CompletesOldSession(t *testing.T) {
 	job := &asyncJob{
 		JobID: "job-1", SessionID: sessionA,
 		Network: "testnet", Channel: "#test", Nick: "testuser",
+		UserID: ensureTestUser(t, "testnet", "testuser"),
 	}
 
 	switchToSession(job)
 
-	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", "testuser")
+	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", ensureTestUser(t, "testnet", "testuser"))
 	require.NotNil(t, activeSession)
 	assert.Equal(t, sessionA, activeSession.ID, "active session should be A")
 
@@ -418,11 +422,12 @@ func TestSwitchToSession_NoOldSession(t *testing.T) {
 	job := &asyncJob{
 		JobID: "job-1", SessionID: sessionA,
 		Network: "testnet", Channel: "#test", Nick: "testuser",
+		UserID: ensureTestUser(t, "testnet", "testuser"),
 	}
 
 	switchToSession(job)
 
-	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", "testuser")
+	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", ensureTestUser(t, "testnet", "testuser"))
 	require.NotNil(t, activeSession)
 	assert.Equal(t, sessionA, activeSession.ID, "active session should be A")
 }
@@ -439,6 +444,7 @@ func TestSwitchToSession_SameSessionIsNoop(t *testing.T) {
 	job := &asyncJob{
 		JobID: "job-1", SessionID: sid,
 		Network: "testnet", Channel: "#test", Nick: "testuser",
+		UserID: ensureTestUser(t, "testnet", "testuser"),
 	}
 
 	switchToSession(job)
@@ -465,7 +471,7 @@ func TestSwitchToSession_InvalidChatCommand(t *testing.T) {
 	msg := switchToSession(job)
 	assert.Equal(t, "", msg, "should return empty string when chat command not found")
 
-	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", "testuser")
+	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", ensureTestUser(t, "testnet", "testuser"))
 	require.NotNil(t, activeSession)
 	assert.Equal(t, sessionB, activeSession.ID, "should remain session B when chat command not found")
 	_ = sessionB
@@ -489,7 +495,7 @@ func TestDeliverAsyncResult_NoContext(t *testing.T) {
 	output := make(chan string, 100)
 	deliverAsyncResult(job, context.Background(), output)
 
-	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", "testuser")
+	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", ensureTestUser(t, "testnet", "testuser"))
 	require.NotNil(t, activeSession)
 	assert.Equal(t, sessionA, activeSession.ID, "should have loaded from DB")
 
@@ -840,17 +846,17 @@ func TestDeliverAsyncResult_MarksJobsDelivered(t *testing.T) {
 	assert.Equal(t, "delivered", pj.Status, "job status")
 }
 
-func waitForActiveSession(t *testing.T, network, channel, nick string, expectedSID int64, timeout time.Duration) {
+func waitForActiveSession(t *testing.T, network, channel string, userID int64, expectedSID int64, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		session, _ := sessionMgr.GetActiveSession(network, channel, nick)
+		session, _ := sessionMgr.GetActiveSession(network, channel, userID)
 		if session != nil && session.ID == expectedSID {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	session, _ := sessionMgr.GetActiveSession(network, channel, nick)
+	session, _ := sessionMgr.GetActiveSession(network, channel, userID)
 	sid := int64(0)
 	if session != nil {
 		sid = session.ID
@@ -883,7 +889,7 @@ func TestDeliverAsyncResult_NoContextLoaded_LoadsFromDB(t *testing.T) {
 	output := make(chan string, 100)
 	deliverAsyncResult(job, context.Background(), output)
 
-	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", "testuser")
+	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", ensureTestUser(t, "testnet", "testuser"))
 	require.NotNil(t, activeSession)
 	assert.Equal(t, sid, activeSession.ID, "should have loaded from DB")
 
@@ -925,7 +931,7 @@ func TestSwitchToSession_NoCurrentSession_NoSwitchMessage(t *testing.T) {
 	msg := switchToSession(job)
 	assert.Equal(t, "", msg, "switchToSession should return empty string when no prior session")
 
-	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", "testuser")
+	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", ensureTestUser(t, "testnet", "testuser"))
 	require.NotNil(t, activeSession)
 	assert.Equal(t, sid, activeSession.ID, "should have loaded from DB")
 }
@@ -995,8 +1001,8 @@ func TestRegisterAsyncJob_Duplicate(t *testing.T) {
 	jobMgr.ctx, jobMgr.cancel = context.WithCancel(context.Background())
 	defer jobMgr.cancel()
 
-	registerAsyncJob("dup-job", 1, "tool", "server", "net", "#chan", "user")
-	registerAsyncJob("dup-job", 1, "tool", "server", "net", "#chan", "user")
+	registerAsyncJob("dup-job", 1, "tool", "server", "net", "#chan", "user", 0)
+	registerAsyncJob("dup-job", 1, "tool", "server", "net", "#chan", "user", 0)
 
 	jobMgr.mu.Lock()
 	count := len(jobMgr.jobs)
@@ -1094,7 +1100,7 @@ func TestDeliverAsyncResult_RunningDuringTurn(t *testing.T) {
 	newChatRunnerFn = func(network Network, client *girc.Client, c AIConfig, _ context.Context, _ chan<- string) chatRunnerInterface {
 		return &mockChatRunner{
 			runTurnFn: func(messages []ChatMessage) ([]ChatMessage, bool) {
-				runningDuringTurn = queueMgr.IsRunning("testnet", "#test", "testuser")
+				runningDuringTurn = queueMgr.IsRunning("testnet", "#test", ensureTestUser(t, "testnet", "testuser"))
 				wg.Done()
 				return messages, true
 			},
@@ -1107,7 +1113,7 @@ func TestDeliverAsyncResult_RunningDuringTurn(t *testing.T) {
 		Network: "testnet", Channel: "#test", Nick: "testuser",
 	}
 
-	queueMgr.Enqueue("testnet", "#test", "testuser", "testsvc", "", func(ctx context.Context, output chan<- string) {
+	queueMgr.Enqueue("testnet", "#test", ensureTestUser(t, "testnet", "testuser"), "testuser", "testsvc", "", func(ctx context.Context, output chan<- string) {
 		deliverAsyncResult(job, ctx, output)
 	})
 
@@ -1124,25 +1130,25 @@ func TestDeliverAsyncResult_RunningDuringTurn_BusyPath(t *testing.T) {
 	ready := make(chan struct{})
 	unblockFirst := make(chan struct{})
 
-	queueMgr.Enqueue("testnet", "#test", "testuser", "testsvc", "", func(ctx context.Context, output chan<- string) {
+	queueMgr.Enqueue("testnet", "#test", ensureTestUser(t, "testnet", "testuser"), "testuser", "testsvc", "", func(ctx context.Context, output chan<- string) {
 		ready <- struct{}{}
 		<-unblockFirst
 	})
 
 	<-ready
 
-	require.True(t, queueMgr.IsRunning("testnet", "#test", "testuser"), "expected first job to be running")
+	require.True(t, queueMgr.IsRunning("testnet", "#test", ensureTestUser(t, "testnet", "testuser")), "expected first job to be running")
 
 	runningDuringTurn := false
 	var turnWg sync.WaitGroup
 	turnWg.Add(1)
 
-	queueMgr.Enqueue("testnet", "#test", "testuser", "testsvc", "", func(ctx context.Context, output chan<- string) {
-		runningDuringTurn = queueMgr.IsRunning("testnet", "#test", "testuser")
+	queueMgr.Enqueue("testnet", "#test", ensureTestUser(t, "testnet", "testuser"), "testuser", "testsvc", "", func(ctx context.Context, output chan<- string) {
+		runningDuringTurn = queueMgr.IsRunning("testnet", "#test", ensureTestUser(t, "testnet", "testuser"))
 		turnWg.Done()
 	})
 
-	current, pending := queueMgr.QueueStatus("testnet", "#test", "testuser")
+	current, pending := queueMgr.QueueStatus("testnet", "#test", ensureTestUser(t, "testnet", "testuser"))
 	require.NotNil(t, current, "expected first job still running")
 	require.Len(t, pending, 1, "expected 1 pending job")
 
@@ -1435,7 +1441,7 @@ func TestWaitForAsyncJob_InlineDelivery(t *testing.T) {
 	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	require.NoError(t, createPendingJob(sid, "inline-1", "generate_image_async", "img-mcp"), "createPendingJob")
 
-	job := registerAsyncJob("inline-1", sid, "generate_image_async", "img-mcp", "testnet", "#test", "testuser")
+	job := registerAsyncJob("inline-1", sid, "generate_image_async", "img-mcp", "testnet", "#test", "testuser", ensureTestUser(t, "testnet", "testuser"))
 	require.NotNil(t, job, "registerAsyncJob should return job")
 
 	var inlineResult string
@@ -1481,7 +1487,7 @@ func TestWaitForAsyncJob_AsyncDeliveryWhenNotWaiting(t *testing.T) {
 
 	require.NoError(t, createPendingJob(sid, "async-1", "generate_image_async", "img-mcp"), "createPendingJob")
 
-	job := registerAsyncJob("async-1", sid, "generate_image_async", "img-mcp", "testnet", "#test", "testuser")
+	job := registerAsyncJob("async-1", sid, "generate_image_async", "img-mcp", "testnet", "#test", "testuser", ensureTestUser(t, "testnet", "testuser"))
 	require.NotNil(t, job, "registerAsyncJob should return job")
 
 	time.Sleep(500 * time.Millisecond)

@@ -75,6 +75,14 @@
 #   bg_header        (string)    Background jobs section header
 #   bg_line          (string)    Background job line. Placeholders: {icon}, {job_id}, {tool}, {server}, {status}, {elapsed}
 #
+# [bans] options:
+#   ban_created      (string)    Ban created notice. Placeholders: {nick}, {duration}, {reason}
+#   ban_list         (string)    Active ban list line. Placeholders: {nick}, {reason}, {expires}
+#   ban_list_empty   (string)    No active bans
+#   ban_history      (string)    Ban history line. Placeholders: {id}, {active}, {reason}, {duration}, {banner}
+#   unbanned         (string)    User unbanned notice. Placeholders: {nick}
+#   user_not_found   (string)    User not found for ban operation. Placeholders: {nick}
+#
 # support           (string)     Support message
 #
 # Example with all options set to defaults:
@@ -150,6 +158,14 @@
 # queue_pending = "  \x0308{position}.\x0F {desc} (waiting {wait})"
 # bg_header = "\x02Background jobs:\x02"
 # bg_line = "  {icon} {job_id} [{tool}/{server}] {status}, {elapsed} ago"
+#
+# [bans]
+# ban_created = "\x0304🚫 Banned {nick} for {duration}: {reason}\x0F"
+# ban_list = "\x02{nick}\x02 — {reason} (expires {expires})"
+# ban_list_empty = "No active bans."
+# ban_history = "#{id} {active} {reason} ({duration}) by {banner}"
+# unbanned = "\x0303✓ Unbanned {nick}\x0F"
+# user_not_found = "User {nick} not found."
 #
 # support = "If you enjoy using dave, consider supporting development at https://patreon.com/shrew269 ❤️"
 

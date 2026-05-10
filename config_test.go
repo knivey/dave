@@ -226,6 +226,65 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 				return cfg
 			},
 		},
+		{
+			name: "disabled_builtin_tools nil inherits from service",
+			cfg:  AIConfig{},
+			svc:  Service{DisabledBuiltinTools: []string{"ban_user"}},
+			expect: func(cfg AIConfig) AIConfig {
+				cfg.DisabledBuiltinTools = []string{"ban_user"}
+				cfg.MaxImages = 5
+				cfg.MaxContextImages = 5
+				cfg.ImageFormat = "jpg"
+				cfg.ImageQuality = 75
+				cfg.MaxImageSize = "1024x1024"
+				cfg.RetryOnEmpty = intPtr(1)
+				return cfg
+			},
+		},
+		{
+			name: "disabled_builtin_tools set overrides service",
+			cfg:  AIConfig{DisabledBuiltinTools: []string{"check_ban_history"}},
+			svc:  Service{DisabledBuiltinTools: []string{"ban_user"}},
+			expect: func(cfg AIConfig) AIConfig {
+				cfg.DisabledBuiltinTools = []string{"check_ban_history"}
+				cfg.MaxImages = 5
+				cfg.MaxContextImages = 5
+				cfg.ImageFormat = "jpg"
+				cfg.ImageQuality = 75
+				cfg.MaxImageSize = "1024x1024"
+				cfg.RetryOnEmpty = intPtr(1)
+				return cfg
+			},
+		},
+		{
+			name: "disabled_builtin_tools empty slice overrides service to none disabled",
+			cfg:  AIConfig{DisabledBuiltinTools: []string{}},
+			svc:  Service{DisabledBuiltinTools: []string{"ban_user"}},
+			expect: func(cfg AIConfig) AIConfig {
+				cfg.DisabledBuiltinTools = []string{}
+				cfg.MaxImages = 5
+				cfg.MaxContextImages = 5
+				cfg.ImageFormat = "jpg"
+				cfg.ImageQuality = 75
+				cfg.MaxImageSize = "1024x1024"
+				cfg.RetryOnEmpty = intPtr(1)
+				return cfg
+			},
+		},
+		{
+			name: "disabled_builtin_tools both nil means nil no disable",
+			cfg:  AIConfig{},
+			svc:  Service{},
+			expect: func(cfg AIConfig) AIConfig {
+				cfg.MaxImages = 5
+				cfg.MaxContextImages = 5
+				cfg.ImageFormat = "jpg"
+				cfg.ImageQuality = 75
+				cfg.MaxImageSize = "1024x1024"
+				cfg.RetryOnEmpty = intPtr(1)
+				return cfg
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -244,6 +303,7 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 			assert.Equal(t, want.MaxImageSize, cfg.MaxImageSize, "MaxImageSize")
 			assert.Equal(t, want.APIUser, cfg.APIUser, "APIUser")
 			assert.Equal(t, want.RetryOnEmpty, cfg.RetryOnEmpty, "RetryOnEmpty")
+			assert.Equal(t, want.DisabledBuiltinTools, cfg.DisabledBuiltinTools, "DisabledBuiltinTools")
 		})
 	}
 }
@@ -936,5 +996,65 @@ api_user = "svc/{{.Nick}}"
 		require.True(t, ok)
 		assert.Equal(t, "svc/{{.Nick}}", cfg.APIUser)
 		assert.NotNil(t, cfg.apiUserTmpl)
+	})
+}
+
+func TestLoadConfigDirHiddenToolsDefault(t *testing.T) {
+	t.Run("hidden_tools defaults to all builtin tools", func(t *testing.T) {
+		mainTOML := `
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+		dir := createTestConfigDir(t, mainTOML, nil)
+		defer os.RemoveAll(dir)
+
+		cfg := loadConfigDirOrDie(dir)
+		assert.Equal(t, []string{"register_background_job", "check_ban_history"}, cfg.HiddenTools)
+	})
+
+	t.Run("hidden_tools explicit value overrides default", func(t *testing.T) {
+		mainTOML := `
+hidden_tools = ["ban_user"]
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+		dir := createTestConfigDir(t, mainTOML, nil)
+		defer os.RemoveAll(dir)
+
+		cfg := loadConfigDirOrDie(dir)
+		assert.Equal(t, []string{"ban_user"}, cfg.HiddenTools)
+	})
+
+	t.Run("disabled_builtin_tools defaults to nil", func(t *testing.T) {
+		mainTOML := `
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+		dir := createTestConfigDir(t, mainTOML, nil)
+		defer os.RemoveAll(dir)
+
+		cfg := loadConfigDirOrDie(dir)
+		assert.Nil(t, cfg.DisabledBuiltinTools, "disabled_builtin_tools should default to nil")
+	})
+
+	t.Run("disabled_builtin_tools explicit value", func(t *testing.T) {
+		mainTOML := `
+disabled_builtin_tools = ["ban_user", "check_ban_history"]
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+		dir := createTestConfigDir(t, mainTOML, nil)
+		defer os.RemoveAll(dir)
+
+		cfg := loadConfigDirOrDie(dir)
+		assert.Equal(t, []string{"ban_user", "check_ban_history"}, cfg.DisabledBuiltinTools)
 	})
 }

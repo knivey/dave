@@ -55,7 +55,7 @@ func setupSessionWithResponseID(t *testing.T, responseID string) (int64, func())
 	db, cleanup := setupTestDBForRunner(t)
 	_ = db
 
-	sid, err := sessionMgr.CreateSession("testnet", "#101", "shrew", "testcmd", "testservice", "testmodel")
+	sid, err := sessionMgr.CreateSession("testnet", "#101", ensureTestUser(t, "testnet", "shrew"), "testcmd", "testservice", "testmodel")
 	require.NoError(t, err)
 	if responseID != "" {
 		require.NoError(t, sessionMgr.UpdateResponseID(sid, &responseID))
@@ -170,6 +170,9 @@ func TestExecuteToolCalls_MultipleToolsSendsCallMultiNotice(t *testing.T) {
 
 func TestExecuteToolCalls_MultipleWithBuiltinOnlySendsMCP(t *testing.T) {
 	setupNoticesDefaults(t)
+	configMu.Lock()
+	config.HiddenTools = []string{"register_background_job", "ban_user", "check_ban_history"}
+	configMu.Unlock()
 	mcpServersMu.Lock()
 	origToolMap := mcpToolToServer
 	origServers := mcpServers
@@ -358,8 +361,9 @@ func TestRunTurnResponses_ConcurrentSerialization(t *testing.T) {
 		Timeout:            10 * time.Second,
 	}
 
-	session, _ := sessionMgr.GetActiveSession("testnet", "#101", "shrew")
+	session, _ := sessionMgr.GetActiveSession("testnet", "#101", ensureTestUser(t, "testnet", "shrew"))
 	require.NotNil(t, session)
+	shrewUserID := ensureTestUser(t, "testnet", "shrew")
 
 	makeRunner := func() *chatRunner {
 		client := openai.NewClient(
@@ -375,6 +379,7 @@ func TestRunTurnResponses_ConcurrentSerialization(t *testing.T) {
 			network:      Network{Name: "testnet"},
 			channel:      "#101",
 			nick:         "shrew",
+			userID:       shrewUserID,
 			sessionID:    session.ID,
 			logger:       logxi.New("test"),
 			ctx:          context.Background(),
@@ -457,15 +462,15 @@ func TestRunTurnResponses_DifferentCtxKeysParallel(t *testing.T) {
 	}))
 	defer server.Close()
 
-	sid1, err := sessionMgr.CreateSession("testnet", "#101", "alice", "testcmd", "svc", "model")
+	sid1, err := sessionMgr.CreateSession("testnet", "#101", ensureTestUser(t, "testnet", "alice"), "testcmd", "svc", "model")
 	require.NoError(t, err)
 	require.NoError(t, sessionMgr.UpdateResponseID(sid1, strPtrOrNil("resp-alice")))
 
-	sid2, err := sessionMgr.CreateSession("testnet", "#101", "bob", "testcmd", "svc", "model")
+	sid2, err := sessionMgr.CreateSession("testnet", "#101", ensureTestUser(t, "testnet", "bob"), "testcmd", "svc", "model")
 	require.NoError(t, err)
 	require.NoError(t, sessionMgr.UpdateResponseID(sid2, strPtrOrNil("resp-bob")))
 
-	makeRunner := func(sessionID int64, nick string) *chatRunner {
+	makeRunner := func(sessionID int64, nick string, userID int64) *chatRunner {
 		client := openai.NewClient(
 			option.WithAPIKey("test-key"),
 			option.WithBaseURL(server.URL+"/v1"),
@@ -479,6 +484,7 @@ func TestRunTurnResponses_DifferentCtxKeysParallel(t *testing.T) {
 			network:      Network{Name: "testnet"},
 			channel:      "#101",
 			nick:         nick,
+			userID:       userID,
 			sessionID:    sessionID,
 			logger:       logxi.New("test"),
 			ctx:          context.Background(),
@@ -493,7 +499,7 @@ func TestRunTurnResponses_DifferentCtxKeysParallel(t *testing.T) {
 		defer wg.Done()
 		sessionMgr.AddMessage(sid1, ChatMessage{Role: RoleUser, Content: "msg"})
 		messages, _ := sessionMgr.GetMessages(sid1, cfg.MaxHistory)
-		runner := makeRunner(sid1, "alice")
+		runner := makeRunner(sid1, "alice", ensureTestUser(t, "testnet", "alice"))
 		runner.runTurn(messages)
 	}()
 
@@ -501,7 +507,7 @@ func TestRunTurnResponses_DifferentCtxKeysParallel(t *testing.T) {
 		defer wg.Done()
 		sessionMgr.AddMessage(sid2, ChatMessage{Role: RoleUser, Content: "msg"})
 		messages, _ := sessionMgr.GetMessages(sid2, cfg.MaxHistory)
-		runner := makeRunner(sid2, "bob")
+		runner := makeRunner(sid2, "bob", ensureTestUser(t, "testnet", "bob"))
 		runner.runTurn(messages)
 	}()
 
@@ -520,4 +526,68 @@ func TestRunTurnResponses_DifferentCtxKeysParallel(t *testing.T) {
 	}
 	assert.True(t, found["resp-alice"], "missing prevID %q in %v", "resp-alice", ids)
 	assert.True(t, found["resp-bob"], "missing prevID %q in %v", "resp-bob", ids)
+}
+
+func TestIsToolDisabled(t *testing.T) {
+	tests := []struct {
+		name     string
+		tool     string
+		disabled []string
+		want     bool
+	}{
+		{name: "empty disabled list", tool: "ban_user", disabled: nil, want: false},
+		{name: "tool in disabled list", tool: "ban_user", disabled: []string{"ban_user"}, want: true},
+		{name: "tool not in disabled list", tool: "ban_user", disabled: []string{"check_ban_history"}, want: false},
+		{name: "multiple disabled includes tool", tool: "register_background_job", disabled: []string{"ban_user", "register_background_job"}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isToolDisabled(tt.tool, tt.disabled))
+		})
+	}
+}
+
+func TestIsToolHidden(t *testing.T) {
+	tests := []struct {
+		name   string
+		tool   string
+		hidden []string
+		want   bool
+	}{
+		{name: "empty hidden list", tool: "ban_user", hidden: nil, want: false},
+		{name: "tool in hidden list", tool: "ban_user", hidden: []string{"ban_user"}, want: true},
+		{name: "tool not in hidden list", tool: "ban_user", hidden: []string{"register_background_job"}, want: false},
+		{name: "multiple hidden includes tool", tool: "check_ban_history", hidden: []string{"ban_user", "check_ban_history"}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isToolHidden(tt.tool, tt.hidden))
+		})
+	}
+}
+
+func TestGetBuiltinToolDefsFiltering(t *testing.T) {
+	configMu.Lock()
+	config.Bans.MaxDuration = "6h"
+	config.Bans.DefaultDuration = "5m"
+	configMu.Unlock()
+
+	allTools := getBuiltinToolDefs(nil)
+	assert.Len(t, allTools, 3, "all builtin tools should be returned with nil disabled")
+
+	allToolsEmpty := getBuiltinToolDefs([]string{})
+	assert.Len(t, allToolsEmpty, 3, "empty disabled list should return all tools")
+
+	filteredBan := getBuiltinToolDefs([]string{"ban_user"})
+	assert.Len(t, filteredBan, 2, "disabling ban_user should leave 2 tools")
+	names := make(map[string]bool, len(filteredBan))
+	for _, tool := range filteredBan {
+		names[tool.Function.Name] = true
+	}
+	assert.True(t, names["register_background_job"], "register_background_job should remain")
+	assert.True(t, names["check_ban_history"], "check_ban_history should remain")
+	assert.False(t, names["ban_user"], "ban_user should be filtered out")
+
+	filteredAll := getBuiltinToolDefs([]string{"register_background_job", "ban_user", "check_ban_history"})
+	assert.Len(t, filteredAll, 0, "disabling all tools should return empty")
 }

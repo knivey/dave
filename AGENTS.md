@@ -72,16 +72,21 @@ No Makefile, no linter config. Use `go fmt` + `go vet`.
 - Command regex: empty = key name; registered as `^<regex> (.+)$` in main.go.
 - Networks inherit root `trigger`/`quitmsg`; cycle multiple servers on reconnect. TUI commands (`/join`, `/part`, `/nick`) update `bot.Network` in-memory (not persisted); `bot.mu` (sync.Mutex) protects access. RPL_WELCOME and reconnect loop reference `bot.Network` (not captured `network` value) so runtime changes survive reconnect.
 - Service `maxhistory` defaults to 8.
+- **Builtin LLM tools**: `register_background_job`, `ban_user`, `check_ban_history` — auto-available when MCP tools exist. Controlled by two config options:
+  - `disabled_builtin_tools` (root/services/chats): which tools are **unavailable** to the model. Cascade: `nil` = inherit from service/root, `[]` = none disabled (override). Default: `nil` (all enabled). Tool definition filtering in `getBuiltinToolDefs(disabled)`, dispatch guard in `executeToolCalls` returns error message for disabled tools.
+  - `hidden_tools` (root only): which tool names skip IRC call notifications. Default: `["register_background_job", "check_ban_history"]`. Controlled by `isToolHidden()` in `executeToolCalls`; previously all builtins were hardcoded-hidden.
 - ComfyConfig requires `workflow_path`, `clientid`, `output_node`, `prompt_node`.
 - `db.go`: GORM database layer. `DatabaseConfig` has `Driver` (sqlite/postgres), `Path` (sqlite), `DSN` (postgres), `MaxAgeDays`. `initDB` opens with appropriate GORM dialector and runs AutoMigrate. All query functions use GORM API (no raw SQL except complex updates). Structs: `Session`, `Message`, `PendingJob`, `TurnUsage` (with `time.Time` timestamps). `theDB` is `*gorm.DB` global.
 - Tests: table-driven + `t.Run()`, using `github.com/stretchr/testify` (`assert`/`require`). MarkdownToIRC uses shared `runTests()` helper with contain/notContain checks. Root has context/config/ai tests. Config tests use `createTestConfigDir` helper for directory-based configs. Hand-rolled mocks (`mockChatRunner`, `mockContextStore`, `mockRateLimiter`) use function fields for per-test behavior — not converted to `testify/mock` since function-field pattern is more flexible for dynamic behavior.
 - MCP tests (`TestMCPConfigValidation`, `TestMCPConfigTimeoutDefault`) run `go run . <dir>` as subprocess. MCP config is in `mcps.toml` (not in `config.toml`).
 - MCP reconnection: `callMCPTool`, `readMCPResource`, `getMCPPrompt` all retry once after reconnect on failure. Backoff: `2^count * 1s` with jitter, capped at 60s. SDK `KeepAlive` (default 30s for HTTP) proactively detects dead sessions. `MCPServer.reconnectMu` serializes reconnect attempts per server. `reconnectCount` resets to 0 on success. `MCPConfig.KeepAlive` field in `mcps.toml`.
 - Responses API: `responses_api` (AIConfig, per-command in `chats.toml`) enables `POST /v1/responses` instead of Chat Completions. Supported by OpenAI and xAI/Grok. `previous_response_id` chains responses via server-side context storage (only sends new messages). Both default `false`. Implementation in `responses.go` bypasses `sashabaranov/go-openai` SDK (which lacks Responses API support) and makes direct HTTP calls via `chatRunner.httpClient` (shares `daveTransport` for extra_body/header injection and API logging). Response ID stored in `ChatContext.ResponseID` and persisted in `sessions.response_id` column. Tool call loop retained locally — `function_call` output items mapped to/from `gogpt.ToolCall`. Graceful fallback on expired/invalid `previous_response_id`.
+- **Never normalize config keys at load time** (e.g. channel names in `Network.Channels` map). Config keys must stay exactly as the admin typed them in TOML. Normalization happens at lookup time using the per-network casemapping (`Network.Casemapping`, set at runtime from ISUPPORT). See `GetChannelConfig` for the correct pattern: normalize the lookup key, then iterate config keys normalizing each for comparison. This is because the correct casemapping is only known after connecting to the IRC server, not at config load time.
 
 ## Code Style
 - Imports: stdlib, blank, third-party.
 - Globals heavily used. Concurrency via `go cmd(...)` + `sync.WaitGroup`.
+- **Logger initialization**: Every `logxi.New()` logger MUST call `SetLevel(logxi.LevelAll)` — without it, debug messages are silently dropped. Package-level loggers do this in an `init()` block; function-scoped loggers do it inline right after creation.
 - Struct fields use TOML snake_case tags.
 - Error: `log.Fatalln` at startup only. TUI `/reload` uses error-returning `loadReloadableDir`.
 - **Design comments**: Preserve and maintain block comments that explain non-obvious design decisions (e.g. "DESIGN NOTE", "Rationale", multi-line comments explaining why code is structured a certain way). When you encounter code that could be misunderstood or that implements a multi-layer defense, add a comment explaining the full picture. These comments are critical for maintaining correctness across future edits. See `isResponseIDError()` in `responses.go` for an example.
@@ -98,7 +103,8 @@ No Makefile, no linter config. Use `go fmt` + `go vet`.
 - All TOML config files in `config/` MUST have a **reference section** at the top listing every available option with type and default value.
 - A **commented-out `[section]` block** with all fields set to example/default values must follow the reference list, directly copy-pasteable.
 - When adding a new config field (Go struct `toml` tag), update the corresponding config file's reference list AND commented example block.
-- Duration fields use TOML string format: `"30s"`, `"2m"`, `"1m30s"`, `"750ms"`.
+- Duration fields use TOML string format: `"30s"`, `"2m"`, `"1m30s"`, `"750ms"`. Ban duration fields (`[bans]`) also support days: `"7d"`.
+- Ban durations are parsed by `parseBanDuration` in `bans.go` which converts `d` suffix to hours. TUI `/ban` and LLM `ban_user` both enforce `max_duration` from config.
 - Keep all existing live config sections untouched below the documentation blocks.
 - The `ignores.txt.example` file should document the wildcard pattern format.
 

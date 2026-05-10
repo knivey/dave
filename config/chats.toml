@@ -44,6 +44,7 @@
 #                                                Fix for: "This model does not support assistant message prefill. The conversation must end with a user message."
 #   api_user             (string, cascades from service)  Go template for API "user" field. Variables: {{.Nick}}, {{.BotNick}}, {{.Channel}}, {{.Network}}, {{.Date}}, {{.Vars.*}}. Empty = not sent.
 #   retry_on_empty       (int, default: 1)           Number of retries when API returns empty response (0 = disabled)
+#   disabled_builtin_tools (string array)            Builtin LLM tools to disable (e.g. ["ban_user", "check_ban_history"]). Cascade: command > service > root default ([]).
 #
 # /me action support: The LLM can use "/me <action text>" on its own line to send IRC CTCP ACTION messages.
 # Add {{.Vars.IRCActionNote}} to the system prompt to instruct the LLM how to use this feature.
@@ -87,6 +88,7 @@
 # needsusersuffix = false
 # api_user = "irc:{{.Network}}:{{.Channel}}:{{.Nick}}"
 # retry_on_empty = 1
+# disabled_builtin_tools = ["ban_user", "check_ban_history"]
 
 [chat]
 description = "General IRC-aware chat"

@@ -398,6 +398,11 @@ func handleTUICommand(text string) {
 		fmt.Fprintf(logView, "  /part <network> <channel> [message]\n")
 		fmt.Fprintf(logView, "                               - Leave a channel\n")
 		fmt.Fprintf(logView, "  /nick <network> <nick>       - Change nickname\n")
+		fmt.Fprintf(logView, "  /ban <network> <nick> <duration> [reason]\n")
+		fmt.Fprintf(logView, "                               - Ban a user\n")
+		fmt.Fprintf(logView, "  /unban <network> <nick>      - Unban a user\n")
+		fmt.Fprintf(logView, "  /bans [network]              - List active bans\n")
+		fmt.Fprintf(logView, "  /banhistory <network> <nick>  - Show ban history for a user\n")
 	case "/reload":
 		if len(parts) >= 2 {
 			mcpName := parts[1]
@@ -425,7 +430,7 @@ func handleTUICommand(text string) {
 			break
 		}
 		network, channel := parts[1], parts[2]
-		bot, ok := bots[network]
+		bot, ok := getBot(network)
 		if !ok {
 			fmt.Fprintf(logView, "[red]Unknown network: %s[white]\n", network)
 			break
@@ -450,7 +455,7 @@ func handleTUICommand(text string) {
 			break
 		}
 		network, channel := parts[1], parts[2]
-		bot, ok := bots[network]
+		bot, ok := getBot(network)
 		if !ok {
 			fmt.Fprintf(logView, "[red]Unknown network: %s[white]\n", network)
 			break
@@ -480,7 +485,7 @@ func handleTUICommand(text string) {
 			break
 		}
 		network, nick := parts[1], parts[2]
-		bot, ok := bots[network]
+		bot, ok := getBot(network)
 		if !ok {
 			fmt.Fprintf(logView, "[red]Unknown network: %s[white]\n", network)
 			break
@@ -491,6 +496,140 @@ func handleTUICommand(text string) {
 		bot.Client.Config.Nick = nick
 		bot.Client.Cmd.Nick(nick)
 		fmt.Fprintf(logView, "[green]Nick change to %s on %s[white]\n", nick, network)
+	case "/ban":
+		if len(parts) < 4 {
+			fmt.Fprintf(logView, "[yellow]Usage: /ban <network> <nick> <duration> [reason][white]\n")
+			break
+		}
+		if theDB == nil {
+			fmt.Fprintf(logView, "[red]Database not available[white]\n")
+			break
+		}
+		parts = strings.SplitN(text, " ", 5)
+		network, banNick := parts[1], parts[2]
+		durationStr := parts[3]
+		reason := "manual ban"
+		if len(parts) >= 5 {
+			reason = parts[4]
+		}
+		duration, err := parseBanDuration(durationStr)
+		if err != nil {
+			fmt.Fprintf(logView, "[red]Invalid duration: %s[white]\n", err)
+			break
+		}
+		var maxDur time.Duration
+		readConfig(func() {
+			maxDur, _ = parseBanDuration(config.Bans.MaxDuration)
+		})
+		if maxDur > 0 && duration > maxDur {
+			fmt.Fprintf(logView, "[yellow]Capping ban duration from %s to max %s[white]\n", formatDuration(duration), formatDuration(maxDur))
+			duration = maxDur
+		}
+		cm := getCasemapping(network)
+		user, err := resolveUserByNick(network, banNick, cm)
+		if err != nil || user == nil {
+			fmt.Fprintf(logView, "[red]User %s not found on %s[white]\n", banNick, network)
+			break
+		}
+		_, err = createBan(theDB, user.ID, network, "", "", reason, duration, nil, "tui")
+		if err != nil {
+			fmt.Fprintf(logView, "[red]Failed to ban: %s[white]\n", err)
+			break
+		}
+		fmt.Fprintf(logView, "[green]Banned %s on %s for %s: %s[white]\n", banNick, network, formatDuration(duration), reason)
+	case "/unban":
+		if len(parts) < 3 {
+			fmt.Fprintf(logView, "[yellow]Usage: /unban <network> <nick>[white]\n")
+			break
+		}
+		if theDB == nil {
+			fmt.Fprintf(logView, "[red]Database not available[white]\n")
+			break
+		}
+		network, unbanNick := parts[1], parts[2]
+		cm := getCasemapping(network)
+		user, err := resolveUserByNick(network, unbanNick, cm)
+		if err != nil || user == nil {
+			fmt.Fprintf(logView, "[red]User %s not found on %s[white]\n", unbanNick, network)
+			break
+		}
+		if err := deactivateBansForUser(theDB, user.ID, network); err != nil {
+			fmt.Fprintf(logView, "[red]Failed to unban: %s[white]\n", err)
+			break
+		}
+		fmt.Fprintf(logView, "[green]Unbanned %s on %s[white]\n", unbanNick, network)
+	case "/bans":
+		if theDB == nil {
+			fmt.Fprintf(logView, "[red]Database not available[white]\n")
+			break
+		}
+		network := ""
+		if len(parts) >= 2 {
+			network = parts[1]
+		}
+		if network == "" {
+			var bans []Ban
+			theDB.Where("active = ?", true).Order("created_at DESC").Find(&bans)
+			if len(bans) == 0 {
+				fmt.Fprintf(logView, "[white]No active bans.[white]\n")
+				break
+			}
+			for _, b := range bans {
+				fmt.Fprintf(logView, "[white]#%d %s/%d %s expires %s[white]\n", b.ID, b.Network, b.UserID, b.Reason, b.ExpiresAt.Format("2006-01-02 15:04"))
+			}
+			break
+		}
+		bans, err := getActiveBans(theDB, network)
+		if err != nil {
+			fmt.Fprintf(logView, "[red]Failed to list bans: %s[white]\n", err)
+			break
+		}
+		if len(bans) == 0 {
+			fmt.Fprintf(logView, "[white]No active bans on %s.[white]\n", network)
+			break
+		}
+		for _, b := range bans {
+			var user User
+			theDB.First(&user, b.UserID)
+			fmt.Fprintf(logView, "[white]#%d %s (%s) %s expires %s[white]\n", b.ID, tview.Escape(user.CurrentNick), formatDuration(b.Duration), tview.Escape(b.Reason), b.ExpiresAt.Format("2006-01-02 15:04"))
+		}
+	case "/banhistory":
+		if len(parts) < 3 {
+			fmt.Fprintf(logView, "[yellow]Usage: /banhistory <network> <nick>[white]\n")
+			break
+		}
+		if theDB == nil {
+			fmt.Fprintf(logView, "[red]Database not available[white]\n")
+			break
+		}
+		network, histNick := parts[1], parts[2]
+		cm := getCasemapping(network)
+		user, err := resolveUserByNick(network, histNick, cm)
+		if err != nil {
+			fmt.Fprintf(logView, "[red]Error looking up user: %s[white]\n", err)
+			break
+		}
+		if user == nil {
+			fmt.Fprintf(logView, "[yellow]User %s not found on %s[white]\n", histNick, network)
+			break
+		}
+		bans, err := getBanHistory(theDB, user.ID)
+		if err != nil {
+			fmt.Fprintf(logView, "[red]Error fetching ban history: %s[white]\n", err)
+			break
+		}
+		if len(bans) == 0 {
+			fmt.Fprintf(logView, "[white]No ban history for %s (id: %d).[white]\n", tview.Escape(user.CurrentNick), user.ID)
+			break
+		}
+		fmt.Fprintf(logView, "[white]Ban history for %s (id: %d):[white]\n", tview.Escape(user.CurrentNick), user.ID)
+		for _, b := range bans {
+			status := "expired"
+			if b.Active {
+				status = "ACTIVE"
+			}
+			fmt.Fprintf(logView, "[white]#%d %s %s (%s) by %s, %s ago[white]\n", b.ID, status, tview.Escape(b.Reason), formatDuration(b.Duration), tview.Escape(b.BannerNick), formatDuration(time.Since(b.CreatedAt)))
+		}
 	default:
 		fmt.Fprintf(logView, "[yellow]Unknown command: %s[white]\n", text)
 	}
@@ -520,7 +659,7 @@ func requestShutdown() {
 		stopToolJobManager()
 		closeMCPClients()
 
-		for _, bot := range bots {
+		for _, bot := range snapshotBots() {
 			bot.Quit()
 		}
 		done := make(chan struct{})

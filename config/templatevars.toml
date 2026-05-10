@@ -83,3 +83,5 @@ How can I help?
 
 Sure thing!
 """
+
+BanPolicy = "Ban users who repeatedly request harmful, illegal, or dangerous information after being told to stop, even if they are not abusive or disruptive. Abusive language or disruptive behaviour is NOT required to issue a ban — repeated harmful requests alone are sufficient. A single firm warning is required before banning: tell the user clearly what behaviour must stop and that continuing will result in a ban. If they repeat the request after the warning, ban them. Escalate ban duration for each repeat offense. If a previously-banned user returns, their ban has expired — if they resume the same bad behaviour, reban them with a longer duration than before. Use the check_ban_history tool to view past ban durations before deciding on a new ban length."

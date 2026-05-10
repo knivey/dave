@@ -149,6 +149,8 @@ type chatRunner struct {
 	client       *girc.Client
 	channel      string
 	nick         string
+	userID       int64
+	hostmask     string
 	logger       logxi.Logger
 	ctx          context.Context
 	outputCh     chan<- string
@@ -207,9 +209,10 @@ func isGrokService(baseURL string) bool {
 	return strings.HasSuffix(strings.ToLower(u.Hostname()), ".x.ai")
 }
 
-func (cr *chatRunner) setChannel(channel, nick string) {
+func (cr *chatRunner) setChannel(channel, nick string, userID int64) {
 	cr.channel = channel
 	cr.nick = nick
+	cr.userID = userID
 	cr.syncAPISessionID()
 	cr.syncConvID()
 }
@@ -308,7 +311,7 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 	}
 	mcpTools := getMCPTools(cr.cfg.MCPs)
 	if len(mcpTools) > 0 {
-		mcpTools = append(mcpTools, getBuiltinToolDefs()...)
+		mcpTools = append(mcpTools, getBuiltinToolDefs(cr.cfg.DisabledBuiltinTools)...)
 	}
 
 	ctx, cancel := context.WithTimeout(cr.ctx, cr.cfg.Timeout)
@@ -693,35 +696,49 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 func (cr *chatRunner) executeToolCalls(messages []ChatMessage, toolCalls []ToolCall) ([]ChatMessage, bool) {
 	registeredJob := false
 
+	var hiddenTools []string
+	readConfig(func() { hiddenTools = config.HiddenTools })
 	verbose := cr.cfg.ToolVerbose == nil || *cr.cfg.ToolVerbose
 	type toolEntry struct {
 		server string
 		tool   string
 	}
 	var visibleTools []toolEntry
-	if verbose && len(toolCalls) > 1 {
-		for _, tc := range toolCalls {
-			if _, ok := builtinTools[tc.Function.Name]; ok {
-				continue
-			}
-			visibleTools = append(visibleTools, toolEntry{
-				server: getMCPServerForTool(tc.Function.Name),
-				tool:   tc.Function.Name,
-			})
+	for _, tc := range toolCalls {
+		if isToolHidden(tc.Function.Name, hiddenTools) {
+			continue
 		}
-		if len(visibleTools) > 1 {
-			parts := make([]string, len(visibleTools))
-			for i, e := range visibleTools {
-				parts[i] = "[" + e.server + "] " + e.tool
-			}
-			cr.sendIRC(expandNotice(getNotices().Tools.CallMulti, map[string]string{
-				"tools": strings.Join(parts, ", "),
-			}))
+		visibleTools = append(visibleTools, toolEntry{
+			server: getToolServerName(tc.Function.Name),
+			tool:   tc.Function.Name,
+		})
+	}
+	if verbose && len(visibleTools) > 1 {
+		parts := make([]string, len(visibleTools))
+		for i, e := range visibleTools {
+			parts[i] = "[" + e.server + "] " + e.tool
 		}
+		cr.sendIRC(expandNotice(getNotices().Tools.CallMulti, map[string]string{
+			"tools": strings.Join(parts, ", "),
+		}))
 	}
 
 	for _, tc := range toolCalls {
 		if entry, ok := builtinTools[tc.Function.Name]; ok {
+			if isToolDisabled(tc.Function.Name, cr.cfg.DisabledBuiltinTools) {
+				toolMsg := ChatMessage{
+					Role:       RoleTool,
+					Content:    fmt.Sprintf("error: tool %q is disabled for this command", tc.Function.Name),
+					ToolCallID: tc.ID,
+				}
+				messages = append(messages, toolMsg)
+				cr.addContext(toolMsg)
+				continue
+			}
+			if verbose && !isToolHidden(tc.Function.Name, hiddenTools) && len(visibleTools) <= 1 {
+				cr.sendIRC(expandNotice(getNotices().Tools.Call, map[string]string{"server": "builtin", "tool": tc.Function.Name}))
+			}
+			cr.logger.Info("builtin tool call", "tool", tc.Function.Name)
 			var registered bool
 			messages, registered = entry.handler(cr, messages, tc)
 			if registered {
@@ -729,7 +746,7 @@ func (cr *chatRunner) executeToolCalls(messages []ChatMessage, toolCalls []ToolC
 			}
 			continue
 		}
-		if verbose && len(visibleTools) <= 1 {
+		if verbose && !isToolHidden(tc.Function.Name, hiddenTools) && len(visibleTools) <= 1 {
 			serverName := getMCPServerForTool(tc.Function.Name)
 			cr.sendIRC(expandNotice(getNotices().Tools.Call, map[string]string{"server": serverName, "tool": tc.Function.Name}))
 		}
@@ -826,7 +843,7 @@ func (cr *chatRunner) handleRegisterBackgroundJob(messages []ChatMessage, tc Too
 		return messages
 	}
 
-	job := registerAsyncJob(args.JobID, cr.sessionID, args.ToolName, args.ServerName, cr.network.Name, cr.channel, cr.nick)
+	job := registerAsyncJob(args.JobID, cr.sessionID, args.ToolName, args.ServerName, cr.network.Name, cr.channel, cr.nick, cr.userID)
 	if job != nil {
 		select {
 		case resultText := <-job.inlineResultCh:
@@ -861,14 +878,166 @@ func (cr *chatRunner) handleRegisterBackgroundJob(messages []ChatMessage, tc Too
 	return messages
 }
 
+func (cr *chatRunner) handleBanUser(messages []ChatMessage, tc ToolCall) []ChatMessage {
+	var args struct {
+		Reason   string `json:"reason"`
+		Duration string `json:"duration"`
+	}
+	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+		return append(messages, ChatMessage{
+			Role:       RoleTool,
+			Content:    fmt.Sprintf("error: failed to parse arguments: %s", err),
+			ToolCallID: tc.ID,
+		})
+	}
+
+	if cr.userID == 0 {
+		return append(messages, ChatMessage{
+			Role:       RoleTool,
+			Content:    "Cannot ban: no user associated with this conversation.",
+			ToolCallID: tc.ID,
+		})
+	}
+
+	user, err := getUserByID(cr.userID)
+	if err != nil {
+		return append(messages, ChatMessage{
+			Role:       RoleTool,
+			Content:    fmt.Sprintf("Error looking up user: %s", err),
+			ToolCallID: tc.ID,
+		})
+	}
+	if user == nil {
+		return append(messages, ChatMessage{
+			Role:       RoleTool,
+			Content:    "Cannot ban: user not found.",
+			ToolCallID: tc.ID,
+		})
+	}
+
+	var maxDur, defaultDur time.Duration
+	readConfig(func() {
+		var err error
+		maxDur, err = parseBanDuration(config.Bans.MaxDuration)
+		if err != nil {
+			maxDur, _ = parseBanDuration("6h")
+		}
+		defaultDur, err = parseBanDuration(config.Bans.DefaultDuration)
+		if err != nil {
+			defaultDur, _ = parseBanDuration("5m")
+		}
+	})
+
+	duration := defaultDur
+	if args.Duration != "" {
+		parsed, err := parseBanDuration(args.Duration)
+		if err != nil {
+			return append(messages, ChatMessage{
+				Role:       RoleTool,
+				Content:    fmt.Sprintf("Invalid duration format: %s. Use formats like '5m', '30m', '1h', '6h'.", args.Duration),
+				ToolCallID: tc.ID,
+			})
+		}
+		duration = parsed
+	}
+
+	if duration > maxDur {
+		duration = maxDur
+	}
+
+	var bannerUserID *int64
+	if cr.userID != 0 {
+		bannerUserID = &cr.userID
+	}
+
+	_, err = createBan(theDB, user.ID, cr.network.Name, cr.channel, "", args.Reason, duration, bannerUserID, cr.network.Nick+":"+cr.cfg.Name)
+	if err != nil {
+		return append(messages, ChatMessage{
+			Role:       RoleTool,
+			Content:    fmt.Sprintf("Failed to create ban: %s", err),
+			ToolCallID: tc.ID,
+		})
+	}
+
+	accountInfo := ""
+	if user.IRCAccount != "" {
+		accountInfo = " (has account, strong ban)"
+	}
+
+	return append(messages, ChatMessage{
+		Role:       RoleTool,
+		Content:    fmt.Sprintf("User %s (id: %d) banned for %s: %s%s", user.CurrentNick, user.ID, formatDuration(duration), args.Reason, accountInfo),
+		ToolCallID: tc.ID,
+	})
+}
+
+func (cr *chatRunner) handleCheckBanHistory(messages []ChatMessage, tc ToolCall) []ChatMessage {
+	if cr.userID == 0 {
+		return append(messages, ChatMessage{
+			Role:       RoleTool,
+			Content:    "Cannot look up ban history: no user associated with this conversation.",
+			ToolCallID: tc.ID,
+		})
+	}
+
+	user, err := getUserByID(cr.userID)
+	if err != nil {
+		return append(messages, ChatMessage{
+			Role:       RoleTool,
+			Content:    fmt.Sprintf("Error looking up user: %s", err),
+			ToolCallID: tc.ID,
+		})
+	}
+	if user == nil {
+		return append(messages, ChatMessage{
+			Role:       RoleTool,
+			Content:    "Cannot look up ban history: user not found.",
+			ToolCallID: tc.ID,
+		})
+	}
+
+	bans, err := getBanHistory(theDB, user.ID)
+	if err != nil {
+		return append(messages, ChatMessage{
+			Role:       RoleTool,
+			Content:    fmt.Sprintf("Error fetching ban history: %s", err),
+			ToolCallID: tc.ID,
+		})
+	}
+
+	if len(bans) == 0 {
+		return append(messages, ChatMessage{
+			Role:       RoleTool,
+			Content:    fmt.Sprintf("User %s has no ban history.", user.CurrentNick),
+			ToolCallID: tc.ID,
+		})
+	}
+
+	var lines []string
+	for _, b := range bans {
+		status := "expired"
+		if b.Active {
+			status = "ACTIVE"
+		}
+		ago := formatDuration(time.Since(b.CreatedAt))
+		lines = append(lines, fmt.Sprintf("#%d [%s] %s (%s) by %s, %s ago", b.ID, status, b.Reason, formatDuration(b.Duration), b.BannerNick, ago))
+	}
+
+	return append(messages, ChatMessage{
+		Role:       RoleTool,
+		Content:    fmt.Sprintf("Ban history for %s:\n%s", user.CurrentNick, strings.Join(lines, "\n")),
+		ToolCallID: tc.ID,
+	})
+}
+
 func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, bool) {
-	mu, _ := responseChainMu.LoadOrStore(cr.network.Name+cr.channel+cr.nick, &sync.Mutex{})
+	mu, _ := responseChainMu.LoadOrStore(fmt.Sprintf("%s%s%d", cr.network.Name, cr.channel, cr.userID), &sync.Mutex{})
 	mu.(*sync.Mutex).Lock()
 	defer mu.(*sync.Mutex).Unlock()
 
 	mcpTools := getMCPTools(cr.cfg.MCPs)
 	if len(mcpTools) > 0 {
-		mcpTools = append(mcpTools, getBuiltinToolDefs()...)
+		mcpTools = append(mcpTools, getBuiltinToolDefs(cr.cfg.DisabledBuiltinTools)...)
 	}
 	responseTools := toolsToResponseToolParams(mcpTools)
 
@@ -922,7 +1091,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 					cr.logAPIIncident(err, messages, iteration, "responses_stream")
 					cr.logger.Warn("previous_response_id invalid, retrying without", "response_id", currentResponseID, "error", err)
 					currentResponseID = ""
-					SetContextResponseID(cr.network.Name, cr.channel, cr.nick, "")
+					SetContextResponseID(cr.network.Name, cr.channel, cr.userID, "")
 					usePrevID = false
 					input = messagesToResponseInputItems(messages)
 					continue
@@ -944,11 +1113,11 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 			// See isResponseIDError() comment in responses.go for the full two-layer design.
 			if resp.ID != "" && (text != "" || len(toolCalls) > 0) {
 				currentResponseID = resp.ID
-				SetContextResponseID(cr.network.Name, cr.channel, cr.nick, resp.ID)
+				SetContextResponseID(cr.network.Name, cr.channel, cr.userID, resp.ID)
 			} else if resp.ID != "" {
 				if currentResponseID != "" {
 					currentResponseID = ""
-					SetContextResponseID(cr.network.Name, cr.channel, cr.nick, "")
+					SetContextResponseID(cr.network.Name, cr.channel, cr.userID, "")
 				}
 				cr.logger.Warn("response had empty output, clearing previous_response_id", "response_id", resp.ID)
 			}
@@ -1007,7 +1176,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 				cr.logAPIIncident(err, messages, iteration, "responses")
 				cr.logger.Warn("previous_response_id invalid, retrying without", "response_id", currentResponseID, "error", err)
 				currentResponseID = ""
-				SetContextResponseID(cr.network.Name, cr.channel, cr.nick, "")
+				SetContextResponseID(cr.network.Name, cr.channel, cr.userID, "")
 				usePrevID = false
 				input = messagesToResponseInputItems(messages)
 				continue
@@ -1025,11 +1194,11 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 		// for the full two-layer design.
 		if resp.ID != "" && (text != "" || len(toolCalls) > 0) {
 			currentResponseID = resp.ID
-			SetContextResponseID(cr.network.Name, cr.channel, cr.nick, resp.ID)
+			SetContextResponseID(cr.network.Name, cr.channel, cr.userID, resp.ID)
 		} else if resp.ID != "" {
 			if currentResponseID != "" {
 				currentResponseID = ""
-				SetContextResponseID(cr.network.Name, cr.channel, cr.nick, "")
+				SetContextResponseID(cr.network.Name, cr.channel, cr.userID, "")
 			}
 			cr.logger.Warn("response had empty output, clearing previous_response_id", "response_id", resp.ID)
 		}
@@ -1258,11 +1427,36 @@ streamDone:
 	return completedResponse, nil
 }
 
-func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx context.Context, output chan<- string, args ...string) {
+func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx context.Context, output chan<- string, resolvedUser *User, args ...string) {
 	runner := newChatRunnerFn(network, c, cfg, ctx, output).(*chatRunner)
-	runner.setChannel(e.Params[0], e.Source.Name)
+	nick := e.Source.Name
+	channel := normalizeIRC(e.Params[0], getCasemapping(network.Name))
+	if resolvedUser == nil {
+		resolvedUser = resolvedUserFromCtx(ctx)
+	}
+	if resolvedUser == nil {
+		casemapping := getCasemapping(network.Name)
+		account := ""
+		if u := c.LookupUser(nick); u != nil {
+			account = u.Extras.Account
+		}
+		var err error
+		resolvedUser, err = resolveUser(network.Name, nick, e.Source.Ident, e.Source.Host, account, casemapping)
+		if err != nil {
+			runner.logger.Error("failed to resolve user in chat()", "error", err)
+			return
+		}
+	}
+	if resolvedUser == nil {
+		runner.logger.Warn("chat() got nil resolved user, dropping message", "nick", nick)
+		return
+	}
+	userID := resolvedUser.ID
+	runner.userID = userID
+	runner.hostmask = e.Source.Name + "!" + e.Source.Ident + "@" + e.Source.Host
+	runner.setChannel(channel, nick, userID)
 
-	session, _ := sessionMgr.GetActiveSession(network.Name, e.Params[0], e.Source.Name)
+	session, _ := sessionMgr.GetActiveSession(network.Name, channel, userID)
 	if session == nil {
 		var systemContent string
 		if cfg.SystemTmpl != nil {
@@ -1274,16 +1468,16 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 				}
 			})
 			data := SystemPromptData{
-				Nick:      e.Source.Name,
+				Nick:      nick,
 				BotNick:   c.GetNick(),
-				Channel:   e.Params[0],
+				Channel:   channel,
 				Network:   network.Name,
 				ChanNicks: "",
 				Date:      time.Now().Format("2006-01-02"),
 				Vars:      templateVars,
 			}
 
-			ch := c.LookupChannel(data.Channel)
+			ch := c.LookupChannel(channel)
 			var nicks []string
 			if ch != nil {
 				for _, u := range ch.Users(c) {
@@ -1305,11 +1499,9 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 			systemContent = cfg.System
 		}
 
-		// Per-user lock: serializes CreateSession so concurrent -commands
-		// each get their own session. See sessionCreationMu in sessionManager.go.
-		mu := getSessionCreationLock(network.Name, e.Params[0], e.Source.Name)
+		mu := getSessionCreationLock(network.Name, channel, userID)
 		mu.Lock()
-		sid, err := sessionMgr.CreateSession(network.Name, e.Params[0], e.Source.Name, cfg.Name, cfg.Service, cfg.Model)
+		sid, err := sessionMgr.CreateSession(network.Name, channel, userID, cfg.Name, cfg.Service, cfg.Model)
 		if err != nil {
 			mu.Unlock()
 			runner.logger.Error("Failed to create session", "error", err)
@@ -1322,7 +1514,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 			Role:    RoleSystem,
 			Content: systemContent,
 		})
-		apiLogger.RestoreSession(sid, network.Name, e.Params[0], e.Source.Name)
+		apiLogger.RestoreSession(sid, network.Name, channel, nick)
 		session, err = sessionMgr.GetSession(sid)
 		mu.Unlock()
 		if err != nil || session == nil {
@@ -1399,7 +1591,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 				break
 			}
 			for _, cj := range completedJobs {
-				injectAsyncResultFromDB(runner.sessionID, cfg, cj, network.Name, e.Params[0], e.Source.Name)
+				injectAsyncResultFromDB(runner.sessionID, cfg, cj, network.Name, channel, e.Source.Name)
 				markPendingJobDelivered(cj.JobID)
 			}
 			messages, _ = sessionMgr.GetMessages(runner.sessionID, cfg.MaxHistory)
@@ -1466,25 +1658,117 @@ var builtinTools = map[string]builtinToolEntry{
 			},
 		},
 	},
+	"ban_user": {
+		handler: func(cr *chatRunner, messages []ChatMessage, tc ToolCall) ([]ChatMessage, bool) {
+			return cr.handleBanUser(messages, tc), false
+		},
+		def: Tool{
+			Type: "function",
+			Function: &FunctionDefinition{
+				Name:        "ban_user",
+				Description: "Ban the current user from using bot commands. They will be ignored until the ban expires. Use this when someone is being abusive, spamming, or otherwise disrupting the channel.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"reason": map[string]any{
+							"type":        "string",
+							"description": "Why the user is being banned",
+						},
+						"duration": map[string]any{
+							"type":        "string",
+							"description": "Duration of the ban (e.g. '5m', '30m', '1h', '6h'). Default: 5m. Maximum: 6h.",
+						},
+					},
+					"required": []string{"reason"},
+				},
+			},
+		},
+	},
+	"check_ban_history": {
+		handler: func(cr *chatRunner, messages []ChatMessage, tc ToolCall) ([]ChatMessage, bool) {
+			return cr.handleCheckBanHistory(messages, tc), false
+		},
+		def: Tool{
+			Type: "function",
+			Function: &FunctionDefinition{
+				Name:        "check_ban_history",
+				Description: "View ban history for the current user. Shows active and past bans with reasons, durations, and how long ago they were issued.",
+				Parameters: map[string]any{
+					"type":       "object",
+					"properties": map[string]any{},
+					"required":   []string{},
+				},
+			},
+		},
+	},
 }
 
-func getBuiltinToolDefs() []Tool {
-	tools := make([]Tool, 0, len(builtinTools))
-	for _, entry := range builtinTools {
-		tools = append(tools, entry.def)
+func isToolDisabled(toolName string, disabled []string) bool {
+	for _, d := range disabled {
+		if d == toolName {
+			return true
+		}
 	}
-	return tools
+	return false
 }
 
-func isToolHidden(toolName string) bool {
-	var hidden []string
-	readConfig(func() { hidden = config.HiddenTools })
+func isToolHidden(toolName string, hidden []string) bool {
 	for _, h := range hidden {
 		if h == toolName {
 			return true
 		}
 	}
 	return false
+}
+
+func getToolServerName(toolName string) string {
+	if _, ok := builtinTools[toolName]; ok {
+		return "builtin"
+	}
+	return getMCPServerForTool(toolName)
+}
+
+func getBuiltinToolDefs(disabled []string) []Tool {
+	tools := make([]Tool, 0, len(builtinTools))
+
+	var banMaxDur, banDefaultDur string
+	readConfig(func() {
+		banMaxDur = config.Bans.MaxDuration
+		banDefaultDur = config.Bans.DefaultDuration
+	})
+
+disabledLoop:
+	for _, entry := range builtinTools {
+		t := entry.def
+		for _, d := range disabled {
+			if t.Function.Name == d {
+				continue disabledLoop
+			}
+		}
+		if t.Function.Name == "ban_user" {
+			banDef := *t.Function
+			paramsMap, _ := t.Function.Parameters.(map[string]any)
+			newParams := make(map[string]any, len(paramsMap))
+			for k, v := range paramsMap {
+				newParams[k] = v
+			}
+			propsMap, _ := paramsMap["properties"].(map[string]any)
+			newProps := make(map[string]any, len(propsMap))
+			for k, v := range propsMap {
+				newProps[k] = v
+			}
+			durationDesc := fmt.Sprintf("Duration of the ban (e.g. '5m', '30m', '1h', '6h'). Default: %s. Maximum: %s.", banDefaultDur, banMaxDur)
+			newProps["duration"] = map[string]any{
+				"type":        "string",
+				"description": durationDesc,
+			}
+			newParams["properties"] = newProps
+			banDef.Parameters = newParams
+			t.Function = &banDef
+		}
+		tools = append(tools, t)
+	}
+	return tools
 }
 
 func logStreamCompletion(sessionID int64, model, content, reasoning string, toolCalls []ToolCall, usage *Usage, role string) {

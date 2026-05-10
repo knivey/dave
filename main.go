@@ -42,6 +42,7 @@ type Bot struct {
 	reconnects  int
 	quitCh      chan struct{}
 	mu          sync.Mutex
+	casemapping string
 }
 
 func (bot *Bot) Quit() {
@@ -61,9 +62,45 @@ func (bot *Bot) isReady(channel string) bool {
 }
 
 var bots map[string]*Bot
+var botsMu sync.RWMutex
 
 func init() {
 	bots = make(map[string]*Bot)
+}
+
+func getBot(network string) (*Bot, bool) {
+	botsMu.RLock()
+	defer botsMu.RUnlock()
+	bot, ok := bots[network]
+	return bot, ok
+}
+
+func setBot(network string, bot *Bot) {
+	botsMu.Lock()
+	defer botsMu.Unlock()
+	bots[network] = bot
+}
+
+func snapshotBots() map[string]*Bot {
+	botsMu.RLock()
+	defer botsMu.RUnlock()
+	m := make(map[string]*Bot, len(bots))
+	for k, v := range bots {
+		m[k] = v
+	}
+	return m
+}
+
+func getCasemapping(network string) string {
+	if bot, ok := getBot(network); ok {
+		bot.mu.Lock()
+		cm := bot.casemapping
+		bot.mu.Unlock()
+		if cm != "" {
+			return cm
+		}
+	}
+	return "rfc1459"
 }
 
 func readConfig(f func()) {
@@ -73,6 +110,26 @@ func readConfig(f func()) {
 }
 
 type CmdFunc func(Network, *girc.Client, girc.Event, context.Context, chan<- string, ...string)
+
+// resolvedUserCtxKey carries the *User resolved in handleChanMessage through
+// the queue/dispatch path so command handlers (chat, completion, etc.) can
+// avoid a redundant DB lookup. Nil if not set.
+type resolvedUserCtxKey struct{}
+
+func ctxWithResolvedUser(ctx context.Context, u *User) context.Context {
+	if u == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, resolvedUserCtxKey{}, u)
+}
+
+func resolvedUserFromCtx(ctx context.Context) *User {
+	if ctx == nil {
+		return nil
+	}
+	u, _ := ctx.Value(resolvedUserCtxKey{}).(*User)
+	return u
+}
 
 var stop_re = regexp.MustCompile("^stop$")
 var help_re = regexp.MustCompile("^help(?:\\s+(.+))?$")
@@ -172,7 +229,7 @@ func registerCommandsLocked(cmds Commands) {
 		logger.Debug("added Chats command", c)
 		re := regexp.MustCompile("^" + c.Regex + " (.+)$")
 		newConfigCmds[re] = func(network Network, client *girc.Client, e girc.Event, ctx context.Context, output chan<- string, args ...string) {
-			chat(network, client, e, c, ctx, output, args...)
+			chat(network, client, e, c, ctx, output, nil, args...)
 		}
 		newChatCmds[re] = true
 	}
@@ -203,6 +260,15 @@ func reloadAll() error {
 	defer configMu.Unlock()
 	if err := loadReloadableDir(configDir, &config); err != nil {
 		return err
+	}
+	for name, bot := range snapshotBots() {
+		bot.mu.Lock()
+		cm := bot.casemapping
+		bot.mu.Unlock()
+		if net, ok := config.Networks[name]; ok {
+			net.Casemapping = cm
+			config.Networks[name] = net
+		}
 	}
 	if apiLogger != nil {
 		apiLogger.CloseAll()
@@ -273,6 +339,14 @@ func main() {
 	startRateLimitGC()
 
 	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			sweepExpiredBans(theDB)
+		}
+	}()
+
+	go func() {
 		waitForMCPReady()
 		recoverPendingJobs()
 		recoverToolPendingJobs()
@@ -314,7 +388,7 @@ func main() {
 		stopToolJobManager()
 		closeMCPClients()
 
-		for _, bot := range bots {
+		for _, bot := range snapshotBots() {
 			bot.Quit()
 		}
 		done := make(chan struct{})
@@ -385,7 +459,8 @@ func sendToOutput(out string, output chan<- string, ctx context.Context) {
 // DO NOT DELETE — stop is only for stopping the current text output, not for cancelling async jobs
 func stop(network Network, client *girc.Client, m girc.Event, _ interface{}, _ ...string) {
 	logger.Info("stop requested")
-	if queueMgr.StopCurrent(network.Name, m.Params[0]) {
+	channel := normalizeIRC(m.Params[0], getCasemapping(network.Name))
+	if queueMgr.StopCurrent(network.Name, channel) {
 		var stoppedMsg string
 		readConfig(func() { stoppedMsg = config.Notices.Queue.Stopped })
 		client.Cmd.Reply(m, stoppedMsg)
@@ -479,23 +554,53 @@ func isIgnored(host string) bool {
 func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 	host := event.Source.Name + "!" + event.Source.Ident + "@" + event.Source.Host
 	msg := event.Params[len(event.Params)-1]
-	if !strings.HasPrefix(msg, network.Trigger) {
+	channel := normalizeIRC(event.Params[0], getCasemapping(network.Name))
+
+	casemapping := getCasemapping(network.Name)
+	account := ""
+	if u := client.LookupUser(event.Source.Name); u != nil {
+		account = u.Extras.Account
+	}
+
+	isTrigger := strings.HasPrefix(msg, network.Trigger)
+
+	if !isTrigger {
 		botnick := client.GetNick()
 		if !strings.HasPrefix(msg, botnick+", ") && !strings.HasPrefix(msg, botnick+": ") {
 			return
 		}
-		if isIgnored(host) {
-			logger.Info("Ignoring host", host)
-			return
-		}
-		if !ContextExists(network.Name, event.Params[0], event.Source.Name) {
+	}
+	if isIgnored(host) {
+		logger.Info("Ignoring host", host)
+		return
+	}
+
+	resolvedUser, err := resolveUser(network.Name, event.Source.Name, event.Source.Ident, event.Source.Host, account, casemapping)
+	if err != nil {
+		logger.Error("failed to resolve user", "error", err)
+		return
+	}
+	if resolvedUser == nil {
+		logger.Warn("resolveUser returned nil, dropping message", "nick", event.Source.Name)
+		return
+	}
+	userID := resolvedUser.ID
+
+	if isBanned(theDB, userID, network.Name, channel, "") {
+		logger.Info("User is banned", "user_id", userID, "nick", event.Source.Name)
+		return
+	}
+
+	if !isTrigger {
+		botnick := client.GetNick()
+		if !ContextExists(network.Name, channel, userID) {
 			logger.Info("Ignoring message due to no existing chat context")
 			var noCtxMsg string
 			readConfig(func() { noCtxMsg = config.Notices.Context.NoContext })
 			client.Cmd.Reply(event, warnMsg(noCtxMsg))
 			return
 		}
-		if !checkRate(network, event.Params[0]) {
+		if !checkRate(network, channel) {
 			var rateMsg string
 			readConfig(func() { rateMsg = config.Notices.Ratemsg() })
 			client.Cmd.Reply(event, warnMsg(rateMsg))
@@ -503,7 +608,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 		}
 		msg = msg[len(botnick+", "):]
 
-		session, _ := sessionMgr.GetActiveSession(network.Name, event.Params[0], event.Source.Name)
+		session, _ := sessionMgr.GetActiveSession(network.Name, channel, userID)
 		if session == nil {
 			return
 		}
@@ -521,20 +626,16 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 		}
 		logger.Info("Running chat completion with existing context")
 
-		position := queueMgr.Enqueue(network.Name, event.Params[0], event.Source.Name,
+		position := queueMgr.Enqueue(network.Name, channel, userID, event.Source.Name,
 			sessionCfg.Service, "chat",
 			func(cx context.Context, output chan<- string) {
-				chat(network, client, event, sessionCfg, cx, output, msg)
+				chat(network, client, event, sessionCfg, cx, output, resolvedUser, msg)
 			})
 		if position > 0 {
 			var queueMsg string
 			readConfig(func() { queueMsg = config.Notices.QueueMsg(position, 0) })
 			client.Cmd.Reply(event, queueMsg)
 		}
-		return
-	}
-	if isIgnored(host) {
-		logger.Info("Ignoring host", host)
 		return
 	}
 	msg = strings.TrimPrefix(msg, network.Trigger)
@@ -555,11 +656,11 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 			commandsMutex.RUnlock()
 
 			if r == stop_re {
-				cmd(network, client, event, context.Background(), nil, args...)
+				cmd(network, client, event, ctxWithResolvedUser(context.Background(), resolvedUser), nil, args...)
 				return
 			}
 
-			if !checkRate(network, event.Params[0]) {
+			if !checkRate(network, channel) {
 				var rateMsg string
 				readConfig(func() { rateMsg = config.Notices.Ratemsg() })
 				client.Cmd.Reply(event, warnMsg(rateMsg))
@@ -567,13 +668,13 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 			}
 
 			if r == stats_re || r == delete_re || r == resume_re || r == support_re {
-				cmd(network, client, event, context.Background(), nil, args...)
+				cmd(network, client, event, ctxWithResolvedUser(context.Background(), resolvedUser), nil, args...)
 				return
 			}
 
-			position := queueMgr.Enqueue(network.Name, event.Params[0], event.Source.Name, "", msg,
+			position := queueMgr.Enqueue(network.Name, channel, userID, event.Source.Name, "", msg,
 				func(cx context.Context, output chan<- string) {
-					cmd(network, client, event, cx, output, args...)
+					cmd(network, client, event, ctxWithResolvedUser(cx, resolvedUser), output, args...)
 				})
 			if position > 0 {
 				var queueMsg string
@@ -594,7 +695,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 			}
 			commandsMutex.RUnlock()
 
-			if !checkRate(network, event.Params[0]) {
+			if !checkRate(network, channel) {
 				var rateMsg string
 				readConfig(func() { rateMsg = config.Notices.Ratemsg() })
 				client.Cmd.Reply(event, warnMsg(rateMsg))
@@ -603,19 +704,19 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 
 			if rateExemptCmds[r] {
 				if chatCmds[r] {
-					ClearContext(network.Name, event.Params[0], event.Source.Name)
+					ClearContext(network.Name, channel, userID)
 				}
 				outCh := make(chan string, 200)
 				go func() {
 					defer close(outCh)
-					cmd(network, client, event, context.Background(), outCh, args...)
+					cmd(network, client, event, ctxWithResolvedUser(context.Background(), resolvedUser), outCh, args...)
 				}()
 				go func() {
 					for msg := range outCh {
 						if action, ok := isIRCAction(msg); ok {
-							client.Cmd.Action(event.Params[0], action)
+							client.Cmd.Action(channel, action)
 						} else {
-							client.Cmd.Message(event.Params[0], "\x02\x02"+msg)
+							client.Cmd.Message(channel, "\x02\x02"+msg)
 						}
 						time.Sleep(time.Millisecond * time.Duration(network.Throttle))
 					}
@@ -624,13 +725,13 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 			}
 
 			if chatCmds[r] {
-				ClearContext(network.Name, event.Params[0], event.Source.Name)
+				ClearContext(network.Name, channel, userID)
 			}
 
 			svc := getServiceForConfigCmd(r)
-			position := queueMgr.Enqueue(network.Name, event.Params[0], event.Source.Name, svc, msg,
+			position := queueMgr.Enqueue(network.Name, channel, userID, event.Source.Name, svc, msg,
 				func(cx context.Context, output chan<- string) {
-					cmd(network, client, event, cx, output, args...)
+					cmd(network, client, event, ctxWithResolvedUser(cx, resolvedUser), output, args...)
 				})
 			if position > 0 {
 				var queueMsg string
@@ -713,7 +814,7 @@ func ircClient(network Network) {
 		Network:   network,
 		quitCh:    make(chan struct{}),
 	}
-	bots[network.Name] = &bot
+	setBot(network.Name, &bot)
 
 	client.Handlers.Add(girc.ALL_EVENTS, func(client *girc.Client, event girc.Event) {
 		if str, ok := event.Pretty(); ok {
@@ -725,6 +826,12 @@ func ircClient(network Network) {
 		bot.mu.Lock()
 		bot.connectedAt = time.Now()
 		bot.reconnects = 0
+		if cm, ok := client.GetServerOption("CASEMAPPING"); ok {
+			bot.casemapping = cm
+		} else {
+			bot.casemapping = "rfc1459"
+		}
+		bot.Network.Casemapping = bot.casemapping
 		throttle := bot.Network.Throttle
 		channels := bot.Network.Channels
 		bot.mu.Unlock()
@@ -747,6 +854,24 @@ func ircClient(network Network) {
 			return
 		}
 		handleChanMessage(network, client, event)
+	})
+
+	client.Handlers.Add(girc.NICK, func(client *girc.Client, event girc.Event) {
+		oldNick := event.Source.Name
+		newNick := event.Params[0]
+		casemapping := getCasemapping(network.Name)
+		if recordNickChange(network.Name, oldNick, newNick, casemapping) {
+			log.Debug("tracked nick change", "old", oldNick, "new", newNick)
+		}
+	})
+
+	client.Handlers.Add(girc.QUIT, func(client *girc.Client, event girc.Event) {
+		casemapping := getCasemapping(network.Name)
+		nick := event.Source.Name
+		user, _ := getUserByNormalizedNick(network.Name, normalizeIRC(nick, casemapping))
+		if user != nil {
+			log.Debug("tracked user quit", "nick", nick, "user_id", user.ID, "network", network.Name)
+		}
 	})
 
 	for {

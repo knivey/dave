@@ -13,11 +13,16 @@ import (
 
 var loggerQM = logxi.New("queue")
 
+func init() {
+	loggerQM.SetLevel(logxi.LevelAll)
+}
+
 type QueueItem struct {
 	ID             int64
 	Network        string
 	Channel        string
 	Nick           string
+	UserID         int64
 	Service        string
 	Description    string
 	Enqueued       time.Time
@@ -179,8 +184,8 @@ func (qm *QueueManager) getOrCreateChannelQueue(key string) *ChannelQueue {
 	return cq
 }
 
-func (qm *QueueManager) Enqueue(network, channel, nick, service, desc string, fn func(ctx context.Context, output chan<- string)) int {
-	return qm.EnqueueAt(network, channel, nick, service, desc, time.Now(), fn)
+func (qm *QueueManager) Enqueue(network, channel string, userID int64, nick, service, desc string, fn func(ctx context.Context, output chan<- string)) int {
+	return qm.EnqueueAt(network, channel, userID, nick, service, desc, time.Now(), fn)
 }
 
 // deliveryPosition returns the number of items ahead of the given item in the
@@ -200,7 +205,7 @@ func (ds *deliverySlot) deliveryPosition(item *QueueItem) int {
 	return pos
 }
 
-func (qm *QueueManager) EnqueueAt(network, channel, nick, service, desc string, enqueuedAt time.Time, fn func(ctx context.Context, output chan<- string)) int {
+func (qm *QueueManager) EnqueueAt(network, channel string, userID int64, nick, service, desc string, enqueuedAt time.Time, fn func(ctx context.Context, output chan<- string)) int {
 	if !qm.running.Load() {
 		return -1
 	}
@@ -222,6 +227,7 @@ func (qm *QueueManager) EnqueueAt(network, channel, nick, service, desc string, 
 		Network:     network,
 		Channel:     channel,
 		Nick:        nick,
+		UserID:      userID,
 		Service:     service,
 		Description: desc,
 		Enqueued:    enqueuedAt,
@@ -248,7 +254,7 @@ func (qm *QueueManager) EnqueueAt(network, channel, nick, service, desc string, 
 	return deliveryPos
 }
 
-func (qm *QueueManager) EnqueueAtWithPrompt(network, channel, nick, service, desc, prompt, startedMsgOverride string, enqueuedAt time.Time, fn func(ctx context.Context, output chan<- string)) int {
+func (qm *QueueManager) EnqueueAtWithPrompt(network, channel string, userID int64, nick, service, desc, prompt, startedMsgOverride string, enqueuedAt time.Time, fn func(ctx context.Context, output chan<- string)) int {
 	if !qm.running.Load() {
 		return -1
 	}
@@ -270,6 +276,7 @@ func (qm *QueueManager) EnqueueAtWithPrompt(network, channel, nick, service, des
 		Network:     network,
 		Channel:     channel,
 		Nick:        nick,
+		UserID:      userID,
 		Service:     service,
 		Description: desc,
 		Enqueued:    enqueuedAt,
@@ -336,7 +343,7 @@ func (qm *QueueManager) StopCurrent(network, channel string) bool {
 	return false
 }
 
-func (qm *QueueManager) CancelPending(network, channel, nick string) bool {
+func (qm *QueueManager) CancelPending(network, channel string, userID int64) bool {
 	qm.mu.Lock()
 	defer qm.mu.Unlock()
 
@@ -349,7 +356,7 @@ func (qm *QueueManager) CancelPending(network, channel, nick string) bool {
 	removed := false
 	newPending := make([]*QueueItem, 0, len(cq.pending))
 	for _, item := range cq.pending {
-		if item.Nick == nick {
+		if item.UserID == userID {
 			if item.cancel != nil {
 				item.cancel()
 			}
@@ -364,7 +371,7 @@ func (qm *QueueManager) CancelPending(network, channel, nick string) bool {
 	return removed
 }
 
-func (qm *QueueManager) IsRunning(network, channel, nick string) bool {
+func (qm *QueueManager) IsRunning(network, channel string, userID int64) bool {
 	qm.mu.Lock()
 	defer qm.mu.Unlock()
 	key := channelKey(network, channel)
@@ -373,14 +380,14 @@ func (qm *QueueManager) IsRunning(network, channel, nick string) bool {
 		return false
 	}
 	for _, item := range cq.running {
-		if item.Nick == nick {
+		if item.UserID == userID {
 			return true
 		}
 	}
 	return false
 }
 
-func (qm *QueueManager) QueueStatus(network, channel, nick string) (current *QueueItem, pending []*QueueItem) {
+func (qm *QueueManager) QueueStatus(network, channel string, userID int64) (current *QueueItem, pending []*QueueItem) {
 	qm.mu.Lock()
 	defer qm.mu.Unlock()
 	key := channelKey(network, channel)
@@ -390,7 +397,7 @@ func (qm *QueueManager) QueueStatus(network, channel, nick string) (current *Que
 	}
 
 	for _, item := range cq.running {
-		if item.Nick != nick {
+		if item.UserID != userID {
 			continue
 		}
 		if current == nil {
@@ -400,7 +407,7 @@ func (qm *QueueManager) QueueStatus(network, channel, nick string) (current *Que
 		}
 	}
 	for _, item := range cq.pending {
-		if item.Nick == nick {
+		if item.UserID == userID {
 			pending = append(pending, item)
 		}
 	}

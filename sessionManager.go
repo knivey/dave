@@ -14,6 +14,10 @@ import (
 var sessionMgr *SessionManager
 var loggerSM = logxi.New("sessionManager")
 
+func init() {
+	loggerSM.SetLevel(logxi.LevelAll)
+}
+
 // CRITICAL DESIGN NOTE: Per-user session creation lock.
 //
 // Every -command MUST create its own session. When two commands from the same
@@ -22,14 +26,14 @@ var loggerSM = logxi.New("sessionManager")
 // the session just created by the first goroutine and reuses it, merging both
 // conversations into one session. This regression happened once already during
 // the removal of in-memory contexts and MUST NOT happen again. DO NOT REMOVE.
-var sessionCreationMu sync.Map // key: "network\x00channel\x00nick" → *sync.Mutex
+var sessionCreationMu sync.Map // key: "network\x00channel\x00<userID>" → *sync.Mutex
 
-func sessionCreationKey(network, channel, nick string) string {
-	return network + "\x00" + channel + "\x00" + nick
+func sessionCreationKey(network, channel string, userID int64) string {
+	return fmt.Sprintf("%s\x00%s\x00%d", network, channel, userID)
 }
 
-func getSessionCreationLock(network, channel, nick string) *sync.Mutex {
-	key := sessionCreationKey(network, channel, nick)
+func getSessionCreationLock(network, channel string, userID int64) *sync.Mutex {
+	key := sessionCreationKey(network, channel, userID)
 	v, _ := sessionCreationMu.LoadOrStore(key, &sync.Mutex{})
 	return v.(*sync.Mutex)
 }
@@ -42,10 +46,10 @@ func NewSessionManager(db *gorm.DB) *SessionManager {
 	return &SessionManager{db: db}
 }
 
-func (sm *SessionManager) GetActiveSession(network, channel, nick string) (*Session, error) {
+func (sm *SessionManager) GetActiveSession(network, channel string, userID int64) (*Session, error) {
 	var session Session
-	err := sm.db.Where("network = ? AND channel = ? AND nick = ? AND status = ?",
-		network, channel, nick, "active").First(&session).Error
+	err := sm.db.Where("network = ? AND channel = ? AND user_id = ? AND status = ?",
+		network, channel, userID, "active").First(&session).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
@@ -55,24 +59,24 @@ func (sm *SessionManager) GetActiveSession(network, channel, nick string) (*Sess
 	return &session, nil
 }
 
-func (sm *SessionManager) ContextExists(network, channel, nick string) bool {
-	session, err := sm.GetActiveSession(network, channel, nick)
+func (sm *SessionManager) ContextExists(network, channel string, userID int64) bool {
+	session, err := sm.GetActiveSession(network, channel, userID)
 	return err == nil && session != nil
 }
 
-func (sm *SessionManager) CreateSession(network, channel, nick, chatCommand, service, model string) (int64, error) {
+func (sm *SessionManager) CreateSession(network, channel string, userID int64, chatCommand, service, model string) (int64, error) {
 	if err := sm.db.Model(&Session{}).
-		Where("network = ? AND channel = ? AND nick = ? AND status = ?",
-			network, channel, nick, "active").
+		Where("network = ? AND channel = ? AND user_id = ? AND status = ?",
+			network, channel, userID, "active").
 		Update("status", "completed").Error; err != nil {
-		loggerSM.Warn("failed to complete previous active sessions", "network", network, "channel", channel, "nick", nick, "error", err)
+		loggerSM.Warn("failed to complete previous active sessions", "network", network, "channel", channel, "user_id", userID, "error", err)
 	}
 
 	convID := generateConvID()
 	session := Session{
 		Network:     network,
 		Channel:     channel,
-		Nick:        nick,
+		UserID:      &userID,
 		ChatCommand: chatCommand,
 		ConvID:      &convID,
 		Service:     service,
@@ -148,12 +152,12 @@ func (sm *SessionManager) ActivateSession(sessionID int64) error {
 		Update("status", "active").Error
 }
 
-func (sm *SessionManager) SwitchActive(network, channel, nick string, newSessionID int64) (int64, error) {
+func (sm *SessionManager) SwitchActive(network, channel string, userID int64, newSessionID int64) (int64, error) {
 	var oldID int64
 
 	var currentActive []Session
-	sm.db.Where("network = ? AND channel = ? AND nick = ? AND status = ?",
-		network, channel, nick, "active").Find(&currentActive)
+	sm.db.Where("network = ? AND channel = ? AND user_id = ? AND status = ?",
+		network, channel, userID, "active").Find(&currentActive)
 
 	if len(currentActive) > 0 {
 		oldID = currentActive[0].ID
@@ -301,8 +305,8 @@ func textContentFromMessage(msg ChatMessage) string {
 	return ""
 }
 
-func (sm *SessionManager) SetResponseIDForActive(network, channel, nick, responseID string) {
-	session, err := sm.GetActiveSession(network, channel, nick)
+func (sm *SessionManager) SetResponseIDForActive(network, channel string, userID int64, responseID string) {
+	session, err := sm.GetActiveSession(network, channel, userID)
 	if err != nil || session == nil {
 		return
 	}

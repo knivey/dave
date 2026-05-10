@@ -37,7 +37,6 @@ type Session struct {
 	ID           int64   `gorm:"primaryKey;autoIncrement"`
 	Network      string  `gorm:"not null;index:idx_sessions_user"`
 	Channel      string  `gorm:"not null;index:idx_sessions_user"`
-	Nick         string  `gorm:"not null;index:idx_sessions_user"`
 	ChatCommand  string  `gorm:"column:chat_command;not null"`
 	FirstMessage string  `gorm:"column:first_message;not null;default:''"`
 	ConvID       *string `gorm:"column:conv_id;index:idx_sessions_conv_id"`
@@ -49,6 +48,7 @@ type Session struct {
 	LastActive   time.Time      `gorm:"column:last_active;index:idx_sessions_last_active"`
 	DeletedAt    gorm.DeletedAt `gorm:"index"`
 	SettingsID   *int64         `gorm:"index:idx_sessions_settings"`
+	UserID       *int64         `gorm:"index:idx_sessions_user"`
 }
 
 type SessionSetting struct {
@@ -87,6 +87,7 @@ type PendingJob struct {
 	Network     *string
 	Channel     *string
 	Nick        *string
+	UserID      *int64
 	CreatedAt   time.Time
 	CompletedAt *time.Time
 }
@@ -109,6 +110,59 @@ func (PendingJob) TableName() string { return "pending_jobs" }
 func (TurnUsage) TableName() string { return "turn_usage" }
 
 func (SessionSetting) TableName() string { return "session_settings" }
+
+type User struct {
+	ID             int64  `gorm:"primaryKey;autoIncrement"`
+	Network        string `gorm:"not null;index:idx_users_nick;index:idx_users_account"`
+	CurrentNick    string `gorm:"not null"`
+	NormalizedNick string `gorm:"not null;index:idx_users_nick,unique"`
+	IRCAccount     string `gorm:"column:account;index:idx_users_account"`
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+func (User) TableName() string { return "users" }
+
+type UserKnownHost struct {
+	ID        int64  `gorm:"primaryKey;autoIncrement"`
+	UserID    int64  `gorm:"not null;index:idx_user_known_hosts_user;uniqueIndex:idx_user_known_hosts_identity"`
+	Ident     string `gorm:"not null;uniqueIndex:idx_user_known_hosts_identity"`
+	Host      string `gorm:"not null;uniqueIndex:idx_user_known_hosts_identity;index:idx_user_known_hosts_lookup"`
+	FirstSeen time.Time
+	LastSeen  time.Time
+}
+
+func (UserKnownHost) TableName() string { return "user_known_hosts" }
+
+type NickChange struct {
+	ID            int64  `gorm:"primaryKey;autoIncrement"`
+	UserID        int64  `gorm:"not null;index:idx_nick_changes_user"`
+	OldNick       string `gorm:"not null"`
+	NewNick       string `gorm:"not null"`
+	NormalizedOld string `gorm:"not null;index:idx_nick_changes_norm"`
+	NormalizedNew string `gorm:"not null;index:idx_nick_changes_norm"`
+	CreatedAt     time.Time
+}
+
+func (NickChange) TableName() string { return "nick_changes" }
+
+type Ban struct {
+	ID            int64  `gorm:"primaryKey;autoIncrement"`
+	UserID        int64  `gorm:"not null;index:idx_bans_user"`
+	Network       string `gorm:"not null;index:idx_bans_lookup"`
+	Channel       string `gorm:"index:idx_bans_lookup"`
+	ServiceScope  string `gorm:"column:service_scope"`
+	Reason        string
+	Duration      time.Duration
+	ExpiresAt     time.Time `gorm:"index:idx_bans_active"`
+	Active        bool      `gorm:"not null;default:true;index:idx_bans_active"`
+	DeactivatedAt *time.Time
+	BannerUserID  *int64 `gorm:"index:idx_bans_banner"`
+	BannerNick    string
+	CreatedAt     time.Time
+}
+
+func (Ban) TableName() string { return "bans" }
 
 func initDB(cfg DatabaseConfig, log logxi.Logger) (*gorm.DB, error) {
 	var dialector gorm.Dialector
@@ -140,7 +194,10 @@ func initDB(cfg DatabaseConfig, log logxi.Logger) (*gorm.DB, error) {
 		sqlDB.SetMaxOpenConns(1)
 	}
 
-	if err := db.AutoMigrate(&Session{}, &Message{}, &PendingJob{}, &TurnUsage{}, &SessionSetting{}); err != nil {
+	if err := db.AutoMigrate(
+		&Session{}, &Message{}, &PendingJob{}, &TurnUsage{}, &SessionSetting{},
+		&User{}, &UserKnownHost{}, &NickChange{}, &Ban{},
+	); err != nil {
 		return nil, fmt.Errorf("running migrations: %w", err)
 	}
 
@@ -227,7 +284,7 @@ func insertDBTurnUsage(sessionID int64, usage *Usage, finishReason, apiPath stri
 func completeDBOrphanedSessions() (int64, error) {
 	result := theDB.Model(&Session{}).
 		Where("status = ? AND id NOT IN (?)", "active",
-			theDB.Model(&Session{}).Select("MAX(id)").Where("status = ?", "active").Group("network, channel, nick"),
+			theDB.Model(&Session{}).Select("MAX(id)").Where("status = ?", "active").Group("network, channel, user_id"),
 		).
 		Update("status", "completed")
 	return result.RowsAffected, result.Error
@@ -237,10 +294,10 @@ func reactivateDBStrandedSessions() (int64, error) {
 	result := theDB.Exec(`
 		UPDATE sessions SET status = 'active'
 		WHERE id IN (
-			SELECT MAX(id) FROM sessions WHERE deleted_at IS NULL GROUP BY network, channel, nick
+			SELECT MAX(id) FROM sessions WHERE deleted_at IS NULL GROUP BY network, channel, user_id
 		) AND status = 'completed'
-		AND (network, channel, nick) IN (
-			SELECT network, channel, nick FROM sessions WHERE deleted_at IS NULL GROUP BY network, channel, nick HAVING SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) = 0
+		AND (network, channel, user_id) IN (
+			SELECT network, channel, user_id FROM sessions WHERE deleted_at IS NULL GROUP BY network, channel, user_id HAVING SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) = 0
 		)`)
 	return result.RowsAffected, result.Error
 }
@@ -259,9 +316,9 @@ func cleanupDBSessions(maxAgeDays int) (int64, error) {
 	return result.RowsAffected, result.Error
 }
 
-func getUserDBSessions(network, channel, nick string, limit int) ([]Session, error) {
+func getUserDBSessions(network, channel string, userID int64, limit int) ([]Session, error) {
 	var sessions []Session
-	err := theDB.Where("network = ? AND channel = ? AND nick = ?", network, channel, nick).
+	err := theDB.Where("network = ? AND channel = ? AND user_id = ?", network, channel, userID).
 		Order("last_active DESC").Limit(limit).Find(&sessions).Error
 	return sessions, err
 }
@@ -279,8 +336,8 @@ func deleteDBSession(id int64) error {
 	return theDB.Where("id = ?", id).Delete(&Session{}).Error
 }
 
-func deleteUserDBSessions(network, channel, nick string) (int64, error) {
-	result := theDB.Where("network = ? AND channel = ? AND nick = ?", network, channel, nick).
+func deleteUserDBSessions(network, channel string, userID int64) (int64, error) {
+	result := theDB.Where("network = ? AND channel = ? AND user_id = ?", network, channel, userID).
 		Delete(&Session{})
 	return result.RowsAffected, result.Error
 }
@@ -296,17 +353,17 @@ func purgeDeletedDBSessions(olderThan time.Duration) (int64, error) {
 	return result.RowsAffected, result.Error
 }
 
-func getUserDBStats(network, channel, nick string) (int, int, error) {
+func getUserDBStats(network, channel string, userID int64) (int, int, error) {
 	var sessionCount int64
 	err := theDB.Model(&Session{}).
-		Where("network = ? AND channel = ? AND nick = ?", network, channel, nick).
+		Where("network = ? AND channel = ? AND user_id = ?", network, channel, userID).
 		Count(&sessionCount).Error
 	if err != nil {
 		return 0, 0, err
 	}
 	var sessionIDs []int64
 	err = theDB.Model(&Session{}).
-		Where("network = ? AND channel = ? AND nick = ?", network, channel, nick).
+		Where("network = ? AND channel = ? AND user_id = ?", network, channel, userID).
 		Pluck("id", &sessionIDs).Error
 	if err != nil {
 		return int(sessionCount), 0, err
@@ -356,10 +413,10 @@ func getCompletedPendingJobs(sessionID int64) ([]PendingJob, error) {
 	return jobs, err
 }
 
-func getPendingJobsForUser(network, channel, nick string) ([]PendingJob, error) {
+func getPendingJobsForUser(network, channel string, userID int64) ([]PendingJob, error) {
 	var jobs []PendingJob
 	err := theDB.Joins("JOIN sessions ON sessions.id = pending_jobs.session_id AND sessions.deleted_at IS NULL").
-		Where("sessions.network = ? AND sessions.channel = ? AND sessions.nick = ?", network, channel, nick).
+		Where("sessions.network = ? AND sessions.channel = ? AND sessions.user_id = ?", network, channel, userID).
 		Where("pending_jobs.status IN ?", []string{"pending", "running", "completed"}).
 		Order("pending_jobs.created_at DESC").
 		Find(&jobs).Error
@@ -373,7 +430,7 @@ func getPendingJobsForRecovery() ([]PendingJob, error) {
 	return jobs, err
 }
 
-func createToolPendingJob(jobID, toolName, mcpServer, network, channel, nick string) error {
+func createToolPendingJob(jobID, toolName, mcpServer, network, channel, nick string, userID int64) error {
 	job := PendingJob{
 		JobID:     jobID,
 		ToolName:  toolName,
@@ -382,6 +439,7 @@ func createToolPendingJob(jobID, toolName, mcpServer, network, channel, nick str
 		Network:   &network,
 		Channel:   &channel,
 		Nick:      &nick,
+		UserID:    &userID,
 	}
 	return theDB.Create(&job).Error
 }

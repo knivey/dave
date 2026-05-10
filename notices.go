@@ -22,6 +22,7 @@ type NoticesConfig struct {
 	Tools    ToolNotices     `toml:"tools"`
 	Pastebin PastebinNotices `toml:"pastebin"`
 	Jobs     JobNotices      `toml:"jobs"`
+	Bans     BanNotices      `toml:"bans"`
 	Support  string          `toml:"support"`
 }
 
@@ -106,6 +107,15 @@ type JobNotices struct {
 	QueuePending string `toml:"queue_pending"`
 	BgHeader     string `toml:"bg_header"`
 	BgLine       string `toml:"bg_line"`
+}
+
+type BanNotices struct {
+	BanCreated   string `toml:"ban_created"`
+	BanList      string `toml:"ban_list"`
+	BanListEmpty string `toml:"ban_list_empty"`
+	BanHistory   string `toml:"ban_history"`
+	Unbanned     string `toml:"unbanned"`
+	UserNotFound string `toml:"user_not_found"`
 }
 
 var (
@@ -277,6 +287,24 @@ func setNoticesDefaults(n *NoticesConfig) {
 	}
 	if n.Jobs.BgLine == "" {
 		n.Jobs.BgLine = "  {icon} {job_id} [{tool}/{server}] {status}, {elapsed} ago"
+	}
+	if n.Bans.BanCreated == "" {
+		n.Bans.BanCreated = "\x0304🚫 Banned {nick} for {duration}: {reason}\x0F"
+	}
+	if n.Bans.BanList == "" {
+		n.Bans.BanList = "\x02{nick}\x02 — {reason} (expires {expires})"
+	}
+	if n.Bans.BanListEmpty == "" {
+		n.Bans.BanListEmpty = "No active bans."
+	}
+	if n.Bans.BanHistory == "" {
+		n.Bans.BanHistory = "#{id} {active} {reason} ({duration}) by {banner}"
+	}
+	if n.Bans.Unbanned == "" {
+		n.Bans.Unbanned = "\x0303✓ Unbanned {nick}\x0F"
+	}
+	if n.Bans.UserNotFound == "" {
+		n.Bans.UserNotFound = "User {nick} not found."
 	}
 	if n.Support == "" {
 		n.Support = "If you enjoy using dave, consider supporting development at https://patreon.com/shrew269 ❤️"

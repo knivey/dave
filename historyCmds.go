@@ -21,7 +21,20 @@ func historySessions(network Network, c *girc.Client, e girc.Event, ctx context.
 	n := getNotices()
 	var maxHistory int
 	readConfig(func() { maxHistory = config.SessionsDisplayLimit })
-	sessions, err := getUserDBSessions(network.Name, e.Params[0], e.Source.Name, maxHistory)
+
+	casemapping := getCasemapping(network.Name)
+	account := ""
+	if u := c.LookupUser(e.Source.Name); u != nil {
+		account = u.Extras.Account
+	}
+	resolvedUser, _ := resolveUser(network.Name, e.Source.Name, e.Source.Ident, e.Source.Host, account, casemapping)
+	var userID int64
+	if resolvedUser != nil {
+		userID = resolvedUser.ID
+	}
+	channel := normalizeIRC(e.Params[0], casemapping)
+
+	sessions, err := getUserDBSessions(network.Name, channel, userID, maxHistory)
 	if err != nil {
 		select {
 		case output <- errorMsg(expandNotice(n.DB.QuerySessions, map[string]string{"error": err.Error()})):
@@ -142,7 +155,22 @@ func historyShow(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 		return
 	}
 
-	if session.Network != network.Name || session.Channel != e.Params[0] || session.Nick != e.Source.Name {
+	if session.Network != network.Name || session.Channel != normalizeIRC(e.Params[0], getCasemapping(network.Name)) {
+		sendErr(errorMsg(n.Sessions.NotOwned))
+		return
+	}
+	if session.UserID != nil {
+		casemapping := getCasemapping(network.Name)
+		account := ""
+		if u := c.LookupUser(e.Source.Name); u != nil {
+			account = u.Extras.Account
+		}
+		resolvedUser, _ := resolveUser(network.Name, e.Source.Name, e.Source.Ident, e.Source.Host, account, casemapping)
+		if resolvedUser == nil || resolvedUser.ID != *session.UserID {
+			sendErr(errorMsg(n.Sessions.NotOwned))
+			return
+		}
+	} else {
 		sendErr(errorMsg(n.Sessions.NotOwned))
 		return
 	}
@@ -230,13 +258,25 @@ func historyStats(network Network, c *girc.Client, e girc.Event, args ...string)
 		return
 	}
 
-	sessionCount, messageCount, err := getUserDBStats(network.Name, e.Params[0], e.Source.Name)
+	casemapping := getCasemapping(network.Name)
+	account := ""
+	if u := c.LookupUser(e.Source.Name); u != nil {
+		account = u.Extras.Account
+	}
+	resolvedUser, _ := resolveUser(network.Name, e.Source.Name, e.Source.Ident, e.Source.Host, account, casemapping)
+	var userID int64
+	if resolvedUser != nil {
+		userID = resolvedUser.ID
+	}
+	channel := normalizeIRC(e.Params[0], casemapping)
+
+	sessionCount, messageCount, err := getUserDBStats(network.Name, channel, userID)
 	if err != nil {
 		c.Cmd.Reply(e, errorMsg(expandNotice(n.DB.QueryStats, map[string]string{"error": err.Error()})))
 		return
 	}
 
-	c.Cmd.Reply(e, expandNotice(n.Sessions.StatsFormat, map[string]string{"network": network.Name, "channel": e.Params[0], "sessions": fmt.Sprintf("%d", sessionCount), "messages": fmt.Sprintf("%d", messageCount)}))
+	c.Cmd.Reply(e, expandNotice(n.Sessions.StatsFormat, map[string]string{"network": network.Name, "channel": channel, "sessions": fmt.Sprintf("%d", sessionCount), "messages": fmt.Sprintf("%d", messageCount)}))
 }
 
 func historyDelete(network Network, c *girc.Client, e girc.Event, args ...string) {
@@ -263,7 +303,22 @@ func historyDelete(network Network, c *girc.Client, e girc.Event, args ...string
 		return
 	}
 
-	if session.Network != network.Name || session.Channel != e.Params[0] || session.Nick != e.Source.Name {
+	if session.Network != network.Name || session.Channel != normalizeIRC(e.Params[0], getCasemapping(network.Name)) {
+		c.Cmd.Reply(e, errorMsg(n.Sessions.NotOwned))
+		return
+	}
+	if session.UserID != nil {
+		casemapping := getCasemapping(network.Name)
+		account := ""
+		if u := c.LookupUser(e.Source.Name); u != nil {
+			account = u.Extras.Account
+		}
+		resolvedUser, _ := resolveUser(network.Name, e.Source.Name, e.Source.Ident, e.Source.Host, account, casemapping)
+		if resolvedUser == nil || resolvedUser.ID != *session.UserID {
+			c.Cmd.Reply(e, errorMsg(n.Sessions.NotOwned))
+			return
+		}
+	} else {
 		c.Cmd.Reply(e, errorMsg(n.Sessions.NotOwned))
 		return
 	}
@@ -302,7 +357,22 @@ func historyResume(network Network, c *girc.Client, e girc.Event, args ...string
 		return
 	}
 
-	if session.Network != network.Name || session.Channel != e.Params[0] || session.Nick != e.Source.Name {
+	if session.Network != network.Name || session.Channel != normalizeIRC(e.Params[0], getCasemapping(network.Name)) {
+		c.Cmd.Reply(e, errorMsg(n.Sessions.NotOwned))
+		return
+	}
+	if session.UserID != nil {
+		casemapping := getCasemapping(network.Name)
+		account := ""
+		if u := c.LookupUser(e.Source.Name); u != nil {
+			account = u.Extras.Account
+		}
+		resolvedUser, _ := resolveUser(network.Name, e.Source.Name, e.Source.Ident, e.Source.Host, account, casemapping)
+		if resolvedUser == nil || resolvedUser.ID != *session.UserID {
+			c.Cmd.Reply(e, errorMsg(n.Sessions.NotOwned))
+			return
+		}
+	} else {
 		c.Cmd.Reply(e, errorMsg(n.Sessions.NotOwned))
 		return
 	}
@@ -344,12 +414,18 @@ func historyResume(network Network, c *girc.Client, e girc.Event, args ...string
 
 	messages = TruncateHistory(messages, currentCfg.MaxHistory)
 
-	oldID, _ := sessionMgr.SwitchActive(network.Name, e.Params[0], e.Source.Name, sessionID)
+	var resumeUserID int64
+	if session.UserID != nil {
+		resumeUserID = *session.UserID
+	}
+
+	channel := normalizeIRC(e.Params[0], getCasemapping(network.Name))
+	oldID, _ := sessionMgr.SwitchActive(network.Name, channel, resumeUserID, sessionID)
 	if oldID != 0 {
 		c.Cmd.Reply(e, expandNotice(n.Sessions.Paused, map[string]string{"id": fmt.Sprintf("%d", oldID)}))
 	}
 
-	apiLogger.RestoreSession(sessionID, network.Name, e.Params[0], e.Source.Name)
+	apiLogger.RestoreSession(sessionID, network.Name, channel, e.Source.Name)
 
 	c.Cmd.Reply(e, expandNotice(n.Sessions.Resumed, map[string]string{"id": fmt.Sprintf("%d", sessionID), "command": session.ChatCommand, "count": fmt.Sprintf("%d", len(messages))}))
 }
@@ -371,8 +447,19 @@ func formatTimeAgo(t time.Time) string {
 func historyJobs(network Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, args ...string) {
 	n := getNotices()
 	nick := e.Source.Name
-	channel := e.Params[0]
+	channel := normalizeIRC(e.Params[0], getCasemapping(network.Name))
 	hasOutput := false
+
+	casemapping := getCasemapping(network.Name)
+	account := ""
+	if u := c.LookupUser(nick); u != nil {
+		account = u.Extras.Account
+	}
+	resolvedUser, _ := resolveUser(network.Name, nick, e.Source.Ident, e.Source.Host, account, casemapping)
+	var userID int64
+	if resolvedUser != nil {
+		userID = resolvedUser.ID
+	}
 
 	sendLine := func(line string) bool {
 		for _, wrapped := range wrapLine(line) {
@@ -386,7 +473,7 @@ func historyJobs(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 	}
 
 	if queueMgr != nil {
-		current, pending := queueMgr.QueueStatus(network.Name, channel, nick)
+		current, pending := queueMgr.QueueStatus(network.Name, channel, userID)
 		if current != nil || len(pending) > 0 {
 			hasOutput = true
 			if !sendLine(n.Jobs.QueueHeader) {
@@ -429,7 +516,7 @@ func historyJobs(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 		return
 	}
 
-	jobs, err := getPendingJobsForUser(network.Name, channel, nick)
+	jobs, err := getPendingJobsForUser(network.Name, channel, userID)
 	if err != nil {
 		select {
 		case output <- errorMsg(expandNotice(n.DB.QueryJobs, map[string]string{"error": err.Error()})):

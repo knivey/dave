@@ -80,7 +80,7 @@ func mcpCmd(network Network, c *girc.Client, e girc.Event, cfg MCPCommandConfig,
 func mcpCmdAsync(network Network, c *girc.Client, e girc.Event, cfg MCPCommandConfig, ctx context.Context, output chan<- string, toolArgs map[string]any, prompt string, log logxi.Logger) {
 	n := getNotices()
 	asyncTool := cfg.GetAsyncTool()
-	channel := e.Params[0]
+	channel := normalizeIRC(e.Params[0], getCasemapping(network.Name))
 	nick := e.Source.Name
 
 	log.Debug("calling async MCP tool", "tool", asyncTool, "timeout", cfg.Timeout.String())
@@ -122,7 +122,18 @@ func mcpCmdAsync(network Network, c *girc.Client, e girc.Event, cfg MCPCommandCo
 		return
 	}
 
-	registerToolAsyncJob(submitResult.JobID, asyncTool, cfg.MCP, network.Name, channel, nick, prompt)
+	casemapping := getCasemapping(network.Name)
+	userAccount := ""
+	if u := c.LookupUser(nick); u != nil {
+		userAccount = u.Extras.Account
+	}
+	resolvedUser, _ := resolveUser(network.Name, nick, e.Source.Ident, e.Source.Host, userAccount, casemapping)
+	var userID int64
+	if resolvedUser != nil {
+		userID = resolvedUser.ID
+	}
+
+	registerToolAsyncJob(submitResult.JobID, asyncTool, cfg.MCP, network.Name, channel, nick, prompt, userID)
 }
 
 func sendImageOrTextResult(text string, ctx context.Context, output chan<- string) {

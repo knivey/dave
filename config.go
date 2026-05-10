@@ -34,6 +34,13 @@ type Config struct {
 	Notices              NoticesConfig     `toml:"-"`
 	HiddenTools          []string          `toml:"hidden_tools"`
 	DisabledBuiltins     []string          `toml:"disabled_builtins"`
+	DisabledBuiltinTools []string          `toml:"disabled_builtin_tools"`
+	Bans                 BanConfig         `toml:"bans"`
+}
+
+type BanConfig struct {
+	MaxDuration     string `toml:"max_duration"`
+	DefaultDuration string `toml:"default_duration"`
 }
 
 type PastebinConfig struct {
@@ -109,13 +116,27 @@ type Network struct {
 	ReconnectDelay *time.Duration `toml:"reconnect_delay"`
 	Trigger        string
 	Quitmsg        string
+	Casemapping    string `toml:"-"`
 }
 
 func (n *Network) GetChannelConfig(channel string) ChannelConfig {
 	if n.Channels == nil {
 		return ChannelConfig{}
 	}
-	return n.Channels[channel]
+	cm := n.Casemapping
+	if cm == "" {
+		cm = "rfc1459"
+	}
+	normalized := normalizeIRC(channel, cm)
+	if cfg, ok := n.Channels[normalized]; ok {
+		return cfg
+	}
+	for k, v := range n.Channels {
+		if normalizeIRC(k, cm) == normalized {
+			return v
+		}
+	}
+	return ChannelConfig{}
 }
 
 func (n *Network) IsEnabled() bool {
@@ -161,66 +182,68 @@ func (c MCPCommandConfig) GetAsyncTool() string {
 }
 
 type AIConfig struct {
-	Name                string //gets set to key name
-	Service             string
-	Model               string
-	Regex               string
-	System              string
-	SystemTmpl          *template.Template `json:"-"`
-	Streaming           bool
-	MaxTokens           int `toml:"maxtokens"`
-	MaxCompletionTokens int `toml:"maxcompletiontokens"`
-	Temperature         float32
-	MaxHistory          int    `toml:"maxhistory"`
-	RenderMarkdown      bool   `toml:"rendermarkdown"`
-	DetectImages        bool   `toml:"detectimages"`
-	MaxImages           int    `toml:"maximages"`
-	MaxContextImages    int    `toml:"maxcontextimages"`
-	ImageFormat         string `toml:"imageformat"`
-	ImageQuality        int    `toml:"imagequality"`
-	MaxImageSize        string `toml:"maximagesize"`
-	MaxImageWidth       int    `toml:"-"`
-	MaxImageHeight      int    `toml:"-"`
-	Description         string
-	MCPs                []string           `toml:"mcps"`
-	TopP                float32            `toml:"topp"`
-	Stop                []string           `toml:"stop"`
-	PresencePenalty     float32            `toml:"presencepenalty"`
-	FrequencyPenalty    float32            `toml:"frequencypenalty"`
-	ParallelToolCalls   *bool              `toml:"paralleltoolcalls"`
-	ReasoningEffort     string             `toml:"reasoningeffort"`
-	ServiceTier         string             `toml:"servicetier"`
-	Verbosity           string             `toml:"verbosity"`
-	ChatTemplateKwargs  map[string]any     `toml:"chat_template_kwargs"`
-	ExtraBody           map[string]any     `toml:"extra_body"`
-	Timeout             time.Duration      `toml:"timeout"`
-	StreamTimeout       time.Duration      `toml:"streamtimeout"`
-	ToolVerbose         *bool              `toml:"toolverbose"`
-	ResponsesAPI        bool               `toml:"responses_api"`
-	PreviousResponseID  bool               `toml:"previous_response_id"`
-	NeedsUserSuffix     bool               `toml:"needsusersuffix"`
-	APIUser             string             `toml:"api_user"`
-	RetryOnEmpty        *int               `toml:"retry_on_empty"`
-	apiUserTmpl         *template.Template `json:"-"`
+	Name                 string //gets set to key name
+	Service              string
+	Model                string
+	Regex                string
+	System               string
+	SystemTmpl           *template.Template `json:"-"`
+	Streaming            bool
+	MaxTokens            int `toml:"maxtokens"`
+	MaxCompletionTokens  int `toml:"maxcompletiontokens"`
+	Temperature          float32
+	MaxHistory           int    `toml:"maxhistory"`
+	RenderMarkdown       bool   `toml:"rendermarkdown"`
+	DetectImages         bool   `toml:"detectimages"`
+	MaxImages            int    `toml:"maximages"`
+	MaxContextImages     int    `toml:"maxcontextimages"`
+	ImageFormat          string `toml:"imageformat"`
+	ImageQuality         int    `toml:"imagequality"`
+	MaxImageSize         string `toml:"maximagesize"`
+	MaxImageWidth        int    `toml:"-"`
+	MaxImageHeight       int    `toml:"-"`
+	Description          string
+	MCPs                 []string           `toml:"mcps"`
+	TopP                 float32            `toml:"topp"`
+	Stop                 []string           `toml:"stop"`
+	PresencePenalty      float32            `toml:"presencepenalty"`
+	FrequencyPenalty     float32            `toml:"frequencypenalty"`
+	ParallelToolCalls    *bool              `toml:"paralleltoolcalls"`
+	ReasoningEffort      string             `toml:"reasoningeffort"`
+	ServiceTier          string             `toml:"servicetier"`
+	Verbosity            string             `toml:"verbosity"`
+	ChatTemplateKwargs   map[string]any     `toml:"chat_template_kwargs"`
+	ExtraBody            map[string]any     `toml:"extra_body"`
+	Timeout              time.Duration      `toml:"timeout"`
+	StreamTimeout        time.Duration      `toml:"streamtimeout"`
+	ToolVerbose          *bool              `toml:"toolverbose"`
+	ResponsesAPI         bool               `toml:"responses_api"`
+	PreviousResponseID   bool               `toml:"previous_response_id"`
+	NeedsUserSuffix      bool               `toml:"needsusersuffix"`
+	APIUser              string             `toml:"api_user"`
+	RetryOnEmpty         *int               `toml:"retry_on_empty"`
+	DisabledBuiltinTools []string           `toml:"disabled_builtin_tools"`
+	apiUserTmpl          *template.Template `json:"-"`
 }
 
 type Service struct {
-	Key                 string
-	Type                string // "openai" (default) or "llama"
-	MaxTokens           int    `toml:"maxtokens"`
-	MaxCompletionTokens int    `toml:"maxcompletiontokens"`
-	BaseURL             string
-	Temperature         float32
-	MaxHistory          int           `toml:"maxhistory"`
-	ImageFormat         string        `toml:"imageformat"`
-	ImageQuality        int           `toml:"imagequality"`
-	MaxImageSize        string        `toml:"maximagesize"`
-	Timeout             time.Duration `toml:"timeout"`
-	StreamTimeout       time.Duration `toml:"streamtimeout"`
-	ToolVerbose         *bool         `toml:"toolverbose"`
-	ParallelToolCalls   *bool         `toml:"paralleltoolcalls"`
-	Parallel            int           `toml:"parallel"`
-	APIUser             string        `toml:"api_user"`
+	Key                  string
+	Type                 string // "openai" (default) or "llama"
+	MaxTokens            int    `toml:"maxtokens"`
+	MaxCompletionTokens  int    `toml:"maxcompletiontokens"`
+	BaseURL              string
+	Temperature          float32
+	MaxHistory           int           `toml:"maxhistory"`
+	ImageFormat          string        `toml:"imageformat"`
+	ImageQuality         int           `toml:"imagequality"`
+	MaxImageSize         string        `toml:"maximagesize"`
+	Timeout              time.Duration `toml:"timeout"`
+	StreamTimeout        time.Duration `toml:"streamtimeout"`
+	ToolVerbose          *bool         `toml:"toolverbose"`
+	ParallelToolCalls    *bool         `toml:"paralleltoolcalls"`
+	Parallel             int           `toml:"parallel"`
+	APIUser              string        `toml:"api_user"`
+	DisabledBuiltinTools []string      `toml:"disabled_builtin_tools"`
 }
 
 type MCPConfig struct {
@@ -321,6 +344,9 @@ func (cfg *AIConfig) ApplyDefaults(service Service) {
 		defaultRetry := 1
 		cfg.RetryOnEmpty = &defaultRetry
 	}
+	if cfg.DisabledBuiltinTools == nil {
+		cfg.DisabledBuiltinTools = service.DisabledBuiltinTools
+	}
 }
 
 func (cfg AIConfig) MarshalJSON() ([]byte, error) {
@@ -386,7 +412,13 @@ func loadConfigDir(dir string) (Config, error) {
 		config.MaxQueueDepth = 5
 	}
 	if len(config.HiddenTools) == 0 {
-		config.HiddenTools = []string{"register_background_job"}
+		config.HiddenTools = []string{"register_background_job", "check_ban_history"}
+	}
+	if config.Bans.MaxDuration == "" {
+		config.Bans.MaxDuration = "6h"
+	}
+	if config.Bans.DefaultDuration == "" {
+		config.Bans.DefaultDuration = "5m"
 	}
 	if config.TUI.ScrollbackLines == 0 {
 		config.TUI.ScrollbackLines = 5000

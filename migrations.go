@@ -14,6 +14,10 @@ import (
 
 var loggerM = logxi.New("migrations")
 
+func init() {
+	loggerM.SetLevel(logxi.LevelAll)
+}
+
 // When you remove a NOT NULL column from a GORM struct (e.g. Session), GORM's
 // AutoMigrate won't drop it — it only adds missing columns and indexes. The old
 // column stays with its NOT NULL constraint, and all INSERTs fail because the Go
@@ -36,6 +40,9 @@ type schemaMigration struct {
 
 var migrations = []migration{
 	{ID: 1, Name: "drop_sessions_context_key", Up: dropSessionsContextKey},
+	{ID: 2, Name: "create_users_from_sessions", Up: createUsersFromSessions},
+	{ID: 3, Name: "normalize_channels_and_reindex", Up: normalizeChannelsAndReindex},
+	{ID: 4, Name: "drop_sessions_nick", Up: dropSessionsNick},
 }
 
 func runMigrations(db *gorm.DB, dbPath string) error {
@@ -143,5 +150,153 @@ func dropSessionsContextKey(db *gorm.DB) error {
 		return db.Exec("ALTER TABLE sessions DROP COLUMN IF EXISTS context_key").Error
 	default:
 		return db.Migrator().DropColumn(&Session{}, "context_key")
+	}
+}
+
+// createUsersFromSessions backfills the users table from existing session data.
+// For each distinct (network, nick) pair in sessions, creates a User row and
+// links sessions to it via user_id. Uses rfc1459 casemapping as default since
+// we don't know what casemapping was active when the sessions were created.
+// Idempotent: skips if all sessions already have user_id set.
+func createUsersFromSessions(db *gorm.DB) error {
+	if !db.Migrator().HasTable("sessions") {
+		return nil
+	}
+
+	if !db.Migrator().HasColumn(&Session{}, "nick") {
+		return nil
+	}
+
+	type nickPair struct {
+		Network string
+		Nick    string
+	}
+
+	var pairs []nickPair
+	result := db.Model(&Session{}).
+		Select("DISTINCT network, nick").
+		Where("user_id IS NULL").
+		Find(&pairs)
+	if result.Error != nil {
+		return fmt.Errorf("querying distinct nicks: %w", result.Error)
+	}
+	if len(pairs) == 0 {
+		return nil
+	}
+
+	loggerM.Info("backfilling users from sessions", "distinct_nicks", len(pairs))
+
+	now := time.Now()
+	for _, p := range pairs {
+		norm := normalizeIRC(p.Nick, "rfc1459")
+
+		var existingUser User
+		err := db.Where("network = ? AND normalized_nick = ?", p.Network, norm).First(&existingUser).Error
+		if err == nil {
+			result := db.Model(&Session{}).
+				Where("network = ? AND nick = ? AND user_id IS NULL", p.Network, p.Nick).
+				Update("user_id", existingUser.ID)
+			if result.Error != nil {
+				return fmt.Errorf("linking sessions to existing user: %w", result.Error)
+			}
+			continue
+		}
+
+		user := User{
+			Network:        p.Network,
+			CurrentNick:    p.Nick,
+			NormalizedNick: norm,
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		}
+		if err := db.Create(&user).Error; err != nil {
+			return fmt.Errorf("creating user for %s/%s: %w", p.Network, p.Nick, err)
+		}
+
+		result := db.Model(&Session{}).
+			Where("network = ? AND nick = ? AND user_id IS NULL", p.Network, p.Nick).
+			Update("user_id", user.ID)
+		if result.Error != nil {
+			return fmt.Errorf("linking sessions to new user: %w", result.Error)
+		}
+		loggerM.Info("created user from sessions", "network", p.Network, "nick", p.Nick, "user_id", user.ID)
+	}
+
+	return nil
+}
+
+func normalizeChannelsAndReindex(db *gorm.DB) error {
+	if !db.Migrator().HasTable("sessions") {
+		return nil
+	}
+
+	type channelPair struct {
+		ID      int64
+		Channel string
+	}
+	var pairs []channelPair
+	if err := db.Model(&Session{}).Select("id, channel").Find(&pairs).Error; err != nil {
+		return fmt.Errorf("querying session channels: %w", err)
+	}
+
+	normalized := 0
+	for _, p := range pairs {
+		norm := normalizeIRC(p.Channel, "rfc1459")
+		if norm != p.Channel {
+			if err := db.Model(&Session{}).Where("id = ?", p.ID).Update("channel", norm).Error; err != nil {
+				return fmt.Errorf("normalizing channel for session %d: %w", p.ID, err)
+			}
+			normalized++
+		}
+	}
+	if normalized > 0 {
+		loggerM.Info("normalized session channels", "count", normalized)
+	}
+
+	var pendingJobs []PendingJob
+	if err := db.Where("channel IS NOT NULL").Find(&pendingJobs).Error; err == nil {
+		pendingNormalized := 0
+		for _, pj := range pendingJobs {
+			if pj.Channel == nil {
+				continue
+			}
+			norm := normalizeIRC(*pj.Channel, "rfc1459")
+			if norm != *pj.Channel {
+				if err := db.Model(&PendingJob{}).Where("id = ?", pj.ID).Update("channel", norm).Error; err != nil {
+					return fmt.Errorf("normalizing channel for pending job %d: %w", pj.ID, err)
+				}
+				pendingNormalized++
+			}
+		}
+		if pendingNormalized > 0 {
+			loggerM.Info("normalized pending_job channels", "count", pendingNormalized)
+		}
+	}
+
+	if db.Migrator().HasIndex(&Session{}, "idx_sessions_user") {
+		if err := db.Migrator().DropIndex(&Session{}, "idx_sessions_user"); err != nil {
+			loggerM.Warn("could not drop old idx_sessions_user", "error", err)
+		}
+	}
+
+	if err := db.AutoMigrate(&Session{}); err != nil {
+		return fmt.Errorf("re-creating session indexes: %w", err)
+	}
+
+	return nil
+}
+
+func dropSessionsNick(db *gorm.DB) error {
+	if !db.Migrator().HasColumn(&Session{}, "nick") {
+		return nil
+	}
+
+	switch db.Dialector.Name() {
+	case "sqlite":
+		return db.Exec("ALTER TABLE sessions DROP COLUMN nick").Error
+	case "postgres":
+		return db.Exec("ALTER TABLE sessions DROP COLUMN IF EXISTS nick").Error
+	default:
+		return db.Migrator().DropColumn(&Session{}, "nick")
 	}
 }

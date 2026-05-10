@@ -50,7 +50,23 @@ func resolveUser(network, nick, ident, host, account, casemapping string) (*User
 			return user, nil
 		}
 
-		loggerUsers.Debug("account lookup missed, trying host recovery", "account", account, "nick", nick, "network", network)
+		loggerUsers.Debug("account lookup missed, trying nick lookup", "account", account, "nick", nick, "network", network)
+		nickUser, err := getUserByNormalizedNick(network, norm)
+		if err != nil {
+			return nil, err
+		}
+		if nickUser != nil {
+			loggerUsers.Debug("resolved user", "method", "nick+account_link", "user_id", nickUser.ID, "nick", nick, "account", account, "network", network)
+			nickUser.IRCAccount = account
+			nickUser.CurrentNick = nick
+			nickUser.NormalizedNick = norm
+			if err := updateDBUser(nickUser); err != nil {
+				return nil, err
+			}
+			_ = upsertKnownHost(nickUser.ID, ident, host)
+			return nickUser, nil
+		}
+
 		hostUser, err := recoverByKnownHost(network, ident, host, norm)
 		if err != nil {
 			return nil, err

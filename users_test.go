@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -280,4 +281,647 @@ func TestCasemappingInResolution(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, user2)
 	assert.Equal(t, user.ID, user2.ID)
+}
+
+func TestReleaseUserNick(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	user, err := resolveUser("testnet", "TestNick", "ident1", "host1", "", "rfc1459")
+	require.NoError(t, err)
+	require.NotNil(t, user)
+
+	err = releaseUserNick(user.ID)
+	require.NoError(t, err)
+
+	updated, err := getUserByID(user.ID)
+	require.NoError(t, err)
+	require.NotNil(t, updated)
+	assert.Equal(t, "", updated.CurrentNick)
+	assert.True(t, isReleasedNick(updated.NormalizedNick))
+	assert.Contains(t, updated.NormalizedNick, releasedNickPrefix)
+
+	found, err := getUserByNormalizedNick("testnet", "testnick")
+	assert.NoError(t, err)
+	assert.Nil(t, found, "released nick should not be findable by original normalized_nick")
+}
+
+func TestHasNoKnownHosts(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	user, err := createNewUser("testnet", "Ghost", "ghost", "", "", "")
+	require.NoError(t, err)
+	require.NotNil(t, user)
+	noHosts, err := hasNoKnownHosts(user.ID)
+	require.NoError(t, err)
+	assert.True(t, noHosts, "user with no hosts should return true")
+
+	_ = upsertKnownHost(user.ID, "ident1", "host1")
+	noHosts, err = hasNoKnownHosts(user.ID)
+	require.NoError(t, err)
+	assert.False(t, noHosts, "user with hosts should return false")
+}
+
+func TestMergeUser(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	ghost, err := createNewUser("testnet", "Ghost", "ghost", "", "", "")
+	require.NoError(t, err)
+
+	target, err := createNewUser("testnet", "Target", "target", "", "ident1", "host1")
+	require.NoError(t, err)
+
+	ghostSession := Session{
+		Network:     "testnet",
+		Channel:     "#test",
+		ChatCommand: "chat",
+		UserID:      &ghost.ID,
+		Status:      "completed",
+		CreatedAt:   time.Now(),
+		LastActive:  time.Now(),
+	}
+	require.NoError(t, theDB.Create(&ghostSession).Error)
+
+	ghostBan, err := createBan(theDB, ghost.ID, "testnet", "#test", "", "spam", 1*time.Hour, nil, "admin")
+	require.NoError(t, err)
+
+	require.NoError(t, theDB.Create(&NickChange{
+		UserID:        ghost.ID,
+		OldNick:       "OldGhost",
+		NewNick:       "Ghost",
+		NormalizedOld: "oldghost",
+		NormalizedNew: "ghost",
+		CreatedAt:     time.Now(),
+	}).Error)
+
+	err = mergeUser(ghost.ID, target.ID)
+	require.NoError(t, err)
+
+	var sessions []Session
+	theDB.Where("user_id = ?", target.ID).Find(&sessions)
+	assert.Len(t, sessions, 1)
+
+	var bans []Ban
+	theDB.Where("user_id = ?", target.ID).Find(&bans)
+	assert.Len(t, bans, 1)
+	assert.Equal(t, ghostBan.ID, bans[0].ID)
+
+	var changes []NickChange
+	theDB.Where("user_id = ?", target.ID).Find(&changes)
+	assert.Len(t, changes, 1)
+
+	deletedUser, err := getUserByID(ghost.ID)
+	assert.NoError(t, err)
+	assert.Nil(t, deletedUser, "ghost user should be deleted after merge")
+}
+
+func TestMergeUserReassignsBannerUserID(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	ghost, err := createNewUser("testnet", "Ghost", "ghost", "", "", "")
+	require.NoError(t, err)
+
+	target, err := createNewUser("testnet", "Target", "target", "", "", "")
+	require.NoError(t, err)
+
+	_, err = createBan(theDB, target.ID, "testnet", "#test", "", "spam", 1*time.Hour, &ghost.ID, "Ghost")
+	require.NoError(t, err)
+
+	err = mergeUser(ghost.ID, target.ID)
+	require.NoError(t, err)
+
+	var bans []Ban
+	theDB.Where("user_id = ?", target.ID).Find(&bans)
+	require.Len(t, bans, 1)
+	assert.Equal(t, &target.ID, bans[0].BannerUserID, "banner_user_id should be reassigned to target")
+}
+
+func TestRecordNickChangeCollisionMergeGhost(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	ghost, err := createNewUser("testnet", "UserA", "usera", "", "", "")
+	require.NoError(t, err)
+	noHosts, err := hasNoKnownHosts(ghost.ID)
+	require.NoError(t, err)
+	assert.True(t, noHosts, "ghost should have no known hosts")
+
+	userB, err := resolveUser("testnet", "UserB", "identB", "hostB", "", "rfc1459")
+	require.NoError(t, err)
+	require.NotNil(t, userB)
+
+	ok := recordNickChange("testnet", "UserB", "UserA", "rfc1459")
+	assert.True(t, ok)
+
+	deletedGhost, err := getUserByID(ghost.ID)
+	assert.NoError(t, err)
+	assert.Nil(t, deletedGhost, "ghost user should be merged and deleted")
+
+	updatedB, err := getUserByID(userB.ID)
+	require.NoError(t, err)
+	require.NotNil(t, updatedB)
+	assert.Equal(t, "UserA", updatedB.CurrentNick)
+	assert.Equal(t, "usera", updatedB.NormalizedNick)
+
+	foundByNick, err := getUserByNormalizedNick("testnet", "usera")
+	require.NoError(t, err)
+	require.NotNil(t, foundByNick)
+	assert.Equal(t, userB.ID, foundByNick.ID, "userB should now own the nick")
+}
+
+func TestRecordNickChangeCollisionReleaseReal(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	userA, err := resolveUser("testnet", "UserA", "identA", "hostA", "", "rfc1459")
+	require.NoError(t, err)
+	require.NotNil(t, userA)
+	noHosts, err := hasNoKnownHosts(userA.ID)
+	require.NoError(t, err)
+	assert.False(t, noHosts, "userA should have known hosts")
+
+	userB, err := resolveUser("testnet", "UserB", "identB", "hostB", "", "rfc1459")
+	require.NoError(t, err)
+	require.NotNil(t, userB)
+
+	ok := recordNickChange("testnet", "UserB", "UserA", "rfc1459")
+	assert.True(t, ok)
+
+	releasedA, err := getUserByID(userA.ID)
+	require.NoError(t, err)
+	require.NotNil(t, releasedA)
+	assert.True(t, isReleasedNick(releasedA.NormalizedNick), "userA's nick should be released")
+	assert.Equal(t, "", releasedA.CurrentNick)
+
+	updatedB, err := getUserByID(userB.ID)
+	require.NoError(t, err)
+	require.NotNil(t, updatedB)
+	assert.Equal(t, "UserA", updatedB.CurrentNick)
+	assert.Equal(t, "usera", updatedB.NormalizedNick)
+}
+
+func TestRecordNickChangeNoCollision(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	user, err := resolveUser("testnet", "OldNick", "ident1", "host1", "", "rfc1459")
+	require.NoError(t, err)
+	require.NotNil(t, user)
+
+	ok := recordNickChange("testnet", "OldNick", "NewNick", "rfc1459")
+	assert.True(t, ok)
+
+	updated, err := getUserByID(user.ID)
+	require.NoError(t, err)
+	require.NotNil(t, updated)
+	assert.Equal(t, "NewNick", updated.CurrentNick)
+	assert.Equal(t, "newnick", updated.NormalizedNick)
+
+	found, err := getUserByNormalizedNick("testnet", "oldnick")
+	assert.NoError(t, err)
+	assert.Nil(t, found, "old nick should no longer resolve")
+}
+
+func TestResolveUserSkipsReleasedNick(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	user, err := resolveUser("testnet", "TestNick", "ident1", "host1", "", "rfc1459")
+	require.NoError(t, err)
+	require.NotNil(t, user)
+
+	err = releaseUserNick(user.ID)
+	require.NoError(t, err)
+
+	resolved, err := resolveUser("testnet", "TestNick", "ident1", "host1", "", "rfc1459")
+	require.NoError(t, err)
+	require.NotNil(t, resolved)
+	assert.Equal(t, user.ID, resolved.ID, "should recover same user via host after nick released")
+}
+
+func TestResolveUserByNickSkipsReleased(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	user, err := resolveUser("testnet", "TestNick", "ident1", "host1", "", "rfc1459")
+	require.NoError(t, err)
+	require.NotNil(t, user)
+
+	err = releaseUserNick(user.ID)
+	require.NoError(t, err)
+
+	found, err := resolveUserByNick("testnet", "TestNick", "rfc1459")
+	require.NoError(t, err)
+	assert.Nil(t, found, "resolveUserByNick should skip released users")
+}
+
+func TestNickTakeoverScenario(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	userA, err := resolveUser("testnet", "UserA", "identA", "hostA", "", "rfc1459")
+	require.NoError(t, err)
+	require.NotNil(t, userA)
+
+	sessionA := Session{
+		Network:     "testnet",
+		Channel:     "#test",
+		ChatCommand: "chat",
+		UserID:      &userA.ID,
+		Status:      "completed",
+		CreatedAt:   time.Now(),
+		LastActive:  time.Now(),
+	}
+	require.NoError(t, theDB.Create(&sessionA).Error)
+
+	userB, err := resolveUser("testnet", "UserB", "identB", "hostB", "", "rfc1459")
+	require.NoError(t, err)
+	require.NotNil(t, userB)
+	assert.NotEqual(t, userA.ID, userB.ID)
+
+	sessionB := Session{
+		Network:     "testnet",
+		Channel:     "#test",
+		ChatCommand: "chat",
+		UserID:      &userB.ID,
+		Status:      "completed",
+		CreatedAt:   time.Now(),
+		LastActive:  time.Now(),
+	}
+	require.NoError(t, theDB.Create(&sessionB).Error)
+
+	releaseUserNick(userA.ID)
+
+	ok := recordNickChange("testnet", "UserB", "UserA", "rfc1459")
+	assert.True(t, ok)
+
+	resolved, err := resolveUser("testnet", "UserA", "identB", "hostB", "", "rfc1459")
+	require.NoError(t, err)
+	require.NotNil(t, resolved)
+	assert.Equal(t, userB.ID, resolved.ID, "should resolve to userB, not userA")
+
+	var bSessions []Session
+	theDB.Where("user_id = ?", userB.ID).Find(&bSessions)
+	assert.Len(t, bSessions, 1, "userB should still have their own session")
+	assert.Equal(t, sessionB.ID, bSessions[0].ID)
+
+	var aSessions []Session
+	theDB.Where("user_id = ?", userA.ID).Find(&aSessions)
+	assert.Len(t, aSessions, 1, "userA should still have their session (not merged, has host history)")
+	assert.Equal(t, sessionA.ID, aSessions[0].ID)
+
+	ok = recordNickChange("testnet", "UserA", "UserB", "rfc1459")
+	assert.True(t, ok)
+
+	resolvedBack, err := resolveUser("testnet", "UserB", "identB", "hostB", "", "rfc1459")
+	require.NoError(t, err)
+	require.NotNil(t, resolvedBack)
+	assert.Equal(t, userB.ID, resolvedBack.ID, "userB changing back should still be userB")
+
+	var bSessionsAfter []Session
+	theDB.Where("user_id = ?", userB.ID).Find(&bSessionsAfter)
+	assert.Len(t, bSessionsAfter, 1, "userB should still have their session after changing back")
+}
+
+func TestNickTakeoverMergeGhostScenario(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	ghost, err := createNewUser("testnet", "UserA", "usera", "", "", "")
+	require.NoError(t, err)
+	noHosts, err := hasNoKnownHosts(ghost.ID)
+	require.NoError(t, err)
+	assert.True(t, noHosts)
+
+	ghostSession := Session{
+		Network:     "testnet",
+		Channel:     "#test",
+		ChatCommand: "chat",
+		UserID:      &ghost.ID,
+		Status:      "completed",
+		CreatedAt:   time.Now(),
+		LastActive:  time.Now(),
+	}
+	require.NoError(t, theDB.Create(&ghostSession).Error)
+
+	userB, err := resolveUser("testnet", "UserB", "identB", "hostB", "", "rfc1459")
+	require.NoError(t, err)
+	require.NotNil(t, userB)
+
+	sessionB := Session{
+		Network:     "testnet",
+		Channel:     "#test",
+		ChatCommand: "chat",
+		UserID:      &userB.ID,
+		Status:      "completed",
+		CreatedAt:   time.Now(),
+		LastActive:  time.Now(),
+	}
+	require.NoError(t, theDB.Create(&sessionB).Error)
+
+	ok := recordNickChange("testnet", "UserB", "UserA", "rfc1459")
+	assert.True(t, ok)
+
+	deleted, err := getUserByID(ghost.ID)
+	assert.NoError(t, err)
+	assert.Nil(t, deleted, "ghost should be deleted after merge")
+
+	var allSessions []Session
+	theDB.Where("user_id = ?", userB.ID).Order("id").Find(&allSessions)
+	assert.Len(t, allSessions, 2, "userB should have both their session and the ghost's session")
+
+	resolved, err := resolveUser("testnet", "UserA", "identB", "hostB", "", "rfc1459")
+	require.NoError(t, err)
+	require.NotNil(t, resolved)
+	assert.Equal(t, userB.ID, resolved.ID)
+}
+
+func TestGetUserInfo(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	user, err := resolveUser("testnet", "TestUser", "ident1", "host1", "myaccount", "rfc1459")
+	require.NoError(t, err)
+	require.NotNil(t, user)
+
+	session := Session{
+		Network:     "testnet",
+		Channel:     "#test",
+		ChatCommand: "chat",
+		UserID:      &user.ID,
+		Status:      "completed",
+		CreatedAt:   time.Now(),
+		LastActive:  time.Now(),
+	}
+	require.NoError(t, theDB.Create(&session).Error)
+	require.NoError(t, insertDBMessage(session.ID, "user", "hello", nil, nil, nil, nil))
+
+	info, err := getUserInfo(user.ID)
+	require.NoError(t, err)
+	require.NotNil(t, info)
+
+	assert.Equal(t, user.ID, info.User.ID)
+	assert.Equal(t, "myaccount", info.User.IRCAccount)
+	assert.Len(t, info.Hosts, 1)
+	assert.Equal(t, 1, info.SessionCount)
+	assert.Equal(t, 1, info.MessageCount)
+	assert.Empty(t, info.ActiveBans)
+
+	infoNil, err := getUserInfo(99999)
+	assert.NoError(t, err)
+	assert.Nil(t, infoNil)
+}
+
+func TestGetUserInfoWithBansAndNickChanges(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	user, err := resolveUser("testnet", "TestUser", "ident1", "host1", "", "rfc1459")
+	require.NoError(t, err)
+
+	ok := recordNickChange("testnet", "TestUser", "NewNick", "rfc1459")
+	assert.True(t, ok)
+
+	_, err = createBan(theDB, user.ID, "testnet", "#test", "", "spam", 1*time.Hour, nil, "admin")
+	require.NoError(t, err)
+
+	info, err := getUserInfo(user.ID)
+	require.NoError(t, err)
+	require.NotNil(t, info)
+
+	assert.Len(t, info.NickChanges, 1)
+	assert.Equal(t, "TestUser", info.NickChanges[0].OldNick)
+	assert.Equal(t, "NewNick", info.NickChanges[0].NewNick)
+	assert.Len(t, info.ActiveBans, 1)
+}
+
+func TestSearchUsersByNick(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	_, err := resolveUser("testnet", "AlphaUser", "ident1", "host1", "", "rfc1459")
+	require.NoError(t, err)
+	_, err = resolveUser("testnet", "BetaUser", "ident2", "host2", "betaaccount", "rfc1459")
+	require.NoError(t, err)
+	_, err = resolveUser("testnet", "GammaUser", "ident3", "host3", "", "rfc1459")
+	require.NoError(t, err)
+
+	results, err := searchUsers("testnet", "alpha")
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "AlphaUser", results[0].CurrentNick)
+
+	results, err = searchUsers("testnet", "user")
+	require.NoError(t, err)
+	assert.Len(t, results, 3)
+
+	results, err = searchUsers("testnet", "betaaccount")
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "BetaUser", results[0].CurrentNick)
+	assert.Equal(t, "betaaccount", results[0].IRCAccount)
+
+	results, err = searchUsers("testnet", "nonexistent")
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
+func TestSearchUsersByID(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	user, err := resolveUser("testnet", "TestUser", "ident1", "host1", "", "rfc1459")
+	require.NoError(t, err)
+
+	results, err := searchUsers("testnet", fmt.Sprintf("%d", user.ID))
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, user.ID, results[0].ID)
+}
+
+func TestSearchUsersByHost(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	_, err := resolveUser("testnet", "TestUser", "myident", "myhost.example.com", "", "rfc1459")
+	require.NoError(t, err)
+
+	results, err := searchUsers("testnet", "myhost")
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "TestUser", results[0].CurrentNick)
+	assert.Equal(t, 1, results[0].HostCount)
+}
+
+func TestSearchUsersReleased(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	user, err := resolveUser("testnet", "TestUser", "ident1", "host1", "", "rfc1459")
+	require.NoError(t, err)
+
+	require.NoError(t, releaseUserNick(user.ID))
+
+	results, err := searchUsers("testnet", fmt.Sprintf("%d", user.ID))
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.True(t, results[0].Released)
+}
+
+func TestSearchUsersDifferentNetwork(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	_, err := resolveUser("testnet", "TestUser", "ident1", "host1", "", "rfc1459")
+	require.NoError(t, err)
+
+	results, err := searchUsers("othernet", "testuser")
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
+func TestSearchUsersWildcardAll(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	_, err := resolveUser("testnet", "AlphaUser", "ident1", "host1", "", "rfc1459")
+	require.NoError(t, err)
+	_, err = resolveUser("testnet", "BetaUser", "ident2", "host2", "", "rfc1459")
+	require.NoError(t, err)
+	_, err = resolveUser("testnet", "GammaUser", "ident3", "host3", "", "rfc1459")
+	require.NoError(t, err)
+
+	results, err := searchUsers("testnet", "*")
+	require.NoError(t, err)
+	assert.Len(t, results, 3)
+}
+
+func TestSearchUsersWildcardPrefix(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	_, err := resolveUser("testnet", "FooBar", "ident1", "host1", "", "rfc1459")
+	require.NoError(t, err)
+	_, err = resolveUser("testnet", "BarFoo", "ident2", "host2", "", "rfc1459")
+	require.NoError(t, err)
+	_, err = resolveUser("testnet", "BazFooQux", "ident3", "host3", "", "rfc1459")
+	require.NoError(t, err)
+
+	results, err := searchUsers("testnet", "Foo*")
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "FooBar", results[0].CurrentNick)
+}
+
+func TestSearchUsersWildcardSuffix(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	_, err := resolveUser("testnet", "FooBar", "ident1", "host1", "", "rfc1459")
+	require.NoError(t, err)
+	_, err = resolveUser("testnet", "BarFoo", "ident2", "host2", "", "rfc1459")
+	require.NoError(t, err)
+
+	results, err := searchUsers("testnet", "*Bar")
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "FooBar", results[0].CurrentNick)
+}
+
+func TestSearchUsersWildcardContains(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	_, err := resolveUser("testnet", "FooBar", "ident1", "host1", "", "rfc1459")
+	require.NoError(t, err)
+	_, err = resolveUser("testnet", "XFooBarX", "ident2", "host2", "", "rfc1459")
+	require.NoError(t, err)
+	_, err = resolveUser("testnet", "BarFoo", "ident3", "host3", "", "rfc1459")
+	require.NoError(t, err)
+
+	results, err := searchUsers("testnet", "*Foo*")
+	require.NoError(t, err)
+	assert.Len(t, results, 3)
+
+	results, err = searchUsers("testnet", "Foo")
+	require.NoError(t, err)
+	assert.Len(t, results, 3, "plain query without * should also be contains match")
+}
+
+func TestSearchUsersWildcardMiddle(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	_, err := resolveUser("testnet", "FooBarBaz", "ident1", "host1", "", "rfc1459")
+	require.NoError(t, err)
+	_, err = resolveUser("testnet", "FooBaz", "ident2", "host2", "", "rfc1459")
+	require.NoError(t, err)
+	_, err = resolveUser("testnet", "BazFoo", "ident3", "host3", "", "rfc1459")
+	require.NoError(t, err)
+
+	results, err := searchUsers("testnet", "Foo*Baz")
+	require.NoError(t, err)
+	assert.Len(t, results, 2, "Foo*Baz should match FooBarBaz and FooBaz (SQL % matches zero chars)")
+	nicks := make(map[string]bool)
+	for _, r := range results {
+		nicks[r.CurrentNick] = true
+	}
+	assert.True(t, nicks["FooBarBaz"])
+	assert.True(t, nicks["FooBaz"])
+	assert.False(t, nicks["BazFoo"])
+}
+
+func TestComputeMergeHash(t *testing.T) {
+	ghost := &User{ID: 1, CurrentNick: "Ghost"}
+	target := &User{ID: 2, CurrentNick: "Target"}
+
+	hash1 := computeMergeHash(ghost, target)
+	hash2 := computeMergeHash(ghost, target)
+	assert.Equal(t, hash1, hash2, "same inputs should produce same hash")
+	assert.Len(t, hash1, 8, "hash should be 8 characters")
+
+	ghostModified := &User{ID: 1, CurrentNick: "GhostModified"}
+	hash3 := computeMergeHash(ghostModified, target)
+	assert.NotEqual(t, hash1, hash3, "different nicks should produce different hash")
+
+	swapped := computeMergeHash(target, ghost)
+	assert.NotEqual(t, hash1, swapped, "swapped order should produce different hash")
+}
+
+func TestGetUserDBStatsAllNetworks(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	user, err := resolveUser("testnet", "TestUser", "ident1", "host1", "", "rfc1459")
+	require.NoError(t, err)
+
+	s1 := Session{
+		Network: "testnet", Channel: "#chan1", ChatCommand: "chat",
+		UserID: &user.ID, Status: "completed",
+		CreatedAt: time.Now(), LastActive: time.Now(),
+	}
+	require.NoError(t, theDB.Create(&s1).Error)
+	require.NoError(t, insertDBMessage(s1.ID, "user", "hello", nil, nil, nil, nil))
+	require.NoError(t, insertDBMessage(s1.ID, "assistant", "hi", nil, nil, nil, nil))
+
+	s2 := Session{
+		Network: "testnet", Channel: "#chan2", ChatCommand: "chat",
+		UserID: &user.ID, Status: "completed",
+		CreatedAt: time.Now(), LastActive: time.Now(),
+	}
+	require.NoError(t, theDB.Create(&s2).Error)
+	require.NoError(t, insertDBMessage(s2.ID, "user", "msg", nil, nil, nil, nil))
+
+	sessions, messages, err := getUserDBStatsAllNetworks(user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, sessions)
+	assert.Equal(t, 3, messages)
+
+	sessions, messages, err = getUserDBStatsAllNetworks(99999)
+	require.NoError(t, err)
+	assert.Equal(t, 0, sessions)
+	assert.Equal(t, 0, messages)
 }

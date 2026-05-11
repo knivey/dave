@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -371,6 +372,51 @@ func flushLogBuf(view *tview.TextView, app *tview.Application, stop <-chan struc
 	}
 }
 
+func printUserInfo(view *tview.TextView, info *UserInfo) {
+	u := info.User
+	released := ""
+	if isReleasedNick(u.NormalizedNick) {
+		released = " [red](released)[white]"
+	}
+	fmt.Fprintf(view, "[white]  ID: #%d  Nick: %s  NormNick: %s%s[white]\n",
+		u.ID, tview.Escape(u.CurrentNick), tview.Escape(u.NormalizedNick), released)
+	fmt.Fprintf(view, "[white]  Network: %s  Account: %s[white]\n",
+		tview.Escape(u.Network), tview.Escape(u.IRCAccount))
+	fmt.Fprintf(view, "[white]  Created: %s  Updated: %s[white]\n",
+		u.CreatedAt.Format("2006-01-02 15:04"), u.UpdatedAt.Format("2006-01-02 15:04"))
+	fmt.Fprintf(view, "[white]  Sessions: %d  Messages: %d[white]\n",
+		info.SessionCount, info.MessageCount)
+
+	if len(info.Hosts) > 0 {
+		fmt.Fprintf(view, "[white]  Known hosts:[white]\n")
+		for _, h := range info.Hosts {
+			fmt.Fprintf(view, "[white]    %s@%s (first: %s, last: %s)[white]\n",
+				tview.Escape(h.Ident), tview.Escape(h.Host),
+				h.FirstSeen.Format("2006-01-02"), h.LastSeen.Format("2006-01-02"))
+		}
+	} else {
+		fmt.Fprintf(view, "[white]  Known hosts: none[white]\n")
+	}
+
+	if len(info.ActiveBans) > 0 {
+		fmt.Fprintf(view, "[white]  Active bans:[white]\n")
+		for _, b := range info.ActiveBans {
+			fmt.Fprintf(view, "[white]    #%d %s %s expires %s[white]\n",
+				b.ID, tview.Escape(b.Reason), formatDuration(b.Duration),
+				b.ExpiresAt.Format("2006-01-02 15:04"))
+		}
+	}
+
+	if len(info.NickChanges) > 0 {
+		fmt.Fprintf(view, "[white]  Recent nick changes (%d):[white]\n", len(info.NickChanges))
+		for _, nc := range info.NickChanges {
+			fmt.Fprintf(view, "[white]    %s -> %s (%s)[white]\n",
+				tview.Escape(nc.OldNick), tview.Escape(nc.NewNick),
+				nc.CreatedAt.Format("2006-01-02 15:04"))
+		}
+	}
+}
+
 func handleTUICommand(text string) {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -403,6 +449,12 @@ func handleTUICommand(text string) {
 		fmt.Fprintf(logView, "  /unban <network> <nick>      - Unban a user\n")
 		fmt.Fprintf(logView, "  /bans [network]              - List active bans\n")
 		fmt.Fprintf(logView, "  /banhistory <network> <nick>  - Show ban history for a user\n")
+		fmt.Fprintf(logView, "  /user <network> <nick|id>    - Show user details\n")
+		fmt.Fprintf(logView, "  /usersearch <network> <query> - Search users by nick/account/host\n")
+		fmt.Fprintf(logView, "  /usermerge <ghost_id> <target_id> [hash]\n")
+		fmt.Fprintf(logView, "                               - Merge ghost user into target\n")
+		fmt.Fprintf(logView, "  /userrelease <network> <nick|id>\n")
+		fmt.Fprintf(logView, "                               - Release a user's nick claim\n")
 	case "/reload":
 		if len(parts) >= 2 {
 			mcpName := parts[1]
@@ -630,6 +682,188 @@ func handleTUICommand(text string) {
 			}
 			fmt.Fprintf(logView, "[white]#%d %s %s (%s) by %s, %s ago[white]\n", b.ID, status, tview.Escape(b.Reason), formatDuration(b.Duration), tview.Escape(b.BannerNick), formatDuration(time.Since(b.CreatedAt)))
 		}
+	case "/user":
+		if len(parts) < 3 {
+			fmt.Fprintf(logView, "[yellow]Usage: /user <network> <nick|id>[white]\n")
+			break
+		}
+		if theDB == nil {
+			fmt.Fprintf(logView, "[red]Database not available[white]\n")
+			break
+		}
+		network, userRef := parts[1], parts[2]
+		var info *UserInfo
+		if id, err := strconv.ParseInt(userRef, 10, 64); err == nil {
+			var infoErr error
+			info, infoErr = getUserInfo(id)
+			if infoErr != nil {
+				fmt.Fprintf(logView, "[red]Error: %s[white]\n", infoErr)
+				break
+			}
+		} else {
+			cm := getCasemapping(network)
+			user, err := resolveUserByNick(network, userRef, cm)
+			if err != nil {
+				fmt.Fprintf(logView, "[red]Error: %s[white]\n", err)
+				break
+			}
+			if user == nil {
+				fmt.Fprintf(logView, "[yellow]User %s not found on %s[white]\n", userRef, network)
+				break
+			}
+			info, err = getUserInfo(user.ID)
+			if err != nil {
+				fmt.Fprintf(logView, "[red]Error: %s[white]\n", err)
+				break
+			}
+		}
+		if info == nil {
+			fmt.Fprintf(logView, "[yellow]User not found[white]\n")
+			break
+		}
+		printUserInfo(logView, info)
+	case "/usersearch":
+		if len(parts) < 3 {
+			fmt.Fprintf(logView, "[yellow]Usage: /usersearch <network> <query>[white]\n")
+			break
+		}
+		if theDB == nil {
+			fmt.Fprintf(logView, "[red]Database not available[white]\n")
+			break
+		}
+		network, query := parts[1], parts[2]
+		results, err := searchUsers(network, query)
+		if err != nil {
+			fmt.Fprintf(logView, "[red]Search error: %s[white]\n", err)
+			break
+		}
+		if len(results) == 0 {
+			fmt.Fprintf(logView, "[white]No users matching %q on %s.[white]\n", query, network)
+			break
+		}
+		fmt.Fprintf(logView, "[white]%d user(s) matching %q on %s:[white]\n", len(results), query, network)
+		for _, r := range results {
+			released := ""
+			if r.Released {
+				released = " [red](released)[white]"
+			}
+			account := ""
+			if r.IRCAccount != "" {
+				account = fmt.Sprintf(" account:%s", tview.Escape(r.IRCAccount))
+			}
+			fmt.Fprintf(logView, "[white]  #%d %s hosts:%d sessions:%d%s%s[white]\n",
+				r.ID, tview.Escape(r.CurrentNick), r.HostCount, r.SessionCount, account, released)
+		}
+	case "/usermerge":
+		parts = strings.SplitN(text, " ", 5)
+		if len(parts) < 3 {
+			fmt.Fprintf(logView, "[yellow]Usage: /usermerge <ghost_id> <target_id> [hash][white]\n")
+			break
+		}
+		if theDB == nil {
+			fmt.Fprintf(logView, "[red]Database not available[white]\n")
+			break
+		}
+		ghostID, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			fmt.Fprintf(logView, "[red]Invalid ghost user ID: %s[white]\n", parts[1])
+			break
+		}
+		targetID, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			fmt.Fprintf(logView, "[red]Invalid target user ID: %s[white]\n", parts[2])
+			break
+		}
+		if ghostID == targetID {
+			fmt.Fprintf(logView, "[red]Cannot merge a user into itself[white]\n")
+			break
+		}
+		ghost, err := getUserByID(ghostID)
+		if err != nil {
+			fmt.Fprintf(logView, "[red]Error: %s[white]\n", err)
+			break
+		}
+		if ghost == nil {
+			fmt.Fprintf(logView, "[red]Ghost user #%d not found[white]\n", ghostID)
+			break
+		}
+		target, err := getUserByID(targetID)
+		if err != nil {
+			fmt.Fprintf(logView, "[red]Error: %s[white]\n", err)
+			break
+		}
+		if target == nil {
+			fmt.Fprintf(logView, "[red]Target user #%d not found[white]\n", targetID)
+			break
+		}
+
+		if len(parts) >= 4 && parts[3] != "" {
+			expected := computeMergeHash(ghost, target)
+			if parts[3] != expected {
+				fmt.Fprintf(logView, "[red]Hash mismatch. Users may have changed. Re-run without hash to verify.[white]\n")
+				break
+			}
+			if err := mergeUser(ghostID, targetID); err != nil {
+				fmt.Fprintf(logView, "[red]Merge failed: %s[white]\n", err)
+				break
+			}
+			fmt.Fprintf(logView, "[green]Merged user #%d (%s) into #%d (%s)[white]\n",
+				ghostID, tview.Escape(ghost.CurrentNick), targetID, tview.Escape(target.CurrentNick))
+		} else {
+			fmt.Fprintf(logView, "[white]Ghost (will be deleted):[white]\n")
+			ghostInfo, _ := getUserInfo(ghostID)
+			if ghostInfo != nil {
+				printUserInfo(logView, ghostInfo)
+			}
+			fmt.Fprintf(logView, "[white]Target (will survive):[white]\n")
+			targetInfo, _ := getUserInfo(targetID)
+			if targetInfo != nil {
+				printUserInfo(logView, targetInfo)
+			}
+			hash := computeMergeHash(ghost, target)
+			fmt.Fprintf(logView, "[yellow]Confirm: /usermerge %d %d %s[white]\n", ghostID, targetID, hash)
+		}
+	case "/userrelease":
+		if len(parts) < 3 {
+			fmt.Fprintf(logView, "[yellow]Usage: /userrelease <network> <nick|id>[white]\n")
+			break
+		}
+		if theDB == nil {
+			fmt.Fprintf(logView, "[red]Database not available[white]\n")
+			break
+		}
+		network, userRef := parts[1], parts[2]
+		var user *User
+		if id, err := strconv.ParseInt(userRef, 10, 64); err == nil {
+			user, err = getUserByID(id)
+			if err != nil {
+				fmt.Fprintf(logView, "[red]Error: %s[white]\n", err)
+				break
+			}
+		} else {
+			cm := getCasemapping(network)
+			var err error
+			user, err = resolveUserByNick(network, userRef, cm)
+			if err != nil {
+				fmt.Fprintf(logView, "[red]Error: %s[white]\n", err)
+				break
+			}
+		}
+		if user == nil {
+			fmt.Fprintf(logView, "[yellow]User not found[white]\n")
+			break
+		}
+		if isReleasedNick(user.NormalizedNick) {
+			fmt.Fprintf(logView, "[yellow]User #%d nick is already released[white]\n", user.ID)
+			break
+		}
+		oldNick := user.CurrentNick
+		if err := releaseUserNick(user.ID); err != nil {
+			fmt.Fprintf(logView, "[red]Failed to release nick: %s[white]\n", err)
+			break
+		}
+		fmt.Fprintf(logView, "[green]Released nick %q for user #%d on %s[white]\n",
+			tview.Escape(oldNick), user.ID, network)
 	default:
 		fmt.Fprintf(logView, "[yellow]Unknown command: %s[white]\n", text)
 	}

@@ -896,9 +896,68 @@ func ircClient(network Network) {
 	client.Handlers.Add(girc.QUIT, func(client *girc.Client, event girc.Event) {
 		casemapping := getCasemapping(network.Name)
 		nick := event.Source.Name
-		user, _ := getUserByNormalizedNick(network.Name, normalizeIRC(nick, casemapping))
+		norm := normalizeIRC(nick, casemapping)
+		user, _ := getUserByNormalizedNick(network.Name, norm)
 		if user != nil {
 			log.Debug("tracked user quit", "nick", nick, "user_id", user.ID, "network", network.Name)
+			if err := releaseUserNick(user.ID); err != nil {
+				log.Error("failed to release user nick on quit", "user_id", user.ID, "error", err)
+			}
+		}
+	})
+
+	client.Handlers.Add(girc.JOIN, func(client *girc.Client, event girc.Event) {
+		nick := event.Source.Name
+		if nick == client.GetNick() {
+			return
+		}
+		casemapping := getCasemapping(network.Name)
+		account := ""
+		if u := client.LookupUser(nick); u != nil {
+			account = u.Extras.Account
+		}
+		_, err := resolveUser(network.Name, nick, event.Source.Ident, event.Source.Host, account, casemapping)
+		if err != nil {
+			log.Error("failed to resolve user on join", "nick", nick, "error", err)
+		}
+	})
+
+	client.Handlers.Add(girc.PART, func(client *girc.Client, event girc.Event) {
+		nick := event.Source.Name
+		if nick == client.GetNick() {
+			return
+		}
+		if u := client.LookupUser(nick); u == nil || len(u.ChannelList) == 0 {
+			casemapping := getCasemapping(network.Name)
+			norm := normalizeIRC(nick, casemapping)
+			user, _ := getUserByNormalizedNick(network.Name, norm)
+			if user != nil {
+				log.Debug("user no longer visible after part, releasing nick", "nick", nick, "user_id", user.ID, "network", network.Name)
+				if err := releaseUserNick(user.ID); err != nil {
+					log.Error("failed to release user nick on part", "user_id", user.ID, "error", err)
+				}
+			}
+		}
+	})
+
+	client.Handlers.Add(girc.KICK, func(client *girc.Client, event girc.Event) {
+		if len(event.Params) < 2 {
+			return
+		}
+		kickedNick := event.Params[1]
+		if kickedNick == client.GetNick() {
+			return
+		}
+		if u := client.LookupUser(kickedNick); u == nil || len(u.ChannelList) == 0 {
+			casemapping := getCasemapping(network.Name)
+			norm := normalizeIRC(kickedNick, casemapping)
+			user, _ := getUserByNormalizedNick(network.Name, norm)
+			if user != nil {
+				log.Debug("user no longer visible after kick, releasing nick", "nick", kickedNick, "user_id", user.ID, "network", network.Name)
+				if err := releaseUserNick(user.ID); err != nil {
+					log.Error("failed to release user nick on kick", "user_id", user.ID, "error", err)
+				}
+			}
 		}
 	})
 

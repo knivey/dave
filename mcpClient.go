@@ -39,6 +39,18 @@ type MCPServer struct {
 	reconnectCount int
 }
 
+type headerTransport struct {
+	base    http.RoundTripper
+	headers map[string]string
+}
+
+func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	for k, v := range t.headers {
+		req.Header.Set(k, v)
+	}
+	return t.base.RoundTrip(req)
+}
+
 var (
 	mcpServers      map[string]*MCPServer
 	mcpServersMu    sync.Mutex
@@ -68,8 +80,28 @@ func connectMCPServer(name string, mcpCfg MCPConfig) (*MCPServer, error) {
 			cmd.Env = append(os.Environ(), mcpCfg.Env...)
 		}
 		transport = &mcp.CommandTransport{Command: cmd, TerminateDuration: 2 * time.Second}
+	} else if mcpCfg.Transport == "sse" {
+		sseT := &mcp.SSEClientTransport{Endpoint: mcpCfg.URL}
+		if len(mcpCfg.Headers) > 0 {
+			sseT.HTTPClient = &http.Client{
+				Transport: &headerTransport{
+					base:    http.DefaultTransport,
+					headers: mcpCfg.Headers,
+				},
+			}
+		}
+		transport = sseT
 	} else {
-		transport = &mcp.StreamableClientTransport{Endpoint: mcpCfg.URL}
+		sct := &mcp.StreamableClientTransport{Endpoint: mcpCfg.URL}
+		if len(mcpCfg.Headers) > 0 {
+			sct.HTTPClient = &http.Client{
+				Transport: &headerTransport{
+					base:    http.DefaultTransport,
+					headers: mcpCfg.Headers,
+				},
+			}
+		}
+		transport = sct
 	}
 
 	session, err := client.Connect(ctx, transport, nil)

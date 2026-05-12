@@ -1,16 +1,17 @@
 # MCP servers provide tools, resources, and prompts that chat commands can use.
 # Tools are automatically injected into the LLM request when a command opts-in via mcps = [...].
 # Resources and prompts are available via bridge functions for explicit use.
-# Supported transports: "stdio" (spawn a local process) and "http" (streamable HTTP endpoint).
+# Supported transports: "stdio" (spawn a local process), "http" (streamable HTTP), and "sse" (legacy SSE).
 #
 # Available options (per [section]):
-#   transport  (string, required)  "stdio" or "http"
+#   transport  (string, required)  "stdio", "http", or "sse"
 #   command    (string)            Executable to spawn (required for stdio)
 #   args       (string array)      Arguments passed to command
 #   env        (string array)      Environment variables in "KEY=value" format (stdio only)
-#   url        (string)            HTTP endpoint URL (required for http)
+#   url        (string)            HTTP endpoint URL (required for http and sse)
 #   timeout    (duration, default: 30s)  Tool call timeout
-#   keepalive  (duration)          Ping interval for liveness detection. Default: 30s for http, 0 (disabled) for stdio
+#   keepalive  (duration)          Ping interval for liveness detection. Default: 30s for http/sse, 0 (disabled) for stdio
+#   headers    (string map)        Custom HTTP headers to send with every request (http and sse only)
 #
 # Duration values: TOML strings like "30s", "2m", "1m30s".
 #
@@ -27,6 +28,22 @@
 # [github]
 # transport = "http"
 # url = "http://localhost:3001/mcp"
+# timeout = "30s"
+# keepalive = "30s"
+#
+# Example — http transport with API key authentication:
+# [dave-web]
+# transport = "http"
+# url = "http://localhost:8081/message"
+# headers = { "X-API-Key" = "dave_abc123..." }
+# timeout = "30s"
+# keepalive = "30s"
+#
+# Example — SSE transport (legacy, e.g. mark3labs/mcp-go servers) with API key:
+# [dave-web]
+# transport = "sse"
+# url = "http://localhost:8081/sse"
+# headers = { "X-API-Key" = "dave_abc123..." }
 # timeout = "30s"
 # keepalive = "30s"
 #

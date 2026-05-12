@@ -248,13 +248,14 @@ type Service struct {
 }
 
 type MCPConfig struct {
-	Transport string        `toml:"transport"` // "stdio" or "http"
-	Command   string        `toml:"command"`
-	Args      []string      `toml:"args"`
-	Env       []string      `toml:"env"`
-	URL       string        `toml:"url"`
-	Timeout   time.Duration `toml:"timeout"`
-	KeepAlive time.Duration `toml:"keepalive"` // ping interval for liveness; default 30s for http, 0 for stdio
+	Transport string            `toml:"transport"` // "stdio", "http", or "sse"
+	Command   string            `toml:"command"`
+	Args      []string          `toml:"args"`
+	Env       []string          `toml:"env"`
+	URL       string            `toml:"url"`
+	Timeout   time.Duration     `toml:"timeout"`
+	KeepAlive time.Duration     `toml:"keepalive"` // ping interval for liveness; default 30s for http, 0 for stdio
+	Headers   map[string]string `toml:"headers"`
 }
 
 type SystemPromptData struct {
@@ -515,21 +516,21 @@ func loadMCPsFile(dir string, config *Config) error {
 	}
 	for name, mcpCfg := range config.MCPs {
 		if mcpCfg.Transport == "" {
-			return fmt.Errorf("mcps.%s transport is required (stdio or http)", name)
+			return fmt.Errorf("mcps.%s transport is required (stdio, http, or sse)", name)
 		}
-		if mcpCfg.Transport != "stdio" && mcpCfg.Transport != "http" {
-			return fmt.Errorf("mcps.%s transport must be 'stdio' or 'http'", name)
+		if mcpCfg.Transport != "stdio" && mcpCfg.Transport != "http" && mcpCfg.Transport != "sse" {
+			return fmt.Errorf("mcps.%s transport must be 'stdio', 'http', or 'sse'", name)
 		}
 		if mcpCfg.Transport == "stdio" && mcpCfg.Command == "" {
 			return fmt.Errorf("mcps.%s command is required for stdio transport", name)
 		}
-		if mcpCfg.Transport == "http" && mcpCfg.URL == "" {
-			return fmt.Errorf("mcps.%s url is required for http transport", name)
+		if (mcpCfg.Transport == "http" || mcpCfg.Transport == "sse") && mcpCfg.URL == "" {
+			return fmt.Errorf("mcps.%s url is required for %s transport", name, mcpCfg.Transport)
 		}
 		if mcpCfg.Timeout == 0 {
 			mcpCfg.Timeout = 30 * time.Second
 		}
-		if mcpCfg.KeepAlive == 0 && mcpCfg.Transport == "http" {
+		if mcpCfg.KeepAlive == 0 && (mcpCfg.Transport == "http" || mcpCfg.Transport == "sse") {
 			mcpCfg.KeepAlive = 30 * time.Second
 		}
 		config.MCPs[name] = mcpCfg

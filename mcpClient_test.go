@@ -49,6 +49,15 @@ service = "test"`,
 			wantErr: "",
 		},
 		{
+			name: "valid sse MCP",
+			mcpsTOML: `[test]
+transport = "sse"
+url = "http://localhost:8081/sse"`,
+			chatsTOML: `[chat]
+service = "test"`,
+			wantErr: "",
+		},
+		{
 			name: "missing transport",
 			mcpsTOML: `[test]
 command = "echo"`,
@@ -63,7 +72,7 @@ transport = "websocket"
 url = "http://localhost:3000"`,
 			chatsTOML: `[chat]
 service = "test"`,
-			wantErr: "transport must be 'stdio' or 'http'",
+			wantErr: "transport must be",
 		},
 		{
 			name: "stdio missing command",
@@ -80,6 +89,14 @@ transport = "http"`,
 			chatsTOML: `[chat]
 service = "test"`,
 			wantErr: "url is required for http",
+		},
+		{
+			name: "sse missing url",
+			mcpsTOML: `[test]
+transport = "sse"`,
+			chatsTOML: `[chat]
+service = "test"`,
+			wantErr: "url is required for sse",
 		},
 		{
 			name:     "command references unknown MCP",
@@ -909,4 +926,87 @@ func TestMCPServerCmd_HTTP(t *testing.T) {
 	srv, err := connectMCPServerImpl("test", mcpCfg)
 	require.NoError(t, err)
 	assert.Nil(t, srv.cmd, "cmd should be nil for http transport")
+}
+
+func TestHeaderTransport(t *testing.T) {
+	var gotHeaders http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	ht := &headerTransport{
+		base: http.DefaultTransport,
+		headers: map[string]string{
+			"X-API-Key":     "dave_testkey123",
+			"X-Custom-Auth": "bearer-token",
+		},
+	}
+
+	client := &http.Client{Transport: ht}
+	req, err := http.NewRequest("GET", server.URL, nil)
+	require.NoError(t, err)
+
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, "dave_testkey123", gotHeaders.Get("X-API-Key"))
+	assert.Equal(t, "bearer-token", gotHeaders.Get("X-Custom-Auth"))
+}
+
+func TestHeaderTransport_EmptyHeaders(t *testing.T) {
+	var gotHeaders http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	ht := &headerTransport{
+		base:    http.DefaultTransport,
+		headers: map[string]string{},
+	}
+
+	client := &http.Client{Transport: ht}
+	req, err := http.NewRequest("GET", server.URL, nil)
+	require.NoError(t, err)
+
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Empty(t, gotHeaders.Get("X-API-Key"))
+}
+
+func TestMCPConfigHeadersParsed(t *testing.T) {
+	dir := t.TempDir()
+	mcpsTOML := `
+[test]
+transport = "http"
+url = "http://localhost:8081/message"
+headers = { "X-API-Key" = "dave_abc123", "Authorization" = "Bearer token456" }
+`
+	chatsTOML := `[chat]
+service = "test"
+`
+	servicesTOML := `
+[test]
+maxtokens = 100
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.toml"), []byte(""), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "mcps.toml"), []byte(mcpsTOML), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "chats.toml"), []byte(chatsTOML), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "services.toml"), []byte(servicesTOML), 0644))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "go", "run", ".", dir)
+	cmd.Env = append(os.Environ(), "LOGXI_FORMAT=maxcol=9999", "DAVE_NO_TUI=1")
+	output, _ := cmd.CombinedOutput()
+	outStr := string(output)
+
+	assert.NotContains(t, outStr, "transport is required", "unexpected config error: %s", outStr)
+	assert.NotContains(t, outStr, "url is required", "unexpected config error: %s", outStr)
 }

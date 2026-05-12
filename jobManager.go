@@ -322,7 +322,7 @@ func switchToSession(job *asyncJob) string {
 		return ""
 	}
 
-	apiLogger.RestoreSession(job.SessionID, job.Network, job.Channel, job.Nick)
+	apiLogger.RestoreSession(job.SessionID, job.Network, job.Channel, job.UserID)
 
 	var switchMsg string
 	if oldID != 0 {

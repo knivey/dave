@@ -457,7 +457,7 @@ func historyResume(network Network, c *girc.Client, e girc.Event, args ...string
 		c.Cmd.Reply(e, expandNotice(n.Sessions.Paused, map[string]string{"id": fmt.Sprintf("%d", oldID)}))
 	}
 
-	apiLogger.RestoreSession(sessionID, network.Name, channel, e.Source.Name)
+	apiLogger.RestoreSession(sessionID, network.Name, channel, resumeUserID)
 
 	c.Cmd.Reply(e, expandNotice(n.Sessions.Resumed, map[string]string{"id": fmt.Sprintf("%d", sessionID), "command": session.ChatCommand, "count": fmt.Sprintf("%d", len(messages))}))
 }

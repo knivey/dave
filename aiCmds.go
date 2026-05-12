@@ -1514,7 +1514,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 			Role:    RoleSystem,
 			Content: systemContent,
 		})
-		apiLogger.RestoreSession(sid, network.Name, channel, nick)
+		apiLogger.RestoreSession(sid, network.Name, channel, userID)
 		session, err = sessionMgr.GetSession(sid)
 		mu.Unlock()
 		if err != nil || session == nil {

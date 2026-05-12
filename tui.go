@@ -922,8 +922,9 @@ func handleTUICommand(text string) {
 					fmt.Fprintf(logView, "[red]Compaction failed for session %d: %s[white]\n", sessionID, err)
 					return
 				}
-				fmt.Fprintf(logView, "[green]Compacted session %d: %d messages, %d→%d tokens, %dms[white]\n",
-					sessionID, res.ArchivedCount, res.PromptTokens, res.CompletionTokens, res.DurationMs)
+				vars := compactionNoticeVars(res, sessionID)
+				fmt.Fprintf(logView, "[green]Compacted session %d: %s messages, total: %s tokens, cached: %s, %dms[white]\n",
+					sessionID, vars["count"], vars["total"], vars["cached"], res.DurationMs)
 			})
 		}()
 	default:

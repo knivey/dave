@@ -87,13 +87,13 @@
 #
 # [compaction] options:
 #   started      (string)  Compaction started notice.
-#   completed    (string)  Compaction completed. Placeholders: {count}, {tokens_in}, {tokens_out}, {duration}
+#   completed    (string)  Compaction completed. Placeholders: {count}, {tokens_in}, {tokens_out}, {duration}, {prompt}, {completion}, {total}, {cached}, {reasoning}
 #   failed       (string)  Compaction failed. Placeholders: {error}
 #   too_short    (string)  Not enough history to compact.
 #   no_active    (string)  No active session to compact.
 #   in_progress  (string)  Compaction already running.
 #   disabled     (string)  Compaction disabled in config.
-#   auto_notice  (string)  Auto-compaction notice. Placeholders: {count}, {tokens_in}, {tokens_out}, {duration}
+#   auto_notice  (string)  Auto-compaction notice. Placeholders: {count}, {tokens_in}, {tokens_out}, {duration}, {prompt}, {completion}, {total}, {cached}, {reasoning}
 #
 # support           (string)     Support message
 #
@@ -183,13 +183,13 @@
 #
 # [compaction]
 # started = "\x0314🗜 Compacting session...\x0F"
-# completed = "\x0303✓ Compacted {count} earlier messages into a summary ({tokens_in}→{tokens_out} tokens, {duration}ms).\x0F"
+# completed = "\x0303✓ Compacted {count} earlier messages into a summary (total: {total} tokens, {cached} cached, {duration}ms).\x0F"
 # failed = "Compaction failed: {error}"
 # too_short = "Not enough history to compact yet."
 # no_active = "You don't have an active session to compact."
 # in_progress = "A compaction is already running for this session."
 # disabled = "Compaction is disabled in config."
-# auto_notice = "\x0314🗜 Auto-compacted {count} earlier messages ({tokens_in}→{tokens_out} tokens).\x0F"
+# auto_notice = "\x0314🗜 Auto-compacted {count} earlier messages ({total} tokens, {cached} cached).\x0F"
 #
 # support = "If you enjoy using dave, consider supporting development at https://patreon.com/shrew269 ❤️"
 

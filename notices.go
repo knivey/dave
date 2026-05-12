@@ -333,7 +333,7 @@ func setNoticesDefaults(n *NoticesConfig) {
 		n.Compaction.Started = "\x0314🗜 Compacting session...\x0F"
 	}
 	if n.Compaction.Completed == "" {
-		n.Compaction.Completed = "\x0303✓ Compacted {count} earlier messages into a summary ({tokens_in}→{tokens_out} tokens, {duration}ms).\x0F"
+		n.Compaction.Completed = "\x0303✓ Compacted {count} earlier messages into a summary (total: {total} tokens, {cached} cached, {duration}ms).\x0F"
 	}
 	if n.Compaction.Failed == "" {
 		n.Compaction.Failed = "Compaction failed: {error}"
@@ -351,7 +351,7 @@ func setNoticesDefaults(n *NoticesConfig) {
 		n.Compaction.Disabled = "Compaction is disabled in config."
 	}
 	if n.Compaction.AutoNotice == "" {
-		n.Compaction.AutoNotice = "\x0314🗜 Auto-compacted {count} earlier messages ({tokens_in}→{tokens_out} tokens).\x0F"
+		n.Compaction.AutoNotice = "\x0314🗜 Auto-compacted {count} earlier messages ({total} tokens, {cached} cached).\x0F"
 	}
 	if n.Support == "" {
 		n.Support = "If you enjoy using dave, consider supporting development at https://patreon.com/shrew269 ❤️"

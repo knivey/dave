@@ -689,6 +689,33 @@ func (sm *SessionManager) ShouldAutoCompact(sessionID int64, cfg AIConfig) bool 
 // Runs in its own goroutine so it never delays the user's reply. Best-effort
 // — if the bot disconnects, the session is closed, or another compaction is
 // already running, we silently skip.
+
+// compactionNoticeVars builds the placeholder map for a compaction notice.
+// It always includes summarizer tokens and the last recorded turn usage (if any).
+func compactionNoticeVars(res *CompactionResult, sessionID int64) map[string]string {
+	vars := map[string]string{
+		"count":      fmt.Sprintf("%d", res.ArchivedCount),
+		"tokens_in":  fmt.Sprintf("%d", res.PromptTokens),
+		"tokens_out": fmt.Sprintf("%d", res.CompletionTokens),
+		"duration":   fmt.Sprintf("%d", res.DurationMs),
+		"prompt":     "0",
+		"completion": "0",
+		"total":      "0",
+		"cached":     "0",
+		"reasoning":  "0",
+	}
+	if theDB != nil {
+		if tu, err := getLastTurnUsageForSession(sessionID); err == nil && tu != nil {
+			vars["prompt"] = fmt.Sprintf("%d", tu.PromptTokens)
+			vars["completion"] = fmt.Sprintf("%d", tu.CompletionTokens)
+			vars["total"] = fmt.Sprintf("%d", tu.PromptTokens+tu.CompletionTokens)
+			vars["cached"] = fmt.Sprintf("%d", tu.CachedTokens)
+			vars["reasoning"] = fmt.Sprintf("%d", tu.ReasoningTokens)
+		}
+	}
+	return vars
+}
+
 func maybeAutoCompact(runner *chatRunner, cfg AIConfig, network Network, c *girc.Client, channel, userNick string) {
 	if runner == nil || runner.sessionID == 0 {
 		return
@@ -720,12 +747,7 @@ func maybeAutoCompact(runner *chatRunner, cfg AIConfig, network Network, c *girc
 			return
 		}
 		n := getNotices()
-		msg := expandNotice(n.Compaction.AutoNotice, map[string]string{
-			"count":      fmt.Sprintf("%d", res.ArchivedCount),
-			"tokens_in":  fmt.Sprintf("%d", res.PromptTokens),
-			"tokens_out": fmt.Sprintf("%d", res.CompletionTokens),
-			"duration":   fmt.Sprintf("%d", res.DurationMs),
-		})
+		msg := expandNotice(n.Compaction.AutoNotice, compactionNoticeVars(res, sessionID))
 		if msg != "" {
 			c.Cmd.Message(channel, msg)
 		}

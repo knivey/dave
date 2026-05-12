@@ -671,10 +671,5 @@ func historyCompact(network Network, c *girc.Client, e girc.Event, ctx context.C
 		return
 	}
 
-	send(expandNotice(n.Compaction.Completed, map[string]string{
-		"count":      fmt.Sprintf("%d", res.ArchivedCount),
-		"tokens_in":  fmt.Sprintf("%d", res.PromptTokens),
-		"tokens_out": fmt.Sprintf("%d", res.CompletionTokens),
-		"duration":   fmt.Sprintf("%d", res.DurationMs),
-	}))
+	send(expandNotice(n.Compaction.Completed, compactionNoticeVars(res, session.ID)))
 }

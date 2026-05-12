@@ -307,6 +307,30 @@ func TestDBUserSessions(t *testing.T) {
 	assert.Len(t, sessions, 3, "sessions for nick")
 }
 
+func TestDBUserSessionsByNetwork(t *testing.T) {
+	_, cleanup := setupTestDB(t)
+	defer cleanup()
+
+	testCreateSession(t, "net", "#chan1", "nick", "chat", "", "")
+	testCreateSession(t, "net", "#chan2", "nick", "chat", "", "")
+	testCreateSession(t, "net", "#chan2", "nick", "chat", "", "")
+	testCreateSession(t, "other", "#chan1", "nick", "chat", "", "")
+
+	userID := ensureTestUser(t, "net", "nick")
+	sessions, err := getUserDBSessionsByNetwork("net", userID, 10)
+	require.NoError(t, err, "getUserDBSessionsByNetwork failed")
+	assert.Len(t, sessions, 3, "sessions for nick on net across channels")
+
+	sessions, err = getUserDBSessionsByNetwork("net", userID, 2)
+	require.NoError(t, err, "getUserDBSessionsByNetwork with limit failed")
+	assert.Len(t, sessions, 2, "sessions limited")
+
+	otherUserID := ensureTestUser(t, "other", "nick")
+	sessions, err = getUserDBSessionsByNetwork("other", otherUserID, 10)
+	require.NoError(t, err, "getUserDBSessionsByNetwork wrong network")
+	assert.Len(t, sessions, 1, "sessions for nick on other network")
+}
+
 func TestDBUserStats(t *testing.T) {
 	_, cleanup := setupTestDB(t)
 	defer cleanup()

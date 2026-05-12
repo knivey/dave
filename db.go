@@ -450,6 +450,13 @@ func getUserDBSessions(network, channel string, userID int64, limit int) ([]Sess
 	return sessions, err
 }
 
+func getUserDBSessionsByNetwork(network string, userID int64, limit int) ([]Session, error) {
+	var sessions []Session
+	err := theDB.Where("network = ? AND user_id = ?", network, userID).
+		Order("last_active DESC").Limit(limit).Find(&sessions).Error
+	return sessions, err
+}
+
 func getDBSessionByID(id int64) (*Session, error) {
 	var session Session
 	err := theDB.Where("id = ?", id).First(&session).Error

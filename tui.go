@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -456,6 +457,8 @@ func handleTUICommand(text string) {
 		fmt.Fprintf(logView, "                               - Merge ghost user into target\n")
 		fmt.Fprintf(logView, "  /userrelease <network> <nick|id>\n")
 		fmt.Fprintf(logView, "                               - Release a user's nick claim\n")
+		fmt.Fprintf(logView, "  /sessions <network> <nick|id> [channel]\n")
+		fmt.Fprintf(logView, "                               - List sessions for a user\n")
 		fmt.Fprintf(logView, "  /compact <session-id>        - Summarize old messages of a session\n")
 	case "/reload":
 		if len(parts) >= 2 {
@@ -866,6 +869,134 @@ func handleTUICommand(text string) {
 		}
 		fmt.Fprintf(logView, "[green]Released nick %q for user #%d on %s[white]\n",
 			tview.Escape(oldNick), user.ID, network)
+	case "/sessions":
+		if len(parts) < 3 {
+			fmt.Fprintf(logView, "[yellow]Usage: /sessions <network> <nick|id> [channel][white]\n")
+			break
+		}
+		if theDB == nil {
+			fmt.Fprintf(logView, "[red]Database not available[white]\n")
+			break
+		}
+		network, userRef := parts[1], parts[2]
+		cm := getCasemapping(network)
+		var userID int64
+		if id, err := strconv.ParseInt(userRef, 10, 64); err == nil {
+			userID = id
+		} else {
+			user, err := resolveUserByNick(network, userRef, cm)
+			if err != nil {
+				fmt.Fprintf(logView, "[red]Error: %s[white]\n", err)
+				break
+			}
+			if user == nil {
+				fmt.Fprintf(logView, "[yellow]User %s not found on %s[white]\n", tview.Escape(userRef), network)
+				break
+			}
+			userID = user.ID
+		}
+		var limit int
+		readConfig(func() { limit = config.SessionsDisplayLimit })
+		var sessions []Session
+		var err error
+		showChannel := false
+		if len(parts) >= 4 {
+			channel := normalizeIRC(parts[3], cm)
+			sessions, err = getUserDBSessions(network, channel, userID, limit)
+		} else {
+			sessions, err = getUserDBSessionsByNetwork(network, userID, limit)
+			showChannel = true
+		}
+		if err != nil {
+			fmt.Fprintf(logView, "[red]Error querying sessions: %s[white]\n", err)
+			break
+		}
+		if len(sessions) == 0 {
+			fmt.Fprintf(logView, "[white]No sessions found for %s on %s[white]\n", tview.Escape(userRef), network)
+			break
+		}
+		var trigger string
+		readConfig(func() { trigger = config.Trigger })
+		if trigger == "" {
+			trigger = "!"
+		}
+		type sessionLine struct {
+			icon    string
+			idStr   string
+			channel string
+			msgStr  string
+			timeStr string
+			cmd     string
+			preview string
+		}
+		lines := make([]sessionLine, len(sessions))
+		maxID := 0
+		maxChan := 0
+		maxMsg := 0
+		maxTime := 0
+		for i, s := range sessions {
+			icon := "[green]●[white]"
+			if s.Status != "active" {
+				icon = "[red]○[white]"
+			}
+			var activeMsgs, archivedMsgs int64
+			theDB.Model(&Message{}).Where("session_id = ? AND archived = ?", s.ID, false).Count(&activeMsgs)
+			theDB.Model(&Message{}).
+				Where("session_id = ? AND archived = ? AND superseded = ?", s.ID, true, false).
+				Count(&archivedMsgs)
+			idStr := fmt.Sprintf("#%d", s.ID)
+			msgStr := fmt.Sprintf("%d msgs", activeMsgs)
+			if archivedMsgs > 0 {
+				msgStr = fmt.Sprintf("%d msgs (%d archived)", activeMsgs, archivedMsgs)
+			}
+			timeStr := formatTimeAgo(s.LastActive)
+			preview := strings.ReplaceAll(s.FirstMessage, "\n", " ")
+			if len(preview) > 80 {
+				preview = preview[:77] + "..."
+			}
+			lines[i] = sessionLine{icon, idStr, tview.Escape(s.Channel), msgStr, timeStr, tview.Escape(s.ChatCommand), tview.Escape(preview)}
+			if l := utf8.RuneCountInString(idStr); l > maxID {
+				maxID = l
+			}
+			if showChannel {
+				if l := utf8.RuneCountInString(s.Channel); l > maxChan {
+					maxChan = l
+				}
+			}
+			if l := utf8.RuneCountInString(msgStr); l > maxMsg {
+				maxMsg = l
+			}
+			if l := utf8.RuneCountInString(timeStr); l > maxTime {
+				maxTime = l
+			}
+		}
+		for _, l := range lines {
+			var line string
+			if showChannel {
+				line = fmt.Sprintf("  %s %s  %s  %s  %s  %s%s",
+					l.icon,
+					l.idStr+strings.Repeat(" ", maxID-utf8.RuneCountInString(l.idStr)),
+					l.channel+strings.Repeat(" ", maxChan-utf8.RuneCountInString(l.channel)),
+					l.msgStr+strings.Repeat(" ", maxMsg-utf8.RuneCountInString(l.msgStr)),
+					l.timeStr+strings.Repeat(" ", maxTime-utf8.RuneCountInString(l.timeStr)),
+					tview.Escape(trigger),
+					l.cmd,
+				)
+			} else {
+				line = fmt.Sprintf("  %s %s  %s  %s  %s%s",
+					l.icon,
+					l.idStr+strings.Repeat(" ", maxID-utf8.RuneCountInString(l.idStr)),
+					l.msgStr+strings.Repeat(" ", maxMsg-utf8.RuneCountInString(l.msgStr)),
+					l.timeStr+strings.Repeat(" ", maxTime-utf8.RuneCountInString(l.timeStr)),
+					tview.Escape(trigger),
+					l.cmd,
+				)
+			}
+			if l.preview != "" {
+				line += " " + l.preview
+			}
+			fmt.Fprintln(logView, line)
+		}
 	case "/compact":
 		if len(parts) < 2 {
 			fmt.Fprintf(logView, "[yellow]Usage: /compact <session-id>[white]\n")

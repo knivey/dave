@@ -73,8 +73,50 @@ type Message struct {
 	MultiContent     *string `gorm:"type:text"`
 	IsAsyncResult    bool    `gorm:"default:false"`
 	SettingsID       *int64  `gorm:"index:idx_messages_settings"`
+	// Archived: when true, this message has been compacted into a summary and is
+	// no longer included in the active history sent to the LLM. Originals are
+	// preserved for the history viewer and future reconstruction. CompactionID
+	// references the Compaction row that performed the archival.
+	Archived     bool   `gorm:"not null;default:false;index:idx_messages_archived"`
+	CompactionID *int64 `gorm:"index:idx_messages_compaction"`
+	// SourceCompactionID, when non-nil, indicates this row was inserted as a
+	// tail-copy by the referenced compaction event (i.e. it duplicates content
+	// that the prior compaction had archived from a higher row id). On the
+	// NEXT compaction, rows with SourceCompactionID set are marked
+	// Superseded=true rather than counted as fresh archived material; this
+	// keeps user-visible archived counts and the history viewer from being
+	// inflated by repeated re-archival of the same content. See compaction.go
+	// for the transaction logic.
+	SourceCompactionID *int64 `gorm:"index:idx_messages_source_compaction"`
+	// Superseded: hidden-from-users flag for tail-copy rows that have already
+	// been re-archived by a later compaction. Such rows still exist on disk
+	// (no GC in this change; relies on MaxAgeDays session cleanup) but are
+	// excluded from loadDBSessionMessagesAll and from the historySessions
+	// archived count. They are NOT visible in any UI surface.
+	Superseded bool `gorm:"not null;default:false;index:idx_messages_superseded"`
+	CreatedAt  time.Time
+}
+
+// Compaction records a single session-compaction event. Archived messages
+// reference this row via Message.CompactionID. See docs / AGENTS.md and
+// session compacting design notes.
+type Compaction struct {
+	ID               int64 `gorm:"primaryKey;autoIncrement"`
+	SessionID        int64 `gorm:"not null;index:idx_compactions_session"`
+	SummaryMessageID int64 `gorm:"not null"`
+	FirstArchivedID  int64 `gorm:"not null"`
+	LastArchivedID   int64 `gorm:"not null"`
+	ArchivedCount    int   `gorm:"not null"`
+	Service          string
+	Model            string
+	PromptTokens     int    `gorm:"default:0"`
+	CompletionTokens int    `gorm:"default:0"`
+	DurationMs       int    `gorm:"default:0"`
+	Trigger          string `gorm:"not null;default:'manual'"`
 	CreatedAt        time.Time
 }
+
+func (Compaction) TableName() string { return "compactions" }
 
 type PendingJob struct {
 	ID          int64   `gorm:"primaryKey;autoIncrement"`
@@ -196,7 +238,7 @@ func initDB(cfg DatabaseConfig, log logxi.Logger) (*gorm.DB, error) {
 
 	if err := db.AutoMigrate(
 		&Session{}, &Message{}, &PendingJob{}, &TurnUsage{}, &SessionSetting{},
-		&User{}, &UserKnownHost{}, &NickChange{}, &Ban{},
+		&User{}, &UserKnownHost{}, &NickChange{}, &Ban{}, &Compaction{},
 	); err != nil {
 		return nil, fmt.Errorf("running migrations: %w", err)
 	}
@@ -302,10 +344,95 @@ func reactivateDBStrandedSessions() (int64, error) {
 	return result.RowsAffected, result.Error
 }
 
+// loadDBSessionMessages returns the active (non-archived) messages for a
+// session, ordered by id. Compacted/archived messages are excluded so they
+// do not appear in the live history sent to the LLM. Use
+// loadDBSessionMessagesAll to inspect the full record including archived rows.
 func loadDBSessionMessages(sessionID int64) ([]Message, error) {
+	var messages []Message
+	err := theDB.Where("session_id = ? AND archived = ?", sessionID, false).
+		Order("id ASC").Find(&messages).Error
+	return messages, err
+}
+
+// loadDBSessionMessagesAll returns every message for a session including
+// archived rows, excluding only superseded tail-copy ghosts (rows that have
+// been re-archived by a later compaction and represent content already
+// covered by an existing summary). Used by the history viewer for read-only
+// display of compacted ranges. Superseded rows live on disk until session
+// cleanup but never surface to users.
+func loadDBSessionMessagesAll(sessionID int64) ([]Message, error) {
+	var messages []Message
+	err := theDB.Where("session_id = ? AND superseded = ?", sessionID, false).
+		Order("id ASC").Find(&messages).Error
+	return messages, err
+}
+
+// loadDBSessionMessagesIncludingSuperseded returns absolutely every row for a
+// session — including superseded tail-copy ghosts. Intended for tests and
+// debug tooling only. Production code paths should use
+// loadDBSessionMessagesAll.
+func loadDBSessionMessagesIncludingSuperseded(sessionID int64) ([]Message, error) {
 	var messages []Message
 	err := theDB.Where("session_id = ?", sessionID).Order("id ASC").Find(&messages).Error
 	return messages, err
+}
+
+// archiveMessagesRange marks every message in the (inclusive) id range as
+// archived and links it to the given compaction. Operates on the supplied
+// transaction so the caller can run it inside an outer atomic block.
+func archiveMessagesRange(tx *gorm.DB, sessionID, compactionID, firstID, lastID int64) error {
+	return tx.Model(&Message{}).
+		Where("session_id = ? AND id >= ? AND id <= ?", sessionID, firstID, lastID).
+		Updates(map[string]interface{}{"archived": true, "compaction_id": compactionID}).Error
+}
+
+// archiveMessageByID archives a single message (used for the original system
+// prompt row, which lives outside the contiguous compacted range).
+func archiveMessageByID(tx *gorm.DB, messageID, compactionID int64) error {
+	return tx.Model(&Message{}).Where("id = ?", messageID).
+		Updates(map[string]interface{}{"archived": true, "compaction_id": compactionID}).Error
+}
+
+// markMessagesSupersededByIDs marks a set of rows as superseded by a later
+// compaction. Used during compaction #N to neutralize tail-copies inserted by
+// compaction #N-1 (or earlier): the underlying content is already represented
+// by the earlier compaction's summary, so re-archiving these rows would
+// inflate user-visible archived counts and clutter the history viewer.
+//
+// Rows are also marked archived=true with compaction_id set to the new
+// compaction event so the bookkeeping is self-consistent — the row IS
+// archived (not live), it's just hidden from any user-facing surface.
+func markMessagesSupersededByIDs(tx *gorm.DB, ids []int64, compactionID int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return tx.Model(&Message{}).Where("id IN ?", ids).
+		Updates(map[string]interface{}{
+			"superseded":    true,
+			"archived":      true,
+			"compaction_id": compactionID,
+		}).Error
+}
+
+// getCompactionsForSession returns all compaction events for a session
+// ordered by creation time.
+func getCompactionsForSession(sessionID int64) ([]Compaction, error) {
+	var rows []Compaction
+	err := theDB.Where("session_id = ?", sessionID).Order("id ASC").Find(&rows).Error
+	return rows, err
+}
+
+// getLastTurnUsageForSession returns the most recent recorded TurnUsage for
+// a session, used to gauge whether the next turn is at risk of exceeding
+// the model's context window.
+func getLastTurnUsageForSession(sessionID int64) (*TurnUsage, error) {
+	var u TurnUsage
+	err := theDB.Where("session_id = ?", sessionID).Order("id DESC").First(&u).Error
+	if err != nil {
+		return nil, err
+	}
+	return &u, nil
 }
 
 func cleanupDBSessions(maxAgeDays int) (int64, error) {

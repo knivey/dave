@@ -356,8 +356,14 @@ func TestAllSessionTemplatesHavePlaceholders(t *testing.T) {
 		{
 			name:     "detail_header",
 			tmpl:     n.Sessions.DetailHeader,
-			vars:     map[string]string{"id": "42", "command": "chat", "count": "10"},
+			vars:     map[string]string{"id": "42", "command": "chat", "count": "10", "archived_suffix": ""},
 			expected: "\x02Session #42 (chat) — 10 messages:\x02",
+		},
+		{
+			name:     "detail_header_with_archived",
+			tmpl:     n.Sessions.DetailHeader,
+			vars:     map[string]string{"id": "42", "command": "chat", "count": "10", "archived_suffix": " (24 archived)"},
+			expected: "\x02Session #42 (chat) — 10 messages (24 archived):\x02",
 		},
 		{
 			name:     "truncated",

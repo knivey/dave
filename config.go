@@ -36,6 +36,7 @@ type Config struct {
 	DisabledBuiltins     []string          `toml:"disabled_builtins"`
 	DisabledBuiltinTools []string          `toml:"disabled_builtin_tools"`
 	Bans                 BanConfig         `toml:"bans"`
+	Compaction           CompactionConfig  `toml:"compaction"`
 }
 
 type BanConfig struct {
@@ -420,6 +421,7 @@ func loadConfigDir(dir string) (Config, error) {
 	if config.Bans.DefaultDuration == "" {
 		config.Bans.DefaultDuration = "5m"
 	}
+	config.Compaction.ApplyDefaults()
 	if config.TUI.ScrollbackLines == 0 {
 		config.TUI.ScrollbackLines = 5000
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"os"
 	"strconv"
@@ -455,6 +456,7 @@ func handleTUICommand(text string) {
 		fmt.Fprintf(logView, "                               - Merge ghost user into target\n")
 		fmt.Fprintf(logView, "  /userrelease <network> <nick|id>\n")
 		fmt.Fprintf(logView, "                               - Release a user's nick claim\n")
+		fmt.Fprintf(logView, "  /compact <session-id>        - Summarize old messages of a session\n")
 	case "/reload":
 		if len(parts) >= 2 {
 			mcpName := parts[1]
@@ -864,6 +866,66 @@ func handleTUICommand(text string) {
 		}
 		fmt.Fprintf(logView, "[green]Released nick %q for user #%d on %s[white]\n",
 			tview.Escape(oldNick), user.ID, network)
+	case "/compact":
+		if len(parts) < 2 {
+			fmt.Fprintf(logView, "[yellow]Usage: /compact <session-id>[white]\n")
+			break
+		}
+		sessionID, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			fmt.Fprintf(logView, "[red]Invalid session id: %s[white]\n", parts[1])
+			break
+		}
+		session, err := getDBSessionByID(sessionID)
+		if err != nil || session == nil {
+			fmt.Fprintf(logView, "[red]Session %d not found[white]\n", sessionID)
+			break
+		}
+		bot, ok := getBot(session.Network)
+		if !ok {
+			fmt.Fprintf(logView, "[red]Unknown network for session: %s[white]\n", session.Network)
+			break
+		}
+		var cfg AIConfig
+		var cfgOk bool
+		readConfig(func() { cfg, cfgOk = config.Commands.Chats[session.ChatCommand] })
+		if session.SettingsID != nil {
+			if settings, sErr := sessionMgr.GetSessionSettings(*session.SettingsID); sErr == nil && settings != nil {
+				cfg = ApplySettings(settings, cfg)
+				cfgOk = true
+			}
+		}
+		if !cfgOk {
+			fmt.Fprintf(logView, "[red]Chat command %q for session %d no longer exists[white]\n", session.ChatCommand, sessionID)
+			break
+		}
+		userNick := ""
+		if session.UserID != nil {
+			if u, err := getUserByID(*session.UserID); err == nil && u != nil {
+				userNick = u.CurrentNick
+			}
+		}
+		fmt.Fprintf(logView, "[white]Compacting session #%d...[white]\n", sessionID)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+			res, err := sessionMgr.CompactSession(ctx, CompactSessionInputs{
+				SessionID: sessionID,
+				Network:   bot.Network,
+				Channel:   session.Channel,
+				UserNick:  userNick,
+				Client:    bot.Client,
+				Trigger:   "manual",
+			}, cfg)
+			tuiApp.QueueUpdateDraw(func() {
+				if err != nil {
+					fmt.Fprintf(logView, "[red]Compaction failed for session %d: %s[white]\n", sessionID, err)
+					return
+				}
+				fmt.Fprintf(logView, "[green]Compacted session %d: %d messages, %d→%d tokens, %dms[white]\n",
+					sessionID, res.ArchivedCount, res.PromptTokens, res.CompletionTokens, res.DurationMs)
+			})
+		}()
 	default:
 		fmt.Fprintf(logView, "[yellow]Unknown command: %s[white]\n", text)
 	}

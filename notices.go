@@ -12,18 +12,19 @@ import (
 )
 
 type NoticesConfig struct {
-	Queue    QueueNotices    `toml:"queue"`
-	Rate     RateNotices     `toml:"rate"`
-	Format   FormatNotices   `toml:"format"`
-	Context  ContextNotices  `toml:"context"`
-	Sessions SessionNotices  `toml:"sessions"`
-	DB       DBNotices       `toml:"db"`
-	Images   ImageNotices    `toml:"images"`
-	Tools    ToolNotices     `toml:"tools"`
-	Pastebin PastebinNotices `toml:"pastebin"`
-	Jobs     JobNotices      `toml:"jobs"`
-	Bans     BanNotices      `toml:"bans"`
-	Support  string          `toml:"support"`
+	Queue      QueueNotices      `toml:"queue"`
+	Rate       RateNotices       `toml:"rate"`
+	Format     FormatNotices     `toml:"format"`
+	Context    ContextNotices    `toml:"context"`
+	Sessions   SessionNotices    `toml:"sessions"`
+	DB         DBNotices         `toml:"db"`
+	Images     ImageNotices      `toml:"images"`
+	Tools      ToolNotices       `toml:"tools"`
+	Pastebin   PastebinNotices   `toml:"pastebin"`
+	Jobs       JobNotices        `toml:"jobs"`
+	Bans       BanNotices        `toml:"bans"`
+	Compaction CompactionNotices `toml:"compaction"`
+	Support    string            `toml:"support"`
 }
 
 type QueueNotices struct {
@@ -120,6 +121,20 @@ type BanNotices struct {
 	AmIBannedNone string `toml:"amibanned_none"`
 }
 
+// CompactionNotices controls user-facing messaging for the session
+// compacting feature (manual `^compact$` IRC command, TUI `/compact`,
+// auto-compaction triggered after high-token turns).
+type CompactionNotices struct {
+	Started    string `toml:"started"`
+	Completed  string `toml:"completed"`
+	Failed     string `toml:"failed"`
+	TooShort   string `toml:"too_short"`
+	NoActive   string `toml:"no_active"`
+	InProgress string `toml:"in_progress"`
+	Disabled   string `toml:"disabled"`
+	AutoNotice string `toml:"auto_notice"`
+}
+
 var (
 	noticeErrorPrefix atomic.Value
 	noticeWarnPrefix  atomic.Value
@@ -162,7 +177,7 @@ func setNoticesDefaults(n *NoticesConfig) {
 		n.Sessions.None = "No session history found."
 	}
 	if n.Sessions.DetailHeader == "" {
-		n.Sessions.DetailHeader = "\x02Session #{id} ({command}) — {count} messages:\x02"
+		n.Sessions.DetailHeader = "\x02Session #{id} ({command}) — {count} messages{archived_suffix}:\x02"
 	}
 	if n.Sessions.Truncated == "" {
 		n.Sessions.Truncated = "  \x0314... ({count} more) ...\x0F"
@@ -313,6 +328,30 @@ func setNoticesDefaults(n *NoticesConfig) {
 	}
 	if n.Bans.AmIBannedNone == "" {
 		n.Bans.AmIBannedNone = "You are not currently banned."
+	}
+	if n.Compaction.Started == "" {
+		n.Compaction.Started = "\x0314🗜 Compacting session...\x0F"
+	}
+	if n.Compaction.Completed == "" {
+		n.Compaction.Completed = "\x0303✓ Compacted {count} earlier messages into a summary ({tokens_in}→{tokens_out} tokens, {duration}ms).\x0F"
+	}
+	if n.Compaction.Failed == "" {
+		n.Compaction.Failed = "Compaction failed: {error}"
+	}
+	if n.Compaction.TooShort == "" {
+		n.Compaction.TooShort = "Not enough history to compact yet."
+	}
+	if n.Compaction.NoActive == "" {
+		n.Compaction.NoActive = "You don't have an active session to compact."
+	}
+	if n.Compaction.InProgress == "" {
+		n.Compaction.InProgress = "A compaction is already running for this session."
+	}
+	if n.Compaction.Disabled == "" {
+		n.Compaction.Disabled = "Compaction is disabled in config."
+	}
+	if n.Compaction.AutoNotice == "" {
+		n.Compaction.AutoNotice = "\x0314🗜 Auto-compacted {count} earlier messages ({tokens_in}→{tokens_out} tokens).\x0F"
 	}
 	if n.Support == "" {
 		n.Support = "If you enjoy using dave, consider supporting development at https://patreon.com/shrew269 ❤️"

@@ -21,7 +21,7 @@
 # [sessions] options:
 #   header           (string)    Session list header. Placeholders: {nick}, {network}
 #   none             (string)    No sessions found
-#   detail_header    (string)    Session detail header. Placeholders: {id}, {command}, {count}
+#   detail_header    (string)    Session detail header. Placeholders: {id}, {command}, {count}, {active}, {archived}, {archived_suffix}, {total}
 #   truncated        (string)    Truncated messages indicator. Placeholders: {count}
 #   not_found        (string)    Session not found
 #   not_owned        (string)    Session belongs to another user
@@ -85,6 +85,16 @@
 #   amibanned        (string)    Per-ban line for !amibanned. Placeholders: {reason}, {remaining}, {banner}
 #   amibanned_none   (string)    No active bans for !amibanned
 #
+# [compaction] options:
+#   started      (string)  Compaction started notice.
+#   completed    (string)  Compaction completed. Placeholders: {count}, {tokens_in}, {tokens_out}, {duration}
+#   failed       (string)  Compaction failed. Placeholders: {error}
+#   too_short    (string)  Not enough history to compact.
+#   no_active    (string)  No active session to compact.
+#   in_progress  (string)  Compaction already running.
+#   disabled     (string)  Compaction disabled in config.
+#   auto_notice  (string)  Auto-compaction notice. Placeholders: {count}, {tokens_in}, {tokens_out}, {duration}
+#
 # support           (string)     Support message
 #
 # Example with all options set to defaults:
@@ -107,7 +117,7 @@
 # [sessions]
 # header = "\x02Session History ({nick} on {network}):\x02"
 # none = "No session history found."
-# detail_header = "\x02Session #{id} ({command}) — {count} messages:\x02"
+# detail_header = "\x02Session #{id} ({command}) — {count} messages{archived_suffix}:\x02"
 # truncated = "  \x0314... ({count} more) ...\x0F"
 # not_found = "session not found"
 # not_owned = "that session doesn't belong to you"
@@ -170,6 +180,16 @@
 # user_not_found = "User {nick} not found."
 # amibanned = "\x0304🚫 Banned: {reason} (expires in {remaining}, by {banner})\x0F"
 # amibanned_none = "You are not currently banned."
+#
+# [compaction]
+# started = "\x0314🗜 Compacting session...\x0F"
+# completed = "\x0303✓ Compacted {count} earlier messages into a summary ({tokens_in}→{tokens_out} tokens, {duration}ms).\x0F"
+# failed = "Compaction failed: {error}"
+# too_short = "Not enough history to compact yet."
+# no_active = "You don't have an active session to compact."
+# in_progress = "A compaction is already running for this session."
+# disabled = "Compaction is disabled in config."
+# auto_notice = "\x0314🗜 Auto-compacted {count} earlier messages ({tokens_in}→{tokens_out} tokens).\x0F"
 #
 # support = "If you enjoy using dave, consider supporting development at https://patreon.com/shrew269 ❤️"
 

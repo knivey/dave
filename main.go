@@ -140,6 +140,7 @@ var delete_re = regexp.MustCompile("^delete\\s+(\\d+)$")
 var resume_re = regexp.MustCompile("^resume\\s+(\\d+)$")
 var jobs_re = regexp.MustCompile("^jobs$")
 var support_re = regexp.MustCompile("^support$")
+var compact_re = regexp.MustCompile("^compact$")
 
 type CmdMap map[*regexp.Regexp]CmdFunc
 
@@ -179,6 +180,9 @@ var builtInCmds = CmdMap{
 	support_re: func(n Network, c *girc.Client, e girc.Event, _ context.Context, _ chan<- string, s ...string) {
 		support(n, c, e, s...)
 	},
+	compact_re: func(n Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, s ...string) {
+		historyCompact(n, c, e, ctx, output, s...)
+	},
 }
 var configCmds CmdMap
 var rateExemptCmds map[*regexp.Regexp]bool
@@ -194,6 +198,7 @@ var builtInNames = map[*regexp.Regexp]string{
 	resume_re:   "resume",
 	jobs_re:     "jobs",
 	support_re:  "support",
+	compact_re:  "compact",
 }
 
 func isBuiltinDisabled(name string) bool {

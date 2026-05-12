@@ -1598,6 +1598,8 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 			messages, _ = runner.runTurn(messages)
 		}
 	}
+
+	maybeAutoCompact(runner, cfg, network, c, channel, e.Source.Name)
 }
 
 func FormatOutput(text string) string {

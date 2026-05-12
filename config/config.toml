@@ -19,6 +19,14 @@
 #   max_duration        (string, default: "6h")   Maximum ban duration (supports s/m/h/d)
 #   default_duration    (string, default: "5m")   Default ban duration when none is specified (supports s/m/h/d)
 #
+# [compaction] options:
+#   enabled            (bool, default: false)   Enable session compaction (manual `^compact$` IRC command + TUI `/compact`)
+#   auto_enabled       (bool, default: false)   Auto-compact when prompt tokens exceed threshold (requires context_window)
+#   auto_threshold     (float, default: 0.7)    Fraction of context_window above which auto-compact runs
+#   context_window     (int, default: 0)        Token limit used to compute auto threshold (0 disables auto)
+#   min_turns          (int, default: 6)        Minimum turn count before any compaction will run
+#   prompt_template    (string)                 Optional override for the summarizer system prompt (see commented example below for default)
+#
 # [database] options:
 #   driver              (string, default: "sqlite")        Database driver: "sqlite" or "postgres"
 #   path                (string, default: "data/dave.db")  SQLite database path (used when driver=sqlite)
@@ -87,6 +95,25 @@
 # [bans]
 # max_duration = "6h"
 # default_duration = "5m"
+#
+# [compaction]
+# enabled = true
+# auto_enabled = false
+# auto_threshold = 0.7
+# context_window = 128000
+# min_turns = 6
+# # prompt_template = """You are summarizing the early portion of an ongoing IRC conversation between a user and an AI assistant.
+# # Produce a concise but information-dense summary of what has happened so far. The summary will replace the original messages in the conversation history, so preserve everything the assistant or user might need to continue coherently:
+# #
+# # - Names, nicknames, channels, networks mentioned.
+# # - Key facts, decisions, conclusions, and unresolved questions.
+# # - User preferences, instructions, or constraints stated by the user.
+# # - Any code, identifiers, paths, URLs, numbers, or short literal strings that were discussed.
+# # - Tools that were called and their outcomes (success/failure + key result data).
+# # - Image content references (use abstract descriptions like "image of a sunset"; the actual images are removed).
+# # - Open threads or topics that were paused mid-conversation.
+# #
+# # Do NOT invent details. If something was unclear, say so. Output only the summary text — no preamble, no headers, no markdown formatting."""
 #
 # [database]
 # path = "data/dave.db"

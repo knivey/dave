@@ -77,11 +77,21 @@ func historySessions(network Network, c *girc.Client, e girc.Event, ctx context.
 			icon = "\x0304○\x0F"
 		}
 
-		var msgCount int64
-		theDB.Model(&Message{}).Where("session_id = ?", s.ID).Count(&msgCount)
+		var activeMsgs, archivedMsgs int64
+		theDB.Model(&Message{}).Where("session_id = ? AND archived = ?", s.ID, false).Count(&activeMsgs)
+		// Exclude superseded tail-copy ghosts from the archived count.
+		// Those rows duplicate content already covered by an earlier
+		// summary; counting them would mislead the user about how much
+		// actual conversation got compacted. See compaction.go.
+		theDB.Model(&Message{}).
+			Where("session_id = ? AND archived = ? AND superseded = ?", s.ID, true, false).
+			Count(&archivedMsgs)
 
 		idStr := fmt.Sprintf("#%d", s.ID)
-		msgStr := fmt.Sprintf("%d msgs", msgCount)
+		msgStr := fmt.Sprintf("%d msgs", activeMsgs)
+		if archivedMsgs > 0 {
+			msgStr = fmt.Sprintf("%d msgs (%d archived)", activeMsgs, archivedMsgs)
+		}
 		timeStr := formatTimeAgo(s.LastActive)
 
 		preview := strings.ReplaceAll(s.FirstMessage, "\n", " ")
@@ -175,13 +185,14 @@ func historyShow(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 		return
 	}
 
-	messages, err := loadDBSessionMessages(sessionID)
+	messages, err := loadDBSessionMessagesAll(sessionID)
 	if err != nil {
 		sendErr(errorMsg(expandNotice(n.DB.LoadMessages, map[string]string{"error": err.Error()})))
 		return
 	}
 
 	var visible []Message
+	var archivedCount int
 	for _, m := range messages {
 		if m.Role == "system" || m.Role == "tool" {
 			continue
@@ -190,10 +201,27 @@ func historyShow(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 			continue
 		}
 		visible = append(visible, m)
+		if m.Archived {
+			archivedCount++
+		}
+	}
+	activeCount := len(visible) - archivedCount
+
+	archivedSuffix := ""
+	if archivedCount > 0 {
+		archivedSuffix = fmt.Sprintf(" (%d archived)", archivedCount)
 	}
 
 	select {
-	case output <- expandNotice(n.Sessions.DetailHeader, map[string]string{"id": fmt.Sprintf("%d", sessionID), "command": session.ChatCommand, "count": fmt.Sprintf("%d", len(visible))}):
+	case output <- expandNotice(n.Sessions.DetailHeader, map[string]string{
+		"id":              fmt.Sprintf("%d", sessionID),
+		"command":         session.ChatCommand,
+		"count":           fmt.Sprintf("%d", activeCount),
+		"active":          fmt.Sprintf("%d", activeCount),
+		"archived":        fmt.Sprintf("%d", archivedCount),
+		"archived_suffix": archivedSuffix,
+		"total":           fmt.Sprintf("%d", len(visible)),
+	}):
 	case <-ctx.Done():
 		return
 	}
@@ -224,7 +252,11 @@ func historyShow(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 		}
 		content = strings.ReplaceAll(content, "\n", " ")
 
-		line := fmt.Sprintf("  %s %s", roleIcon, content)
+		archivedTag := ""
+		if m.Archived {
+			archivedTag = "\x0314[archived]\x0F "
+		}
+		line := fmt.Sprintf("  %s %s%s", roleIcon, archivedTag, content)
 		for _, wrapped := range wrapLine(line) {
 			select {
 			case output <- wrapped:
@@ -554,4 +586,95 @@ func historyJobs(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 			return
 		}
 	}
+}
+
+// historyCompact is the IRC `^compact$` command handler. Compacts the user's
+// active session in the current channel using the LLM associated with that
+// session's chat command. Replies with a notice indicating success or
+// failure. See compaction.go for the underlying algorithm.
+func historyCompact(network Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, args ...string) {
+	n := getNotices()
+	send := func(msg string) {
+		select {
+		case output <- msg:
+		case <-ctx.Done():
+		}
+	}
+	if theDB == nil {
+		send(errorMsg(n.DB.NotAvailable))
+		return
+	}
+
+	var ccfg CompactionConfig
+	readConfig(func() { ccfg = config.Compaction })
+	if !ccfg.Enabled {
+		send(errorMsg(n.Compaction.Disabled))
+		return
+	}
+
+	channel := normalizeIRC(e.Params[0], getCasemapping(network.Name))
+	casemapping := getCasemapping(network.Name)
+	account := ""
+	if u := c.LookupUser(e.Source.Name); u != nil {
+		account = u.Extras.Account
+	}
+	resolvedUser, err := resolveUser(network.Name, e.Source.Name, e.Source.Ident, e.Source.Host, account, casemapping)
+	if err != nil || resolvedUser == nil {
+		send(errorMsg(n.Compaction.NoActive))
+		return
+	}
+
+	session, err := sessionMgr.GetActiveSession(network.Name, channel, resolvedUser.ID)
+	if err != nil || session == nil {
+		send(errorMsg(n.Compaction.NoActive))
+		return
+	}
+
+	var cfg AIConfig
+	var cfgOk bool
+	readConfig(func() {
+		cfg, cfgOk = config.Commands.Chats[session.ChatCommand]
+	})
+	if session.SettingsID != nil {
+		settings, sErr := sessionMgr.GetSessionSettings(*session.SettingsID)
+		if sErr == nil && settings != nil {
+			cfg = ApplySettings(settings, cfg)
+			cfgOk = true
+		}
+	}
+	if !cfgOk {
+		send(errorMsg(expandNotice(n.Sessions.CommandGone, map[string]string{"command": session.ChatCommand})))
+		return
+	}
+
+	send(n.Compaction.Started)
+
+	res, cErr := sessionMgr.CompactSession(ctx, CompactSessionInputs{
+		SessionID: session.ID,
+		Network:   network,
+		Channel:   channel,
+		UserNick:  e.Source.Name,
+		Client:    c,
+		Trigger:   "manual",
+	}, cfg)
+	if cErr != nil {
+		switch cErr {
+		case ErrCompactionTooShort:
+			send(errorMsg(n.Compaction.TooShort))
+		case ErrCompactionInProgress:
+			send(errorMsg(n.Compaction.InProgress))
+		case ErrCompactionEmptyResult:
+			send(errorMsg(expandNotice(n.Compaction.Failed, map[string]string{"error": "summarizer returned empty content"})))
+		default:
+			send(errorMsg(expandNotice(n.Compaction.Failed, map[string]string{"error": cErr.Error()})))
+		}
+		return
+	}
+
+	send(expandNotice(n.Compaction.Completed, map[string]string{
+		"count":      fmt.Sprintf("%d", res.ArchivedCount),
+		"tokens_in":  fmt.Sprintf("%d", res.PromptTokens),
+		"tokens_out": fmt.Sprintf("%d", res.CompletionTokens),
+		"duration":   fmt.Sprintf("%d", res.DurationMs),
+	}))
 }

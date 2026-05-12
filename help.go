@@ -83,6 +83,7 @@ func help(network Network, client *girc.Client, event girc.Event, ctx context.Co
 		lines = append(lines, fmt.Sprintf("  %sdelete <id> \u2014 Delete a session", network.Trigger))
 		lines = append(lines, fmt.Sprintf("  %smystats \u2014 Show your session/message stats", network.Trigger))
 		lines = append(lines, fmt.Sprintf("  %sjobs \u2014 List your chat queue and background jobs", network.Trigger))
+		lines = append(lines, fmt.Sprintf("  %scompact \u2014 Summarize old messages in your active session to free context", network.Trigger))
 	}
 
 	if len(completions) > 0 {
@@ -350,6 +351,12 @@ func findCommandHelp(network Network, cmdName string) (helpEntry, bool) {
 		return helpEntry{
 			cmd:  network.Trigger + "jobs",
 			desc: "List your chat queue status and pending/running/completed background jobs",
+		}, true
+	}
+	if cmdName == "compact" {
+		return helpEntry{
+			cmd:  network.Trigger + "compact",
+			desc: "Summarize the first 2/3 of your active session into a single message to free context tokens",
 		}, true
 	}
 	if cmdName == "support" {

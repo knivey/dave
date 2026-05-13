@@ -24,6 +24,7 @@ type NoticesConfig struct {
 	Jobs       JobNotices        `toml:"jobs"`
 	Bans       BanNotices        `toml:"bans"`
 	Compaction CompactionNotices `toml:"compaction"`
+	Users      UsersNotices      `toml:"users"`
 	Support    string            `toml:"support"`
 }
 
@@ -133,6 +134,17 @@ type CompactionNotices struct {
 	InProgress string `toml:"in_progress"`
 	Disabled   string `toml:"disabled"`
 	AutoNotice string `toml:"auto_notice"`
+}
+
+// UsersNotices governs user-facing messages emitted when resolveUser fails.
+// ResolveTransient is sent after retries exhausted on transient DB errors —
+// the caller drops the message and the user should retry shortly.
+// ResolvePersistent is sent when a flagged-row fallback was created (the
+// message continues processing) or when the fallback itself failed. Both are
+// rendered via warnMsg() and support {nick} placeholder.
+type UsersNotices struct {
+	ResolveTransient  string `toml:"resolve_transient"`
+	ResolvePersistent string `toml:"resolve_persistent"`
 }
 
 var (
@@ -352,6 +364,12 @@ func setNoticesDefaults(n *NoticesConfig) {
 	}
 	if n.Compaction.AutoNotice == "" {
 		n.Compaction.AutoNotice = "\x0314🗜 Auto-compacted {count} earlier messages ({total} tokens, {cached} cached).\x0F"
+	}
+	if n.Users.ResolveTransient == "" {
+		n.Users.ResolveTransient = "internal hiccup tracking your identity, try again in a moment ({nick})"
+	}
+	if n.Users.ResolvePersistent == "" {
+		n.Users.ResolvePersistent = "internal data conflict for {nick} — using temporary tracking, admin should investigate"
 	}
 	if n.Support == "" {
 		n.Support = "If you enjoy using dave, consider supporting development at https://patreon.com/shrew269 ❤️"

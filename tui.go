@@ -20,6 +20,7 @@ import (
 var (
 	tuiApp       *tview.Application
 	logView      *tview.TextView
+	statusBar    *tview.TextView
 	inputField   *tview.InputField
 	shutdownOnce int32
 	autoScroll   = true
@@ -37,6 +38,9 @@ var (
 	logBuf       []string
 	logFlushStop chan struct{}
 	logFlushDone chan struct{}
+
+	statusBarStop chan struct{}
+	statusBarDone chan struct{}
 )
 
 const cmdHistoryMax = 100
@@ -196,8 +200,15 @@ func initTUI() (*tview.Application, error) {
 		return action, event
 	})
 
+	statusBar = tview.NewTextView().
+		SetDynamicColors(true).
+		SetTextAlign(tview.AlignLeft)
+	statusBar.SetBackgroundColor(tcell.ColorBlack)
+	statusBar.SetText("[dim]flagged:0[white]")
+
 	flex := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(logContainer, 0, 1, true).
+		AddItem(statusBar, 1, 0, false).
 		AddItem(inputField, 1, 0, true)
 
 	app.SetRoot(flex, true).SetFocus(inputField)
@@ -274,6 +285,10 @@ func initTUI() (*tview.Application, error) {
 	logFlushStop = make(chan struct{})
 	logFlushDone = make(chan struct{})
 	go flushLogBuf(logView, app, logFlushStop, logFlushDone)
+
+	statusBarStop = make(chan struct{})
+	statusBarDone = make(chan struct{})
+	go pollStatusBar(app, statusBarStop, statusBarDone)
 
 	tuiApp = app
 	return app, nil
@@ -374,6 +389,47 @@ func flushLogBuf(view *tview.TextView, app *tview.Application, stop <-chan struc
 	}
 }
 
+// pollStatusBar refreshes the TUI status bar every 5 seconds with the current
+// flagged-user count. Runs until stop is closed. statusBar always reflects
+// the latest DB count; yellow when >0 to catch admin attention, dim grey
+// when zero. DB query is a single indexed COUNT — negligible load.
+func pollStatusBar(app *tview.Application, stop <-chan struct{}, done chan<- struct{}) {
+	defer close(done)
+	render := func() {
+		n, err := countFlaggedUsers()
+		if err != nil {
+			logger.Warn("status bar countFlaggedUsers failed", "error", err.Error())
+			app.QueueUpdateDraw(func() {
+				statusBar.SetText("[red]flagged:?[white]")
+			})
+			return
+		}
+		var text string
+		if n > 0 {
+			text = fmt.Sprintf("[yellow]flagged:%d[white]", n)
+		} else {
+			text = "[dim]flagged:0[white]"
+		}
+		app.QueueUpdateDraw(func() {
+			statusBar.SetText(text)
+		})
+	}
+
+	// Render immediately on start so the bar reflects DB state at launch.
+	render()
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			render()
+		}
+	}
+}
+
 func printUserInfo(view *tview.TextView, info *UserInfo) {
 	u := info.User
 	released := ""
@@ -457,6 +513,7 @@ func handleTUICommand(text string) {
 		fmt.Fprintf(logView, "                               - Merge ghost user into target\n")
 		fmt.Fprintf(logView, "  /userrelease <network> <nick|id>\n")
 		fmt.Fprintf(logView, "                               - Release a user's nick claim\n")
+		fmt.Fprintf(logView, "  /flagged [network]           - List flagged users (resolveUser fallback rows)\n")
 		fmt.Fprintf(logView, "  /sessions <network> <nick|id> [channel]\n")
 		fmt.Fprintf(logView, "                               - List sessions for a user\n")
 		fmt.Fprintf(logView, "  /compact <session-id>        - Summarize old messages of a session\n")
@@ -869,6 +926,44 @@ func handleTUICommand(text string) {
 		}
 		fmt.Fprintf(logView, "[green]Released nick %q for user #%d on %s[white]\n",
 			tview.Escape(oldNick), user.ID, network)
+	case "/flagged":
+		// /flagged [network] — list current flagged users (resolveUser
+		// fallback rows). Helps admin find and merge them via /usermerge.
+		var netFilter string
+		if len(parts) >= 2 {
+			netFilter = parts[1]
+		}
+		flagged, err := getFlaggedUsers(netFilter)
+		if err != nil {
+			fmt.Fprintf(logView, "[red]Failed to list flagged users: %s[white]\n", err)
+			break
+		}
+		if len(flagged) == 0 {
+			if netFilter == "" {
+				fmt.Fprintf(logView, "[dim]No flagged users.[white]\n")
+			} else {
+				fmt.Fprintf(logView, "[dim]No flagged users on %s.[white]\n", tview.Escape(netFilter))
+			}
+			break
+		}
+		header := "Flagged users:"
+		if netFilter != "" {
+			header = fmt.Sprintf("Flagged users on %s:", netFilter)
+		}
+		fmt.Fprintf(logView, "[white]%s[white]\n", header)
+		for _, u := range flagged {
+			account := ""
+			if u.IRCAccount != "" {
+				account = fmt.Sprintf(" account:%s", tview.Escape(u.IRCAccount))
+			}
+			fmt.Fprintf(logView, "[yellow]  #%d[white] %s%s reason:%s network:%s created:%s\n",
+				u.ID,
+				tview.Escape(u.CurrentNick),
+				account,
+				tview.Escape(u.FlaggedReason),
+				tview.Escape(u.Network),
+				u.CreatedAt.Format("2006-01-02 15:04:05"))
+		}
 	case "/sessions":
 		if len(parts) < 3 {
 			fmt.Fprintf(logView, "[yellow]Usage: /sessions <network> <nick|id> [channel][white]\n")
@@ -1075,6 +1170,11 @@ func requestShutdown() {
 		if logFlushStop != nil {
 			close(logFlushStop)
 			<-logFlushDone
+		}
+
+		if statusBarStop != nil {
+			close(statusBarStop)
+			<-statusBarDone
 		}
 
 		if apiLogger != nil {

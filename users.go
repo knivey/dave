@@ -3,8 +3,11 @@ package main
 import (
 	"crypto/sha256"
 	"fmt"
+	"math/rand"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	logxi "github.com/mgutz/logxi/v1"
@@ -12,11 +15,157 @@ import (
 )
 
 const releasedNickPrefix = ",quit,"
+const flaggedNickPrefix = ",flagged,"
+
+// FlaggedReasonCollision is set on flagged users created because the normal
+// resolveUser flow could not claim a real normalized_nick (UNIQUE constraint
+// fired even after claimNickFor). See resolveUserFallback for details.
+const FlaggedReasonCollision = "collision_unique_nick"
+
+// claimNickForFn is a package-level indirection over claimNickFor so tests
+// can override it to force a UNIQUE-constraint failure path. Production code
+// always uses the real claimNickFor.
+var claimNickForFn = claimNickFor
+
+// resolveUserRand is a goroutine-safe random source used to add jitter to the
+// retry backoff in resolveUser. Guarded by resolveUserRandMu because *rand.Rand
+// is not goroutine-safe.
+var (
+	resolveUserRandMu sync.Mutex
+	resolveUserRand   = rand.New(rand.NewSource(time.Now().UnixNano()))
+)
+
+// flaggedSeq is a process-local monotonic counter appended to flagged-row
+// sentinels. UnixNano alone would have a vanishing collision window on
+// systems with coarse clock resolution or in tight concurrent bursts; the
+// counter makes the sentinel collision-free regardless of clock behavior.
+var flaggedSeq atomic.Int64
+
+func resolveUserJitter() time.Duration {
+	resolveUserRandMu.Lock()
+	defer resolveUserRandMu.Unlock()
+	return time.Duration(resolveUserRand.Intn(30)) * time.Millisecond
+}
+
+// ErrUserResolveTransient wraps a transient DB error (lock contention,
+// "database is busy"). After retries exhausted, resolveUser returns this so
+// callers can prompt the user to try again.
+type ErrUserResolveTransient struct {
+	Err error
+}
+
+func (e *ErrUserResolveTransient) Error() string {
+	if e == nil || e.Err == nil {
+		return "transient db error"
+	}
+	return "transient db error: " + e.Err.Error()
+}
+
+func (e *ErrUserResolveTransient) Unwrap() error { return e.Err }
+
+// ErrUserResolveCollision indicates the UNIQUE-constraint path was hit and
+// the fallback flagged-row creation itself also failed. Should be very rare;
+// callers should send the persistent notice and log loudly.
+type ErrUserResolveCollision struct {
+	Network        string
+	Nick           string
+	Account        string
+	ExistingUserID int64
+	Err            error
+}
+
+func (e *ErrUserResolveCollision) Error() string {
+	if e == nil {
+		return "user resolve collision"
+	}
+	cause := ""
+	if e.Err != nil {
+		cause = ": " + e.Err.Error()
+	}
+	return fmt.Sprintf("user resolve collision (network=%s nick=%s account=%s)%s",
+		e.Network, e.Nick, e.Account, cause)
+}
+
+func (e *ErrUserResolveCollision) Unwrap() error { return e.Err }
+
+// isUniqueConstraintErr returns true for SQLite UNIQUE-constraint and
+// Postgres unique-violation errors. String-matching is used because the
+// underlying drivers don't share a typed error API; SQLITE and pg both emit
+// these substrings reliably.
+func isUniqueConstraintErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "UNIQUE constraint failed") ||
+		strings.Contains(s, "duplicate key") ||
+		strings.Contains(s, "SQLSTATE 23505")
+}
+
+// isTransientDBErr returns true for transient DB errors that may succeed on
+// retry: SQLite lock contention, Postgres serialization failure, deadlock.
+func isTransientDBErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "database is locked") ||
+		strings.Contains(s, "database is busy") ||
+		strings.Contains(s, "SQLITE_BUSY") ||
+		strings.Contains(s, "deadlock detected") ||
+		strings.Contains(s, "could not serialize access")
+}
+
+// isFlaggedNick returns true if the normalized nick is a flagged-row sentinel
+// (created when resolveUser fell back to creating a placeholder user row).
+func isFlaggedNick(s string) bool {
+	return strings.HasPrefix(s, flaggedNickPrefix)
+}
+
+// isPlaceholderNick returns true for any non-claimable normalized_nick: both
+// released sentinels (",quit,<id>") and flagged sentinels (",flagged,...").
+// resolveUser and resolveUserByNick skip rows matching this so the real nick
+// remains available for the legitimate owner.
+func isPlaceholderNick(s string) bool {
+	return isReleasedNick(s) || isFlaggedNick(s)
+}
 
 var loggerUsers = logxi.New("users")
 
 func init() {
 	loggerUsers.SetLevel(logxi.LevelAll)
+}
+
+// claimNickFor ensures `user` may safely take `(network, norm)` as its
+// normalized_nick before the caller assigns it and writes the row. If a
+// different user currently holds that slot, handleNickCollision either merges
+// them into `user` (when they have no known hosts — migration-era ghost) or
+// releases their nick to a `,quit,<id>` sentinel (real user, presumed
+// offline/displaced). After this returns nil, the (network, norm) pair is
+// guaranteed free for `user` to claim.
+//
+// This mirrors the collision handling recordNickChange performs for NICK
+// events. resolveUser needs the same guard because it can identify a user by
+// account or by ident@host recovery and then try to assign that user a
+// normalized_nick already owned by another row, violating the UNIQUE index
+// idx_users_nick on (network, normalized_nick).
+func claimNickFor(network string, user *User, norm string) error {
+	if user.NormalizedNick == norm {
+		return nil
+	}
+	existing, err := getUserByNormalizedNick(network, norm)
+	if err != nil {
+		return err
+	}
+	if existing == nil || existing.ID == user.ID {
+		return nil
+	}
+	loggerUsers.Debug("claimNickFor: collision detected, delegating to handleNickCollision",
+		"claiming_user_id", user.ID,
+		"existing_user_id", existing.ID,
+		"norm", norm,
+		"network", network)
+	return handleNickCollision(network, existing, user)
 }
 
 // resolveUser finds or creates a User for the given IRC identity.
@@ -38,6 +187,41 @@ func resolveUser(network, nick, ident, host, account, casemapping string) (*User
 		return nil, nil
 	}
 
+	backoffs := []time.Duration{50 * time.Millisecond, 150 * time.Millisecond}
+	var lastErr error
+	for attempt := 0; attempt <= len(backoffs); attempt++ {
+		user, err := resolveUserOnce(network, nick, ident, host, account, casemapping)
+		if err == nil {
+			return user, nil
+		}
+		lastErr = err
+		if !isTransientDBErr(err) {
+			break
+		}
+		if attempt < len(backoffs) {
+			time.Sleep(backoffs[attempt] + resolveUserJitter())
+			loggerUsers.Debug("resolveUser transient error, retrying",
+				"attempt", attempt+1, "error", err.Error(),
+				"network", network, "nick", nick)
+			continue
+		}
+		return nil, &ErrUserResolveTransient{Err: err}
+	}
+
+	if isUniqueConstraintErr(lastErr) {
+		return resolveUserFallback(network, nick, ident, host, account, casemapping, lastErr)
+	}
+	return nil, lastErr
+}
+
+// resolveUserOnce performs a single resolveUser attempt (the original
+// pre-retry implementation). Callers should not invoke this directly outside
+// of tests; production code uses resolveUser which adds retry + fallback.
+func resolveUserOnce(network, nick, ident, host, account, casemapping string) (*User, error) {
+	if theDB == nil {
+		return nil, nil
+	}
+
 	norm := normalizeIRC(nick, casemapping)
 
 	if account != "" {
@@ -47,6 +231,9 @@ func resolveUser(network, nick, ident, host, account, casemapping string) (*User
 		}
 		if user != nil {
 			loggerUsers.Debug("resolved user", "method", "account", "user_id", user.ID, "nick", nick, "account", account, "network", network)
+			if err := claimNickForFn(network, user, norm); err != nil {
+				return nil, err
+			}
 			user.CurrentNick = nick
 			user.NormalizedNick = norm
 			if err := updateDBUser(user); err != nil {
@@ -61,8 +248,8 @@ func resolveUser(network, nick, ident, host, account, casemapping string) (*User
 		if err != nil {
 			return nil, err
 		}
-		if nickUser != nil && isReleasedNick(nickUser.NormalizedNick) {
-			loggerUsers.Debug("nick lookup hit released user, skipping", "user_id", nickUser.ID, "nick", nick, "network", network)
+		if nickUser != nil && isPlaceholderNick(nickUser.NormalizedNick) {
+			loggerUsers.Debug("nick lookup hit placeholder user, skipping", "user_id", nickUser.ID, "nick", nick, "network", network)
 			nickUser = nil
 		}
 		if nickUser != nil {
@@ -83,6 +270,9 @@ func resolveUser(network, nick, ident, host, account, casemapping string) (*User
 		}
 		if hostUser != nil {
 			loggerUsers.Debug("resolved user", "method", "host_recovery+account_link", "user_id", hostUser.ID, "nick", nick, "account", account, "network", network)
+			if err := claimNickForFn(network, hostUser, norm); err != nil {
+				return nil, err
+			}
 			hostUser.IRCAccount = account
 			hostUser.CurrentNick = nick
 			hostUser.NormalizedNick = norm
@@ -101,8 +291,8 @@ func resolveUser(network, nick, ident, host, account, casemapping string) (*User
 		return nil, err
 	}
 	if user != nil {
-		if isReleasedNick(user.NormalizedNick) {
-			loggerUsers.Debug("nick lookup hit released user, falling through to host recovery", "user_id", user.ID, "nick", nick, "network", network)
+		if isPlaceholderNick(user.NormalizedNick) {
+			loggerUsers.Debug("nick lookup hit placeholder user, falling through to host recovery", "user_id", user.ID, "nick", nick, "network", network)
 			user = nil
 		}
 	}
@@ -126,6 +316,9 @@ func resolveUser(network, nick, ident, host, account, casemapping string) (*User
 	}
 	if hostUser != nil {
 		loggerUsers.Debug("resolved user", "method", "host_recovery", "user_id", hostUser.ID, "nick", nick, "network", network)
+		if err := claimNickForFn(network, hostUser, norm); err != nil {
+			return nil, err
+		}
 		if hostUser.IRCAccount == "" && account != "" {
 			hostUser.IRCAccount = account
 		}
@@ -141,8 +334,59 @@ func resolveUser(network, nick, ident, host, account, casemapping string) (*User
 	return createNewUser(network, nick, norm, "", ident, host)
 }
 
+// resolveUserFallback is invoked when resolveUser's normal flow fails with a
+// UNIQUE-constraint violation that retries could not avoid. It creates a new
+// flagged user row with a sentinel normalized_nick that cannot collide with
+// any real IRC nick (leading comma reserved). The caller sees a valid *User
+// and the message keeps flowing.
+//
+// Logs at ERROR with a distinctive message so admins can grep / alert.
+//
+// On insert failure, returns ErrUserResolveCollision so callers can surface
+// a persistent notice and stop. Does NOT loop or retry the fallback itself.
+func resolveUserFallback(network, nick, ident, host, account, casemapping string, cause error) (*User, error) {
+	norm := normalizeIRC(nick, casemapping)
+	sentinel := fmt.Sprintf("%s%s,%s,%d,%d",
+		flaggedNickPrefix, network, norm,
+		time.Now().UnixNano(),
+		flaggedSeq.Add(1))
+	now := time.Now()
+	user := &User{
+		Network:        network,
+		CurrentNick:    nick,
+		NormalizedNick: sentinel,
+		IRCAccount:     account,
+		Flagged:        true,
+		FlaggedReason:  FlaggedReasonCollision,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	if err := theDB.Create(user).Error; err != nil {
+		loggerUsers.Error("flagged_user_create_failed",
+			"network", network, "nick", nick, "account", account,
+			"cause", cause.Error(), "fallback_error", err.Error())
+		return nil, &ErrUserResolveCollision{
+			Network: network,
+			Nick:    nick,
+			Account: account,
+			Err:     cause,
+		}
+	}
+	_ = upsertKnownHost(user.ID, ident, host)
+	loggerUsers.Error("flagged_user_created_admin_attention_required",
+		"user_id", user.ID,
+		"network", network,
+		"nick", nick,
+		"account", account,
+		"reason", user.FlaggedReason,
+		"cause", cause.Error())
+	return user, nil
+}
+
 // resolveUserByNick looks up a user by their current nick. Used by LLM ban
-// tool and TUI commands which only see nicks, not ident/host.
+// tool and TUI commands which only see nicks, not ident/host. Skips
+// placeholder rows (released or flagged) so the lookup behaves as if those
+// rows don't hold the nick.
 func resolveUserByNick(network, nick, casemapping string) (*User, error) {
 	if theDB == nil {
 		return nil, nil
@@ -151,18 +395,22 @@ func resolveUserByNick(network, nick, casemapping string) (*User, error) {
 	if err != nil {
 		return nil, err
 	}
-	if user != nil && isReleasedNick(user.NormalizedNick) {
+	if user != nil && isPlaceholderNick(user.NormalizedNick) {
 		return nil, nil
 	}
 	return user, nil
 }
 
+// getUserByAccount returns the (non-flagged) user with the given network +
+// IRC services account. Flagged rows are excluded so they cannot be matched
+// as the canonical identity for that account — they are diagnostic
+// placeholders awaiting admin cleanup.
 func getUserByAccount(network, account string) (*User, error) {
 	if account == "" {
 		return nil, nil
 	}
 	var user User
-	err := theDB.Where("network = ? AND account = ?", network, account).First(&user).Error
+	err := theDB.Where("network = ? AND account = ? AND flagged = ?", network, account, false).First(&user).Error
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
 			return nil, nil
@@ -188,11 +436,18 @@ func getUserByNormalizedNick(network, normalizedNick string) (*User, error) {
 // nick is not recognized (bot restart scenario). If ident@host matches
 // multiple users, cross-references the normalized nick against nick_changes
 // history to disambiguate. Returns nil if no match or ambiguous.
+//
+// Flagged users are excluded from the JOIN — they are diagnostic placeholders
+// awaiting admin cleanup and must never be matched as a canonical identity.
+// Without this filter, a flagged row created via resolveUserFallback would
+// inherit the legitimate owner's (ident, host) via upsertKnownHost and could
+// then be re-surfaced here, causing the next claimNickFor pass to displace
+// or merge real users into the flagged row.
 func recoverByKnownHost(network, ident, host, normalizedNick string) (*User, error) {
 	var hosts []UserKnownHost
 	err := theDB.Joins("JOIN users ON users.id = user_known_hosts.user_id").
-		Where("users.network = ? AND user_known_hosts.ident = ? AND user_known_hosts.host = ?",
-			network, ident, host).
+		Where("users.network = ? AND user_known_hosts.ident = ? AND user_known_hosts.host = ? AND users.flagged = ?",
+			network, ident, host, false).
 		Find(&hosts).Error
 	if err != nil {
 		return nil, err
@@ -437,6 +692,38 @@ func getUserByID(id int64) (*User, error) {
 		return nil, err
 	}
 	return &user, nil
+}
+
+// getFlaggedUsers returns up to 50 flagged rows ordered by created_at desc.
+// If network is non-empty, results are restricted to that network. Used by
+// the TUI /flagged command and admin diagnostics.
+func getFlaggedUsers(network string) ([]User, error) {
+	if theDB == nil {
+		return nil, nil
+	}
+	var users []User
+	q := theDB.Where("flagged = ?", true)
+	if network != "" {
+		q = q.Where("network = ?", network)
+	}
+	if err := q.Order("created_at DESC").Limit(50).Find(&users).Error; err != nil {
+		return nil, err
+	}
+	return users, nil
+}
+
+// countFlaggedUsers returns the total number of flagged rows across all
+// networks. Used by the TUI status bar to surface "flagged:N" so admins
+// notice when resolveUser fell back to placeholder rows.
+func countFlaggedUsers() (int64, error) {
+	if theDB == nil {
+		return 0, nil
+	}
+	var n int64
+	if err := theDB.Model(&User{}).Where("flagged = ?", true).Count(&n).Error; err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 type UserInfo struct {

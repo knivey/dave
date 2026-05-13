@@ -43,6 +43,7 @@ var migrations = []migration{
 	{ID: 2, Name: "create_users_from_sessions", Up: createUsersFromSessions},
 	{ID: 3, Name: "normalize_channels_and_reindex", Up: normalizeChannelsAndReindex},
 	{ID: 4, Name: "drop_sessions_nick", Up: dropSessionsNick},
+	{ID: 5, Name: "add_users_flagged_columns", Up: addUsersFlaggedColumns},
 }
 
 func runMigrations(db *gorm.DB, dbPath string) error {
@@ -299,4 +300,59 @@ func dropSessionsNick(db *gorm.DB) error {
 	default:
 		return db.Migrator().DropColumn(&Session{}, "nick")
 	}
+}
+
+// addUsersFlaggedColumns adds the Flagged + FlaggedReason columns and the
+// idx_users_flagged index on the users table. Idempotent: columns/index are
+// only added if missing. Existing rows default flagged=false, reason=”.
+func addUsersFlaggedColumns(db *gorm.DB) error {
+	migrator := db.Migrator()
+
+	if !migrator.HasColumn(&User{}, "flagged") {
+		var ddl string
+		switch db.Dialector.Name() {
+		case "sqlite":
+			ddl = "ALTER TABLE users ADD COLUMN flagged INTEGER NOT NULL DEFAULT 0"
+		case "postgres":
+			ddl = "ALTER TABLE users ADD COLUMN flagged BOOLEAN NOT NULL DEFAULT FALSE"
+		default:
+			if err := migrator.AddColumn(&User{}, "Flagged"); err != nil {
+				return fmt.Errorf("adding flagged column: %w", err)
+			}
+			ddl = ""
+		}
+		if ddl != "" {
+			if err := db.Exec(ddl).Error; err != nil {
+				return fmt.Errorf("adding flagged column: %w", err)
+			}
+		}
+	}
+
+	if !migrator.HasColumn(&User{}, "flagged_reason") {
+		var ddl string
+		switch db.Dialector.Name() {
+		case "sqlite":
+			ddl = "ALTER TABLE users ADD COLUMN flagged_reason TEXT NOT NULL DEFAULT ''"
+		case "postgres":
+			ddl = "ALTER TABLE users ADD COLUMN flagged_reason TEXT NOT NULL DEFAULT ''"
+		default:
+			if err := migrator.AddColumn(&User{}, "FlaggedReason"); err != nil {
+				return fmt.Errorf("adding flagged_reason column: %w", err)
+			}
+			ddl = ""
+		}
+		if ddl != "" {
+			if err := db.Exec(ddl).Error; err != nil {
+				return fmt.Errorf("adding flagged_reason column: %w", err)
+			}
+		}
+	}
+
+	if !migrator.HasIndex(&User{}, "idx_users_flagged") {
+		if err := db.Exec("CREATE INDEX idx_users_flagged ON users(flagged)").Error; err != nil {
+			return fmt.Errorf("creating idx_users_flagged: %w", err)
+		}
+	}
+
+	return nil
 }

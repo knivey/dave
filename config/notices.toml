@@ -95,6 +95,10 @@
 #   disabled     (string)  Compaction disabled in config.
 #   auto_notice  (string)  Auto-compaction notice. Placeholders: {count}, {tokens_in}, {tokens_out}, {duration}, {prompt}, {completion}, {total}, {cached}, {reasoning}
 #
+# [users] options:
+#   resolve_transient  (string)  Sent (as warnMsg) when resolveUser exhausts its retries on transient DB errors. Placeholders: {nick}
+#   resolve_persistent (string)  Sent (as warnMsg) when resolveUser fell back to creating a flagged placeholder row, or when even that fallback failed. Placeholders: {nick}
+#
 # support           (string)     Support message
 #
 # Example with all options set to defaults:
@@ -190,6 +194,10 @@
 # in_progress = "A compaction is already running for this session."
 # disabled = "Compaction is disabled in config."
 # auto_notice = "\x0314🗜 Auto-compacted {count} earlier messages ({total} tokens, {cached} cached).\x0F"
+#
+# [users]
+# resolve_transient = "internal hiccup tracking your identity, try again in a moment ({nick})"
+# resolve_persistent = "internal data conflict for {nick} — using temporary tracking, admin should investigate"
 #
 # support = "If you enjoy using dave, consider supporting development at https://patreon.com/shrew269 ❤️"
 

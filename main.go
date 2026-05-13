@@ -588,13 +588,11 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 		resolvedUser, err := resolveUser(network.Name, event.Source.Name, event.Source.Ident, event.Source.Host, account, casemapping)
 		if err != nil {
 			logger.Error("failed to resolve user", "error", err)
+		}
+		proceed, userID := handleResolveResult(client, event, resolvedUser, err)
+		if !proceed {
 			return
 		}
-		if resolvedUser == nil {
-			logger.Warn("resolveUser returned nil, dropping message", "nick", event.Source.Name)
-			return
-		}
-		userID := resolvedUser.ID
 
 		if isBanned(theDB, userID, network.Name, channel, "") {
 			logger.Info("User is banned", "user_id", userID, "nick", event.Source.Name)
@@ -657,13 +655,11 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 		resolvedUser, err := resolveUser(network.Name, event.Source.Name, event.Source.Ident, event.Source.Host, account, casemapping)
 		if err != nil {
 			logger.Error("failed to resolve user", "error", err)
+		}
+		proceed, userID := handleResolveResult(client, event, resolvedUser, err)
+		if !proceed {
 			return
 		}
-		if resolvedUser == nil {
-			logger.Warn("resolveUser returned nil, dropping message", "nick", event.Source.Name)
-			return
-		}
-		userID := resolvedUser.ID
 		bans := getActiveBansForUser(theDB, userID, network.Name)
 		n := getNotices()
 		if len(bans) == 0 {
@@ -738,13 +734,11 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 	resolvedUser, err := resolveUser(network.Name, event.Source.Name, event.Source.Ident, event.Source.Host, account, casemapping)
 	if err != nil {
 		logger.Error("failed to resolve user", "error", err)
+	}
+	proceed, userID := handleResolveResult(client, event, resolvedUser, err)
+	if !proceed {
 		return
 	}
-	if resolvedUser == nil {
-		logger.Warn("resolveUser returned nil, dropping message", "nick", event.Source.Name)
-		return
-	}
-	userID := resolvedUser.ID
 
 	if isBanned(theDB, userID, network.Name, channel, "") {
 		logger.Info("User is banned", "user_id", userID, "nick", event.Source.Name)

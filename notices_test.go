@@ -127,6 +127,10 @@ func TestSetNoticesDefaults(t *testing.T) {
 	assert.NotEmpty(t, n.Jobs.QueuePending)
 	assert.NotEmpty(t, n.Jobs.BgHeader)
 	assert.NotEmpty(t, n.Jobs.BgLine)
+	assert.NotEmpty(t, n.Users.ResolveTransient)
+	assert.NotEmpty(t, n.Users.ResolvePersistent)
+	assert.Contains(t, n.Users.ResolveTransient, "{nick}")
+	assert.Contains(t, n.Users.ResolvePersistent, "{nick}")
 	assert.NotEmpty(t, n.Support)
 }
 

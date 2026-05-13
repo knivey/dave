@@ -159,6 +159,8 @@ type User struct {
 	CurrentNick    string `gorm:"not null"`
 	NormalizedNick string `gorm:"not null;index:idx_users_nick,unique"`
 	IRCAccount     string `gorm:"column:account;index:idx_users_account"`
+	Flagged        bool   `gorm:"not null;default:false;index:idx_users_flagged"`
+	FlaggedReason  string `gorm:"not null;default:''"`
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 }

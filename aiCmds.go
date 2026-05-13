@@ -1466,12 +1466,22 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 		resolvedUser, err = resolveUser(network.Name, nick, e.Source.Ident, e.Source.Host, account, casemapping)
 		if err != nil {
 			runner.logger.Error("failed to resolve user in chat()", "error", err)
+		}
+		proceed, _ := handleResolveResult(c, e, resolvedUser, err)
+		if !proceed {
 			return
 		}
 	}
 	if resolvedUser == nil {
 		runner.logger.Warn("chat() got nil resolved user, dropping message", "nick", nick)
 		return
+	}
+	if resolvedUser.Flagged {
+		// Flagged user: handleResolveResult already sent the persistent
+		// notice on the original resolution path. Still continue here so the
+		// LLM responds to them.
+		runner.logger.Warn("chat() proceeding with flagged user",
+			"user_id", resolvedUser.ID, "nick", nick, "reason", resolvedUser.FlaggedReason)
 	}
 	userID := resolvedUser.ID
 	runner.userID = userID

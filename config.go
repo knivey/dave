@@ -26,17 +26,20 @@ type Config struct {
 	Database             DatabaseConfig
 	MCPs                 map[string]MCPConfig `toml:"mcps"`
 	TUI                  TUIConfig
-	APILog               APILogConfig      `toml:"api_log"`
-	IncidentLog          IncidentConfig    `toml:"incident_log"`
-	Pastebin             PastebinConfig    `toml:"pastebin"`
-	TemplateVars         map[string]string `toml:"-"`
-	SessionsDisplayLimit int               `toml:"sessions_display_limit"`
-	Notices              NoticesConfig     `toml:"-"`
-	HiddenTools          []string          `toml:"hidden_tools"`
-	DisabledBuiltins     []string          `toml:"disabled_builtins"`
-	DisabledBuiltinTools []string          `toml:"disabled_builtin_tools"`
-	Bans                 BanConfig         `toml:"bans"`
-	Compaction           CompactionConfig  `toml:"compaction"`
+	APILog               APILogConfig        `toml:"api_log"`
+	IncidentLog          IncidentConfig      `toml:"incident_log"`
+	Pastebin             PastebinConfig      `toml:"pastebin"`
+	TemplateVars         map[string]string   `toml:"-"`
+	SessionsDisplayLimit int                 `toml:"sessions_display_limit"`
+	Notices              NoticesConfig       `toml:"-"`
+	HiddenTools          []string            `toml:"hidden_tools"`
+	DisabledBuiltins     []string            `toml:"disabled_builtins"`
+	DisabledBuiltinTools []string            `toml:"disabled_builtin_tools"`
+	HiddenMCPTools       []string            `toml:"hidden_mcp_tools"`
+	HiddenMCPToolSets    []string            `toml:"hidden_mcp_tool_sets"`
+	MCPToolSets          map[string][]string `toml:"-"`
+	Bans                 BanConfig           `toml:"bans"`
+	Compaction           CompactionConfig    `toml:"compaction"`
 }
 
 type BanConfig struct {
@@ -224,6 +227,8 @@ type AIConfig struct {
 	APIUser              string             `toml:"api_user"`
 	RetryOnEmpty         *int               `toml:"retry_on_empty"`
 	DisabledBuiltinTools []string           `toml:"disabled_builtin_tools"`
+	HiddenMCPTools       []string           `toml:"hidden_mcp_tools"`
+	HiddenMCPToolSets    []string           `toml:"hidden_mcp_tool_sets"`
 	apiUserTmpl          *template.Template `json:"-"`
 }
 
@@ -245,6 +250,8 @@ type Service struct {
 	Parallel             int           `toml:"parallel"`
 	APIUser              string        `toml:"api_user"`
 	DisabledBuiltinTools []string      `toml:"disabled_builtin_tools"`
+	HiddenMCPTools       []string      `toml:"hidden_mcp_tools"`
+	HiddenMCPToolSets    []string      `toml:"hidden_mcp_tool_sets"`
 }
 
 type MCPConfig struct {
@@ -349,6 +356,52 @@ func (cfg *AIConfig) ApplyDefaults(service Service) {
 	if cfg.DisabledBuiltinTools == nil {
 		cfg.DisabledBuiltinTools = service.DisabledBuiltinTools
 	}
+	if cfg.HiddenMCPTools == nil {
+		cfg.HiddenMCPTools = service.HiddenMCPTools
+	}
+	if cfg.HiddenMCPToolSets == nil {
+		cfg.HiddenMCPToolSets = service.HiddenMCPToolSets
+	}
+}
+
+func (cfg *AIConfig) resolveHiddenMCPTools(sets map[string][]string) []string {
+	return resolveHiddenMCPToolsFrom(sets, cfg.HiddenMCPTools, cfg.HiddenMCPToolSets)
+}
+
+func resolveHiddenMCPToolsFrom(sets map[string][]string, tools []string, setNames []string) []string {
+	seen := make(map[string]struct{})
+	var result []string
+	for _, name := range setNames {
+		if toolList, ok := sets[name]; ok {
+			for _, t := range toolList {
+				if _, ok := seen[t]; !ok {
+					seen[t] = struct{}{}
+					result = append(result, t)
+				}
+			}
+		}
+	}
+	for _, t := range tools {
+		if _, ok := seen[t]; !ok {
+			seen[t] = struct{}{}
+			result = append(result, t)
+		}
+	}
+	return result
+}
+
+func isMCPToolHidden(toolName, serverName string, hidden []string) bool {
+	for _, h := range hidden {
+		if h == toolName {
+			return true
+		}
+		if idx := strings.Index(h, "."); idx >= 0 {
+			if h[:idx] == serverName && h[idx+1:] == toolName {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (cfg AIConfig) MarshalJSON() ([]byte, error) {
@@ -502,18 +555,58 @@ func loadServicesFile(dir string, config *Config) error {
 		if service.Parallel <= 0 {
 			service.Parallel = 1
 		}
+		if service.DisabledBuiltinTools == nil {
+			service.DisabledBuiltinTools = config.DisabledBuiltinTools
+		}
+		if service.HiddenMCPTools == nil {
+			service.HiddenMCPTools = config.HiddenMCPTools
+		}
+		if service.HiddenMCPToolSets == nil {
+			service.HiddenMCPToolSets = config.HiddenMCPToolSets
+		}
 		config.Services[name] = service
 	}
 	return nil
 }
 
+type HiddenMCPToolSetConfig struct {
+	Tools []string `toml:"tools"`
+}
+
 func loadMCPsFile(dir string, config *Config) error {
-	if err := loadCommandFile(filepath.Join(dir, "mcps.toml"), &config.MCPs); err != nil {
+	path := filepath.Join(dir, "mcps.toml")
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		config.MCPs = make(map[string]MCPConfig)
+		config.MCPToolSets = make(map[string][]string)
+		return nil
+	}
+
+	var raw map[string]toml.Primitive
+	if _, err := toml.DecodeFile(path, &raw); err != nil {
 		return fmt.Errorf("loading mcps: %w", err)
 	}
-	if config.MCPs == nil {
-		config.MCPs = make(map[string]MCPConfig)
+
+	config.MCPToolSets = make(map[string][]string)
+	if tsRaw, ok := raw["hidden_mcp_tool_sets"]; ok {
+		var toolSets map[string]HiddenMCPToolSetConfig
+		if err := toml.PrimitiveDecode(tsRaw, &toolSets); err != nil {
+			return fmt.Errorf("loading mcps hidden_mcp_tool_sets: %w", err)
+		}
+		for name, ts := range toolSets {
+			config.MCPToolSets[name] = ts.Tools
+		}
+		delete(raw, "hidden_mcp_tool_sets")
 	}
+
+	config.MCPs = make(map[string]MCPConfig)
+	for name, prim := range raw {
+		var mcpCfg MCPConfig
+		if err := toml.PrimitiveDecode(prim, &mcpCfg); err != nil {
+			return fmt.Errorf("loading mcps.%s: %w", name, err)
+		}
+		config.MCPs[name] = mcpCfg
+	}
+
 	for name, mcpCfg := range config.MCPs {
 		if mcpCfg.Transport == "" {
 			return fmt.Errorf("mcps.%s transport is required (stdio, http, or sse)", name)
@@ -558,6 +651,10 @@ func loadTemplateVarsFile(dir string, config *Config) error {
 func loadReloadableDir(dir string, config *Config) error {
 	var tmpConfig Config
 
+	tmpConfig.DisabledBuiltinTools = config.DisabledBuiltinTools
+	tmpConfig.HiddenMCPTools = config.HiddenMCPTools
+	tmpConfig.HiddenMCPToolSets = config.HiddenMCPToolSets
+
 	if err := loadMCPsFile(dir, &tmpConfig); err != nil {
 		return err
 	}
@@ -580,6 +677,7 @@ func loadReloadableDir(dir string, config *Config) error {
 	}
 
 	config.MCPs = tmpConfig.MCPs
+	config.MCPToolSets = tmpConfig.MCPToolSets
 	config.Services = tmpConfig.Services
 	config.Commands = commands
 	config.TemplateVars = tmpConfig.TemplateVars

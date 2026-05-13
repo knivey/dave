@@ -629,7 +629,7 @@ func (srv *MCPServer) callToolWithContext(parentCtx context.Context, toolName st
 	})
 }
 
-func getMCPTools(serverNames []string) []Tool {
+func getMCPTools(serverNames []string, hiddenTools []string) []Tool {
 	var tools []Tool
 
 	for _, serverName := range serverNames {
@@ -641,6 +641,10 @@ func getMCPTools(serverNames []string) []Tool {
 		}
 
 		for _, tool := range srv.Tools {
+			if isMCPToolHidden(tool.Name, serverName, hiddenTools) {
+				continue
+			}
+
 			params := make(map[string]any)
 			if tool.InputSchema != nil {
 				raw, err := json.Marshal(tool.InputSchema)

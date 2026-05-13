@@ -163,7 +163,7 @@ func TestMCPToolSchemaConversion(t *testing.T) {
 	mcpServers["test"] = srv
 	mcpToolToServer["read_file"] = "test"
 
-	tools := getMCPTools([]string{"test"})
+	tools := getMCPTools([]string{"test"}, nil)
 
 	require.Len(t, tools, 1, "expected 1 tool")
 
@@ -296,7 +296,7 @@ func TestMCPInMemoryIntegration(t *testing.T) {
 	mcpServers["test"] = srv
 	mcpToolToServer["greet"] = "test"
 
-	tools := getMCPTools([]string{"test"})
+	tools := getMCPTools([]string{"test"}, nil)
 	require.Len(t, tools, 1, "expected 1 tool")
 
 	result, err := callMCPTool("greet", map[string]any{"name": "World"})
@@ -370,7 +370,7 @@ func TestMCPToolConversionWithNilSchema(t *testing.T) {
 		},
 	}
 
-	tools := getMCPTools([]string{"test"})
+	tools := getMCPTools([]string{"test"}, nil)
 	require.Len(t, tools, 1, "expected 1 tool")
 
 	assert.Equal(t, "no_schema", tools[0].Function.Name, "name mismatch")
@@ -397,7 +397,7 @@ func TestMCPToolConversionObjectWithoutProperties(t *testing.T) {
 		},
 	}
 
-	tools := getMCPTools([]string{"test"})
+	tools := getMCPTools([]string{"test"}, nil)
 	require.Len(t, tools, 1, "expected 1 tool")
 
 	params, ok := tools[0].Function.Parameters.(map[string]any)
@@ -407,6 +407,87 @@ func TestMCPToolConversionObjectWithoutProperties(t *testing.T) {
 	props, ok := params["properties"].(map[string]any)
 	require.True(t, ok, "expected properties to be map[string]any")
 	assert.Empty(t, props, "expected empty properties map")
+}
+
+func TestGetMCPToolsHidden(t *testing.T) {
+	mcpServers = make(map[string]*MCPServer)
+	mcpToolToServer = make(map[string]string)
+
+	srv := &MCPServer{
+		Tools: []*mcp.Tool{
+			{Name: "generate_image", Description: "Generate an image"},
+			{Name: "wait_for_job", Description: "Wait for a job"},
+			{Name: "cancel_job", Description: "Cancel a job"},
+			{Name: "get_job_status", Description: "Get job status"},
+		},
+	}
+	mcpServers["img-mcp"] = srv
+	mcpToolToServer["generate_image"] = "img-mcp"
+	mcpToolToServer["wait_for_job"] = "img-mcp"
+	mcpToolToServer["cancel_job"] = "img-mcp"
+	mcpToolToServer["get_job_status"] = "img-mcp"
+	defer func() {
+		delete(mcpServers, "img-mcp")
+		delete(mcpToolToServer, "generate_image")
+		delete(mcpToolToServer, "wait_for_job")
+		delete(mcpToolToServer, "cancel_job")
+		delete(mcpToolToServer, "get_job_status")
+	}()
+
+	tests := []struct {
+		name      string
+		servers   []string
+		hidden    []string
+		wantNames []string
+	}{
+		{
+			name:      "no hidden",
+			servers:   []string{"img-mcp"},
+			hidden:    nil,
+			wantNames: []string{"generate_image", "wait_for_job", "cancel_job", "get_job_status"},
+		},
+		{
+			name:      "hide by bare name",
+			servers:   []string{"img-mcp"},
+			hidden:    []string{"wait_for_job", "cancel_job"},
+			wantNames: []string{"generate_image", "get_job_status"},
+		},
+		{
+			name:      "hide by server prefixed name",
+			servers:   []string{"img-mcp"},
+			hidden:    []string{"img-mcp.wait_for_job"},
+			wantNames: []string{"generate_image", "cancel_job", "get_job_status"},
+		},
+		{
+			name:      "server prefixed wrong server does not hide",
+			servers:   []string{"img-mcp"},
+			hidden:    []string{"other.wait_for_job"},
+			wantNames: []string{"generate_image", "wait_for_job", "cancel_job", "get_job_status"},
+		},
+		{
+			name:      "hide all",
+			servers:   []string{"img-mcp"},
+			hidden:    []string{"generate_image", "wait_for_job", "cancel_job", "get_job_status"},
+			wantNames: nil,
+		},
+		{
+			name:      "unknown server returns nothing",
+			servers:   []string{"nonexistent"},
+			hidden:    nil,
+			wantNames: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tools := getMCPTools(tt.servers, tt.hidden)
+			var names []string
+			for _, tool := range tools {
+				names = append(names, tool.Function.Name)
+			}
+			assert.Equal(t, tt.wantNames, names)
+		})
+	}
 }
 
 func TestToolCallAccumulation(t *testing.T) {

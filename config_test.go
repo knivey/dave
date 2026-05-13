@@ -1058,3 +1058,391 @@ host = "irc.example.com"
 		assert.Equal(t, []string{"ban_user", "check_ban_history"}, cfg.DisabledBuiltinTools)
 	})
 }
+
+func TestHiddenMCPToolsCascade(t *testing.T) {
+	tests := []struct {
+		name   string
+		cfg    AIConfig
+		svc    Service
+		expect func(AIConfig) AIConfig
+	}{
+		{
+			name: "hidden_mcp_tools nil inherits from service",
+			cfg:  AIConfig{},
+			svc:  Service{HiddenMCPTools: []string{"wait_for_job"}},
+			expect: func(cfg AIConfig) AIConfig {
+				cfg.HiddenMCPTools = []string{"wait_for_job"}
+				cfg.MaxImages = 5
+				cfg.MaxContextImages = 5
+				cfg.ImageFormat = "jpg"
+				cfg.ImageQuality = 75
+				cfg.MaxImageSize = "1024x1024"
+				cfg.RetryOnEmpty = intPtr(1)
+				return cfg
+			},
+		},
+		{
+			name: "hidden_mcp_tools set overrides service",
+			cfg:  AIConfig{HiddenMCPTools: []string{"cancel_job"}},
+			svc:  Service{HiddenMCPTools: []string{"wait_for_job"}},
+			expect: func(cfg AIConfig) AIConfig {
+				cfg.HiddenMCPTools = []string{"cancel_job"}
+				cfg.MaxImages = 5
+				cfg.MaxContextImages = 5
+				cfg.ImageFormat = "jpg"
+				cfg.ImageQuality = 75
+				cfg.MaxImageSize = "1024x1024"
+				cfg.RetryOnEmpty = intPtr(1)
+				return cfg
+			},
+		},
+		{
+			name: "hidden_mcp_tools empty slice overrides service to none",
+			cfg:  AIConfig{HiddenMCPTools: []string{}},
+			svc:  Service{HiddenMCPTools: []string{"wait_for_job"}},
+			expect: func(cfg AIConfig) AIConfig {
+				cfg.HiddenMCPTools = []string{}
+				cfg.MaxImages = 5
+				cfg.MaxContextImages = 5
+				cfg.ImageFormat = "jpg"
+				cfg.ImageQuality = 75
+				cfg.MaxImageSize = "1024x1024"
+				cfg.RetryOnEmpty = intPtr(1)
+				return cfg
+			},
+		},
+		{
+			name: "hidden_mcp_tool_sets nil inherits from service",
+			cfg:  AIConfig{},
+			svc:  Service{HiddenMCPToolSets: []string{"img-async-management"}},
+			expect: func(cfg AIConfig) AIConfig {
+				cfg.HiddenMCPToolSets = []string{"img-async-management"}
+				cfg.MaxImages = 5
+				cfg.MaxContextImages = 5
+				cfg.ImageFormat = "jpg"
+				cfg.ImageQuality = 75
+				cfg.MaxImageSize = "1024x1024"
+				cfg.RetryOnEmpty = intPtr(1)
+				return cfg
+			},
+		},
+		{
+			name: "hidden_mcp_tool_sets set overrides service",
+			cfg:  AIConfig{HiddenMCPToolSets: []string{"custom-set"}},
+			svc:  Service{HiddenMCPToolSets: []string{"img-async-management"}},
+			expect: func(cfg AIConfig) AIConfig {
+				cfg.HiddenMCPToolSets = []string{"custom-set"}
+				cfg.MaxImages = 5
+				cfg.MaxContextImages = 5
+				cfg.ImageFormat = "jpg"
+				cfg.ImageQuality = 75
+				cfg.MaxImageSize = "1024x1024"
+				cfg.RetryOnEmpty = intPtr(1)
+				return cfg
+			},
+		},
+		{
+			name: "both nil means nil",
+			cfg:  AIConfig{},
+			svc:  Service{},
+			expect: func(cfg AIConfig) AIConfig {
+				cfg.MaxImages = 5
+				cfg.MaxContextImages = 5
+				cfg.ImageFormat = "jpg"
+				cfg.ImageQuality = 75
+				cfg.MaxImageSize = "1024x1024"
+				cfg.RetryOnEmpty = intPtr(1)
+				return cfg
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := tt.cfg
+			cfg.ApplyDefaults(tt.svc)
+			want := tt.expect(AIConfig{})
+			assert.Equal(t, want.HiddenMCPTools, cfg.HiddenMCPTools, "HiddenMCPTools")
+			assert.Equal(t, want.HiddenMCPToolSets, cfg.HiddenMCPToolSets, "HiddenMCPToolSets")
+		})
+	}
+}
+
+func TestResolveHiddenMCPToolsFrom(t *testing.T) {
+	sets := map[string][]string{
+		"img-async-management": {"wait_for_job", "cancel_job", "get_job_status", "list_jobs"},
+		"debug-tools":          {"verbose_log", "dump_state"},
+	}
+
+	tests := []struct {
+		name     string
+		tools    []string
+		setNames []string
+		want     []string
+	}{
+		{
+			name:     "nil inputs",
+			tools:    nil,
+			setNames: nil,
+			want:     nil,
+		},
+		{
+			name:     "empty inputs",
+			tools:    []string{},
+			setNames: []string{},
+			want:     nil,
+		},
+		{
+			name:     "tools only",
+			tools:    []string{"wait_for_job", "cancel_job"},
+			setNames: nil,
+			want:     []string{"wait_for_job", "cancel_job"},
+		},
+		{
+			name:     "set only",
+			tools:    nil,
+			setNames: []string{"img-async-management"},
+			want:     []string{"wait_for_job", "cancel_job", "get_job_status", "list_jobs"},
+		},
+		{
+			name:     "set and tools merged deduped",
+			tools:    []string{"wait_for_job", "extra_tool"},
+			setNames: []string{"img-async-management"},
+			want:     []string{"wait_for_job", "cancel_job", "get_job_status", "list_jobs", "extra_tool"},
+		},
+		{
+			name:     "multiple sets",
+			tools:    nil,
+			setNames: []string{"img-async-management", "debug-tools"},
+			want:     []string{"wait_for_job", "cancel_job", "get_job_status", "list_jobs", "verbose_log", "dump_state"},
+		},
+		{
+			name:     "unknown set ignored",
+			tools:    []string{"my_tool"},
+			setNames: []string{"nonexistent"},
+			want:     []string{"my_tool"},
+		},
+		{
+			name:     "dedup across set and tools",
+			tools:    []string{"wait_for_job"},
+			setNames: []string{"img-async-management"},
+			want:     []string{"wait_for_job", "cancel_job", "get_job_status", "list_jobs"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveHiddenMCPToolsFrom(sets, tt.tools, tt.setNames)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestIsMCPToolHidden(t *testing.T) {
+	hidden := []string{"wait_for_job", "cancel_job", "img-mcp-async.get_job_status", "other-server.specific_tool"}
+
+	tests := []struct {
+		name       string
+		toolName   string
+		serverName string
+		hidden     []string
+		want       bool
+	}{
+		{name: "bare match", toolName: "wait_for_job", serverName: "img-mcp-async", hidden: hidden, want: true},
+		{name: "bare no match", toolName: "generate_image", serverName: "img-mcp", hidden: hidden, want: false},
+		{name: "server prefixed match", toolName: "get_job_status", serverName: "img-mcp-async", hidden: hidden, want: true},
+		{name: "server prefixed wrong server", toolName: "get_job_status", serverName: "img-mcp", hidden: hidden, want: false},
+		{name: "server prefixed match other", toolName: "specific_tool", serverName: "other-server", hidden: hidden, want: true},
+		{name: "empty hidden list", toolName: "wait_for_job", serverName: "img-mcp-async", hidden: nil, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isMCPToolHidden(tt.toolName, tt.serverName, tt.hidden))
+		})
+	}
+}
+
+func TestLoadMCPsFileWithToolSets(t *testing.T) {
+	mainTOML := `
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+	mcpsTOML := `
+[img-mcp]
+transport = "http"
+url = "http://localhost:8080/sync"
+
+[img-mcp-async]
+transport = "http"
+url = "http://localhost:8080/async"
+
+[hidden_mcp_tool_sets.img-async-management]
+tools = ["wait_for_job", "cancel_job", "get_job_status", "list_jobs"]
+`
+	dir := createTestConfigDir(t, mainTOML, map[string]string{
+		"mcps.toml": mcpsTOML,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg := loadConfigDirOrDie(dir)
+	assert.Contains(t, cfg.MCPs, "img-mcp")
+	assert.Contains(t, cfg.MCPs, "img-mcp-async")
+	assert.Equal(t, map[string][]string{
+		"img-async-management": {"wait_for_job", "cancel_job", "get_job_status", "list_jobs"},
+	}, cfg.MCPToolSets)
+}
+
+func TestLoadMCPsFileWithoutToolSets(t *testing.T) {
+	mainTOML := `
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+	mcpsTOML := `
+[img-mcp]
+transport = "http"
+url = "http://localhost:8080/sync"
+`
+	dir := createTestConfigDir(t, mainTOML, map[string]string{
+		"mcps.toml": mcpsTOML,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg := loadConfigDirOrDie(dir)
+	assert.Empty(t, cfg.MCPToolSets)
+}
+
+func TestLoadMCPsFileMissing(t *testing.T) {
+	mainTOML := `
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+	dir := createTestConfigDir(t, mainTOML, nil)
+	defer os.RemoveAll(dir)
+
+	cfg := loadConfigDirOrDie(dir)
+	assert.Empty(t, cfg.MCPToolSets)
+	assert.Empty(t, cfg.MCPs)
+}
+
+func TestRootToServiceCascade(t *testing.T) {
+	mainTOML := `
+disabled_builtin_tools = ["ban_user"]
+hidden_mcp_tools = ["wait_for_job"]
+hidden_mcp_tool_sets = ["img-async-management"]
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+	servicesTOML := `
+[myservice]
+baseurl = "http://localhost:8000/v1"
+`
+	dir := createTestConfigDir(t, mainTOML, map[string]string{
+		"services.toml": servicesTOML,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg := loadConfigDirOrDie(dir)
+	svc := cfg.Services["myservice"]
+	assert.Equal(t, []string{"ban_user"}, svc.DisabledBuiltinTools, "service should inherit root disabled_builtin_tools")
+	assert.Equal(t, []string{"wait_for_job"}, svc.HiddenMCPTools, "service should inherit root hidden_mcp_tools")
+	assert.Equal(t, []string{"img-async-management"}, svc.HiddenMCPToolSets, "service should inherit root hidden_mcp_tool_sets")
+}
+
+func TestRootToServiceCascadeServiceOverrides(t *testing.T) {
+	mainTOML := `
+disabled_builtin_tools = ["ban_user"]
+hidden_mcp_tools = ["wait_for_job"]
+hidden_mcp_tool_sets = ["img-async-management"]
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+	servicesTOML := `
+[myservice]
+baseurl = "http://localhost:8000/v1"
+disabled_builtin_tools = ["check_ban_history"]
+hidden_mcp_tools = ["cancel_job"]
+hidden_mcp_tool_sets = ["custom-set"]
+`
+	dir := createTestConfigDir(t, mainTOML, map[string]string{
+		"services.toml": servicesTOML,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg := loadConfigDirOrDie(dir)
+	svc := cfg.Services["myservice"]
+	assert.Equal(t, []string{"check_ban_history"}, svc.DisabledBuiltinTools, "service should override root disabled_builtin_tools")
+	assert.Equal(t, []string{"cancel_job"}, svc.HiddenMCPTools, "service should override root hidden_mcp_tools")
+	assert.Equal(t, []string{"custom-set"}, svc.HiddenMCPToolSets, "service should override root hidden_mcp_tool_sets")
+}
+
+func TestRootToServiceCascadeServiceEmptyOverrides(t *testing.T) {
+	mainTOML := `
+disabled_builtin_tools = ["ban_user"]
+hidden_mcp_tools = ["wait_for_job"]
+hidden_mcp_tool_sets = ["img-async-management"]
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+	servicesTOML := `
+[myservice]
+baseurl = "http://localhost:8000/v1"
+disabled_builtin_tools = []
+hidden_mcp_tools = []
+hidden_mcp_tool_sets = []
+`
+	dir := createTestConfigDir(t, mainTOML, map[string]string{
+		"services.toml": servicesTOML,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg := loadConfigDirOrDie(dir)
+	svc := cfg.Services["myservice"]
+	assert.Equal(t, []string{}, svc.DisabledBuiltinTools, "service empty slice should override root to none")
+	assert.Equal(t, []string{}, svc.HiddenMCPTools, "service empty slice should override root to none")
+	assert.Equal(t, []string{}, svc.HiddenMCPToolSets, "service empty slice should override root to none")
+}
+
+func TestFullCascadeRootToCommand(t *testing.T) {
+	mainTOML := `
+hidden_mcp_tools = ["wait_for_job", "cancel_job"]
+hidden_mcp_tool_sets = ["img-async-management"]
+disabled_builtin_tools = ["ban_user"]
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+	servicesTOML := `
+[myservice]
+baseurl = "http://localhost:8000/v1"
+`
+	chatsTOML := `
+[mychat]
+service = "myservice"
+system = "test"
+`
+	dir := createTestConfigDir(t, mainTOML, map[string]string{
+		"services.toml": servicesTOML,
+		"chats.toml":    chatsTOML,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg := loadConfigDirOrDie(dir)
+	chat := cfg.Commands.Chats["mychat"]
+	assert.Equal(t, []string{"ban_user"}, chat.DisabledBuiltinTools, "command should inherit root→service→command disabled_builtin_tools")
+	assert.Equal(t, []string{"wait_for_job", "cancel_job"}, chat.HiddenMCPTools, "command should inherit root→service→command hidden_mcp_tools")
+	assert.Equal(t, []string{"img-async-management"}, chat.HiddenMCPToolSets, "command should inherit root→service→command hidden_mcp_tool_sets")
+}

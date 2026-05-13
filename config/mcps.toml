@@ -13,6 +13,17 @@
 #   keepalive  (duration)          Ping interval for liveness detection. Default: 30s for http/sse, 0 (disabled) for stdio
 #   headers    (string map)        Custom HTTP headers to send with every request (http and sse only)
 #
+# Hidden MCP tool sets — named groups of tools to exclude from the LLM's tool list.
+# Tool names can be bare ("tool_name") or server-prefixed ("server.tool_name") for disambiguation.
+# Referenced in services.toml / chats.toml via hidden_mcp_tool_sets = ["set-name", ...].
+#
+# [hidden_mcp_tool_sets.<name>]
+# tools = ["tool_name", "server.tool_name", ...]
+#
+# Example — hide async management tools from img-mcp-async:
+# [hidden_mcp_tool_sets.img-async-management]
+# tools = ["wait_for_job", "cancel_job", "get_job_status", "list_jobs"]
+#
 # Duration values: TOML strings like "30s", "2m", "1m30s".
 #
 # Example — stdio transport with all options:

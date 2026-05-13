@@ -6,6 +6,8 @@ Go IRC chatbot for OpenAI-compatible APIs, Stable Diffusion, ComfyUI image gen. 
 **Module**: `github.com/knivey/dave`
 **Go**: 1.25.0
 
+**NEVER** use `git add -f` to force-add files that are in `.gitignore`. The `.gitignore` exists for a reason (secret keys, environment configs, build artifacts). If `git add` refuses to track a file, respect that — do not override it.
+
 ## Design Docs
 - [Queue & Session System](docs/queue-and-sessions.md) — how queue delivery, parallel execution, sessions, and async background tasks are intended to work
 

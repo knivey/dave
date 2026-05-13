@@ -309,7 +309,11 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 	if cr.cfg.ResponsesAPI {
 		return cr.runTurnResponses(messages)
 	}
-	mcpTools := getMCPTools(cr.cfg.MCPs)
+	var hiddenMCPTools []string
+	readConfig(func() {
+		hiddenMCPTools = cr.cfg.resolveHiddenMCPTools(config.MCPToolSets)
+	})
+	mcpTools := getMCPTools(cr.cfg.MCPs, hiddenMCPTools)
 	if len(mcpTools) > 0 {
 		mcpTools = append(mcpTools, getBuiltinToolDefs(cr.cfg.DisabledBuiltinTools)...)
 	}
@@ -698,6 +702,10 @@ func (cr *chatRunner) executeToolCalls(messages []ChatMessage, toolCalls []ToolC
 
 	var hiddenTools []string
 	readConfig(func() { hiddenTools = config.HiddenTools })
+	var hiddenMCPTools []string
+	readConfig(func() {
+		hiddenMCPTools = cr.cfg.resolveHiddenMCPTools(config.MCPToolSets)
+	})
 	verbose := cr.cfg.ToolVerbose == nil || *cr.cfg.ToolVerbose
 	type toolEntry struct {
 		server string
@@ -746,8 +754,18 @@ func (cr *chatRunner) executeToolCalls(messages []ChatMessage, toolCalls []ToolC
 			}
 			continue
 		}
+		serverName := getMCPServerForTool(tc.Function.Name)
+		if isMCPToolHidden(tc.Function.Name, serverName, hiddenMCPTools) {
+			toolMsg := ChatMessage{
+				Role:       RoleTool,
+				Content:    fmt.Sprintf("error: tool %q is hidden for this command", tc.Function.Name),
+				ToolCallID: tc.ID,
+			}
+			messages = append(messages, toolMsg)
+			cr.addContext(toolMsg)
+			continue
+		}
 		if verbose && !isToolHidden(tc.Function.Name, hiddenTools) && len(visibleTools) <= 1 {
-			serverName := getMCPServerForTool(tc.Function.Name)
 			cr.sendIRC(expandNotice(getNotices().Tools.Call, map[string]string{"server": serverName, "tool": tc.Function.Name}))
 		}
 		var toolArgs map[string]any
@@ -1035,7 +1053,11 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 	mu.(*sync.Mutex).Lock()
 	defer mu.(*sync.Mutex).Unlock()
 
-	mcpTools := getMCPTools(cr.cfg.MCPs)
+	var hiddenMCPTools []string
+	readConfig(func() {
+		hiddenMCPTools = cr.cfg.resolveHiddenMCPTools(config.MCPToolSets)
+	})
+	mcpTools := getMCPTools(cr.cfg.MCPs, hiddenMCPTools)
 	if len(mcpTools) > 0 {
 		mcpTools = append(mcpTools, getBuiltinToolDefs(cr.cfg.DisabledBuiltinTools)...)
 	}

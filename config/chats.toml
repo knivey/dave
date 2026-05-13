@@ -45,6 +45,8 @@
 #   api_user             (string, cascades from service)  Go template for API "user" field. Variables: {{.Nick}}, {{.BotNick}}, {{.Channel}}, {{.Network}}, {{.Date}}, {{.Vars.*}}. Empty = not sent.
 #   retry_on_empty       (int, default: 1)           Number of retries when API returns empty response (0 = disabled)
 #   disabled_builtin_tools (string array)            Builtin LLM tools to disable (e.g. ["ban_user", "check_ban_history"]). Cascade: command > service > root default ([]).
+#   hidden_mcp_tools     (string array)              MCP tool names to hide from the LLM. Bare names ("tool") or server-prefixed ("server.tool"). Cascade: command > service > root default ([]).
+#   hidden_mcp_tool_sets (string array)              Named tool sets from mcps.toml [hidden_mcp_tool_sets.*]. Merged with hidden_mcp_tools. Cascade: command > service > root default ([]).
 #
 # /me action support: The LLM can use "/me <action text>" on its own line to send IRC CTCP ACTION messages.
 # Add {{.Vars.IRCActionNote}} to the system prompt to instruct the LLM how to use this feature.
@@ -89,6 +91,8 @@
 # api_user = "irc:{{.Network}}:{{.Channel}}:{{.Nick}}"
 # retry_on_empty = 1
 # disabled_builtin_tools = ["ban_user", "check_ban_history"]
+# hidden_mcp_tools = ["wait_for_job", "cancel_job"]
+# hidden_mcp_tool_sets = ["img-async-management"]
 
 [chat]
 description = "General IRC-aware chat"

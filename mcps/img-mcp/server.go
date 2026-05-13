@@ -70,16 +70,16 @@ func createSyncServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 
 func createAsyncServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 	server := newServer(cfg, cfg.Server.Name+"-async",
-		"MCP server for ComfyUI image generation (async). Use generate_image_async or enhance_and_generate_async to queue jobs and get a job_id immediately, then check with job_status or wait_for_job.")
+		"MCP server for ComfyUI image generation (async). Use generate_image_async or enhance_and_generate_async to queue jobs and get a job_id immediately.")
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "generate_image_async",
-		Description: "Queue a ComfyUI image generation job and return a job_id immediately without waiting. Use job_status to check progress or wait_for_job to block until done. Uses the default workflow if workflow is empty or 'default'.",
+		Description: "Queue a ComfyUI image generation job and return a job_id immediately without waiting. Uses the default workflow if workflow is empty or 'default'.",
 	}, handlers.handleGenerateImageAsync)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "enhance_and_generate_async",
-		Description: "Enhance a prompt via LLM and queue a ComfyUI image generation job in one step. Returns a job_id immediately without waiting. Uses the 'default' enhancement profile unless a different one is specified. Uses the default workflow if workflow is empty or 'default'. Use job_status to check progress or wait_for_job to block until done.",
+		Description: "Enhance a prompt via LLM and queue a ComfyUI image generation job in one step. Returns a job_id immediately without waiting. Uses the 'default' enhancement profile unless a different one is specified. Uses the default workflow if workflow is empty or 'default'.",
 	}, handlers.handleEnhanceAndGenerateAsync)
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -127,7 +127,7 @@ func createAsyncServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 
 func createFullServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 	server := newServer(cfg, cfg.Server.Name,
-		"MCP server for ComfyUI image generation and prompt enhancement. Use generate_image or enhance_and_generate for one-step image generation (blocks until done). Use generate_image_async or enhance_and_generate_async to queue jobs and get a job_id immediately, then check with job_status or wait_for_job.")
+		"MCP server for ComfyUI image generation and prompt enhancement. Use generate_image or enhance_and_generate for one-step image generation (blocks until done). Use generate_image_async or enhance_and_generate_async to queue jobs and get a job_id immediately.")
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "enhance_prompt",
@@ -141,7 +141,7 @@ func createFullServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "generate_image_async",
-		Description: "Queue a ComfyUI image generation job and return a job_id immediately without waiting. Use job_status to check progress or wait_for_job to block until done. Uses the default workflow if workflow is empty or 'default'.",
+		Description: "Queue a ComfyUI image generation job and return a job_id immediately without waiting. Uses the default workflow if workflow is empty or 'default'.",
 	}, handlers.handleGenerateImageAsync)
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -151,7 +151,7 @@ func createFullServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "enhance_and_generate_async",
-		Description: "Enhance a prompt via LLM and queue a ComfyUI image generation job in one step. Returns a job_id immediately without waiting. Uses the 'default' enhancement profile unless a different one is specified. Uses the default workflow if workflow is empty or 'default'. Use job_status to check progress or wait_for_job to block until done.",
+		Description: "Enhance a prompt via LLM and queue a ComfyUI image generation job in one step. Returns a job_id immediately without waiting. Uses the 'default' enhancement profile unless a different one is specified. Uses the default workflow if workflow is empty or 'default'.",
 	}, handlers.handleEnhanceAndGenerateAsync)
 
 	mcp.AddTool(server, &mcp.Tool{

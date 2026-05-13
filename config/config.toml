@@ -9,6 +9,8 @@
 #   hidden_tools        (string array)        Tool names to hide from IRC notifications (default: ["register_background_job", "check_ban_history"])
 #   disabled_builtins   (string array)        Builtin commands to disable (e.g. ["support", "mystats"])
 #   disabled_builtin_tools (string array)     Builtin LLM tools to disable (default: []); cascades to services/chats
+#   hidden_mcp_tools    (string array)        MCP tool names to hide from the LLM (default: []). Bare names or "server.tool" prefixed. Cascades to services/chats.
+#   hidden_mcp_tool_sets (string array)       Named tool sets from mcps.toml [hidden_mcp_tool_sets.*] (default: []). Cascades to services/chats.
 #
 # Builtin LLM tools (auto-available when MCP tools are present):
 #   register_background_job  — Monitor an async tool job for its result

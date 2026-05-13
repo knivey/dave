@@ -20,6 +20,8 @@
 #   parallel             (int, default: 1)           Max concurrent requests per command
 #   api_user             (string)                    Go template for API "user" field (cascades to commands). Variables: {{.Nick}}, {{.BotNick}}, {{.Channel}}, {{.Network}}, {{.Date}}, {{.Vars.*}}. Empty = not sent.
 #   disabled_builtin_tools (string array)            Builtin LLM tools to disable for commands using this service. Cascade: command > service > root default ([]). Nil = inherit.
+#   hidden_mcp_tools     (string array)              MCP tool names to hide from the LLM. Bare names ("tool") or server-prefixed ("server.tool"). Cascade: command > service > root.
+#   hidden_mcp_tool_sets (string array)              Named tool sets from mcps.toml [hidden_mcp_tool_sets.*]. Merged with hidden_mcp_tools. Cascade: command > service > root.
 #
 # Duration values: TOML strings like "30s", "2m", "1m30s".
 #
@@ -42,6 +44,8 @@
 # parallel = 1
 # api_user = "dave/{{.Network}}/{{.Nick}}"
 # disabled_builtin_tools = ["ban_user"]
+# hidden_mcp_tools = ["wait_for_job"]
+# hidden_mcp_tool_sets = ["img-async-management"]
 
 [openai]
 key = "UR KEY HERE :P"

@@ -580,51 +580,27 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 		return
 	}
 
-	resolvedUser, err := resolveUser(network.Name, event.Source.Name, event.Source.Ident, event.Source.Host, account, casemapping)
-	if err != nil {
-		logger.Error("failed to resolve user", "error", err)
-		return
-	}
-	if resolvedUser == nil {
-		logger.Warn("resolveUser returned nil, dropping message", "nick", event.Source.Name)
-		return
-	}
-	userID := resolvedUser.ID
-
-	if isTrigger {
-		stripped := strings.TrimPrefix(msg, network.Trigger)
-		if stripped == "amibanned" {
-			bans := getActiveBansForUser(theDB, userID, network.Name)
-			n := getNotices()
-			if len(bans) == 0 {
-				client.Cmd.Reply(event, n.Bans.AmIBannedNone)
-			} else {
-				for _, ban := range bans {
-					remainingStr := "never"
-					if !ban.ExpiresAt.IsZero() {
-						remaining := time.Until(ban.ExpiresAt).Round(time.Minute)
-						if remaining < 0 {
-							remaining = 0
-						}
-						remainingStr = formatDuration(remaining)
-					}
-					client.Cmd.Reply(event, expandNotice(n.Bans.AmIBanned, map[string]string{
-						"reason":    ban.Reason,
-						"remaining": remainingStr,
-						"banner":    ban.BannerNick,
-					}))
-				}
-			}
+	// DESIGN NOTE: resolveUser does multiple DB queries (account lookup, nick lookup,
+	// host recovery). For the non-trigger (mention) path we need it immediately.
+	// For the trigger path we defer it until after confirming the message matches
+	// an actual command, so that "-random_text" that matches nothing skips the DB work.
+	if !isTrigger {
+		resolvedUser, err := resolveUser(network.Name, event.Source.Name, event.Source.Ident, event.Source.Host, account, casemapping)
+		if err != nil {
+			logger.Error("failed to resolve user", "error", err)
 			return
 		}
-	}
+		if resolvedUser == nil {
+			logger.Warn("resolveUser returned nil, dropping message", "nick", event.Source.Name)
+			return
+		}
+		userID := resolvedUser.ID
 
-	if isBanned(theDB, userID, network.Name, channel, "") {
-		logger.Info("User is banned", "user_id", userID, "nick", event.Source.Name)
-		return
-	}
+		if isBanned(theDB, userID, network.Name, channel, "") {
+			logger.Info("User is banned", "user_id", userID, "nick", event.Source.Name)
+			return
+		}
 
-	if !isTrigger {
 		botnick := client.GetNick()
 		if !ContextExists(network.Name, channel, userID) {
 			logger.Info("Ignoring message due to no existing chat context")
@@ -671,111 +647,179 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 		}
 		return
 	}
-	msg = strings.TrimPrefix(msg, network.Trigger)
-	commandsMutex.RLock()
 
-	for r, cmd := range builtInCmds {
-		if r.Match([]byte(msg)) {
-			if isBuiltinDisabled(builtInNames[r]) {
-				commandsMutex.RUnlock()
-				return
-			}
-			var args []string
-			for i, m := range r.FindSubmatch([]byte(msg)) {
-				if i != 0 && len(m) > 0 {
-					args = append(args, string(m))
-				}
-			}
-			commandsMutex.RUnlock()
+	// --- Trigger path ---
+	stripped := strings.TrimPrefix(msg, network.Trigger)
 
-			if r == stop_re {
-				cmd(network, client, event, ctxWithResolvedUser(context.Background(), resolvedUser), nil, args...)
-				return
-			}
-
-			if !checkRate(network, channel) {
-				var rateMsg string
-				readConfig(func() { rateMsg = config.Notices.Ratemsg() })
-				client.Cmd.Reply(event, warnMsg(rateMsg))
-				return
-			}
-
-			if r == stats_re || r == delete_re || r == resume_re || r == support_re {
-				cmd(network, client, event, ctxWithResolvedUser(context.Background(), resolvedUser), nil, args...)
-				return
-			}
-
-			position := queueMgr.Enqueue(network.Name, channel, userID, event.Source.Name, "", msg,
-				func(cx context.Context, output chan<- string) {
-					cmd(network, client, event, ctxWithResolvedUser(cx, resolvedUser), output, args...)
-				})
-			if position > 0 {
-				var queueMsg string
-				readConfig(func() { queueMsg = config.Notices.QueueMsg(position, 0) })
-				client.Cmd.Reply(event, queueMsg)
-			}
+	// amibanned is a special case: it must work even for banned users,
+	// so it resolves the user and returns before the ban check.
+	if stripped == "amibanned" {
+		resolvedUser, err := resolveUser(network.Name, event.Source.Name, event.Source.Ident, event.Source.Host, account, casemapping)
+		if err != nil {
+			logger.Error("failed to resolve user", "error", err)
 			return
 		}
-	}
-
-	for r, cmd := range configCmds {
-		if r.Match([]byte(msg)) {
-			var args []string
-			for i, m := range r.FindSubmatch([]byte(msg)) {
-				if i != 0 && len(m) > 0 {
-					args = append(args, string(m))
-				}
-			}
-			commandsMutex.RUnlock()
-
-			if !checkRate(network, channel) {
-				var rateMsg string
-				readConfig(func() { rateMsg = config.Notices.Ratemsg() })
-				client.Cmd.Reply(event, warnMsg(rateMsg))
-				return
-			}
-
-			if rateExemptCmds[r] {
-				if chatCmds[r] {
-					ClearContext(network.Name, channel, userID)
-				}
-				outCh := make(chan string, 200)
-				go func() {
-					defer close(outCh)
-					cmd(network, client, event, ctxWithResolvedUser(context.Background(), resolvedUser), outCh, args...)
-				}()
-				go func() {
-					for msg := range outCh {
-						if action, ok := isIRCAction(msg); ok {
-							client.Cmd.Action(channel, action)
-						} else {
-							client.Cmd.Message(channel, "\x02\x02"+msg)
-						}
-						time.Sleep(time.Millisecond * time.Duration(network.Throttle))
+		if resolvedUser == nil {
+			logger.Warn("resolveUser returned nil, dropping message", "nick", event.Source.Name)
+			return
+		}
+		userID := resolvedUser.ID
+		bans := getActiveBansForUser(theDB, userID, network.Name)
+		n := getNotices()
+		if len(bans) == 0 {
+			client.Cmd.Reply(event, n.Bans.AmIBannedNone)
+		} else {
+			for _, ban := range bans {
+				remainingStr := "never"
+				if !ban.ExpiresAt.IsZero() {
+					remaining := time.Until(ban.ExpiresAt).Round(time.Minute)
+					if remaining < 0 {
+						remaining = 0
 					}
-				}()
-				return
+					remainingStr = formatDuration(remaining)
+				}
+				client.Cmd.Reply(event, expandNotice(n.Bans.AmIBanned, map[string]string{
+					"reason":    ban.Reason,
+					"remaining": remainingStr,
+					"banner":    ban.BannerNick,
+				}))
 			}
-
-			if chatCmds[r] {
-				ClearContext(network.Name, channel, userID)
-			}
-
-			svc := getServiceForConfigCmd(r)
-			position := queueMgr.Enqueue(network.Name, channel, userID, event.Source.Name, svc, msg,
-				func(cx context.Context, output chan<- string) {
-					cmd(network, client, event, ctxWithResolvedUser(cx, resolvedUser), output, args...)
-				})
-			if position > 0 {
-				var queueMsg string
-				readConfig(func() { queueMsg = config.Notices.QueueMsg(position, 0) })
-				client.Cmd.Reply(event, queueMsg)
-			}
-			return
 		}
+		return
 	}
 
+	// Cheap command match phase — no DB work yet.
+	type cmdMatch struct {
+		cmd      CmdFunc
+		re       *regexp.Regexp
+		args     []string
+		builtin  bool
+		disabled bool
+	}
+	var match *cmdMatch
+	commandsMutex.RLock()
+	for r, cmd := range builtInCmds {
+		if r.Match([]byte(stripped)) {
+			var args []string
+			for i, m := range r.FindSubmatch([]byte(stripped)) {
+				if i != 0 && len(m) > 0 {
+					args = append(args, string(m))
+				}
+			}
+			match = &cmdMatch{
+				cmd: cmd, re: r, args: args,
+				builtin: true, disabled: isBuiltinDisabled(builtInNames[r]),
+			}
+			break
+		}
+	}
+	if match == nil {
+		for r, cmd := range configCmds {
+			if r.Match([]byte(stripped)) {
+				var args []string
+				for i, m := range r.FindSubmatch([]byte(stripped)) {
+					if i != 0 && len(m) > 0 {
+						args = append(args, string(m))
+					}
+				}
+				match = &cmdMatch{cmd: cmd, re: r, args: args}
+				break
+			}
+		}
+	}
 	commandsMutex.RUnlock()
+
+	// No command matched or disabled builtin — return without DB lookup.
+	if match == nil || match.disabled {
+		return
+	}
+
+	// Command matched — now resolve user and check bans.
+	resolvedUser, err := resolveUser(network.Name, event.Source.Name, event.Source.Ident, event.Source.Host, account, casemapping)
+	if err != nil {
+		logger.Error("failed to resolve user", "error", err)
+		return
+	}
+	if resolvedUser == nil {
+		logger.Warn("resolveUser returned nil, dropping message", "nick", event.Source.Name)
+		return
+	}
+	userID := resolvedUser.ID
+
+	if isBanned(theDB, userID, network.Name, channel, "") {
+		logger.Info("User is banned", "user_id", userID, "nick", event.Source.Name)
+		return
+	}
+
+	// Execute the matched command.
+	if match.builtin {
+		if match.re == stop_re {
+			match.cmd(network, client, event, ctxWithResolvedUser(context.Background(), resolvedUser), nil, match.args...)
+			return
+		}
+		if !checkRate(network, channel) {
+			var rateMsg string
+			readConfig(func() { rateMsg = config.Notices.Ratemsg() })
+			client.Cmd.Reply(event, warnMsg(rateMsg))
+			return
+		}
+		if match.re == stats_re || match.re == delete_re || match.re == resume_re || match.re == support_re {
+			match.cmd(network, client, event, ctxWithResolvedUser(context.Background(), resolvedUser), nil, match.args...)
+			return
+		}
+		position := queueMgr.Enqueue(network.Name, channel, userID, event.Source.Name, "", msg,
+			func(cx context.Context, output chan<- string) {
+				match.cmd(network, client, event, ctxWithResolvedUser(cx, resolvedUser), output, match.args...)
+			})
+		if position > 0 {
+			var queueMsg string
+			readConfig(func() { queueMsg = config.Notices.QueueMsg(position, 0) })
+			client.Cmd.Reply(event, queueMsg)
+		}
+		return
+	}
+
+	// Config command execution.
+	if !checkRate(network, channel) {
+		var rateMsg string
+		readConfig(func() { rateMsg = config.Notices.Ratemsg() })
+		client.Cmd.Reply(event, warnMsg(rateMsg))
+		return
+	}
+	if rateExemptCmds[match.re] {
+		if chatCmds[match.re] {
+			ClearContext(network.Name, channel, userID)
+		}
+		outCh := make(chan string, 200)
+		go func() {
+			defer close(outCh)
+			match.cmd(network, client, event, ctxWithResolvedUser(context.Background(), resolvedUser), outCh, match.args...)
+		}()
+		go func() {
+			for m := range outCh {
+				if action, ok := isIRCAction(m); ok {
+					client.Cmd.Action(channel, action)
+				} else {
+					client.Cmd.Message(channel, "\x02\x02"+m)
+				}
+				time.Sleep(time.Millisecond * time.Duration(network.Throttle))
+			}
+		}()
+		return
+	}
+	if chatCmds[match.re] {
+		ClearContext(network.Name, channel, userID)
+	}
+	svc := getServiceForConfigCmd(match.re)
+	position := queueMgr.Enqueue(network.Name, channel, userID, event.Source.Name, svc, msg,
+		func(cx context.Context, output chan<- string) {
+			match.cmd(network, client, event, ctxWithResolvedUser(cx, resolvedUser), output, match.args...)
+		})
+	if position > 0 {
+		var queueMsg string
+		readConfig(func() { queueMsg = config.Notices.QueueMsg(position, 0) })
+		client.Cmd.Reply(event, queueMsg)
+	}
 }
 
 func getServiceForConfigCmd(r *regexp.Regexp) string {

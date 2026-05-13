@@ -15,8 +15,13 @@ type Config struct {
 	Comfy        ComfyServiceConfig           `toml:"comfy"`
 	Upload       UploadConfig                 `toml:"upload"`
 	Queue        QueueConfig                  `toml:"queue"`
+	Auth         AuthConfig                   `toml:"auth"`
 	Enhancements map[string]EnhancementConfig `toml:"enhancement"`
 	Workflows    map[string]WorkflowConfig    `toml:"workflow"`
+}
+
+type AuthConfig struct {
+	APIKey string `toml:"api_key"`
 }
 
 type ServerConfig struct {
@@ -197,6 +202,7 @@ func reloadConfigFromFile(configFile string, current Config) (Config, []string, 
 	newCfg.Database = current.Database
 	newCfg.Queue.MaxWorkers = current.Queue.MaxWorkers
 	newCfg.Queue.MaxDepth = current.Queue.MaxDepth
+	newCfg.Auth = current.Auth
 
 	return newCfg, warnings, nil
 }
@@ -221,6 +227,9 @@ func compareNonReloadable(current, newCfg Config) []string {
 	}
 	if current.Queue.MaxDepth != newCfg.Queue.MaxDepth {
 		warnings = append(warnings, fmt.Sprintf("queue.max_depth changed from %d to %d: requires restart", current.Queue.MaxDepth, newCfg.Queue.MaxDepth))
+	}
+	if current.Auth.APIKey != newCfg.Auth.APIKey {
+		warnings = append(warnings, fmt.Sprintf("auth.api_key changed: requires restart"))
 	}
 
 	return warnings

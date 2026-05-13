@@ -36,6 +36,12 @@ max_depth = 100
 # How long to keep job results in memory (e.g., "1h", "30m", "24h")
 result_ttl = "1h"
 
+[auth]
+# Shared secret for authenticating HTTP requests (required in HTTP mode, ignored in stdio mode).
+# Requests must include the X-API-Key header with this value.
+# Not reloadable — changes require restart.
+api_key = "CHANGE_ME_TO_A_STRONG_RANDOM_SECRET"
+
 [enhancement.default]
 # Prompt enhancement settings (optional)
 description = "General purpose image prompt enhancer"

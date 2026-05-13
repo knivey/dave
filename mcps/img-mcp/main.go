@@ -48,6 +48,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	if *httpMode && cfg.Auth.APIKey == "" {
+		fmt.Fprintf(os.Stderr, "config error: auth.api_key is required in HTTP mode\n")
+		os.Exit(1)
+	}
+
 	dbPath := cfg.Database.Path
 	if dbPath == "" {
 		dbPath = "data/img-mcp.db"
@@ -170,5 +175,8 @@ func buildHTTPHandler(cfg Config, handlers *ToolHandlers, queue *JobQueue, confi
 		json.NewEncoder(w).Encode(resp)
 	})
 
+	if cfg.Auth.APIKey != "" {
+		return apiKeyMiddleware(cfg.Auth.APIKey)(mux)
+	}
 	return mux
 }

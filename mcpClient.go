@@ -252,7 +252,20 @@ func signalMCPServerHTTP(name string, srv *MCPServer) (*ReloadMCPServerResult, e
 	adminPath := "/admin"
 	reloadURL := fmt.Sprintf("%s://%s%s/reload", parsed.Scheme, parsed.Host, adminPath)
 
-	resp, err := http.Post(reloadURL, "application/json", nil)
+	client := &http.Client{}
+	if len(srv.Config.Headers) > 0 {
+		client.Transport = &headerTransport{
+			base:    http.DefaultTransport,
+			headers: srv.Config.Headers,
+		}
+	}
+
+	req, err := http.NewRequest("POST", reloadURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create reload request for %s: %w", name, err)
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to POST reload to %s: %w", name, err)
 	}

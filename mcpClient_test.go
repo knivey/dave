@@ -1010,3 +1010,94 @@ maxtokens = 100
 	assert.NotContains(t, outStr, "transport is required", "unexpected config error: %s", outStr)
 	assert.NotContains(t, outStr, "url is required", "unexpected config error: %s", outStr)
 }
+
+func TestSignalMCPServerHTTP_SendsHeaders(t *testing.T) {
+	var gotHeaders http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeaders = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer server.Close()
+
+	srv := &MCPServer{
+		Config: MCPConfig{
+			Transport: "http",
+			URL:       server.URL + "/sync",
+			Headers: map[string]string{
+				"X-API-Key":     "test-secret-123",
+				"X-Custom-Auth": "custom-value",
+			},
+		},
+	}
+
+	result, err := signalMCPServerHTTP("test-server", srv)
+	require.NoError(t, err)
+	assert.Empty(t, result.Warnings)
+	assert.Equal(t, "test-secret-123", gotHeaders.Get("X-API-Key"))
+	assert.Equal(t, "custom-value", gotHeaders.Get("X-Custom-Auth"))
+}
+
+func TestSignalMCPServerHTTP_NoHeaders(t *testing.T) {
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer server.Close()
+
+	srv := &MCPServer{
+		Config: MCPConfig{
+			Transport: "http",
+			URL:       server.URL + "/sync",
+		},
+	}
+
+	result, err := signalMCPServerHTTP("test-server", srv)
+	require.NoError(t, err)
+	assert.True(t, called)
+	assert.Empty(t, result.Warnings)
+}
+
+func TestSignalMCPServerHTTP_AuthFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-API-Key") != "correct-key" {
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte("unauthorized"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer server.Close()
+
+	t.Run("wrong key returns error", func(t *testing.T) {
+		srv := &MCPServer{
+			Config: MCPConfig{
+				Transport: "http",
+				URL:       server.URL + "/sync",
+				Headers:   map[string]string{"X-API-Key": "wrong-key"},
+			},
+		}
+		_, err := signalMCPServerHTTP("test-server", srv)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "401")
+	})
+
+	t.Run("correct key succeeds", func(t *testing.T) {
+		srv := &MCPServer{
+			Config: MCPConfig{
+				Transport: "http",
+				URL:       server.URL + "/sync",
+				Headers:   map[string]string{"X-API-Key": "correct-key"},
+			},
+		}
+		result, err := signalMCPServerHTTP("test-server", srv)
+		require.NoError(t, err)
+		assert.Empty(t, result.Warnings)
+	})
+}

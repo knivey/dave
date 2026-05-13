@@ -246,6 +246,32 @@ timeout = 30
 	assert.Equal(t, "test-model", newCfg.Enhancements["default"].Model)
 }
 
+func TestReloadConfigFromFile_PreservesAuthApiKey(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteWorkflow(t, dir)
+	cfgToml := baseTestConfigToml("http://localhost:8188") + `
+[auth]
+api_key = "original-secret"
+`
+	path := writeTestConfigFile(t, dir, cfgToml)
+
+	original, err := loadConfig(path)
+	require.NoError(t, err)
+	assert.Equal(t, "original-secret", original.Auth.APIKey)
+
+	changed := baseTestConfigToml("http://localhost:8188") + `
+[auth]
+api_key = "changed-secret"
+`
+	writeTestConfigFile(t, dir, changed)
+
+	newCfg, warnings, err := reloadConfigFromFile(path, original)
+	require.NoError(t, err)
+	assert.Equal(t, "original-secret", newCfg.Auth.APIKey, "auth.api_key should be preserved on reload")
+	require.Len(t, warnings, 1)
+	assert.Contains(t, warnings[0], "auth.api_key")
+}
+
 func TestCompareNonReloadable(t *testing.T) {
 	base := Config{
 		Server:   ServerConfig{Name: "img-mcp", Version: "0.1.0", Addr: ":8080"},
@@ -285,5 +311,14 @@ func TestCompareNonReloadable(t *testing.T) {
 		changed.Queue.ResultTTL = 5 * time.Minute
 		warnings := compareNonReloadable(base, changed)
 		assert.Empty(t, warnings)
+	})
+
+	t.Run("AuthApiKeyChanged", func(t *testing.T) {
+		changed := base
+		changed.Auth.APIKey = "new-secret"
+		warnings := compareNonReloadable(base, changed)
+		require.Len(t, warnings, 1)
+		assert.Contains(t, warnings[0], "auth.api_key")
+		assert.Contains(t, warnings[0], "requires restart")
 	})
 }

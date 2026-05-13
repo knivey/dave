@@ -51,11 +51,13 @@
 # [img-mcp]
 # transport = "http"
 # url = "http://localhost:8080/sync"
+# headers = { "X-API-Key" = "your-shared-secret" }
 # timeout = "2m"
 # keepalive = "30s"
 #
 # [img-mcp-async]
 # transport = "http"
 # url = "http://localhost:8080/async"
+# headers = { "X-API-Key" = "your-shared-secret" }
 # timeout = "2m"
 # keepalive = "30s"

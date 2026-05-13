@@ -763,19 +763,39 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 			client.Cmd.Reply(event, warnMsg(rateMsg))
 			return
 		}
+		if match.re == compact_re {
+			position := queueMgr.Enqueue(network.Name, channel, userID, event.Source.Name, "", msg,
+				func(cx context.Context, output chan<- string) {
+					match.cmd(network, client, event, ctxWithResolvedUser(cx, resolvedUser), output, match.args...)
+				})
+			if position > 0 {
+				var queueMsg string
+				readConfig(func() { queueMsg = config.Notices.QueueMsg(position, 0) })
+				client.Cmd.Reply(event, queueMsg)
+			}
+			return
+		}
+
 		if match.re == stats_re || match.re == delete_re || match.re == resume_re || match.re == support_re {
 			match.cmd(network, client, event, ctxWithResolvedUser(context.Background(), resolvedUser), nil, match.args...)
 			return
 		}
-		position := queueMgr.Enqueue(network.Name, channel, userID, event.Source.Name, "", msg,
-			func(cx context.Context, output chan<- string) {
-				match.cmd(network, client, event, ctxWithResolvedUser(cx, resolvedUser), output, match.args...)
-			})
-		if position > 0 {
-			var queueMsg string
-			readConfig(func() { queueMsg = config.Notices.QueueMsg(position, 0) })
-			client.Cmd.Reply(event, queueMsg)
-		}
+
+		outCh := make(chan string, 200)
+		go func() {
+			defer close(outCh)
+			match.cmd(network, client, event, ctxWithResolvedUser(context.Background(), resolvedUser), outCh, match.args...)
+		}()
+		go func() {
+			for msg := range outCh {
+				if action, ok := isIRCAction(msg); ok {
+					client.Cmd.Action(channel, action)
+				} else {
+					client.Cmd.Message(channel, "\x02\x02"+msg)
+				}
+				time.Sleep(time.Millisecond * time.Duration(network.Throttle))
+			}
+		}()
 		return
 	}
 

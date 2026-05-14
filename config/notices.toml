@@ -36,6 +36,9 @@
 #   history_usage    (string)    Usage hint. Placeholders: {trigger}
 #   delete_usage     (string)    Usage hint. Placeholders: {trigger}
 #   resume_usage     (string)    Usage hint. Placeholders: {trigger}
+#   other_header     (string)    Another user's session list header. Placeholders: {nick}, {network}
+#   other_none       (string)    No sessions for target user. Placeholders: {nick}
+#   all_header       (string)    All sessions header. Placeholders: {network}, {channel}
 #
 # [db] options:
 #   not_available    (string)    Database unavailable
@@ -95,6 +98,16 @@
 #   disabled     (string)  Compaction disabled in config.
 #   auto_notice  (string)  Auto-compaction notice. Placeholders: {count}, {tokens_in}, {tokens_out}, {duration}, {prompt}, {completion}, {total}, {cached}, {reasoning}
 #
+# [clone] options:
+#   cloned            (string)  Clone success. Placeholders: {id}, {source_nick}, {source_id}, {count}
+#   no_target_session (string)  Target nick has no active session. Placeholders: {nick}
+#   target_not_found  (string)  Target nick not resolved. Placeholders: {nick}
+#   session_not_found (string)  Session ID not found. Placeholders: {id}
+#   wrong_channel     (string)  Session is in a different channel. Placeholders: {id}
+#   incomplete_calls  (string)  Session has incomplete tool calls. Placeholders: {id}
+#   command_gone      (string)  Chat command no longer exists. Placeholders: {command}
+#   usage             (string)  Usage hint. Placeholders: {trigger}
+#
 # [users] options:
 #   resolve_transient  (string)  Sent (as warnMsg) when resolveUser exhausts its retries on transient DB errors. Placeholders: {nick}
 #   resolve_persistent (string)  Sent (as warnMsg) when resolveUser fell back to creating a flagged placeholder row, or when even that fallback failed. Placeholders: {nick}
@@ -136,6 +149,9 @@
 # history_usage = "usage: {trigger}history <session-id>"
 # delete_usage = "usage: {trigger}delete <session-id>"
 # resume_usage = "usage: {trigger}resume <session-id>"
+# other_header = "\x02Sessions for {nick} on {network}:\x02"
+# other_none = "No sessions found for {nick}."
+# all_header = "\x02All sessions in {channel} on {network}:\x02"
 #
 # [db]
 # not_available = "database not available"
@@ -194,6 +210,16 @@
 # in_progress = "A compaction is already running for this session."
 # disabled = "Compaction is disabled in config."
 # auto_notice = "\x0314🗜 Auto-compacted {count} earlier messages ({total} tokens, {cached} cached).\x0F"
+#
+# [clone]
+# cloned = "\x0303📋 Cloned session #{source_id} → #{id} ({count} messages)\x0F"
+# no_target_session = "\x0304❗ {nick} has no active session in this channel.\x0F"
+# target_not_found = "\x0304❗ Nick '{nick}' not found.\x0F"
+# session_not_found = "\x0304❗ Session #{id} not found.\x0F"
+# wrong_channel = "\x0304❗ Session #{id} is not in this channel.\x0F"
+# incomplete_calls = "\x0304❗ Session #{id} has incomplete tool calls and cannot be cloned. Wait for the current turn to finish.\x0F"
+# command_gone = "\x0304❗ Command '{command}' no longer exists.\x0F"
+# usage = "\x0304❗ Usage: {trigger}clone <nick|id>\x0F"
 #
 # [users]
 # resolve_transient = "internal hiccup tracking your identity, try again in a moment ({nick})"

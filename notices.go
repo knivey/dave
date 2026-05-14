@@ -24,6 +24,7 @@ type NoticesConfig struct {
 	Jobs       JobNotices        `toml:"jobs"`
 	Bans       BanNotices        `toml:"bans"`
 	Compaction CompactionNotices `toml:"compaction"`
+	Clone      CloneNotices      `toml:"clone"`
 	Users      UsersNotices      `toml:"users"`
 	Support    string            `toml:"support"`
 }
@@ -66,6 +67,9 @@ type SessionNotices struct {
 	HistoryUsage string `toml:"history_usage"`
 	DeleteUsage  string `toml:"delete_usage"`
 	ResumeUsage  string `toml:"resume_usage"`
+	OtherHeader  string `toml:"other_header"`
+	OtherNone    string `toml:"other_none"`
+	AllHeader    string `toml:"all_header"`
 }
 
 type DBNotices struct {
@@ -134,6 +138,17 @@ type CompactionNotices struct {
 	InProgress string `toml:"in_progress"`
 	Disabled   string `toml:"disabled"`
 	AutoNotice string `toml:"auto_notice"`
+}
+
+type CloneNotices struct {
+	Cloned          string `toml:"cloned"`
+	NoTargetSession string `toml:"no_target_session"`
+	TargetNotFound  string `toml:"target_not_found"`
+	SessionNotFound string `toml:"session_not_found"`
+	WrongChannel    string `toml:"wrong_channel"`
+	IncompleteCalls string `toml:"incomplete_calls"`
+	CommandGone     string `toml:"command_gone"`
+	Usage           string `toml:"usage"`
 }
 
 // UsersNotices governs user-facing messages emitted when resolveUser fails.
@@ -232,6 +247,15 @@ func setNoticesDefaults(n *NoticesConfig) {
 	}
 	if n.Sessions.ResumeUsage == "" {
 		n.Sessions.ResumeUsage = "usage: {trigger}resume <session-id>"
+	}
+	if n.Sessions.OtherHeader == "" {
+		n.Sessions.OtherHeader = "\x02Sessions for {nick} on {network}:\x02"
+	}
+	if n.Sessions.OtherNone == "" {
+		n.Sessions.OtherNone = "No sessions found for {nick}."
+	}
+	if n.Sessions.AllHeader == "" {
+		n.Sessions.AllHeader = "\x02All sessions in {channel} on {network}:\x02"
 	}
 	if n.DB.NotAvailable == "" {
 		n.DB.NotAvailable = "database not available"
@@ -364,6 +388,30 @@ func setNoticesDefaults(n *NoticesConfig) {
 	}
 	if n.Compaction.AutoNotice == "" {
 		n.Compaction.AutoNotice = "\x0314🗜 Auto-compacted {count} earlier messages ({total} tokens, {cached} cached).\x0F"
+	}
+	if n.Clone.Cloned == "" {
+		n.Clone.Cloned = "\x0303📋 Cloned session #{source_id} → #{id} ({count} messages)\x0F"
+	}
+	if n.Clone.NoTargetSession == "" {
+		n.Clone.NoTargetSession = "\x0304❗ {nick} has no active session in this channel.\x0F"
+	}
+	if n.Clone.TargetNotFound == "" {
+		n.Clone.TargetNotFound = "\x0304❗ Nick '{nick}' not found.\x0F"
+	}
+	if n.Clone.SessionNotFound == "" {
+		n.Clone.SessionNotFound = "\x0304❗ Session #{id} not found.\x0F"
+	}
+	if n.Clone.WrongChannel == "" {
+		n.Clone.WrongChannel = "\x0304❗ Session #{id} is not in this channel.\x0F"
+	}
+	if n.Clone.IncompleteCalls == "" {
+		n.Clone.IncompleteCalls = "\x0304❗ Session #{id} has incomplete tool calls and cannot be cloned. Wait for the current turn to finish.\x0F"
+	}
+	if n.Clone.CommandGone == "" {
+		n.Clone.CommandGone = "\x0304❗ Command '{command}' no longer exists.\x0F"
+	}
+	if n.Clone.Usage == "" {
+		n.Clone.Usage = "\x0304❗ Usage: {trigger}clone <nick|id>\x0F"
 	}
 	if n.Users.ResolveTransient == "" {
 		n.Users.ResolveTransient = "internal hiccup tracking your identity, try again in a moment ({nick})"

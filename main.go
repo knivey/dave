@@ -133,7 +133,7 @@ func resolvedUserFromCtx(ctx context.Context) *User {
 
 var stop_re = regexp.MustCompile("^stop$")
 var help_re = regexp.MustCompile("^help(?:\\s+(.+))?$")
-var sessions_re = regexp.MustCompile("^sessions$")
+var sessions_re = regexp.MustCompile("^sessions(?:\\s+(\\S+))?$")
 var history_re = regexp.MustCompile("^history(?:\\s+(.+))?$")
 var stats_re = regexp.MustCompile("^mystats$")
 var delete_re = regexp.MustCompile("^delete\\s+(\\d+)$")
@@ -141,6 +141,7 @@ var resume_re = regexp.MustCompile("^resume\\s+(\\d+)$")
 var jobs_re = regexp.MustCompile("^jobs$")
 var support_re = regexp.MustCompile("^support$")
 var compact_re = regexp.MustCompile("^compact$")
+var clone_re = regexp.MustCompile("^clone\\s+(\\S+)$")
 
 type CmdMap map[*regexp.Regexp]CmdFunc
 
@@ -183,6 +184,9 @@ var builtInCmds = CmdMap{
 	compact_re: func(n Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, s ...string) {
 		historyCompact(n, c, e, ctx, output, s...)
 	},
+	clone_re: func(n Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, s ...string) {
+		historyClone(n, c, e, ctx, output, s...)
+	},
 }
 var configCmds CmdMap
 var rateExemptCmds map[*regexp.Regexp]bool
@@ -199,6 +203,7 @@ var builtInNames = map[*regexp.Regexp]string{
 	jobs_re:     "jobs",
 	support_re:  "support",
 	compact_re:  "compact",
+	clone_re:    "clone",
 }
 
 func isBuiltinDisabled(name string) bool {
@@ -758,6 +763,24 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 			return
 		}
 		if match.re == compact_re {
+			position := queueMgr.Enqueue(network.Name, channel, userID, event.Source.Name, "", msg,
+				func(cx context.Context, output chan<- string) {
+					match.cmd(network, client, event, ctxWithResolvedUser(cx, resolvedUser), output, match.args...)
+				})
+			if position > 0 {
+				var queueMsg string
+				readConfig(func() { queueMsg = config.Notices.QueueMsg(position, 0) })
+				client.Cmd.Reply(event, queueMsg)
+			}
+			return
+		}
+
+		// Clone is queued (not direct-dispatch) because cloneDBSession
+		// runs a multi-step DB transaction and acquires sessionCreationMu.
+		// Queueing serializes clones per channel slot, preventing concurrent
+		// clones from colliding on the same source session or racing with
+		// chat() session creation.
+		if match.re == clone_re {
 			position := queueMgr.Enqueue(network.Name, channel, userID, event.Source.Name, "", msg,
 				func(cx context.Context, output chan<- string) {
 					match.cmd(network, client, event, ctxWithResolvedUser(cx, resolvedUser), output, match.args...)

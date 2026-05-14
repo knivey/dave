@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/glebarez/sqlite"
@@ -591,6 +593,162 @@ func getToolPendingJobsForRecovery() ([]PendingJob, error) {
 	err := theDB.Where("status IN ? AND session_id IS NULL", []string{"pending", "running"}).
 		Find(&jobs).Error
 	return jobs, err
+}
+
+type SessionWithUser struct {
+	Session
+	OwnerNick string
+}
+
+func getChannelDBSessions(network, channel string, limit int) ([]SessionWithUser, error) {
+	var results []SessionWithUser
+	err := theDB.Model(&Session{}).
+		Select("sessions.*, users.current_nick as owner_nick").
+		Joins("JOIN users ON users.id = sessions.user_id").
+		Where("sessions.network = ? AND sessions.channel = ? AND sessions.deleted_at IS NULL", network, channel).
+		Order("sessions.last_active DESC").
+		Limit(limit).
+		Find(&results).Error
+	return results, err
+}
+
+func sessionHasIncompleteToolCalls(sessionID int64) (bool, error) {
+	messages, err := loadDBSessionMessages(sessionID)
+	if err != nil {
+		return false, err
+	}
+
+	toolResponses := make(map[string]struct{})
+	for _, m := range messages {
+		if m.Role == "tool" && m.ToolCallID != nil {
+			toolResponses[*m.ToolCallID] = struct{}{}
+		}
+	}
+
+	for _, m := range messages {
+		if m.Role == "assistant" && m.ToolCalls != nil {
+			var calls []struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal([]byte(*m.ToolCalls), &calls); err != nil {
+				continue
+			}
+			for _, tc := range calls {
+				if _, ok := toolResponses[tc.ID]; !ok {
+					return true, nil
+				}
+			}
+		}
+	}
+	return false, nil
+}
+
+func cloneDBSession(sourceSessionID int64, targetNetwork, targetChannel string, targetUserID int64) (int64, error) {
+	tx := theDB.Begin()
+	if tx.Error != nil {
+		return 0, tx.Error
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Rollback()
+		}
+	}()
+
+	var source Session
+	if err := tx.Where("id = ?", sourceSessionID).First(&source).Error; err != nil {
+		return 0, fmt.Errorf("load source session: %w", err)
+	}
+
+	var newSettingsID *int64
+	if source.SettingsID != nil {
+		var srcSettings SessionSetting
+		if err := tx.Where("id = ?", *source.SettingsID).First(&srcSettings).Error; err != nil {
+			return 0, fmt.Errorf("load source settings: %w", err)
+		}
+		srcSettings.ID = 0
+		srcSettings.CreatedAt = time.Time{}
+		if err := tx.Create(&srcSettings).Error; err != nil {
+			return 0, fmt.Errorf("copy settings: %w", err)
+		}
+		newSettingsID = &srcSettings.ID
+	}
+
+	if err := tx.Model(&Session{}).
+		Where("network = ? AND channel = ? AND user_id = ? AND status = ?",
+			targetNetwork, targetChannel, targetUserID, "active").
+		Update("status", "completed").Error; err != nil {
+		return 0, fmt.Errorf("complete existing active session: %w", err)
+	}
+
+	convID := generateConvID()
+	newSession := Session{
+		Network:     targetNetwork,
+		Channel:     targetChannel,
+		UserID:      &targetUserID,
+		ChatCommand: source.ChatCommand,
+		ConvID:      &convID,
+		ResponseID:  nil,
+		Service:     source.Service,
+		Model:       source.Model,
+		Status:      "active",
+		SettingsID:  newSettingsID,
+	}
+	if err := tx.Create(&newSession).Error; err != nil {
+		return 0, fmt.Errorf("create new session: %w", err)
+	}
+
+	var sourceMessages []Message
+	if err := tx.Where("session_id = ? AND archived = ? AND superseded = ?", sourceSessionID, false, false).
+		Order("id ASC").Find(&sourceMessages).Error; err != nil {
+		return 0, fmt.Errorf("load source messages: %w", err)
+	}
+
+	skippedSystem := false
+	var firstUserContent string
+	for _, m := range sourceMessages {
+		if !skippedSystem && m.Role == "system" {
+			skippedSystem = true
+			continue
+		}
+		if firstUserContent == "" && m.Role == "user" {
+			firstUserContent = m.Content
+		}
+		newMsg := Message{
+			SessionID:          newSession.ID,
+			Role:               m.Role,
+			Content:            m.Content,
+			ToolCalls:          m.ToolCalls,
+			ToolCallID:         m.ToolCallID,
+			ReasoningContent:   m.ReasoningContent,
+			MultiContent:       m.MultiContent,
+			IsAsyncResult:      m.IsAsyncResult,
+			Archived:           false,
+			CompactionID:       nil,
+			SourceCompactionID: nil,
+			Superseded:         false,
+		}
+		if err := tx.Create(&newMsg).Error; err != nil {
+			return 0, fmt.Errorf("copy message: %w", err)
+		}
+	}
+
+	if firstUserContent != "" {
+		preview := strings.ReplaceAll(firstUserContent, "\n", " ")
+		if len(preview) > 80 {
+			preview = preview[:77] + "..."
+		}
+		if err := tx.Model(&Session{}).Where("id = ? AND first_message = ''", newSession.ID).
+			Update("first_message", preview).Error; err != nil {
+			return 0, fmt.Errorf("set first_message: %w", err)
+		}
+	}
+
+	if err := tx.Commit().Error; err != nil {
+		return 0, err
+	}
+	committed = true
+	return newSession.ID, nil
 }
 
 func strPtrOrNil(s string) *string {

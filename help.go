@@ -77,13 +77,14 @@ func help(network Network, client *girc.Client, event girc.Event, ctx context.Co
 
 	if theDB != nil {
 		lines = append(lines, "\x02History:\x02")
-		lines = append(lines, fmt.Sprintf("  %ssessions \u2014 List your recent sessions", network.Trigger))
+		lines = append(lines, fmt.Sprintf("  %ssessions [nick|*] \u2014 List sessions (yours, another user's, or all)", network.Trigger))
 		lines = append(lines, fmt.Sprintf("  %shistory <id> \u2014 Show messages from a session", network.Trigger))
 		lines = append(lines, fmt.Sprintf("  %sresume <id> \u2014 Resume a previous session", network.Trigger))
 		lines = append(lines, fmt.Sprintf("  %sdelete <id> \u2014 Delete a session", network.Trigger))
 		lines = append(lines, fmt.Sprintf("  %smystats \u2014 Show your session/message stats", network.Trigger))
 		lines = append(lines, fmt.Sprintf("  %sjobs \u2014 List your chat queue and background jobs", network.Trigger))
 		lines = append(lines, fmt.Sprintf("  %scompact \u2014 Summarize old messages in your active session to free context", network.Trigger))
+		lines = append(lines, fmt.Sprintf("  %sclone <nick|id> \u2014 Clone another user's session (or your own, to fork it)", network.Trigger))
 	}
 
 	if len(completions) > 0 {
@@ -319,8 +320,8 @@ func findCommandHelp(network Network, cmdName string) (helpEntry, bool) {
 	}
 	if cmdName == "sessions" {
 		return helpEntry{
-			cmd:  network.Trigger + "sessions",
-			desc: "List your recent chat sessions",
+			cmd:  network.Trigger + "sessions [nick|*]",
+			desc: "List sessions. No args = yours, <nick> = another user's, * = all in channel",
 		}, true
 	}
 	if cmdName == "history" {
@@ -357,6 +358,12 @@ func findCommandHelp(network Network, cmdName string) (helpEntry, bool) {
 		return helpEntry{
 			cmd:  network.Trigger + "compact",
 			desc: "Summarize the first 2/3 of your active session into a single message to free context tokens",
+		}, true
+	}
+	if cmdName == "clone" {
+		return helpEntry{
+			cmd:  network.Trigger + "clone <nick|id>",
+			desc: "Clone another user's session (or your own, to fork it). Creates a new session with a copy of the source's message history",
 		}, true
 	}
 	if cmdName == "support" {

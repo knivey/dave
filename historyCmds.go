@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -23,6 +24,45 @@ func historySessions(network Network, c *girc.Client, e girc.Event, ctx context.
 	readConfig(func() { maxHistory = config.SessionsDisplayLimit })
 
 	casemapping := getCasemapping(network.Name)
+	channel := normalizeIRC(e.Params[0], casemapping)
+
+	var arg string
+	if len(args) > 0 {
+		arg = args[0]
+	}
+
+	if arg == "*" {
+		if theDB == nil {
+			select {
+			case output <- errorMsg(n.DB.NotAvailable):
+			case <-ctx.Done():
+			}
+			return
+		}
+		results, err := getChannelDBSessions(network.Name, channel, maxHistory)
+		if err != nil {
+			select {
+			case output <- errorMsg(expandNotice(n.DB.QuerySessions, map[string]string{"error": err.Error()})):
+			case <-ctx.Done():
+			}
+			return
+		}
+		if len(results) == 0 {
+			select {
+			case output <- n.Sessions.None:
+			case <-ctx.Done():
+			}
+			return
+		}
+		select {
+		case output <- expandNotice(n.Sessions.AllHeader, map[string]string{"network": network.Name, "channel": channel}):
+		case <-ctx.Done():
+			return
+		}
+		sendSessionsLinesWithNick(output, ctx, results, network.Trigger)
+		return
+	}
+
 	account := ""
 	if u := c.LookupUser(e.Source.Name); u != nil {
 		account = u.Extras.Account
@@ -32,7 +72,50 @@ func historySessions(network Network, c *girc.Client, e girc.Event, ctx context.
 	if resolvedUser != nil {
 		userID = resolvedUser.ID
 	}
-	channel := normalizeIRC(e.Params[0], casemapping)
+
+	if arg != "" {
+		if theDB == nil {
+			select {
+			case output <- errorMsg(n.DB.NotAvailable):
+			case <-ctx.Done():
+			}
+			return
+		}
+		targetUser, err := resolveUserByNick(network.Name, arg, casemapping)
+		if err != nil || targetUser == nil {
+			select {
+			case output <- expandNotice(n.Sessions.OtherNone, map[string]string{"nick": arg}):
+			case <-ctx.Done():
+			}
+			return
+		}
+		sessions, err := getUserDBSessions(network.Name, channel, targetUser.ID, maxHistory)
+		if err != nil {
+			select {
+			case output <- errorMsg(expandNotice(n.DB.QuerySessions, map[string]string{"error": err.Error()})):
+			case <-ctx.Done():
+			}
+			return
+		}
+		if len(sessions) == 0 {
+			select {
+			case output <- expandNotice(n.Sessions.OtherNone, map[string]string{"nick": arg}):
+			case <-ctx.Done():
+			}
+			return
+		}
+		select {
+		case output <- expandNotice(n.Sessions.OtherHeader, map[string]string{"nick": targetUser.CurrentNick, "network": network.Name}):
+		case <-ctx.Done():
+			return
+		}
+		var swu []SessionWithUser
+		for _, s := range sessions {
+			swu = append(swu, SessionWithUser{Session: s, OwnerNick: targetUser.CurrentNick})
+		}
+		sendSessionsLinesWithNick(output, ctx, swu, network.Trigger)
+		return
+	}
 
 	sessions, err := getUserDBSessions(network.Name, channel, userID, maxHistory)
 	if err != nil {
@@ -57,8 +140,25 @@ func historySessions(network Network, c *girc.Client, e girc.Event, ctx context.
 		return
 	}
 
+	sendSessionsLinesSelf(output, ctx, sessions, network.Trigger)
+}
+
+func sendSessionsLinesSelf(output chan<- string, ctx context.Context, sessions []Session, trigger string) {
+	var swu []SessionWithUser
+	for _, s := range sessions {
+		swu = append(swu, SessionWithUser{Session: s})
+	}
+	sendSessionsLines(output, ctx, swu, trigger, false)
+}
+
+func sendSessionsLinesWithNick(output chan<- string, ctx context.Context, sessions []SessionWithUser, trigger string) {
+	sendSessionsLines(output, ctx, sessions, trigger, true)
+}
+
+func sendSessionsLines(output chan<- string, ctx context.Context, sessions []SessionWithUser, trigger string, showNick bool) {
 	type sessionLine struct {
 		icon    string
+		nickStr string
 		idStr   string
 		msgStr  string
 		timeStr string
@@ -70,6 +170,7 @@ func historySessions(network Network, c *girc.Client, e girc.Event, ctx context.
 	maxID := 0
 	maxMsg := 0
 	maxTime := 0
+	maxNick := 0
 
 	for i, s := range sessions {
 		icon := "\x0303●\x0F"
@@ -93,13 +194,13 @@ func historySessions(network Network, c *girc.Client, e girc.Event, ctx context.
 			msgStr = fmt.Sprintf("%d msgs (%d archived)", activeMsgs, archivedMsgs)
 		}
 		timeStr := formatTimeAgo(s.LastActive)
-
+		nickStr := s.OwnerNick
 		preview := strings.ReplaceAll(s.FirstMessage, "\n", " ")
 		if len(preview) > 80 {
 			preview = preview[:77] + "..."
 		}
 
-		lines[i] = sessionLine{icon, idStr, msgStr, timeStr, s.ChatCommand, preview}
+		lines[i] = sessionLine{icon, nickStr, idStr, msgStr, timeStr, s.ChatCommand, preview}
 
 		if l := utf8.RuneCountInString(idStr); l > maxID {
 			maxID = l
@@ -110,17 +211,35 @@ func historySessions(network Network, c *girc.Client, e girc.Event, ctx context.
 		if l := utf8.RuneCountInString(timeStr); l > maxTime {
 			maxTime = l
 		}
+		if showNick {
+			if l := utf8.RuneCountInString(nickStr); l > maxNick {
+				maxNick = l
+			}
+		}
 	}
 
 	for _, l := range lines {
-		line := fmt.Sprintf("  %s %s  %s  %s  %s%s",
-			l.icon,
-			l.idStr+strings.Repeat(" ", maxID-utf8.RuneCountInString(l.idStr)),
-			l.msgStr+strings.Repeat(" ", maxMsg-utf8.RuneCountInString(l.msgStr)),
-			l.timeStr+strings.Repeat(" ", maxTime-utf8.RuneCountInString(l.timeStr)),
-			network.Trigger,
-			l.cmd,
-		)
+		var line string
+		if showNick {
+			line = fmt.Sprintf("  %s %s  %s  %s  %s  %s%s",
+				l.icon,
+				l.nickStr+strings.Repeat(" ", maxNick-utf8.RuneCountInString(l.nickStr)),
+				l.idStr+strings.Repeat(" ", maxID-utf8.RuneCountInString(l.idStr)),
+				l.msgStr+strings.Repeat(" ", maxMsg-utf8.RuneCountInString(l.msgStr)),
+				l.timeStr+strings.Repeat(" ", maxTime-utf8.RuneCountInString(l.timeStr)),
+				trigger,
+				l.cmd,
+			)
+		} else {
+			line = fmt.Sprintf("  %s %s  %s  %s  %s%s",
+				l.icon,
+				l.idStr+strings.Repeat(" ", maxID-utf8.RuneCountInString(l.idStr)),
+				l.msgStr+strings.Repeat(" ", maxMsg-utf8.RuneCountInString(l.msgStr)),
+				l.timeStr+strings.Repeat(" ", maxTime-utf8.RuneCountInString(l.timeStr)),
+				trigger,
+				l.cmd,
+			)
+		}
 		if l.preview != "" {
 			line += " " + l.preview
 		}
@@ -672,4 +791,185 @@ func historyCompact(network Network, c *girc.Client, e girc.Event, ctx context.C
 	}
 
 	send(expandNotice(n.Compaction.Completed, compactionNoticeVars(res, session.ID)))
+}
+
+func historyClone(network Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, args ...string) {
+	n := getNotices()
+	send := func(msg string) {
+		select {
+		case output <- msg:
+		case <-ctx.Done():
+		}
+	}
+	if theDB == nil {
+		send(errorMsg(n.DB.NotAvailable))
+		return
+	}
+
+	if len(args) == 0 || args[0] == "" {
+		send(errorMsg(expandNotice(n.Clone.Usage, map[string]string{"trigger": network.Trigger})))
+		return
+	}
+
+	casemapping := getCasemapping(network.Name)
+	channel := normalizeIRC(e.Params[0], casemapping)
+
+	account := ""
+	if u := c.LookupUser(e.Source.Name); u != nil {
+		account = u.Extras.Account
+	}
+	resolvedUser, err := resolveUser(network.Name, e.Source.Name, e.Source.Ident, e.Source.Host, account, casemapping)
+	if err != nil || resolvedUser == nil {
+		send(errorMsg(expandNotice(n.Clone.Usage, map[string]string{"trigger": network.Trigger})))
+		return
+	}
+	callingUserID := resolvedUser.ID
+
+	var sourceSession *Session
+	var sourceNick string
+
+	if isAllDigits(args[0]) {
+		sessionID, parseErr := strconv.ParseInt(args[0], 10, 64)
+		if parseErr != nil {
+			send(errorMsg(n.Sessions.InvalidID))
+			return
+		}
+		src, dbErr := getDBSessionByID(sessionID)
+		if dbErr != nil {
+			send(errorMsg(expandNotice(n.Clone.SessionNotFound, map[string]string{"id": args[0]})))
+			return
+		}
+		normChannel := normalizeIRC(src.Channel, casemapping)
+		if src.Network != network.Name || normChannel != channel {
+			send(errorMsg(expandNotice(n.Clone.WrongChannel, map[string]string{"id": args[0]})))
+			return
+		}
+		sourceSession = src
+	} else {
+		nick := args[0]
+		targetUser, rErr := resolveUserByNick(network.Name, nick, casemapping)
+		if rErr != nil || targetUser == nil {
+			send(errorMsg(expandNotice(n.Clone.TargetNotFound, map[string]string{"nick": nick})))
+			return
+		}
+		activeSession, aErr := sessionMgr.GetActiveSession(network.Name, channel, targetUser.ID)
+		if aErr != nil || activeSession == nil {
+			send(errorMsg(expandNotice(n.Clone.NoTargetSession, map[string]string{"nick": targetUser.CurrentNick})))
+			return
+		}
+		sourceSession = activeSession
+		sourceNick = targetUser.CurrentNick
+	}
+
+	incomplete, icErr := sessionHasIncompleteToolCalls(sourceSession.ID)
+	if icErr != nil {
+		send(errorMsg(expandNotice(n.DB.QuerySessions, map[string]string{"error": icErr.Error()})))
+		return
+	}
+	if incomplete {
+		send(errorMsg(expandNotice(n.Clone.IncompleteCalls, map[string]string{"id": fmt.Sprintf("%d", sourceSession.ID)})))
+		return
+	}
+
+	var cfg AIConfig
+	var cfgOk bool
+	readConfig(func() {
+		cfg, cfgOk = config.Commands.Chats[sourceSession.ChatCommand]
+	})
+	if sourceSession.SettingsID != nil {
+		settings, sErr := sessionMgr.GetSessionSettings(*sourceSession.SettingsID)
+		if sErr == nil && settings != nil {
+			cfg = ApplySettings(settings, cfg)
+			cfgOk = true
+		}
+	}
+	if !cfgOk {
+		send(errorMsg(expandNotice(n.Clone.CommandGone, map[string]string{"command": sourceSession.ChatCommand})))
+		return
+	}
+
+	mu := getSessionCreationLock(network.Name, channel, callingUserID)
+	mu.Lock()
+	defer mu.Unlock()
+
+	newSessionID, cloneErr := cloneDBSession(sourceSession.ID, network.Name, channel, callingUserID)
+	if cloneErr != nil {
+		send(errorMsg(expandNotice(n.DB.InternalError, map[string]string{"error": cloneErr.Error()})))
+		return
+	}
+
+	var systemContent string
+	if cfg.SystemTmpl != nil {
+		var templateVars map[string]string
+		readConfig(func() {
+			templateVars = make(map[string]string, len(config.TemplateVars))
+			for k, v := range config.TemplateVars {
+				templateVars[k] = v
+			}
+		})
+		data := SystemPromptData{
+			Nick:    e.Source.Name,
+			BotNick: c.GetNick(),
+			Channel: channel,
+			Network: network.Name,
+			Date:    time.Now().Format("2006-01-02"),
+			Vars:    templateVars,
+		}
+		ch := c.LookupChannel(channel)
+		var nicks []string
+		if ch != nil {
+			for _, u := range ch.Users(c) {
+				nicks = append(nicks, u.Nick)
+			}
+			sort.Strings(nicks)
+		}
+		data.ChanNicks = `["` + strings.Join(nicks, `","`) + `"]`
+
+		var buf strings.Builder
+		if execErr := cfg.SystemTmpl.Execute(&buf, data); execErr != nil {
+			systemContent = cfg.System
+		} else {
+			systemContent = buf.String()
+		}
+	} else {
+		systemContent = cfg.System
+	}
+	sessionMgr.AddMessage(newSessionID, ChatMessage{
+		Role:    RoleSystem,
+		Content: systemContent,
+	})
+
+	apiLogger.RestoreSession(newSessionID, network.Name, channel, callingUserID)
+
+	vars := map[string]string{
+		"id":        fmt.Sprintf("%d", newSessionID),
+		"source_id": fmt.Sprintf("%d", sourceSession.ID),
+		"count":     "0",
+	}
+	if sourceNick != "" {
+		vars["source_nick"] = sourceNick
+	} else {
+		if sourceSession.UserID != nil {
+			var srcUser User
+			if err := theDB.Where("id = ?", *sourceSession.UserID).First(&srcUser).Error; err == nil && srcUser.ID != 0 {
+				vars["source_nick"] = srcUser.CurrentNick
+			}
+		}
+	}
+	newMsgs, _ := loadDBSessionMessages(newSessionID)
+	vars["count"] = fmt.Sprintf("%d", len(newMsgs))
+
+	send(expandNotice(n.Clone.Cloned, vars))
+}
+
+func isAllDigits(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }

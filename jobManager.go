@@ -388,7 +388,7 @@ func recoverPendingJobs() {
 		if session.UserID != nil {
 			userID = *session.UserID
 			if u, err := getUserByID(userID); err == nil {
-				nick = u.CurrentNick
+				nick = displayNick(u)
 			}
 		}
 		registerAsyncJob(j.JobID, *j.SessionID, j.ToolName, j.MCPServer, session.Network, session.Channel, nick, userID)

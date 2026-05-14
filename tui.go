@@ -433,11 +433,11 @@ func pollStatusBar(app *tview.Application, stop <-chan struct{}, done chan<- str
 func printUserInfo(view *tview.TextView, info *UserInfo) {
 	u := info.User
 	released := ""
-	if isReleasedNick(u.NormalizedNick) {
+	if u.Released {
 		released = " [red](released)[white]"
 	}
 	fmt.Fprintf(view, "[white]  ID: #%d  Nick: %s  NormNick: %s%s[white]\n",
-		u.ID, tview.Escape(u.CurrentNick), tview.Escape(u.NormalizedNick), released)
+		u.ID, tview.Escape(displayNick(&u)), tview.Escape(u.NormalizedNick), released)
 	fmt.Fprintf(view, "[white]  Network: %s  Account: %s[white]\n",
 		tview.Escape(u.Network), tview.Escape(u.IRCAccount))
 	fmt.Fprintf(view, "[white]  Created: %s  Updated: %s[white]\n",
@@ -705,7 +705,7 @@ func handleTUICommand(text string) {
 		for _, b := range bans {
 			var user User
 			theDB.First(&user, b.UserID)
-			fmt.Fprintf(logView, "[white]#%d %s (%s) %s expires %s[white]\n", b.ID, tview.Escape(user.CurrentNick), formatDuration(b.Duration), tview.Escape(b.Reason), b.ExpiresAt.Format("2006-01-02 15:04"))
+			fmt.Fprintf(logView, "[white]#%d %s (%s) %s expires %s[white]\n", b.ID, tview.Escape(displayNick(&user)), formatDuration(b.Duration), tview.Escape(b.Reason), b.ExpiresAt.Format("2006-01-02 15:04"))
 		}
 	case "/banhistory":
 		if len(parts) < 3 {
@@ -733,10 +733,10 @@ func handleTUICommand(text string) {
 			break
 		}
 		if len(bans) == 0 {
-			fmt.Fprintf(logView, "[white]No ban history for %s (id: %d).[white]\n", tview.Escape(user.CurrentNick), user.ID)
+			fmt.Fprintf(logView, "[white]No ban history for %s (id: %d).[white]\n", tview.Escape(displayNick(user)), user.ID)
 			break
 		}
-		fmt.Fprintf(logView, "[white]Ban history for %s (id: %d):[white]\n", tview.Escape(user.CurrentNick), user.ID)
+		fmt.Fprintf(logView, "[white]Ban history for %s (id: %d):[white]\n", tview.Escape(displayNick(user)), user.ID)
 		for _, b := range bans {
 			status := "expired"
 			if b.Active {
@@ -814,7 +814,7 @@ func handleTUICommand(text string) {
 				account = fmt.Sprintf(" account:%s", tview.Escape(r.IRCAccount))
 			}
 			fmt.Fprintf(logView, "[white]  #%d %s hosts:%d sessions:%d%s%s[white]\n",
-				r.ID, tview.Escape(r.CurrentNick), r.HostCount, r.SessionCount, account, released)
+				r.ID, tview.Escape(r.DisplayName()), r.HostCount, r.SessionCount, account, released)
 		}
 	case "/usermerge":
 		parts = strings.SplitN(text, " ", 5)
@@ -870,7 +870,7 @@ func handleTUICommand(text string) {
 				break
 			}
 			fmt.Fprintf(logView, "[green]Merged user #%d (%s) into #%d (%s)[white]\n",
-				ghostID, tview.Escape(ghost.CurrentNick), targetID, tview.Escape(target.CurrentNick))
+				ghostID, tview.Escape(displayNick(ghost)), targetID, tview.Escape(displayNick(target)))
 		} else {
 			fmt.Fprintf(logView, "[white]Ghost (will be deleted):[white]\n")
 			ghostInfo, _ := getUserInfo(ghostID)
@@ -915,11 +915,11 @@ func handleTUICommand(text string) {
 			fmt.Fprintf(logView, "[yellow]User not found[white]\n")
 			break
 		}
-		if isReleasedNick(user.NormalizedNick) {
+		if user.Released {
 			fmt.Fprintf(logView, "[yellow]User #%d nick is already released[white]\n", user.ID)
 			break
 		}
-		oldNick := user.CurrentNick
+		oldNick := displayNick(user)
 		if err := releaseUserNick(user.ID); err != nil {
 			fmt.Fprintf(logView, "[red]Failed to release nick: %s[white]\n", err)
 			break
@@ -958,7 +958,7 @@ func handleTUICommand(text string) {
 			}
 			fmt.Fprintf(logView, "[yellow]  #%d[white] %s%s reason:%s network:%s created:%s\n",
 				u.ID,
-				tview.Escape(u.CurrentNick),
+				tview.Escape(displayNick(&u)),
 				account,
 				tview.Escape(u.FlaggedReason),
 				tview.Escape(u.Network),
@@ -1128,7 +1128,7 @@ func handleTUICommand(text string) {
 		userNick := ""
 		if session.UserID != nil {
 			if u, err := getUserByID(*session.UserID); err == nil && u != nil {
-				userNick = u.CurrentNick
+				userNick = displayNick(u)
 			}
 		}
 		fmt.Fprintf(logView, "[white]Compacting session #%d...[white]\n", sessionID)

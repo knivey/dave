@@ -984,7 +984,7 @@ func (cr *chatRunner) handleBanUser(messages []ChatMessage, tc ToolCall) []ChatM
 
 	return append(messages, ChatMessage{
 		Role:       RoleTool,
-		Content:    fmt.Sprintf("User %s (id: %d) banned for %s: %s%s", user.CurrentNick, user.ID, formatDuration(duration), args.Reason, accountInfo),
+		Content:    fmt.Sprintf("User %s (id: %d) banned for %s: %s%s", displayNick(user), user.ID, formatDuration(duration), args.Reason, accountInfo),
 		ToolCallID: tc.ID,
 	})
 }
@@ -1026,7 +1026,7 @@ func (cr *chatRunner) handleCheckBanHistory(messages []ChatMessage, tc ToolCall)
 	if len(bans) == 0 {
 		return append(messages, ChatMessage{
 			Role:       RoleTool,
-			Content:    fmt.Sprintf("User %s has no ban history.", user.CurrentNick),
+			Content:    fmt.Sprintf("User %s has no ban history.", displayNick(user)),
 			ToolCallID: tc.ID,
 		})
 	}
@@ -1043,7 +1043,7 @@ func (cr *chatRunner) handleCheckBanHistory(messages []ChatMessage, tc ToolCall)
 
 	return append(messages, ChatMessage{
 		Role:       RoleTool,
-		Content:    fmt.Sprintf("Ban history for %s:\n%s", user.CurrentNick, strings.Join(lines, "\n")),
+		Content:    fmt.Sprintf("Ban history for %s:\n%s", displayNick(user), strings.Join(lines, "\n")),
 		ToolCallID: tc.ID,
 	})
 }

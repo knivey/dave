@@ -297,13 +297,13 @@ func TestReleaseUserNick(t *testing.T) {
 	updated, err := getUserByID(user.ID)
 	require.NoError(t, err)
 	require.NotNil(t, updated)
-	assert.Equal(t, "", updated.CurrentNick)
-	assert.True(t, isReleasedNick(updated.NormalizedNick))
-	assert.Contains(t, updated.NormalizedNick, releasedNickPrefix)
+	assert.Equal(t, "TestNick", updated.CurrentNick, "current_nick should be preserved after release")
+	assert.Equal(t, "testnick", updated.NormalizedNick, "normalized_nick should be preserved after release")
+	assert.True(t, updated.Released, "released should be true after release")
 
-	found, err := getUserByNormalizedNick("testnet", "testnick")
+	found, err := getActiveUserByNormalizedNick("testnet", "testnick")
 	assert.NoError(t, err)
-	assert.Nil(t, found, "released nick should not be findable by original normalized_nick")
+	assert.Nil(t, found, "released nick should not be findable as active by normalized_nick")
 }
 
 func TestHasNoKnownHosts(t *testing.T) {
@@ -426,7 +426,7 @@ func TestRecordNickChangeCollisionMergeGhost(t *testing.T) {
 	assert.Equal(t, "UserA", updatedB.CurrentNick)
 	assert.Equal(t, "usera", updatedB.NormalizedNick)
 
-	foundByNick, err := getUserByNormalizedNick("testnet", "usera")
+	foundByNick, err := getActiveUserByNormalizedNick("testnet", "usera")
 	require.NoError(t, err)
 	require.NotNil(t, foundByNick)
 	assert.Equal(t, userB.ID, foundByNick.ID, "userB should now own the nick")
@@ -453,8 +453,8 @@ func TestRecordNickChangeCollisionReleaseReal(t *testing.T) {
 	releasedA, err := getUserByID(userA.ID)
 	require.NoError(t, err)
 	require.NotNil(t, releasedA)
-	assert.True(t, isReleasedNick(releasedA.NormalizedNick), "userA's nick should be released")
-	assert.Equal(t, "", releasedA.CurrentNick)
+	assert.True(t, releasedA.Released, "userA's nick should be released")
+	assert.Equal(t, "UserA", releasedA.CurrentNick, "current_nick preserved through release")
 
 	updatedB, err := getUserByID(userB.ID)
 	require.NoError(t, err)
@@ -480,7 +480,7 @@ func TestRecordNickChangeNoCollision(t *testing.T) {
 	assert.Equal(t, "NewNick", updated.CurrentNick)
 	assert.Equal(t, "newnick", updated.NormalizedNick)
 
-	found, err := getUserByNormalizedNick("testnet", "oldnick")
+	found, err := getActiveUserByNormalizedNick("testnet", "oldnick")
 	assert.NoError(t, err)
 	assert.Nil(t, found, "old nick should no longer resolve")
 }
@@ -931,6 +931,13 @@ func TestGetUserDBStatsAllNetworks(t *testing.T) {
 // reclaim normalized_nick "spartan" while another user (#172) still owned it,
 // causing a UNIQUE constraint failure on (network, normalized_nick).
 // claimNickFor must displace the colliding real user before the update.
+//
+// Note: with the released-nick fallback in resolveUserOnce, the natural
+// flow where a stranger types "SpartaN" while userA is released would now
+// re-attach them to userA's row. To still exercise the collision-handling
+// code path, we stage userB by direct DB insertion (simulating a row that
+// came from migration or admin intervention) rather than going through
+// resolveUser.
 func TestResolveUserAccountPathReleasesCollidingRealUser(t *testing.T) {
 	cleanup := setupUserTestDB(t)
 	defer cleanup()
@@ -941,10 +948,26 @@ func TestResolveUserAccountPathReleasesCollidingRealUser(t *testing.T) {
 	require.NotNil(t, userA)
 	require.NoError(t, releaseUserNick(userA.ID))
 
-	// userB: someone else grabbed the nick "SpartaN" while A was released.
-	userB, err := resolveUser("gamesurge", "SpartaN", "identB", "hostB", "", "rfc1459")
-	require.NoError(t, err)
-	require.NotNil(t, userB)
+	// userB: a separate row that ALSO has normalized_nick=spartan, active.
+	// Created via direct DB insert because the released-nick fallback would
+	// otherwise merge them. Give userB a known host so handleNickCollision
+	// won't treat them as a ghost (we want the release branch).
+	now := time.Now()
+	userB := &User{
+		Network:        "gamesurge",
+		CurrentNick:    "SpartaN",
+		NormalizedNick: "spartan",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	require.NoError(t, theDB.Create(userB).Error)
+	require.NoError(t, theDB.Create(&UserKnownHost{
+		UserID:    userB.ID,
+		Ident:     "identB",
+		Host:      "hostB",
+		FirstSeen: now,
+		LastSeen:  now,
+	}).Error)
 	require.NotEqual(t, userA.ID, userB.ID)
 	require.Equal(t, "spartan", userB.NormalizedNick)
 
@@ -961,10 +984,10 @@ func TestResolveUserAccountPathReleasesCollidingRealUser(t *testing.T) {
 	displacedB, err := getUserByID(userB.ID)
 	require.NoError(t, err)
 	require.NotNil(t, displacedB)
-	assert.True(t, isReleasedNick(displacedB.NormalizedNick), "userB's nick should now be released")
+	assert.True(t, displacedB.Released, "userB's nick should now be released")
 
 	// Lookup by normalized nick should resolve to A.
-	foundByNick, err := getUserByNormalizedNick("gamesurge", "spartan")
+	foundByNick, err := getActiveUserByNormalizedNick("gamesurge", "spartan")
 	require.NoError(t, err)
 	require.NotNil(t, foundByNick)
 	assert.Equal(t, userA.ID, foundByNick.ID)
@@ -1082,7 +1105,7 @@ func TestClaimNickForHelper(t *testing.T) {
 		require.NoError(t, err)
 
 		// No row should hold "freenick" yet.
-		found, err := getUserByNormalizedNick("net", "freenick")
+		found, err := getActiveUserByNormalizedNick("net", "freenick")
 		require.NoError(t, err)
 		assert.Nil(t, found)
 	})
@@ -1120,7 +1143,7 @@ func TestClaimNickForHelper(t *testing.T) {
 		releasedB, err := getUserByID(userB.ID)
 		require.NoError(t, err)
 		require.NotNil(t, releasedB)
-		assert.True(t, isReleasedNick(releasedB.NormalizedNick), "userB should be released")
+		assert.True(t, releasedB.Released, "userB should be released")
 	})
 }
 
@@ -1175,19 +1198,19 @@ func TestIsUniqueConstraintErr(t *testing.T) {
 	assert.False(t, isUniqueConstraintErr(nil))
 }
 
-func TestIsPlaceholderNick(t *testing.T) {
-	assert.True(t, isReleasedNick(",quit,18"))
-	assert.True(t, isFlaggedNick(",flagged,gamesurge,spartan,1700000000000"))
-	assert.True(t, isPlaceholderNick(",quit,18"))
-	assert.True(t, isPlaceholderNick(",flagged,net,foo,1"))
-	assert.False(t, isPlaceholderNick("spartan"))
-	assert.False(t, isPlaceholderNick(""))
+func TestDisplayNick(t *testing.T) {
+	// current_nick is always populated (no longer cleared on release).
+	assert.Equal(t, "shrew", displayNick(&User{CurrentNick: "shrew"}))
+	assert.Equal(t, "", displayNick(&User{CurrentNick: ""}))
 }
 
 // TestResolveUserFallbackCreatesFlaggedRow simulates the case where
 // claimNickFor cannot resolve the collision (e.g. a race we didn't anticipate)
 // by overriding claimNickForFn to a no-op. The subsequent UPDATE then trips
 // the UNIQUE constraint, and resolveUser must fall back to a flagged row.
+//
+// Note: userB is staged via direct DB insertion to bypass the released-nick
+// fallback that would otherwise merge them with userA.
 func TestResolveUserFallbackCreatesFlaggedRow(t *testing.T) {
 	cleanup := setupUserTestDB(t)
 	defer cleanup()
@@ -1198,9 +1221,17 @@ func TestResolveUserFallbackCreatesFlaggedRow(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, releaseUserNick(userA.ID))
 
-	// userB grabs the nick.
-	userB, err := resolveUser("gamesurge", "SpartaN", "identB", "hostB", "", "rfc1459")
-	require.NoError(t, err)
+	// userB owns the nick (staged directly to avoid the released-nick
+	// fallback merging them with userA).
+	now := time.Now()
+	userB := &User{
+		Network:        "gamesurge",
+		CurrentNick:    "SpartaN",
+		NormalizedNick: "spartan",
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	require.NoError(t, theDB.Create(userB).Error)
 	require.NotEqual(t, userA.ID, userB.ID)
 
 	// Force claimNickFor to a no-op so the impending UPDATE will fail.
@@ -1214,7 +1245,7 @@ func TestResolveUserFallbackCreatesFlaggedRow(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, resolved)
 	assert.True(t, resolved.Flagged, "fallback row must be flagged")
-	assert.True(t, isFlaggedNick(resolved.NormalizedNick), "normalized_nick should be flagged sentinel, got %q", resolved.NormalizedNick)
+	assert.Equal(t, "spartan", resolved.NormalizedNick, "flagged row keeps real normalized_nick (partial unique index excludes it)")
 	assert.Equal(t, FlaggedReasonCollision, resolved.FlaggedReason)
 	assert.Equal(t, "SpartaN[DK]", resolved.IRCAccount)
 	assert.Equal(t, "SpartaN", resolved.CurrentNick)
@@ -1232,10 +1263,12 @@ func TestFlaggedUserRowSkippedByAccountLookup(t *testing.T) {
 	require.NoError(t, err)
 
 	// Manually create a flagged row that also carries the same account.
+	// The partial unique index excludes flagged rows, so this can coexist
+	// with the real user even on the same nick.
 	flagged := &User{
 		Network:        "net",
 		CurrentNick:    "Imposter",
-		NormalizedNick: ",flagged,net,imposter,1700000000000",
+		NormalizedNick: "imposter",
 		IRCAccount:     "shared_account",
 		Flagged:        true,
 		FlaggedReason:  FlaggedReasonCollision,
@@ -1254,11 +1287,13 @@ func TestFlaggedUserRowSkippedByNickLookup(t *testing.T) {
 	cleanup := setupUserTestDB(t)
 	defer cleanup()
 
-	// Only a flagged row exists with the target normalized_nick sentinel.
+	// Only a flagged row exists with the target normalized_nick. With the
+	// partial unique index, flagged rows preserve their real normalized_nick
+	// (no sentinel needed) and active lookups must still skip them.
 	flagged := &User{
 		Network:        "net",
 		CurrentNick:    "Ghost",
-		NormalizedNick: ",flagged,net,ghost,1700000000000",
+		NormalizedNick: "ghost",
 		Flagged:        true,
 		FlaggedReason:  FlaggedReasonCollision,
 		CreatedAt:      time.Now(),
@@ -1266,17 +1301,20 @@ func TestFlaggedUserRowSkippedByNickLookup(t *testing.T) {
 	}
 	require.NoError(t, theDB.Create(flagged).Error)
 
-	// Looking up by the "real" normalized nick must not return the flagged row.
-	found, err := getUserByNormalizedNick("net", "ghost")
+	// Active lookup must not return the flagged row.
+	found, err := getActiveUserByNormalizedNick("net", "ghost")
 	require.NoError(t, err)
-	assert.Nil(t, found, "ghost nick is only held by flagged sentinel, lookup should miss")
+	assert.Nil(t, found, "ghost nick is only held by flagged row, active lookup should miss")
 }
 
 func TestGetFlaggedUsers(t *testing.T) {
 	cleanup := setupUserTestDB(t)
 	defer cleanup()
 
-	// 2 flagged users on 'net', 1 flagged on 'other', 1 normal.
+	// Three flagged users (2 on 'net', 1 on 'other') plus one normal user
+	// on 'net'. The partial unique index excludes flagged rows, so flagged
+	// nicks could collide with active nicks — we keep them distinct here
+	// for clarity, not necessity.
 	for i, spec := range []struct {
 		net     string
 		nick    string
@@ -1288,16 +1326,10 @@ func TestGetFlaggedUsers(t *testing.T) {
 		{"other", "C", "c", true},
 		{"net", "D", "d", false},
 	} {
-		var nn string
-		if spec.flagged {
-			nn = fmt.Sprintf(",flagged,%s,%s,%d", spec.net, spec.norm, 1700000000000+int64(i))
-		} else {
-			nn = spec.norm
-		}
 		u := &User{
 			Network:        spec.net,
 			CurrentNick:    spec.nick,
-			NormalizedNick: nn,
+			NormalizedNick: spec.norm,
 			Flagged:        spec.flagged,
 			FlaggedReason:  "",
 			CreatedAt:      time.Now().Add(time.Duration(i) * time.Second),
@@ -1333,7 +1365,7 @@ func TestCountFlaggedUsers(t *testing.T) {
 	flagged := &User{
 		Network:        "net",
 		CurrentNick:    "X",
-		NormalizedNick: ",flagged,net,x,1700000000000",
+		NormalizedNick: "x",
 		Flagged:        true,
 		FlaggedReason:  FlaggedReasonCollision,
 		CreatedAt:      time.Now(),
@@ -1350,7 +1382,12 @@ func TestCountFlaggedUsers(t *testing.T) {
 	assert.Equal(t, int64(1), n)
 }
 
-func TestFlaggedSentinelUnique(t *testing.T) {
+// TestFlaggedFallbackAllowsMultipleRows verifies that two back-to-back
+// fallback calls for the same nick produce two distinct flagged rows. The
+// partial unique index excludes flagged rows from uniqueness, so multiple
+// flagged rows for the same (network, normalized_nick) can coexist while
+// awaiting admin merge.
+func TestFlaggedFallbackAllowsMultipleRows(t *testing.T) {
 	cleanup := setupUserTestDB(t)
 	defer cleanup()
 
@@ -1359,18 +1396,16 @@ func TestFlaggedSentinelUnique(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, u1)
 
-	// No sleep: sentinel combines UnixNano with a process-local atomic
-	// counter, so back-to-back calls must produce distinct sentinels
-	// regardless of clock resolution.
 	u2, err := resolveUserFallback("net", "Same", "ident", "host", "", "rfc1459", cause)
 	require.NoError(t, err)
 	require.NotNil(t, u2)
 
-	assert.NotEqual(t, u1.ID, u2.ID)
-	assert.NotEqual(t, u1.NormalizedNick, u2.NormalizedNick,
-		"two fallback rows for the same nick must have distinct sentinels")
-	assert.True(t, isFlaggedNick(u1.NormalizedNick))
-	assert.True(t, isFlaggedNick(u2.NormalizedNick))
+	assert.NotEqual(t, u1.ID, u2.ID, "must be two distinct rows")
+	assert.True(t, u1.Flagged)
+	assert.True(t, u2.Flagged)
+	// Both keep the real normalized_nick — no sentinel encoding.
+	assert.Equal(t, "same", u1.NormalizedNick)
+	assert.Equal(t, "same", u2.NormalizedNick)
 }
 
 // TestResolveUserHostRecoverySkipsFlagged asserts that recoverByKnownHost
@@ -1406,4 +1441,221 @@ func TestResolveUserHostRecoverySkipsFlagged(t *testing.T) {
 	assert.NotEqual(t, flagged.ID, resolved.ID, "host recovery must not surface a flagged row")
 	assert.False(t, resolved.Flagged, "newly created user should not be flagged")
 	assert.Equal(t, "different", resolved.NormalizedNick)
+}
+
+// TestResolveUserRecoversReleasedNick_SameNickDifferentHost is the
+// "userA quit from host abcd, rejoins from host zxcv" scenario on a network
+// with no IRC services. Without the released-nick fallback the second
+// resolveUser call would create a brand new user row, splitting userA's
+// identity. With the fallback it should re-attach to the original row.
+func TestResolveUserRecoversReleasedNick_SameNickDifferentHost(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	// userA appears, gets known host (foo, abcd).
+	first, err := resolveUser("net", "userA", "foo", "abcd", "", "rfc1459")
+	require.NoError(t, err)
+	require.NotNil(t, first)
+	originalID := first.ID
+
+	// userA quits → row released.
+	require.NoError(t, releaseUserNick(originalID))
+
+	// userA rejoins from a brand new host. Nick lookup misses (released).
+	// Host recovery misses (zxcv was never seen for this user). Released
+	// fallback should match by nick.
+	second, err := resolveUser("net", "userA", "foo", "zxcv", "", "rfc1459")
+	require.NoError(t, err)
+	require.NotNil(t, second)
+	assert.Equal(t, originalID, second.ID, "should recover the released row by nick")
+	assert.False(t, second.Released, "row should be reactivated")
+	assert.Equal(t, "userA", second.CurrentNick)
+	assert.Equal(t, "usera", second.NormalizedNick)
+
+	// Known hosts should now include both abcd (from before) and zxcv.
+	var hosts []UserKnownHost
+	require.NoError(t, theDB.Where("user_id = ?", originalID).Find(&hosts).Error)
+	hostSet := map[string]bool{}
+	for _, h := range hosts {
+		hostSet[h.Host] = true
+	}
+	assert.True(t, hostSet["abcd"], "original host preserved")
+	assert.True(t, hostSet["zxcv"], "new host added")
+}
+
+// TestResolveUserRecoversReleasedNick_DifferentIdent is the variant where
+// ident also changed between sessions (e.g. user reconfigured their client).
+// Nick alone should still be enough to re-attach.
+func TestResolveUserRecoversReleasedNick_DifferentIdent(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	first, err := resolveUser("net", "userA", "foo", "abcd", "", "rfc1459")
+	require.NoError(t, err)
+	originalID := first.ID
+
+	require.NoError(t, releaseUserNick(originalID))
+
+	// Different ident AND different host.
+	second, err := resolveUser("net", "userA", "bar", "zxcv", "", "rfc1459")
+	require.NoError(t, err)
+	require.NotNil(t, second)
+	assert.Equal(t, originalID, second.ID, "nick alone should be enough to re-attach")
+	assert.False(t, second.Released)
+}
+
+// TestResolveUserReleasedNickFallback_HostRecoveryWinsFirst verifies the
+// priority order: when both a released-by-host match and a released-by-nick
+// match are possible, host recovery wins (it ran first).
+func TestResolveUserReleasedNickFallback_HostRecoveryWinsFirst(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	// userA: released, has known host (foo, abcd).
+	userA, err := resolveUser("net", "userA", "foo", "abcd", "", "rfc1459")
+	require.NoError(t, err)
+	require.NoError(t, releaseUserNick(userA.ID))
+
+	// Another user that also held the "usera" normalized nick at some point
+	// — created directly so we can stage a released row without going through
+	// claim/displace (since the partial index would let this coexist).
+	now := time.Now()
+	other := &User{
+		Network:        "net",
+		CurrentNick:    "userA",
+		NormalizedNick: "usera",
+		Released:       true,
+		CreatedAt:      now,
+		UpdatedAt:      now.Add(1 * time.Hour), // newer
+	}
+	require.NoError(t, theDB.Create(other).Error)
+
+	// Coming back with the host that matches userA's known_hosts.
+	// Host recovery should return userA, not the newer released row.
+	resolved, err := resolveUser("net", "userA", "foo", "abcd", "", "rfc1459")
+	require.NoError(t, err)
+	require.NotNil(t, resolved)
+	assert.Equal(t, userA.ID, resolved.ID, "host recovery should take priority over nick fallback")
+}
+
+// TestResolveUserReleasedNickFallback_MultipleMatchesPicksNewest stages two
+// released rows with the same nick. The fallback should pick the row with
+// the most recent updated_at.
+func TestResolveUserReleasedNickFallback_MultipleMatchesPicksNewest(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	now := time.Now()
+	older := &User{
+		Network:        "net",
+		CurrentNick:    "userA",
+		NormalizedNick: "usera",
+		Released:       true,
+		CreatedAt:      now.Add(-2 * time.Hour),
+		UpdatedAt:      now.Add(-2 * time.Hour),
+	}
+	require.NoError(t, theDB.Create(older).Error)
+
+	newer := &User{
+		Network:        "net",
+		CurrentNick:    "userA",
+		NormalizedNick: "usera",
+		Released:       true,
+		CreatedAt:      now.Add(-1 * time.Hour),
+		UpdatedAt:      now.Add(-1 * time.Hour),
+	}
+	require.NoError(t, theDB.Create(newer).Error)
+
+	resolved, err := resolveUser("net", "userA", "foo", "newhost", "", "rfc1459")
+	require.NoError(t, err)
+	require.NotNil(t, resolved)
+	assert.Equal(t, newer.ID, resolved.ID, "should pick the most recently updated released row")
+	assert.False(t, resolved.Released)
+}
+
+// TestResolveUserReleasedNickFallback_NoMatchCreatesNew verifies that when
+// no released row matches the nick (and host/account misses too), a fresh
+// user is created — fallback doesn't accidentally pick up unrelated rows.
+func TestResolveUserReleasedNickFallback_NoMatchCreatesNew(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	// Stage an unrelated released row to confirm it isn't matched.
+	now := time.Now()
+	other := &User{
+		Network:        "net",
+		CurrentNick:    "someoneElse",
+		NormalizedNick: "someoneelse",
+		Released:       true,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	require.NoError(t, theDB.Create(other).Error)
+
+	resolved, err := resolveUser("net", "brandNewNick", "foo", "host", "", "rfc1459")
+	require.NoError(t, err)
+	require.NotNil(t, resolved)
+	assert.NotEqual(t, other.ID, resolved.ID)
+	assert.Equal(t, "brandnewnick", resolved.NormalizedNick)
+	assert.False(t, resolved.Released)
+}
+
+// TestResolveUserReleasedNickFallback_AccountBranch covers the corner case
+// where a user gains an IRC services account between disconnects. The
+// account lookup misses (we've never seen this account), nick is held by
+// a released row from before the account was registered, and the fallback
+// links them together.
+func TestResolveUserReleasedNickFallback_AccountBranch(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	// Released row from when userA had no account.
+	now := time.Now()
+	pre := &User{
+		Network:        "net",
+		CurrentNick:    "userA",
+		NormalizedNick: "usera",
+		Released:       true,
+		CreatedAt:      now.Add(-1 * time.Hour),
+		UpdatedAt:      now.Add(-1 * time.Hour),
+	}
+	require.NoError(t, theDB.Create(pre).Error)
+
+	// Now they reappear with an account. Account lookup misses (no row has
+	// account="newacct" yet). Active nick lookup misses (released). Host
+	// recovery misses (fresh host). Released-nick fallback should match.
+	resolved, err := resolveUser("net", "userA", "foo", "newhost", "newacct", "rfc1459")
+	require.NoError(t, err)
+	require.NotNil(t, resolved)
+	assert.Equal(t, pre.ID, resolved.ID, "should recover the released row")
+	assert.False(t, resolved.Released)
+	assert.Equal(t, "newacct", resolved.IRCAccount, "account should be attached")
+}
+
+// TestResolveUserReleasedNickFallback_DoesNotMatchFlagged verifies that
+// flagged rows are excluded from the released-nick fallback. A flagged row
+// is a diagnostic placeholder, never an identity match.
+func TestResolveUserReleasedNickFallback_DoesNotMatchFlagged(t *testing.T) {
+	cleanup := setupUserTestDB(t)
+	defer cleanup()
+
+	now := time.Now()
+	flagged := &User{
+		Network:        "net",
+		CurrentNick:    "userA",
+		NormalizedNick: "usera",
+		Released:       true, // flagged AND released — still must not match
+		Flagged:        true,
+		FlaggedReason:  FlaggedReasonCollision,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	require.NoError(t, theDB.Create(flagged).Error)
+
+	resolved, err := resolveUser("net", "userA", "foo", "host", "", "rfc1459")
+	require.NoError(t, err)
+	require.NotNil(t, resolved)
+	assert.NotEqual(t, flagged.ID, resolved.ID,
+		"flagged released row must not be matched by the fallback")
+	assert.False(t, resolved.Flagged)
 }

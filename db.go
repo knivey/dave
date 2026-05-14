@@ -155,12 +155,24 @@ func (TurnUsage) TableName() string { return "turn_usage" }
 
 func (SessionSetting) TableName() string { return "session_settings" }
 
+// User represents a tracked IRC identity.
+//
+// NormalizedNick uniqueness is enforced by a *partial* unique index:
+//
+//	UNIQUE (network, normalized_nick) WHERE released = false AND flagged = false
+//
+// created in migration #7 (convert_sentinels_to_released_column). The
+// struct tag therefore does NOT request a full unique index — GORM cannot
+// express partial indexes in struct tags. Released and flagged rows
+// preserve their real normalized_nick (no sentinels); the partial index
+// simply ignores them so another active user can claim the same nick.
 type User struct {
 	ID             int64  `gorm:"primaryKey;autoIncrement"`
-	Network        string `gorm:"not null;index:idx_users_nick;index:idx_users_account"`
+	Network        string `gorm:"not null;index:idx_users_account"`
 	CurrentNick    string `gorm:"not null"`
-	NormalizedNick string `gorm:"not null;index:idx_users_nick,unique"`
+	NormalizedNick string `gorm:"not null"`
 	IRCAccount     string `gorm:"column:account;index:idx_users_account"`
+	Released       bool   `gorm:"not null;default:false;index:idx_users_released"`
 	Flagged        bool   `gorm:"not null;default:false;index:idx_users_flagged"`
 	FlaggedReason  string `gorm:"not null;default:''"`
 	CreatedAt      time.Time

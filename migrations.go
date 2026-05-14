@@ -44,6 +44,8 @@ var migrations = []migration{
 	{ID: 3, Name: "normalize_channels_and_reindex", Up: normalizeChannelsAndReindex},
 	{ID: 4, Name: "drop_sessions_nick", Up: dropSessionsNick},
 	{ID: 5, Name: "add_users_flagged_columns", Up: addUsersFlaggedColumns},
+	{ID: 6, Name: "add_users_last_nick", Up: addUsersLastNick},
+	{ID: 7, Name: "convert_sentinels_to_released_column", Up: convertSentinelsToReleasedColumn},
 }
 
 func runMigrations(db *gorm.DB, dbPath string) error {
@@ -351,6 +353,280 @@ func addUsersFlaggedColumns(db *gorm.DB) error {
 	if !migrator.HasIndex(&User{}, "idx_users_flagged") {
 		if err := db.Exec("CREATE INDEX idx_users_flagged ON users(flagged)").Error; err != nil {
 			return fmt.Errorf("creating idx_users_flagged: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func addUsersLastNick(db *gorm.DB) error {
+	migrator := db.Migrator()
+
+	if !migrator.HasColumn(&User{}, "last_nick") {
+		var ddl string
+		switch db.Dialector.Name() {
+		case "sqlite":
+			ddl = "ALTER TABLE users ADD COLUMN last_nick TEXT NOT NULL DEFAULT ''"
+		case "postgres":
+			ddl = "ALTER TABLE users ADD COLUMN last_nick TEXT NOT NULL DEFAULT ''"
+		default:
+			return fmt.Errorf("unsupported dialect %s for add_users_last_nick", db.Dialector.Name())
+		}
+		if err := db.Exec(ddl).Error; err != nil {
+			return fmt.Errorf("adding last_nick column: %w", err)
+		}
+	}
+
+	result := db.Exec("UPDATE users SET last_nick = current_nick WHERE last_nick = '' AND current_nick != ''")
+	if result.Error != nil {
+		return fmt.Errorf("backfilling last_nick from current_nick: %w", result.Error)
+	}
+	if result.RowsAffected > 0 {
+		loggerM.Info("backfilled last_nick from current_nick", "rows", result.RowsAffected)
+	}
+
+	return nil
+}
+
+// convertSentinelsToReleasedColumn replaces the sentinel-in-normalized_nick
+// scheme (",quit,<id>" for released users and ",flagged,..." for flagged
+// users) with a proper `released BOOLEAN` column plus a partial unique index
+// on `(network, normalized_nick) WHERE released = false AND flagged = false`.
+//
+// Rationale: the original sentinels encoded uniqueness in a string payload
+// (because the old idx_users_nick was a full UNIQUE index, so two released
+// rows in the same network would collide on `,quit,`). The payload itself
+// was opaque to the code — nothing ever parsed `<id>` back out. This
+// migration moves that signalling into a real column where it belongs.
+//
+// Legacy data caveat: the old `releaseUserNick` cleared `current_nick=”`
+// at release time. Migration #6 backfills `last_nick = current_nick`, so
+// rows that were already released before #6 ran will end up with empty
+// `last_nick` too — there is no surviving copy of the original nick on
+// disk. For those rows this migration sets `released=true` and leaves the
+// `,quit,<id>` sentinel sitting in `normalized_nick` as an inert tombstone.
+// The released-nick fallback in `resolveUserOnce` cannot match them. An
+// ERROR-level log line surfaces the count so admins running the migration
+// see this happen once.
+//
+// Steps:
+//  1. Add the `released` column (defaults false).
+//  2. Backfill: for rows whose normalized_nick is a ",quit,*" sentinel,
+//     set released=true and restore normalized_nick + current_nick from
+//     the last_nick column (added by migration #6). Rows with empty
+//     last_nick become tombstones (see caveat above).
+//  3. Backfill flagged sentinels (",flagged,*") similarly. Their `flagged`
+//     bool is already true (set at creation time in resolveUserFallback).
+//  4. Resolve any duplicate (network, normalized_nick) among the now-active
+//     rows by marking the older row released=true.
+//  5. Drop the old full unique index idx_users_nick.
+//  6. Create the new partial unique index idx_users_nick_active.
+//  7. Drop the last_nick column (info now lives in current_nick again).
+func convertSentinelsToReleasedColumn(db *gorm.DB) error {
+	migrator := db.Migrator()
+
+	// Step 1: add `released` column if missing.
+	if !migrator.HasColumn(&User{}, "released") {
+		var ddl string
+		switch db.Dialector.Name() {
+		case "sqlite":
+			ddl = "ALTER TABLE users ADD COLUMN released INTEGER NOT NULL DEFAULT 0"
+		case "postgres":
+			ddl = "ALTER TABLE users ADD COLUMN released BOOLEAN NOT NULL DEFAULT FALSE"
+		default:
+			return fmt.Errorf("unsupported dialect %s for convert_sentinels_to_released_column", db.Dialector.Name())
+		}
+		if err := db.Exec(ddl).Error; err != nil {
+			return fmt.Errorf("adding released column: %w", err)
+		}
+	}
+
+	if !migrator.HasIndex(&User{}, "idx_users_released") {
+		if err := db.Exec("CREATE INDEX idx_users_released ON users(released)").Error; err != nil {
+			return fmt.Errorf("creating idx_users_released: %w", err)
+		}
+	}
+
+	hasLastNick := migrator.HasColumn(&User{}, "last_nick")
+
+	// Step 2: backfill released sentinels.
+	// Sentinels look like ",quit,<id>" — we identify them by the prefix.
+	// We restore the real nick from last_nick (migration #6 backfilled it).
+	if hasLastNick {
+		type sentinelRow struct {
+			ID             int64
+			Network        string
+			NormalizedNick string
+			CurrentNick    string
+			LastNick       string
+		}
+		var rows []sentinelRow
+		if err := db.Raw(
+			"SELECT id, network, normalized_nick, current_nick, last_nick FROM users WHERE normalized_nick LIKE ',quit,%'",
+		).Scan(&rows).Error; err != nil {
+			return fmt.Errorf("querying released sentinel rows: %w", err)
+		}
+		releasedCount := 0
+		tombstoneCount := 0
+		for _, r := range rows {
+			restoreNorm := normalizeIRC(r.LastNick, "rfc1459")
+			restoreCurrent := r.LastNick
+			if r.LastNick == "" {
+				// No history to restore — leave the sentinel in place. The
+				// row stays usable as a placeholder (released=true) but the
+				// released-nick fallback cannot match it. See the function
+				// docstring's "Legacy data caveat" for context.
+				if err := db.Exec(
+					"UPDATE users SET released = ? WHERE id = ?", true, r.ID,
+				).Error; err != nil {
+					return fmt.Errorf("marking released row %d: %w", r.ID, err)
+				}
+				releasedCount++
+				tombstoneCount++
+				continue
+			}
+			if err := db.Exec(
+				"UPDATE users SET released = ?, normalized_nick = ?, current_nick = ? WHERE id = ?",
+				true, restoreNorm, restoreCurrent, r.ID,
+			).Error; err != nil {
+				return fmt.Errorf("restoring released row %d: %w", r.ID, err)
+			}
+			releasedCount++
+		}
+		if releasedCount > 0 {
+			loggerM.Info("converted released sentinels to released column", "rows", releasedCount)
+		}
+		if tombstoneCount > 0 {
+			// Surface this loudly: these rows are released but carry the
+			// original ",quit,<id>" sentinel as their normalized_nick. The
+			// released-nick fallback can never match them, so any users
+			// they originally represented will be created fresh on next
+			// interaction. Admins may want to merge those manually via
+			// /usermerge once the new identities have built up some
+			// evidence (account, known hosts).
+			loggerM.Error("legacy_released_rows_preserved_as_tombstones_nick_history_lost",
+				"count", tombstoneCount,
+				"explanation", "rows released under the old sentinel scheme had current_nick cleared before migration #6 could capture it; migration #7 left their ,quit,<id> sentinel in normalized_nick. They are not matchable by the released-nick fallback.")
+		}
+
+		// Step 3: backfill flagged sentinels.
+		// flagged column is already true; we only need to restore the real
+		// normalized_nick + current_nick from last_nick (if available).
+		var flaggedRows []sentinelRow
+		if err := db.Raw(
+			"SELECT id, network, normalized_nick, current_nick, last_nick FROM users WHERE normalized_nick LIKE ',flagged,%'",
+		).Scan(&flaggedRows).Error; err != nil {
+			return fmt.Errorf("querying flagged sentinel rows: %w", err)
+		}
+		flaggedCount := 0
+		for _, r := range flaggedRows {
+			if r.LastNick == "" {
+				// No nick history to restore; leave the sentinel in place.
+				continue
+			}
+			restoreNorm := normalizeIRC(r.LastNick, "rfc1459")
+			restoreCurrent := r.LastNick
+			if err := db.Exec(
+				"UPDATE users SET normalized_nick = ?, current_nick = ? WHERE id = ?",
+				restoreNorm, restoreCurrent, r.ID,
+			).Error; err != nil {
+				return fmt.Errorf("restoring flagged row %d: %w", r.ID, err)
+			}
+			flaggedCount++
+		}
+		if flaggedCount > 0 {
+			loggerM.Info("restored flagged sentinel nicks", "rows", flaggedCount)
+		}
+	}
+
+	// Step 4: resolve any duplicate (network, normalized_nick) among the
+	// active rows we just restored. If two active rows now collide on the
+	// same nick (e.g. user A quit, someone else took the nick, both got
+	// their nick "restored" by the backfill), prefer the more recently
+	// updated row and release the older one.
+	type dupGroup struct {
+		Network        string
+		NormalizedNick string
+		Cnt            int
+	}
+	var dups []dupGroup
+	if err := db.Raw(
+		`SELECT network, normalized_nick, COUNT(*) as cnt
+		 FROM users
+		 WHERE released = ? AND flagged = ?
+		 GROUP BY network, normalized_nick
+		 HAVING COUNT(*) > 1`,
+		false, false,
+	).Scan(&dups).Error; err != nil {
+		return fmt.Errorf("scanning for duplicate active nicks: %w", err)
+	}
+	for _, g := range dups {
+		// Pull all colliding rows ordered by updated_at desc; keep the
+		// freshest as the active owner, mark older ones released.
+		var colliders []User
+		if err := db.Where(
+			"network = ? AND normalized_nick = ? AND released = ? AND flagged = ?",
+			g.Network, g.NormalizedNick, false, false,
+		).Order("updated_at DESC, id DESC").Find(&colliders).Error; err != nil {
+			return fmt.Errorf("loading colliders for %s/%s: %w", g.Network, g.NormalizedNick, err)
+		}
+		for i := 1; i < len(colliders); i++ {
+			loggerM.Info("resolving duplicate active nick by releasing older row",
+				"keep_user_id", colliders[0].ID,
+				"release_user_id", colliders[i].ID,
+				"network", g.Network,
+				"normalized_nick", g.NormalizedNick)
+			if err := db.Model(&User{}).Where("id = ?", colliders[i].ID).
+				Update("released", true).Error; err != nil {
+				return fmt.Errorf("releasing duplicate row %d: %w", colliders[i].ID, err)
+			}
+		}
+	}
+
+	// Step 5: drop the old full unique index if it exists. Both sqlite and
+	// postgres accept "DROP INDEX IF EXISTS".
+	if migrator.HasIndex(&User{}, "idx_users_nick") {
+		switch db.Dialector.Name() {
+		case "sqlite", "postgres":
+			if err := db.Exec("DROP INDEX IF EXISTS idx_users_nick").Error; err != nil {
+				return fmt.Errorf("dropping idx_users_nick: %w", err)
+			}
+		default:
+			return fmt.Errorf("unsupported dialect %s for convert_sentinels_to_released_column", db.Dialector.Name())
+		}
+	}
+
+	// Step 6: create the partial unique index. SQLite and Postgres both
+	// support `CREATE UNIQUE INDEX ... WHERE ...` (partial indexes).
+	if !migrator.HasIndex(&User{}, "idx_users_nick_active") {
+		var ddl string
+		switch db.Dialector.Name() {
+		case "sqlite":
+			ddl = "CREATE UNIQUE INDEX idx_users_nick_active ON users(network, normalized_nick) WHERE released = 0 AND flagged = 0"
+		case "postgres":
+			ddl = "CREATE UNIQUE INDEX idx_users_nick_active ON users(network, normalized_nick) WHERE released = FALSE AND flagged = FALSE"
+		default:
+			return fmt.Errorf("unsupported dialect %s for convert_sentinels_to_released_column", db.Dialector.Name())
+		}
+		if err := db.Exec(ddl).Error; err != nil {
+			return fmt.Errorf("creating idx_users_nick_active: %w", err)
+		}
+	}
+
+	// Step 7: drop the last_nick column. Its info now lives in current_nick
+	// (no longer cleared at release time).
+	if hasLastNick {
+		switch db.Dialector.Name() {
+		case "sqlite":
+			if err := db.Exec("ALTER TABLE users DROP COLUMN last_nick").Error; err != nil {
+				return fmt.Errorf("dropping last_nick column: %w", err)
+			}
+		case "postgres":
+			if err := db.Exec("ALTER TABLE users DROP COLUMN IF EXISTS last_nick").Error; err != nil {
+				return fmt.Errorf("dropping last_nick column: %w", err)
+			}
+		default:
+			return fmt.Errorf("unsupported dialect %s for convert_sentinels_to_released_column", db.Dialector.Name())
 		}
 	}
 

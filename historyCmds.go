@@ -105,13 +105,13 @@ func historySessions(network Network, c *girc.Client, e girc.Event, ctx context.
 			return
 		}
 		select {
-		case output <- expandNotice(n.Sessions.OtherHeader, map[string]string{"nick": targetUser.CurrentNick, "network": network.Name}):
+		case output <- expandNotice(n.Sessions.OtherHeader, map[string]string{"nick": displayNick(targetUser), "network": network.Name}):
 		case <-ctx.Done():
 			return
 		}
 		var swu []SessionWithUser
 		for _, s := range sessions {
-			swu = append(swu, SessionWithUser{Session: s, OwnerNick: targetUser.CurrentNick})
+			swu = append(swu, SessionWithUser{Session: s, OwnerNick: displayNick(targetUser)})
 		}
 		sendSessionsLinesWithNick(output, ctx, swu, network.Trigger)
 		return
@@ -854,11 +854,11 @@ func historyClone(network Network, c *girc.Client, e girc.Event, ctx context.Con
 		}
 		activeSession, aErr := sessionMgr.GetActiveSession(network.Name, channel, targetUser.ID)
 		if aErr != nil || activeSession == nil {
-			send(errorMsg(expandNotice(n.Clone.NoTargetSession, map[string]string{"nick": targetUser.CurrentNick})))
+			send(errorMsg(expandNotice(n.Clone.NoTargetSession, map[string]string{"nick": displayNick(targetUser)})))
 			return
 		}
 		sourceSession = activeSession
-		sourceNick = targetUser.CurrentNick
+		sourceNick = displayNick(targetUser)
 	}
 
 	incomplete, icErr := sessionHasIncompleteToolCalls(sourceSession.ID)
@@ -952,7 +952,7 @@ func historyClone(network Network, c *girc.Client, e girc.Event, ctx context.Con
 		if sourceSession.UserID != nil {
 			var srcUser User
 			if err := theDB.Where("id = ?", *sourceSession.UserID).First(&srcUser).Error; err == nil && srcUser.ID != 0 {
-				vars["source_nick"] = srcUser.CurrentNick
+				vars["source_nick"] = displayNick(&srcUser)
 			}
 		}
 	}

@@ -7,15 +7,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	logxi "github.com/mgutz/logxi/v1"
 	"gorm.io/gorm"
 )
-
-const releasedNickPrefix = ",quit,"
-const flaggedNickPrefix = ",flagged,"
 
 // FlaggedReasonCollision is set on flagged users created because the normal
 // resolveUser flow could not claim a real normalized_nick (UNIQUE constraint
@@ -34,12 +30,6 @@ var (
 	resolveUserRandMu sync.Mutex
 	resolveUserRand   = rand.New(rand.NewSource(time.Now().UnixNano()))
 )
-
-// flaggedSeq is a process-local monotonic counter appended to flagged-row
-// sentinels. UnixNano alone would have a vanishing collision window on
-// systems with coarse clock resolution or in tight concurrent bursts; the
-// counter makes the sentinel collision-free regardless of clock behavior.
-var flaggedSeq atomic.Int64
 
 func resolveUserJitter() time.Duration {
 	resolveUserRandMu.Lock()
@@ -116,18 +106,13 @@ func isTransientDBErr(err error) bool {
 		strings.Contains(s, "could not serialize access")
 }
 
-// isFlaggedNick returns true if the normalized nick is a flagged-row sentinel
-// (created when resolveUser fell back to creating a placeholder user row).
-func isFlaggedNick(s string) bool {
-	return strings.HasPrefix(s, flaggedNickPrefix)
-}
-
-// isPlaceholderNick returns true for any non-claimable normalized_nick: both
-// released sentinels (",quit,<id>") and flagged sentinels (",flagged,...").
-// resolveUser and resolveUserByNick skip rows matching this so the real nick
-// remains available for the legitimate owner.
-func isPlaceholderNick(s string) bool {
-	return isReleasedNick(s) || isFlaggedNick(s)
+// displayNick returns the display nick for a user. Currently this is just
+// CurrentNick — wrapper exists as a future-proofing seam (e.g. to decorate
+// released users in some UIs, or to fall back to IRCAccount when set). Use
+// this rather than reading CurrentNick directly so future presentation
+// changes have one place to land.
+func displayNick(u *User) string {
+	return u.CurrentNick
 }
 
 var loggerUsers = logxi.New("users")
@@ -138,22 +123,32 @@ func init() {
 
 // claimNickFor ensures `user` may safely take `(network, norm)` as its
 // normalized_nick before the caller assigns it and writes the row. If a
-// different user currently holds that slot, handleNickCollision either merges
-// them into `user` (when they have no known hosts — migration-era ghost) or
-// releases their nick to a `,quit,<id>` sentinel (real user, presumed
+// different *active* user currently holds that slot, handleNickCollision
+// either merges them into `user` (when they have no known hosts —
+// migration-era ghost) or releases their nick (real user, presumed
 // offline/displaced). After this returns nil, the (network, norm) pair is
-// guaranteed free for `user` to claim.
+// guaranteed free for `user` to claim under the partial unique index
+// idx_users_nick_active.
+//
+// Released and flagged rows are not collisions: the partial unique index
+// excludes them, so multiple released/flagged rows for the same nick can
+// coexist with the active owner.
 //
 // This mirrors the collision handling recordNickChange performs for NICK
 // events. resolveUser needs the same guard because it can identify a user by
 // account or by ident@host recovery and then try to assign that user a
-// normalized_nick already owned by another row, violating the UNIQUE index
-// idx_users_nick on (network, normalized_nick).
+// normalized_nick already owned by another active row.
 func claimNickFor(network string, user *User, norm string) error {
-	if user.NormalizedNick == norm {
+	// Skip the short-circuit for released/flagged rows: even if the
+	// normalized_nick happens to match, the caller is about to reactivate
+	// them (clear Released) which moves the row into the partial unique
+	// index's active set. We need to verify no other active row holds
+	// the slot before letting the caller commit. Do not simplify this
+	// to a plain `user.NormalizedNick == norm` check.
+	if user.NormalizedNick == norm && !user.Released && !user.Flagged {
 		return nil
 	}
-	existing, err := getUserByNormalizedNick(network, norm)
+	existing, err := getActiveUserByNormalizedNick(network, norm)
 	if err != nil {
 		return err
 	}
@@ -214,6 +209,19 @@ func resolveUser(network, nick, ident, host, account, casemapping string) (*User
 	return nil, lastErr
 }
 
+// reactivateIfReleased clears the Released flag on a user that we've just
+// identified by a stable key (account or known host). The user has come back
+// and is taking their nick again. Returns true if the row was previously
+// released and is now being re-activated.
+func reactivateIfReleased(user *User) bool {
+	if !user.Released {
+		return false
+	}
+	user.Released = false
+	loggerUsers.Debug("reactivating released user", "user_id", user.ID, "network", user.Network)
+	return true
+}
+
 // resolveUserOnce performs a single resolveUser attempt (the original
 // pre-retry implementation). Callers should not invoke this directly outside
 // of tests; production code uses resolveUser which adds retry + fallback.
@@ -234,6 +242,7 @@ func resolveUserOnce(network, nick, ident, host, account, casemapping string) (*
 			if err := claimNickForFn(network, user, norm); err != nil {
 				return nil, err
 			}
+			reactivateIfReleased(user)
 			user.CurrentNick = nick
 			user.NormalizedNick = norm
 			if err := updateDBUser(user); err != nil {
@@ -244,13 +253,9 @@ func resolveUserOnce(network, nick, ident, host, account, casemapping string) (*
 		}
 
 		loggerUsers.Debug("account lookup missed, trying nick lookup", "account", account, "nick", nick, "network", network)
-		nickUser, err := getUserByNormalizedNick(network, norm)
+		nickUser, err := getActiveUserByNormalizedNick(network, norm)
 		if err != nil {
 			return nil, err
-		}
-		if nickUser != nil && isPlaceholderNick(nickUser.NormalizedNick) {
-			loggerUsers.Debug("nick lookup hit placeholder user, skipping", "user_id", nickUser.ID, "nick", nick, "network", network)
-			nickUser = nil
 		}
 		if nickUser != nil {
 			loggerUsers.Debug("resolved user", "method", "nick+account_link", "user_id", nickUser.ID, "nick", nick, "account", account, "network", network)
@@ -273,6 +278,7 @@ func resolveUserOnce(network, nick, ident, host, account, casemapping string) (*
 			if err := claimNickForFn(network, hostUser, norm); err != nil {
 				return nil, err
 			}
+			reactivateIfReleased(hostUser)
 			hostUser.IRCAccount = account
 			hostUser.CurrentNick = nick
 			hostUser.NormalizedNick = norm
@@ -283,18 +289,52 @@ func resolveUserOnce(network, nick, ident, host, account, casemapping string) (*
 			return hostUser, nil
 		}
 
+		// Third-tier fallback: released row with same nick. Only reached
+		// when account is unknown to us AND no host history matches, so
+		// nick is the only evidence we have. See
+		// getMostRecentReleasedUserByNormalizedNick for the security note.
+		//
+		// Both voluntarily-released rows (QUIT/PART/KICK) and involuntarily-
+		// released rows (handleNickCollision displacement) are eligible.
+		// See handleNickCollision docstring for the trade-off rationale.
+		//
+		// Race note: under high concurrency two callers may try to reactivate
+		// two different released rows with the same (network, normalized_nick)
+		// simultaneously. One UPDATE will hit the partial UNIQUE constraint
+		// and resolveUser will fall through to resolveUserFallback, producing
+		// a flagged row. Acceptable degraded behavior; the second user will
+		// not be silently merged into the wrong identity.
+		releasedUser, matchCount, err := getMostRecentReleasedUserByNormalizedNick(network, norm)
+		if err != nil {
+			return nil, err
+		}
+		if releasedUser != nil {
+			if matchCount > 1 {
+				loggerUsers.Warn("released-nick fallback: multiple released rows match, picking newest",
+					"user_id", releasedUser.ID,
+					"match_count", matchCount,
+					"nick", nick, "network", network)
+			}
+			loggerUsers.Info("resolved user", "method", "released_nick_fallback+account_link",
+				"user_id", releasedUser.ID, "nick", nick, "account", account, "network", network,
+				"released_at", releasedUser.UpdatedAt)
+			reactivateIfReleased(releasedUser)
+			releasedUser.IRCAccount = account
+			releasedUser.CurrentNick = nick
+			releasedUser.NormalizedNick = norm
+			if err := updateDBUser(releasedUser); err != nil {
+				return nil, err
+			}
+			_ = upsertKnownHost(releasedUser.ID, ident, host)
+			return releasedUser, nil
+		}
+
 		return createNewUser(network, nick, norm, account, ident, host)
 	}
 
-	user, err := getUserByNormalizedNick(network, norm)
+	user, err := getActiveUserByNormalizedNick(network, norm)
 	if err != nil {
 		return nil, err
-	}
-	if user != nil {
-		if isPlaceholderNick(user.NormalizedNick) {
-			loggerUsers.Debug("nick lookup hit placeholder user, falling through to host recovery", "user_id", user.ID, "nick", nick, "network", network)
-			user = nil
-		}
 	}
 	if user != nil {
 		loggerUsers.Debug("resolved user", "method", "nick", "user_id", user.ID, "nick", nick, "network", network)
@@ -319,6 +359,7 @@ func resolveUserOnce(network, nick, ident, host, account, casemapping string) (*
 		if err := claimNickForFn(network, hostUser, norm); err != nil {
 			return nil, err
 		}
+		reactivateIfReleased(hostUser)
 		if hostUser.IRCAccount == "" && account != "" {
 			hostUser.IRCAccount = account
 		}
@@ -331,14 +372,56 @@ func resolveUserOnce(network, nick, ident, host, account, casemapping string) (*
 		return hostUser, nil
 	}
 
+	// Third-tier fallback: released row with same nick. This handles the
+	// common accountless-network case where a user quits and rejoins from
+	// a new host (mobile networks, ISP DHCP, VPN). See
+	// getMostRecentReleasedUserByNormalizedNick for the security note.
+	//
+	// Both voluntarily-released rows (QUIT/PART/KICK) and involuntarily-
+	// released rows (handleNickCollision displacement) are eligible.
+	// See handleNickCollision docstring for the trade-off rationale.
+	//
+	// Race note: under high concurrency two callers may try to reactivate
+	// two different released rows with the same (network, normalized_nick)
+	// simultaneously. One UPDATE will hit the partial UNIQUE constraint
+	// and resolveUser will fall through to resolveUserFallback, producing
+	// a flagged row. Acceptable degraded behavior; the second user will
+	// not be silently merged into the wrong identity.
+	releasedUser, matchCount, err := getMostRecentReleasedUserByNormalizedNick(network, norm)
+	if err != nil {
+		return nil, err
+	}
+	if releasedUser != nil {
+		if matchCount > 1 {
+			loggerUsers.Warn("released-nick fallback: multiple released rows match, picking newest",
+				"user_id", releasedUser.ID,
+				"match_count", matchCount,
+				"nick", nick, "network", network)
+		}
+		loggerUsers.Info("resolved user", "method", "released_nick_fallback",
+			"user_id", releasedUser.ID, "nick", nick, "network", network,
+			"released_at", releasedUser.UpdatedAt)
+		reactivateIfReleased(releasedUser)
+		if releasedUser.IRCAccount == "" && account != "" {
+			releasedUser.IRCAccount = account
+		}
+		releasedUser.CurrentNick = nick
+		releasedUser.NormalizedNick = norm
+		if err := updateDBUser(releasedUser); err != nil {
+			return nil, err
+		}
+		_ = upsertKnownHost(releasedUser.ID, ident, host)
+		return releasedUser, nil
+	}
+
 	return createNewUser(network, nick, norm, "", ident, host)
 }
 
 // resolveUserFallback is invoked when resolveUser's normal flow fails with a
 // UNIQUE-constraint violation that retries could not avoid. It creates a new
-// flagged user row with a sentinel normalized_nick that cannot collide with
-// any real IRC nick (leading comma reserved). The caller sees a valid *User
-// and the message keeps flowing.
+// flagged user row. With the partial unique index in place, flagged rows are
+// excluded from uniqueness so we can write the real normalized_nick without
+// needing a sentinel payload.
 //
 // Logs at ERROR with a distinctive message so admins can grep / alert.
 //
@@ -346,15 +429,11 @@ func resolveUserOnce(network, nick, ident, host, account, casemapping string) (*
 // a persistent notice and stop. Does NOT loop or retry the fallback itself.
 func resolveUserFallback(network, nick, ident, host, account, casemapping string, cause error) (*User, error) {
 	norm := normalizeIRC(nick, casemapping)
-	sentinel := fmt.Sprintf("%s%s,%s,%d,%d",
-		flaggedNickPrefix, network, norm,
-		time.Now().UnixNano(),
-		flaggedSeq.Add(1))
 	now := time.Now()
 	user := &User{
 		Network:        network,
 		CurrentNick:    nick,
-		NormalizedNick: sentinel,
+		NormalizedNick: norm,
 		IRCAccount:     account,
 		Flagged:        true,
 		FlaggedReason:  FlaggedReasonCollision,
@@ -385,26 +464,23 @@ func resolveUserFallback(network, nick, ident, host, account, casemapping string
 
 // resolveUserByNick looks up a user by their current nick. Used by LLM ban
 // tool and TUI commands which only see nicks, not ident/host. Skips
-// placeholder rows (released or flagged) so the lookup behaves as if those
-// rows don't hold the nick.
+// released and flagged rows so the lookup behaves as if those rows don't
+// hold the nick.
 func resolveUserByNick(network, nick, casemapping string) (*User, error) {
 	if theDB == nil {
 		return nil, nil
 	}
-	user, err := getUserByNormalizedNick(network, normalizeIRC(nick, casemapping))
-	if err != nil {
-		return nil, err
-	}
-	if user != nil && isPlaceholderNick(user.NormalizedNick) {
-		return nil, nil
-	}
-	return user, nil
+	return getActiveUserByNormalizedNick(network, normalizeIRC(nick, casemapping))
 }
 
-// getUserByAccount returns the (non-flagged) user with the given network +
-// IRC services account. Flagged rows are excluded so they cannot be matched
-// as the canonical identity for that account — they are diagnostic
-// placeholders awaiting admin cleanup.
+// getUserByAccount returns the user with the given network + IRC services
+// account. Flagged rows are excluded so they cannot be matched as the
+// canonical identity for that account — they are diagnostic placeholders
+// awaiting admin cleanup.
+//
+// Released rows ARE returned: if someone with an account quits and comes
+// back, we want to re-attach them to the existing row (which has their
+// known hosts, bans, etc.). resolveUserOnce sets Released=false on match.
 func getUserByAccount(network, account string) (*User, error) {
 	if account == "" {
 		return nil, nil
@@ -420,9 +496,16 @@ func getUserByAccount(network, account string) (*User, error) {
 	return &user, nil
 }
 
-func getUserByNormalizedNick(network, normalizedNick string) (*User, error) {
+// getActiveUserByNormalizedNick returns the *active* user (not released,
+// not flagged) holding the given normalized_nick on the network. This is
+// what callers want when checking "who owns this nick right now". With the
+// partial unique index there can only ever be at most one such row.
+func getActiveUserByNormalizedNick(network, normalizedNick string) (*User, error) {
 	var user User
-	err := theDB.Where("network = ? AND normalized_nick = ?", network, normalizedNick).First(&user).Error
+	err := theDB.Where(
+		"network = ? AND normalized_nick = ? AND released = ? AND flagged = ?",
+		network, normalizedNick, false, false,
+	).First(&user).Error
 	if err != nil {
 		if err == gorm.ErrRecordNotFound {
 			return nil, nil
@@ -430,6 +513,52 @@ func getUserByNormalizedNick(network, normalizedNick string) (*User, error) {
 		return nil, err
 	}
 	return &user, nil
+}
+
+// getMostRecentReleasedUserByNormalizedNick returns the released user with
+// the most recent updated_at holding `normalizedNick` on `network`. Flagged
+// rows are excluded — they are diagnostic placeholders, not identity matches.
+//
+// This is the third-tier identity fallback used by resolveUserOnce when both
+// active nick lookup and host recovery miss. It exists for the common case
+// on accountless networks where a user quits and rejoins from a new host
+// (mobile networks, ISP DHCP, VPN cycling): nick alone is enough evidence
+// to re-attach to the previous row rather than create a duplicate.
+//
+// If more than one released row matches, returns the newest by updated_at
+// and the total match count so the caller can WARN about ambiguity. This
+// happens after multiple release/reclaim cycles without account or host
+// evidence linking them together — the bot is making a best-effort guess.
+//
+// Returns (nil, 0, nil) when there are no matches.
+//
+// Security note: on zero-trust networks this extends nick continuity across
+// disconnects, which means anyone re-using a released nick inherits the
+// previous owner's identity (sessions, bans, history). This is the same
+// trust posture the bot already had via in-channel nick continuity — the
+// fallback just preserves it across QUIT/PART/KICK. Full mitigation is
+// deferred to the Phase 5 account system.
+func getMostRecentReleasedUserByNormalizedNick(network, normalizedNick string) (*User, int64, error) {
+	var count int64
+	err := theDB.Model(&User{}).Where(
+		"network = ? AND normalized_nick = ? AND released = ? AND flagged = ?",
+		network, normalizedNick, true, false,
+	).Count(&count).Error
+	if err != nil {
+		return nil, 0, err
+	}
+	if count == 0 {
+		return nil, 0, nil
+	}
+	var user User
+	err = theDB.Where(
+		"network = ? AND normalized_nick = ? AND released = ? AND flagged = ?",
+		network, normalizedNick, true, false,
+	).Order("updated_at DESC, id DESC").First(&user).Error
+	if err != nil {
+		return nil, count, err
+	}
+	return &user, count, nil
 }
 
 // recoverByKnownHost attempts to re-associate a user via ident@host when the
@@ -443,6 +572,10 @@ func getUserByNormalizedNick(network, normalizedNick string) (*User, error) {
 // inherit the legitimate owner's (ident, host) via upsertKnownHost and could
 // then be re-surfaced here, causing the next claimNickFor pass to displace
 // or merge real users into the flagged row.
+//
+// Released users ARE included: if a user quit and is coming back from the
+// same ident@host, we want to re-attach to their existing row. The caller
+// (resolveUserOnce) clears Released=false on match.
 func recoverByKnownHost(network, ident, host, normalizedNick string) (*User, error) {
 	var hosts []UserKnownHost
 	err := theDB.Joins("JOIN users ON users.id = user_known_hosts.user_id").
@@ -533,23 +666,17 @@ func upsertKnownHost(userID int64, ident, host string) error {
 	return err
 }
 
-// isReleasedNick returns true if the normalized nick is a released sentinel
-// value (set when a user quits or is displaced by a nick collision).
-func isReleasedNick(normalizedNick string) bool {
-	return strings.HasPrefix(normalizedNick, releasedNickPrefix)
-}
-
-// releaseUserNick clears a user's nick claim so another user can take it over.
-// Sets normalized_nick to a unique sentinel that cannot collide with real IRC
-// nicks (commas are not valid in IRC nicknames). The user record is preserved
-// for host-based recovery on reconnect.
+// releaseUserNick marks a user's nick claim as released so another user can
+// take it over. The user's current_nick and normalized_nick are preserved
+// (the partial unique index idx_users_nick_active excludes released rows,
+// so this row no longer blocks another active user from claiming the same
+// nick). The row stays in place for host-based recovery on reconnect, and
+// for display in UIs (admins searching by old nicks, etc.).
 func releaseUserNick(userID int64) error {
-	sentinel := fmt.Sprintf("%s%d", releasedNickPrefix, userID)
 	return theDB.Model(&User{}).Where("id = ?", userID).
 		Updates(map[string]interface{}{
-			"normalized_nick": sentinel,
-			"current_nick":    "",
-			"updated_at":      time.Now(),
+			"released":   true,
+			"updated_at": time.Now(),
 		}).Error
 }
 
@@ -614,6 +741,22 @@ func mergeUser(ghostUserID, targetUserID int64) error {
 // existing user's normalized_nick. If the existing user has no known hosts
 // (migration-era ghost), they are merged into the changing user. Otherwise,
 // the existing user's nick is released (they're offline/displaced).
+//
+// Note on involuntary release: this reuses releaseUserNick to free the
+// (network, normalized_nick) slot for the new owner, even though the
+// displaced user did not actually quit. The displaced row is then eligible
+// for the released-nick fallback in resolveUserOnce on a future rejoin,
+// just like a voluntarily-released row. On accountless networks this means
+// a stranger arriving with the displaced nick from a fresh host can be
+// re-attached to the displaced row, inheriting its sessions / bans /
+// history.
+//
+// The precondition (two active rows on the same normalized_nick) is hard
+// to reach on real IRC servers: the server enforces nick uniqueness, so
+// realistic sources are netsplit corner cases or DB-state drift, not
+// anything a user can deliberately trigger. Full mitigation (e.g. a
+// separate Displaced flag excluded from the nick fallback) is deferred to
+// the Phase 5 account system which resolves identity more rigorously.
 func handleNickCollision(network string, existingUser *User, changingUser *User) error {
 	noHosts, err := hasNoKnownHosts(existingUser.ID)
 	if err != nil {
@@ -646,13 +789,13 @@ func recordNickChange(network, oldNick, newNick, casemapping string) bool {
 	normOld := normalizeIRC(oldNick, casemapping)
 	normNew := normalizeIRC(newNick, casemapping)
 
-	user, err := getUserByNormalizedNick(network, normOld)
+	user, err := getActiveUserByNormalizedNick(network, normOld)
 	if err != nil || user == nil {
 		loggerUsers.Debug("nick change: old nick not tracked", "old", oldNick, "new", newNick, "network", network)
 		return false
 	}
 
-	existing, err := getUserByNormalizedNick(network, normNew)
+	existing, err := getActiveUserByNormalizedNick(network, normNew)
 	if err != nil {
 		loggerUsers.Error("nick change: error checking collision", "error", err)
 		return false
@@ -791,6 +934,13 @@ type UserSearchResult struct {
 	Released       bool
 }
 
+// DisplayName returns the display nick for a search result. Mirrors
+// displayNick(); kept as a method so callers can use r.DisplayName() in
+// templates and format strings without dereferencing.
+func (r *UserSearchResult) DisplayName() string {
+	return r.CurrentNick
+}
+
 func searchUsers(network, query string) ([]UserSearchResult, error) {
 	var users []User
 
@@ -866,7 +1016,7 @@ func buildSearchResults(users []User) []UserSearchResult {
 			IRCAccount:     u.IRCAccount,
 			HostCount:      int(hostCount),
 			SessionCount:   int(sessionCount),
-			Released:       isReleasedNick(u.NormalizedNick),
+			Released:       u.Released,
 		})
 	}
 	return results

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	logxi "github.com/mgutz/logxi/v1"
 	"github.com/stretchr/testify/assert"
@@ -315,4 +316,162 @@ func TestMigration4_AllowsInsertAfterDrop(t *testing.T) {
 	userID := ensureTestUser(t, "testnet", "user")
 	_, err := sessionMgr.CreateSession("testnet", "#test", userID, "cmd", "svc", "model")
 	require.NoError(t, err, "should be able to insert session after dropping nick")
+}
+
+// TestMigration6_AddUsersLastNick verifies that migration #6 historically
+// added the last_nick column and backfilled it from current_nick. The
+// column is later dropped by migration #7 — so we cannot assert via the
+// User struct (which no longer has LastNick). We query the raw column.
+//
+// Migration #6 is now a transitional step that exists only to give #7 a
+// source of nick history when upgrading old DBs that still have sentinel
+// values in normalized_nick.
+func TestMigration6_AddUsersLastNick(t *testing.T) {
+	_, cleanup := setupMigrationDB(t)
+	defer cleanup()
+
+	userID := ensureTestUser(t, "testnet", "ActiveUser")
+
+	require.NoError(t, addUsersLastNick(theDB), "first run re-adds the column")
+	require.NoError(t, addUsersLastNick(theDB), "idempotent")
+
+	type row struct {
+		CurrentNick string
+		LastNick    string
+	}
+	var r row
+	require.NoError(t, theDB.Raw(
+		"SELECT current_nick, last_nick FROM users WHERE id = ?", userID,
+	).Scan(&r).Error)
+	assert.Equal(t, "ActiveUser", r.CurrentNick)
+	assert.Equal(t, "ActiveUser", r.LastNick, "last_nick should be backfilled from current_nick")
+}
+
+// TestMigration7_ConvertSentinelsToReleasedColumn covers the conversion of
+// the ",quit,<id>" / ",flagged,..." sentinel-in-normalized_nick scheme into
+// a proper released column with a partial unique index.
+//
+// Because setupMigrationDB already runs ALL migrations (including #7) to
+// completion, the DB is already in the post-migration state. We simulate
+// an old DB by manually creating sentinel rows AFTER migration and then
+// re-running convertSentinelsToReleasedColumn — but the migrator's
+// schema_migrations table already has #7, so we'd need to call the
+// function directly. The migration is idempotent in the sense that the
+// backfill query is filtered by LIKE patterns; re-running it just picks
+// up any new sentinel rows.
+func TestMigration7_ConvertSentinelsToReleasedColumn(t *testing.T) {
+	_, cleanup := setupMigrationDB(t)
+	defer cleanup()
+
+	// Pre-condition: last_nick column was dropped by #7.
+	assert.False(t, theDB.Migrator().HasColumn(&User{}, "last_nick"),
+		"last_nick should be dropped after #7")
+
+	// Pre-condition: partial unique index exists.
+	assert.True(t, theDB.Migrator().HasIndex(&User{}, "idx_users_nick_active"),
+		"idx_users_nick_active should exist after #7")
+
+	// Pre-condition: released column exists.
+	assert.True(t, theDB.Migrator().HasColumn(&User{}, "released"),
+		"released column should exist after #7")
+}
+
+// TestMigration7_ReplaysOnLegacySentinels simulates an upgrade from a DB
+// that still has legacy ",quit,*" sentinels by undoing parts of #7 and
+// running it again. Verifies that backfill restores normalized_nick from
+// last_nick and marks the row released.
+func TestMigration7_ReplaysOnLegacySentinels(t *testing.T) {
+	_, cleanup := setupMigrationDB(t)
+	defer cleanup()
+
+	// Re-add last_nick so the backfill has something to read.
+	require.NoError(t, theDB.Exec(
+		"ALTER TABLE users ADD COLUMN last_nick TEXT NOT NULL DEFAULT ''",
+	).Error)
+
+	userID := ensureTestUser(t, "testnet", "RealNick")
+	// Simulate the legacy state: nick replaced by sentinel, current_nick
+	// cleared, last_nick holding the original nick.
+	require.NoError(t, theDB.Exec(
+		"UPDATE users SET normalized_nick = ?, current_nick = '', last_nick = ?, released = ? WHERE id = ?",
+		",quit,42", "RealNick", false, userID,
+	).Error)
+
+	// Drop the partial unique index so we can re-run #7 cleanly.
+	_ = theDB.Exec("DROP INDEX IF EXISTS idx_users_nick_active").Error
+
+	require.NoError(t, convertSentinelsToReleasedColumn(theDB), "replay")
+
+	type row struct {
+		NormalizedNick string
+		CurrentNick    string
+		Released       bool
+	}
+	var r row
+	require.NoError(t, theDB.Raw(
+		"SELECT normalized_nick, current_nick, released FROM users WHERE id = ?", userID,
+	).Scan(&r).Error)
+	assert.Equal(t, "realnick", r.NormalizedNick, "normalized_nick restored from last_nick")
+	assert.Equal(t, "RealNick", r.CurrentNick, "current_nick restored from last_nick")
+	assert.True(t, r.Released, "released should be true for legacy ,quit, sentinel rows")
+}
+
+// TestMigration7_ResolvesDuplicates verifies that the duplicate-resolution
+// step in migration #7 marks the older of two colliding active rows as
+// released so the partial unique index can be created.
+//
+// We stage the collision directly: two rows with released=false, flagged=false,
+// same (network, normalized_nick). This is a state the OLD full UNIQUE index
+// could not have allowed, but it can arise from DB-state drift, manual admin
+// fixes, or migration replays. We must drop the partial unique index first
+// so the inserts themselves can land. ensureTestUser cannot stage this
+// because it dedupes by (network, normalized_nick) — we use raw inserts.
+func TestMigration7_ResolvesDuplicates(t *testing.T) {
+	_, cleanup := setupMigrationDB(t)
+	defer cleanup()
+
+	// Drop the partial unique index so we can insert duplicate rows.
+	_ = theDB.Exec("DROP INDEX IF EXISTS idx_users_nick_active").Error
+
+	now := time.Now()
+	older := &User{
+		Network:        "testnet",
+		CurrentNick:    "Dupe",
+		NormalizedNick: "dupe",
+		Released:       false,
+		Flagged:        false,
+		CreatedAt:      now.Add(-2 * time.Hour),
+		UpdatedAt:      now.Add(-2 * time.Hour),
+	}
+	require.NoError(t, theDB.Create(older).Error)
+
+	newer := &User{
+		Network:        "testnet",
+		CurrentNick:    "Dupe",
+		NormalizedNick: "dupe",
+		Released:       false,
+		Flagged:        false,
+		CreatedAt:      now.Add(-1 * time.Hour),
+		UpdatedAt:      now.Add(-1 * time.Hour),
+	}
+	require.NoError(t, theDB.Create(newer).Error)
+	require.NotEqual(t, older.ID, newer.ID, "two distinct rows on the same nick")
+
+	// Run #7 again. The released-sentinel and flagged-sentinel loops
+	// touch nothing (no sentinels). The duplicate detector should fire,
+	// pick the newer row, and release the older one.
+	require.NoError(t, convertSentinelsToReleasedColumn(theDB), "duplicate-resolution path")
+
+	type row struct {
+		Released bool
+	}
+	var rOlder, rNewer row
+	require.NoError(t, theDB.Raw("SELECT released FROM users WHERE id = ?", older.ID).Scan(&rOlder).Error)
+	require.NoError(t, theDB.Raw("SELECT released FROM users WHERE id = ?", newer.ID).Scan(&rNewer).Error)
+	assert.True(t, rOlder.Released, "older row should be released by duplicate resolver")
+	assert.False(t, rNewer.Released, "newer row should stay active")
+
+	// Partial unique index should have been recreated.
+	assert.True(t, theDB.Migrator().HasIndex(&User{}, "idx_users_nick_active"),
+		"partial unique index should be recreated after resolution")
 }

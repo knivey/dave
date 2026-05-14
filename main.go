@@ -983,7 +983,7 @@ func ircClient(network Network) {
 		casemapping := getCasemapping(network.Name)
 		nick := event.Source.Name
 		norm := normalizeIRC(nick, casemapping)
-		user, _ := getUserByNormalizedNick(network.Name, norm)
+		user, _ := getActiveUserByNormalizedNick(network.Name, norm)
 		if user != nil {
 			log.Debug("tracked user quit", "nick", nick, "user_id", user.ID, "network", network.Name)
 			if err := releaseUserNick(user.ID); err != nil {
@@ -1016,7 +1016,7 @@ func ircClient(network Network) {
 		if u := client.LookupUser(nick); u == nil || len(u.ChannelList) == 0 {
 			casemapping := getCasemapping(network.Name)
 			norm := normalizeIRC(nick, casemapping)
-			user, _ := getUserByNormalizedNick(network.Name, norm)
+			user, _ := getActiveUserByNormalizedNick(network.Name, norm)
 			if user != nil {
 				log.Debug("user no longer visible after part, releasing nick", "nick", nick, "user_id", user.ID, "network", network.Name)
 				if err := releaseUserNick(user.ID); err != nil {
@@ -1037,7 +1037,7 @@ func ircClient(network Network) {
 		if u := client.LookupUser(kickedNick); u == nil || len(u.ChannelList) == 0 {
 			casemapping := getCasemapping(network.Name)
 			norm := normalizeIRC(kickedNick, casemapping)
-			user, _ := getUserByNormalizedNick(network.Name, norm)
+			user, _ := getActiveUserByNormalizedNick(network.Name, norm)
 			if user != nil {
 				log.Debug("user no longer visible after kick, releasing nick", "nick", kickedNick, "user_id", user.ID, "network", network.Name)
 				if err := releaseUserNick(user.ID); err != nil {

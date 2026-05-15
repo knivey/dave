@@ -1,0 +1,34 @@
+# Example configuration for yt-mcp
+# Copy this file to config.toml and adjust values as needed.
+
+[server]
+# Server identification (shown to MCP clients)
+name = "yt-mcp"
+version = "0.1.0"
+
+[ytdlp]
+# Path to yt-dlp binary. Can be just "yt-dlp" if it's on PATH,
+# or an absolute path like "/usr/local/bin/yt-dlp".
+path = "yt-dlp"
+
+# Timeout for yt-dlp operations (fetching transcript or video info).
+# Long videos or slow connections may need more time.
+timeout = "2m"
+
+# Subtitle languages to try, in priority order.
+# The first language is used as the default when no language is specified.
+languages = ["en"]
+
+# Prefer auto-generated captions over manually uploaded subtitles.
+# Auto captions are available for most YouTube videos.
+# Manual subtitles are only available if the creator uploaded them.
+prefer_auto = true
+
+# Maximum transcript length in characters before truncating.
+# Prevents excessively long transcripts from consuming too many tokens.
+max_length = 50000
+
+# Directory for temporary files created during transcript fetching.
+# Defaults to os.TempDir() if empty.
+# Files are named <videoID>.<lang>.json3 to avoid collisions.
+temp_dir = ""

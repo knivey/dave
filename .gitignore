@@ -11,6 +11,8 @@ mcps/img-mcp/prod.toml
 mcps/img-mcp/test.toml
 mcps/img-mcp/img-mcp
 mcps/img-mcp/data/*
+mcps/yt-mcp/yt-mcp
+mcps/yt-mcp/config.toml
 data/*
 logs/
 tools/backfill-session-meta/backfill-session-meta

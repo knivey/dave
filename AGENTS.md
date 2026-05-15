@@ -15,6 +15,7 @@ Go IRC chatbot for OpenAI-compatible APIs, Stable Diffusion, ComfyUI image gen. 
 ```bash
 go build -o dave .
 go build -o mcps/img-mcp/img-mcp ./mcps/img-mcp
+go build -o mcps/yt-mcp/yt-mcp ./mcps/yt-mcp
 go build -o tools/migrate-sqlite-to-pgsql/migrate-sqlite-to-pgsql ./tools/migrate-sqlite-to-pgsql
 
 ./dave              # config/ directory
@@ -62,6 +63,16 @@ No Makefile, no linter config. Use `go fmt` + `go vet`.
     - `server.go`: three server builders — `createSyncServer`, `createAsyncServer`, `createFullServer` (stdio).
     - Config access: `ToolHandlers` and `JobQueue` use `getConfig()`/`setConfig()` with `sync.RWMutex` for atomic config swaps during reload.
     - Dave connects via two MCP entries in `mcps.toml`: `[img-mcp]` (sync path) and `[img-mcp-async]` (async path).
+  - `mcps/yt-mcp/`: YouTube transcript and video metadata MCP.
+    - Binary: `mcps/yt-mcp/yt-mcp`
+    - Config files: `config.toml` (default), `example.toml`
+    - Config path is relative to binary directory by default
+    - Built via: `go build -o mcps/yt-mcp/yt-mcp ./mcps/yt-mcp`
+    - **Stdio only** — no HTTP mode, no database, no job queue.
+    - **Config reload**: `SIGHUP` triggers hot reload of `ytdlp.*` settings.
+    - Tools: `get_transcript` (fetches YouTube auto-captions via yt-dlp json3 format, parses to plain text), `get_video_info` (fetches video metadata via `--dump-json`). YouTube-only — tool descriptions enforce this so the LLM won't call on non-YouTube URLs.
+    - Temp files named `<videoID>.<lang>.json3` to avoid collisions.
+    - Dave connects via `[yt-mcp]` entry in `mcps.toml` (stdio transport).
   - MCPs are referenced in dave's config via `mcps.toml` (transport: stdio/http, command path, timeout) and `tools.toml` (mcp server name, tool name, args).
 
 ## High-Signal Gotchas

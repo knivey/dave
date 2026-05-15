@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -13,6 +15,7 @@ import (
 )
 
 func main() {
+	httpMode := flag.Bool("http", false, "use HTTP transport instead of stdio")
 	flag.Parse()
 
 	exePath, err := os.Executable()
@@ -36,6 +39,11 @@ func main() {
 	cfg, err := loadConfig(configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *httpMode && cfg.Auth.APIKey == "" {
+		fmt.Fprintf(os.Stderr, "config error: auth.api_key is required in HTTP mode\n")
 		os.Exit(1)
 	}
 
@@ -66,8 +74,58 @@ func main() {
 		}
 	}()
 
+	if *httpMode {
+		serveHTTP(ctx, cfg, handlers, configPath)
+	} else {
+		server := createServer(cfg, handlers)
+		serveStdio(ctx, server)
+	}
+}
+
+func serveHTTP(ctx context.Context, cfg Config, handlers *ToolHandlers, configPath string) {
 	server := createServer(cfg, handlers)
-	serveStdio(ctx, server)
+
+	handler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
+		return server
+	}, &mcp.StreamableHTTPOptions{JSONResponse: true})
+
+	mux := http.NewServeMux()
+	mux.Handle("/", handler)
+
+	mux.HandleFunc("POST /admin/reload", func(w http.ResponseWriter, r *http.Request) {
+		newCfg, err := loadConfig(configPath)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": err.Error()})
+			return
+		}
+		handlers.setConfig(newCfg)
+		logger.Info("config reloaded via admin endpoint")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	})
+
+	var h http.Handler = mux
+
+	if cfg.Auth.APIKey != "" {
+		h = apiKeyMiddleware(cfg.Auth.APIKey)(mux)
+	}
+
+	httpServer := &http.Server{
+		Addr:    cfg.Server.Addr,
+		Handler: h,
+	}
+
+	go func() {
+		<-ctx.Done()
+		httpServer.Shutdown(context.Background())
+	}()
+
+	logger.Info("HTTP server listening", "addr", cfg.Server.Addr)
+	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		fmt.Fprintf(os.Stderr, "HTTP server error: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 func createServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
@@ -101,5 +159,19 @@ func serveStdio(ctx context.Context, server *mcp.Server) {
 		}
 		fmt.Fprintf(os.Stderr, "stdio server error: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+const apiKeyHeader = "X-API-Key"
+
+func apiKeyMiddleware(key string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get(apiKeyHeader) != key {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
 	}
 }

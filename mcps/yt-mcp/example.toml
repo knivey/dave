@@ -1,10 +1,13 @@
 # Example configuration for yt-mcp
+# Config file is optional — defaults work for most setups.
 # Copy this file to config.toml and adjust values as needed.
 
 [server]
 # Server identification (shown to MCP clients)
 name = "yt-mcp"
 version = "0.1.0"
+# HTTP server address (only used with --http flag)
+addr = ":8080"
 
 [ytdlp]
 # Path to yt-dlp binary. Can be just "yt-dlp" if it's on PATH,
@@ -32,3 +35,8 @@ max_length = 50000
 # Defaults to os.TempDir() if empty.
 # Files are named <videoID>.<lang>.json3 to avoid collisions.
 temp_dir = ""
+
+[auth]
+# Shared secret for authenticating HTTP requests (required with --http, ignored in stdio mode).
+# Requests must include the X-API-Key header with this value.
+api_key = "CHANGE_ME_TO_A_STRONG_RANDOM_SECRET"

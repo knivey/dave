@@ -24,11 +24,13 @@ func TestLoadConfigNoFile(t *testing.T) {
 
 	assert.Equal(t, "yt-mcp", cfg.Server.Name)
 	assert.Equal(t, "0.1.0", cfg.Server.Version)
+	assert.Equal(t, ":8080", cfg.Server.Addr)
 	assert.Equal(t, "yt-dlp", cfg.Ytdlp.Path)
 	assert.Equal(t, 2*time.Minute, cfg.Ytdlp.Timeout)
 	assert.Equal(t, []string{"en"}, cfg.Ytdlp.Languages)
 	assert.Equal(t, 50000, cfg.Ytdlp.MaxLength)
 	assert.Equal(t, os.TempDir(), cfg.Ytdlp.TempDir)
+	assert.Empty(t, cfg.Auth.APIKey)
 }
 
 func TestLoadConfigCustom(t *testing.T) {
@@ -37,23 +39,29 @@ func TestLoadConfigCustom(t *testing.T) {
 [server]
 name = "yt-mcp-test"
 version = "0.2.0"
+addr = ":9090"
 
 [ytdlp]
 timeout = "30s"
 languages = ["en", "es"]
 max_length = 5000
 temp_dir = "/tmp"
+
+[auth]
+api_key = "test-secret"
 `)
 	cfg, err := loadConfig(filepath.Join(dir, "config.toml"))
 	require.NoError(t, err)
 
 	assert.Equal(t, "yt-mcp-test", cfg.Server.Name)
 	assert.Equal(t, "0.2.0", cfg.Server.Version)
+	assert.Equal(t, ":9090", cfg.Server.Addr)
 	assert.Equal(t, "yt-dlp", cfg.Ytdlp.Path)
 	assert.Equal(t, 30*time.Second, cfg.Ytdlp.Timeout)
 	assert.Equal(t, []string{"en", "es"}, cfg.Ytdlp.Languages)
 	assert.Equal(t, 5000, cfg.Ytdlp.MaxLength)
 	assert.Equal(t, "/tmp", cfg.Ytdlp.TempDir)
+	assert.Equal(t, "test-secret", cfg.Auth.APIKey)
 }
 
 func TestLoadConfigMultipleLanguages(t *testing.T) {

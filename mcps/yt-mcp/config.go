@@ -12,11 +12,17 @@ import (
 type Config struct {
 	Server ServerConfig `toml:"server"`
 	Ytdlp  YtdlpConfig  `toml:"ytdlp"`
+	Auth   AuthConfig   `toml:"auth"`
 }
 
 type ServerConfig struct {
 	Name    string `toml:"name"`
 	Version string `toml:"version"`
+	Addr    string `toml:"addr"`
+}
+
+type AuthConfig struct {
+	APIKey string `toml:"api_key"`
 }
 
 type YtdlpConfig struct {
@@ -39,6 +45,7 @@ func loadConfig(configFile string) (Config, error) {
 
 	cfg.Server.Name = defaultString(cfg.Server.Name, "yt-mcp")
 	cfg.Server.Version = defaultString(cfg.Server.Version, "0.1.0")
+	cfg.Server.Addr = defaultString(cfg.Server.Addr, ":8080")
 
 	cfg.Ytdlp.Path = defaultString(cfg.Ytdlp.Path, "yt-dlp")
 	if cfg.Ytdlp.Timeout == 0 {

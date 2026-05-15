@@ -69,7 +69,8 @@ No Makefile, no linter config. Use `go fmt` + `go vet`.
     - Config path is relative to binary directory by default
     - Built via: `go build -o mcps/yt-mcp/yt-mcp ./mcps/yt-mcp`
     - **Stdio only** — no HTTP mode, no database, no job queue.
-    - **Config reload**: `SIGHUP` triggers hot reload of `ytdlp.*` settings.
+    - **HTTP mode**: `--http` flag serves Streamable HTTP MCP on `server.addr`. Requires `auth.api_key`. Admin endpoint at `POST /admin/reload`.
+    - **Config reload**: `SIGHUP` triggers hot reload of `ytdlp.*` settings. HTTP mode also exposes `POST /admin/reload`.
     - Tools: `get_transcript` (fetches YouTube auto-captions via yt-dlp json3 format, parses to plain text), `get_video_info` (fetches video metadata via `--dump-json`). YouTube-only — tool descriptions enforce this so the LLM won't call on non-YouTube URLs.
     - Temp files named `<videoID>.<lang>.json3` to avoid collisions.
     - Dave connects via `[yt-mcp]` entry in `mcps.toml` (stdio transport).

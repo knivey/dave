@@ -328,10 +328,7 @@ func (cr *chatRunner) sendWarning(msg string) {
 	}
 }
 
-func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
-	if cr.cfg.ResponsesAPI {
-		return cr.runTurnResponses(messages)
-	}
+func (cr *chatRunner) getTools() []Tool {
 	var hiddenMCPTools []string
 	readConfig(func() {
 		hiddenMCPTools = cr.cfg.resolveHiddenMCPTools(config.MCPToolSets)
@@ -340,14 +337,43 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 	if len(mcpTools) > 0 {
 		mcpTools = append(mcpTools, getBuiltinToolDefs(cr.cfg.DisabledBuiltinTools)...)
 	}
+	return mcpTools
+}
+
+// DESIGN NOTE: Both empty-response retries and previous_response_id retries
+// count toward the maxToolIterations budget. Each retry consumes one iteration
+// slot. Setting retry_on_empty too high (close to 20) risks hitting the limit.
+const maxToolIterations = 20
+
+func (cr *chatRunner) checkIterationLimit(iteration int) bool {
+	if iteration > maxToolIterations {
+		cr.sendIRC(getNotices().Tools.CallLimit)
+		cr.logger.Warn("max tool iterations reached", "limit", maxToolIterations)
+		return true
+	}
+	return false
+}
+
+func (cr *chatRunner) checkEmptyRetry(content, reasoning string, emptyRetries, maxEmptyRetries int) (bool, string) {
+	if content != "" || reasoning != "" {
+		return false, content
+	}
+	if emptyRetries < maxEmptyRetries {
+		cr.logger.Warn("empty response from API, retrying", "attempt", emptyRetries+1, "max", maxEmptyRetries)
+		return true, ""
+	}
+	return false, "..."
+}
+
+func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
+	if cr.cfg.ResponsesAPI {
+		return cr.runTurnResponses(messages)
+	}
+	mcpTools := cr.getTools()
 
 	ctx, cancel := context.WithTimeout(cr.ctx, cr.cfg.Timeout)
 	defer cancel()
 
-	const maxToolIterations = 20
-	// DESIGN NOTE: Both empty-response retries and previous_response_id retries
-	// count toward the maxToolIterations budget. Each retry consumes one iteration
-	// slot. Setting retry_on_empty too high (close to 20) risks hitting the limit.
 	iterations := 0
 	emptyRetries := 0
 	maxEmptyRetries := 0
@@ -356,12 +382,10 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 	}
 
 	for {
-		if iterations >= maxToolIterations {
-			cr.sendIRC(getNotices().Tools.CallLimit)
-			cr.logger.Warn("max tool iterations reached", "limit", maxToolIterations)
+		iterations++
+		if cr.checkIterationLimit(iterations) {
 			return messages, true
 		}
-		iterations++
 
 		params := buildChatCompletionParams(cr.cfg, messages, mcpTools, cr.renderAPIUser())
 
@@ -555,10 +579,13 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 			}
 
 			if streamDone || len(accumulatedToolCalls) == 0 {
-				if fullContent == "" && reasoningBuffer == "" && len(accumulatedToolCalls) == 0 && emptyRetries < maxEmptyRetries {
-					emptyRetries++
-					cr.logger.Warn("empty response from API, retrying", "attempt", emptyRetries, "max", maxEmptyRetries)
-					continue
+				if len(accumulatedToolCalls) == 0 {
+					if retry, newContent := cr.checkEmptyRetry(fullContent, reasoningBuffer, emptyRetries, maxEmptyRetries); retry {
+						emptyRetries++
+						continue
+					} else if newContent != fullContent {
+						fullContent = newContent
+					}
 				}
 				flushStreamedOutput()
 				return messages, true
@@ -620,13 +647,11 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 		nonStreamTimings := extractTimings(capturedBody)
 
 		if len(toolCalls) == 0 {
-			if content == "" && reasoning == "" {
-				if emptyRetries < maxEmptyRetries {
-					emptyRetries++
-					cr.logger.Warn("empty response from API, retrying", "attempt", emptyRetries, "max", maxEmptyRetries)
-					continue
-				}
-				content = "..."
+			if retry, newContent := cr.checkEmptyRetry(content, reasoning, emptyRetries, maxEmptyRetries); retry {
+				emptyRetries++
+				continue
+			} else {
+				content = newContent
 			}
 			cr.addContext(ChatMessage{
 				Role:             RoleAssistant,
@@ -945,15 +970,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 	mu.(*sync.Mutex).Lock()
 	defer mu.(*sync.Mutex).Unlock()
 
-	var hiddenMCPTools []string
-	readConfig(func() {
-		hiddenMCPTools = cr.cfg.resolveHiddenMCPTools(config.MCPToolSets)
-	})
-	mcpTools := getMCPTools(cr.cfg.MCPs, hiddenMCPTools)
-	if len(mcpTools) > 0 {
-		mcpTools = append(mcpTools, getBuiltinToolDefs(cr.cfg.DisabledBuiltinTools)...)
-	}
-	responseTools := toolsToResponseToolParams(mcpTools)
+	responseTools := toolsToResponseToolParams(cr.getTools())
 
 	ctx, cancel := context.WithTimeout(cr.ctx, cr.cfg.Timeout)
 	defer cancel()
@@ -974,10 +991,6 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 		input = messagesToResponseInputItems(messages)
 	}
 
-	const maxToolIterations = 20
-	// DESIGN NOTE: Both empty-response retries and previous_response_id retries
-	// count toward the maxToolIterations budget. Each retry consumes one iteration
-	// slot. Setting retry_on_empty too high (close to 20) risks hitting the limit.
 	emptyRetries := 0
 	maxEmptyRetries := 0
 	if cr.cfg.RetryOnEmpty != nil {
@@ -987,12 +1000,10 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 	iteration := 0
 
 	for {
-		if iteration >= maxToolIterations {
-			cr.sendIRC(getNotices().Tools.CallLimit)
-			cr.logger.Warn("max tool iterations reached", "limit", maxToolIterations)
+		iteration++
+		if cr.checkIterationLimit(iteration) {
 			return messages, true
 		}
-		iteration++
 
 		params := buildResponseParams(cr.cfg, input, responseTools, currentResponseID, cr.renderAPIUser())
 
@@ -1043,13 +1054,11 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 			}
 
 			if len(toolCalls) == 0 {
-				if text == "" && reasoning == "" {
-					if emptyRetries < maxEmptyRetries {
-						emptyRetries++
-						cr.logger.Warn("empty response from API, retrying", "attempt", emptyRetries, "max", maxEmptyRetries)
-						continue
-					}
-					text = "..."
+				if retry, newText := cr.checkEmptyRetry(text, reasoning, emptyRetries, maxEmptyRetries); retry {
+					emptyRetries++
+					continue
+				} else if newText != text {
+					text = newText
 					assistantMsg.Content = text
 				}
 				messages = append(messages, assistantMsg)
@@ -1119,13 +1128,11 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 
 		if len(toolCalls) == 0 {
 			content := text
-			if content == "" && reasoning == "" {
-				if emptyRetries < maxEmptyRetries {
-					emptyRetries++
-					cr.logger.Warn("empty response from API, retrying", "attempt", emptyRetries, "max", maxEmptyRetries)
-					continue
-				}
-				content = "..."
+			if retry, newContent := cr.checkEmptyRetry(content, reasoning, emptyRetries, maxEmptyRetries); retry {
+				emptyRetries++
+				continue
+			} else {
+				content = newContent
 			}
 			assistantMsg := ChatMessage{
 				Role:             RoleAssistant,

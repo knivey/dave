@@ -17,6 +17,21 @@ func getNotices() NoticesConfig {
 	return n
 }
 
+func verifySessionOwnership(session *Session, network Network, c *girc.Client, e girc.Event) (bool, string) {
+	n := getNotices()
+	if session.Network != network.Name || session.Channel != normalizeIRC(e.Params[0], getCasemapping(network.Name)) {
+		return false, errorMsg(n.Sessions.NotOwned)
+	}
+	if session.UserID == nil {
+		return false, errorMsg(n.Sessions.NotOwned)
+	}
+	resolvedUser, _ := resolveIRCUser(network, c, e.Source.Name, e.Source)
+	if resolvedUser == nil || resolvedUser.ID != *session.UserID {
+		return false, errorMsg(n.Sessions.NotOwned)
+	}
+	return true, ""
+}
+
 func historySessions(network Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, args ...string) {
 	n := getNotices()
 	var maxHistory int
@@ -62,11 +77,7 @@ func historySessions(network Network, c *girc.Client, e girc.Event, ctx context.
 		return
 	}
 
-	account := ""
-	if u := c.LookupUser(e.Source.Name); u != nil {
-		account = u.Extras.Account
-	}
-	resolvedUser, _ := resolveUser(network.Name, e.Source.Name, e.Source.Ident, e.Source.Host, account, casemapping)
+	resolvedUser, _ := resolveIRCUser(network, c, e.Source.Name, e.Source)
 	var userID int64
 	if resolvedUser != nil {
 		userID = resolvedUser.ID
@@ -283,23 +294,8 @@ func historyShow(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 		return
 	}
 
-	if session.Network != network.Name || session.Channel != normalizeIRC(e.Params[0], getCasemapping(network.Name)) {
-		sendErr(errorMsg(n.Sessions.NotOwned))
-		return
-	}
-	if session.UserID != nil {
-		casemapping := getCasemapping(network.Name)
-		account := ""
-		if u := c.LookupUser(e.Source.Name); u != nil {
-			account = u.Extras.Account
-		}
-		resolvedUser, _ := resolveUser(network.Name, e.Source.Name, e.Source.Ident, e.Source.Host, account, casemapping)
-		if resolvedUser == nil || resolvedUser.ID != *session.UserID {
-			sendErr(errorMsg(n.Sessions.NotOwned))
-			return
-		}
-	} else {
-		sendErr(errorMsg(n.Sessions.NotOwned))
+	if ok, msg := verifySessionOwnership(session, network, c, e); !ok {
+		sendErr(msg)
 		return
 	}
 
@@ -408,17 +404,12 @@ func historyStats(network Network, c *girc.Client, e girc.Event, args ...string)
 		return
 	}
 
-	casemapping := getCasemapping(network.Name)
-	account := ""
-	if u := c.LookupUser(e.Source.Name); u != nil {
-		account = u.Extras.Account
-	}
-	resolvedUser, _ := resolveUser(network.Name, e.Source.Name, e.Source.Ident, e.Source.Host, account, casemapping)
+	resolvedUser, _ := resolveIRCUser(network, c, e.Source.Name, e.Source)
 	var userID int64
 	if resolvedUser != nil {
 		userID = resolvedUser.ID
 	}
-	channel := normalizeIRC(e.Params[0], casemapping)
+	channel := normalizeIRC(e.Params[0], getCasemapping(network.Name))
 
 	sessionCount, messageCount, err := getUserDBStats(network.Name, channel, userID)
 	if err != nil {
@@ -453,23 +444,8 @@ func historyDelete(network Network, c *girc.Client, e girc.Event, args ...string
 		return
 	}
 
-	if session.Network != network.Name || session.Channel != normalizeIRC(e.Params[0], getCasemapping(network.Name)) {
-		c.Cmd.Reply(e, errorMsg(n.Sessions.NotOwned))
-		return
-	}
-	if session.UserID != nil {
-		casemapping := getCasemapping(network.Name)
-		account := ""
-		if u := c.LookupUser(e.Source.Name); u != nil {
-			account = u.Extras.Account
-		}
-		resolvedUser, _ := resolveUser(network.Name, e.Source.Name, e.Source.Ident, e.Source.Host, account, casemapping)
-		if resolvedUser == nil || resolvedUser.ID != *session.UserID {
-			c.Cmd.Reply(e, errorMsg(n.Sessions.NotOwned))
-			return
-		}
-	} else {
-		c.Cmd.Reply(e, errorMsg(n.Sessions.NotOwned))
+	if ok, msg := verifySessionOwnership(session, network, c, e); !ok {
+		c.Cmd.Reply(e, msg)
 		return
 	}
 
@@ -507,40 +483,14 @@ func historyResume(network Network, c *girc.Client, e girc.Event, args ...string
 		return
 	}
 
-	if session.Network != network.Name || session.Channel != normalizeIRC(e.Params[0], getCasemapping(network.Name)) {
-		c.Cmd.Reply(e, errorMsg(n.Sessions.NotOwned))
-		return
-	}
-	if session.UserID != nil {
-		casemapping := getCasemapping(network.Name)
-		account := ""
-		if u := c.LookupUser(e.Source.Name); u != nil {
-			account = u.Extras.Account
-		}
-		resolvedUser, _ := resolveUser(network.Name, e.Source.Name, e.Source.Ident, e.Source.Host, account, casemapping)
-		if resolvedUser == nil || resolvedUser.ID != *session.UserID {
-			c.Cmd.Reply(e, errorMsg(n.Sessions.NotOwned))
-			return
-		}
-	} else {
-		c.Cmd.Reply(e, errorMsg(n.Sessions.NotOwned))
+	if ok, msg := verifySessionOwnership(session, network, c, e); !ok {
+		c.Cmd.Reply(e, msg)
 		return
 	}
 
 	var currentCfg AIConfig
 	var cfgOk bool
-	readConfig(func() {
-		currentCfg, cfgOk = config.Commands.Chats[session.ChatCommand]
-	})
-	if session.SettingsID != nil {
-		settings, err := sessionMgr.GetSessionSettings(*session.SettingsID)
-		if err != nil {
-			c.Cmd.Reply(e, warnMsg("failed to load stored session config: "+err.Error()))
-		} else if settings != nil {
-			currentCfg = ApplySettings(settings, currentCfg)
-			cfgOk = true
-		}
-	}
+	currentCfg, cfgOk = getSessionConfig(session)
 	if !cfgOk {
 		c.Cmd.Reply(e, errorNotice(n.Sessions.CommandGone, map[string]string{"command": session.ChatCommand}))
 		return
@@ -600,12 +550,7 @@ func historyJobs(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 	channel := normalizeIRC(e.Params[0], getCasemapping(network.Name))
 	hasOutput := false
 
-	casemapping := getCasemapping(network.Name)
-	account := ""
-	if u := c.LookupUser(nick); u != nil {
-		account = u.Extras.Account
-	}
-	resolvedUser, _ := resolveUser(network.Name, nick, e.Source.Ident, e.Source.Host, account, casemapping)
+	resolvedUser, _ := resolveIRCUser(network, c, nick, e.Source)
 	var userID int64
 	if resolvedUser != nil {
 		userID = resolvedUser.ID
@@ -731,12 +676,7 @@ func historyCompact(network Network, c *girc.Client, e girc.Event, ctx context.C
 	}
 
 	channel := normalizeIRC(e.Params[0], getCasemapping(network.Name))
-	casemapping := getCasemapping(network.Name)
-	account := ""
-	if u := c.LookupUser(e.Source.Name); u != nil {
-		account = u.Extras.Account
-	}
-	resolvedUser, err := resolveUser(network.Name, e.Source.Name, e.Source.Ident, e.Source.Host, account, casemapping)
+	resolvedUser, err := resolveIRCUser(network, c, e.Source.Name, e.Source)
 	if err != nil || resolvedUser == nil {
 		send(errorMsg(n.Compaction.NoActive))
 		return
@@ -750,16 +690,7 @@ func historyCompact(network Network, c *girc.Client, e girc.Event, ctx context.C
 
 	var cfg AIConfig
 	var cfgOk bool
-	readConfig(func() {
-		cfg, cfgOk = config.Commands.Chats[session.ChatCommand]
-	})
-	if session.SettingsID != nil {
-		settings, sErr := sessionMgr.GetSessionSettings(*session.SettingsID)
-		if sErr == nil && settings != nil {
-			cfg = ApplySettings(settings, cfg)
-			cfgOk = true
-		}
-	}
+	cfg, cfgOk = getSessionConfig(session)
 	if !cfgOk {
 		send(errorNotice(n.Sessions.CommandGone, map[string]string{"command": session.ChatCommand}))
 		return
@@ -813,11 +744,7 @@ func historyClone(network Network, c *girc.Client, e girc.Event, ctx context.Con
 	casemapping := getCasemapping(network.Name)
 	channel := normalizeIRC(e.Params[0], casemapping)
 
-	account := ""
-	if u := c.LookupUser(e.Source.Name); u != nil {
-		account = u.Extras.Account
-	}
-	resolvedUser, err := resolveUser(network.Name, e.Source.Name, e.Source.Ident, e.Source.Host, account, casemapping)
+	resolvedUser, err := resolveIRCUser(network, c, e.Source.Name, e.Source)
 	if err != nil || resolvedUser == nil {
 		send(errorNotice(n.Clone.Usage, map[string]string{"trigger": network.Trigger}))
 		return
@@ -872,16 +799,7 @@ func historyClone(network Network, c *girc.Client, e girc.Event, ctx context.Con
 
 	var cfg AIConfig
 	var cfgOk bool
-	readConfig(func() {
-		cfg, cfgOk = config.Commands.Chats[sourceSession.ChatCommand]
-	})
-	if sourceSession.SettingsID != nil {
-		settings, sErr := sessionMgr.GetSessionSettings(*sourceSession.SettingsID)
-		if sErr == nil && settings != nil {
-			cfg = ApplySettings(settings, cfg)
-			cfgOk = true
-		}
-	}
+	cfg, cfgOk = getSessionConfig(sourceSession)
 	if !cfgOk {
 		send(errorNotice(n.Clone.CommandGone, map[string]string{"command": sourceSession.ChatCommand}))
 		return

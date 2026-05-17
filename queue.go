@@ -547,20 +547,8 @@ func (qm *QueueManager) runJob(item *QueueItem) {
 		bot.Client.Cmd.Message(item.Channel, startedMsg)
 	}
 
-	throttle := bot.Network.Throttle
-	for line := range item.outputCh {
-		if item.ctx.Err() != nil {
-			for range item.outputCh {
-			}
-			break
-		}
-		if action, ok := isIRCAction(line); ok {
-			bot.Client.Cmd.Action(item.Channel, action)
-		} else {
-			bot.Client.Cmd.Message(item.Channel, "\x02\x02"+line)
-		}
-		time.Sleep(time.Millisecond * time.Duration(throttle))
-	}
+	throttle := time.Millisecond * bot.Network.Throttle
+	drainToChannel(bot.Client, item.Channel, throttle, item.outputCh, item.ctx)
 }
 
 func (qm *QueueManager) executionComplete(item *QueueItem) {

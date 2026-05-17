@@ -1116,13 +1116,7 @@ func handleTUICommand(text string) {
 		}
 		var cfg AIConfig
 		var cfgOk bool
-		readConfig(func() { cfg, cfgOk = config.Commands.Chats[session.ChatCommand] })
-		if session.SettingsID != nil {
-			if settings, sErr := sessionMgr.GetSessionSettings(*session.SettingsID); sErr == nil && settings != nil {
-				cfg = ApplySettings(settings, cfg)
-				cfgOk = true
-			}
-		}
+		cfg, cfgOk = getSessionConfig(session)
 		if !cfgOk {
 			fmt.Fprintf(logView, "[red]Chat command %q for session %d no longer exists[white]\n", session.ChatCommand, sessionID)
 			break

@@ -266,6 +266,41 @@ func (cr *chatRunner) addContext(msg ChatMessage) {
 	}
 }
 
+func (cr *chatRunner) sendWithPastebin(text, rawText string) bool {
+	chCfg := cr.network.GetChannelConfig(cr.channel)
+	if chCfg.Pastebin {
+		lines := wrapForIRC(text)
+		if len(lines) >= chCfg.GetMaxLines() {
+			pasteTitle := cr.cfg.Service + "/" + cr.cfg.Model
+			url, err := uploadToPastebin(rawText, pasteTitle)
+			n := getNotices()
+			if err != nil {
+				cr.sendIRC(errorNotice(n.DB.PastebinUpload, map[string]string{"error": err.Error()}))
+				preview := chCfg.GetMaxLines()
+				if preview > len(lines) {
+					preview = len(lines)
+				}
+				for i := 0; i < preview; i++ {
+					cr.sendIRC(lines[i])
+				}
+				cr.sendIRC(n.Pastebin.Failed)
+			} else {
+				preview := chCfg.GetPastebinPreviewLines(config.Pastebin)
+				if preview > len(lines) {
+					preview = len(lines)
+				}
+				for i := 0; i < preview; i++ {
+					cr.sendIRC(lines[i])
+				}
+				cr.sendIRC(expandNotice(n.Pastebin.Link, map[string]string{"url": url}))
+			}
+			return true
+		}
+	}
+	cr.sendIRC(text)
+	return false
+}
+
 func (cr *chatRunner) renderAPIUser() string {
 	if cr.cfg.apiUserTmpl == nil {
 		return ""
@@ -613,37 +648,9 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 				if cr.cfg.RenderMarkdown {
 					text = markdowntoirc.MarkdownToIRC(text)
 				}
-				chCfg := cr.network.GetChannelConfig(cr.channel)
-				if chCfg.Pastebin {
-					lines := wrapForIRC(text)
-					if len(lines) >= chCfg.GetMaxLines() {
-						pasteTitle := cr.cfg.Service + "/" + cr.cfg.Model
-						url, err := uploadToPastebin(rawText, pasteTitle)
-						n := getNotices()
-						if err != nil {
-							cr.sendIRC(errorNotice(n.DB.PastebinUpload, map[string]string{"error": err.Error()}))
-							preview := chCfg.GetMaxLines()
-							if preview > len(lines) {
-								preview = len(lines)
-							}
-							for i := 0; i < preview; i++ {
-								cr.sendIRC(lines[i])
-							}
-							cr.sendIRC(n.Pastebin.Failed)
-						} else {
-							preview := chCfg.GetPastebinPreviewLines(config.Pastebin)
-							if preview > len(lines) {
-								preview = len(lines)
-							}
-							for i := 0; i < preview; i++ {
-								cr.sendIRC(lines[i])
-							}
-							cr.sendIRC(expandNotice(n.Pastebin.Link, map[string]string{"url": url}))
-						}
-						return messages, true
-					}
+				if cr.sendWithPastebin(text, rawText) {
+					return messages, true
 				}
-				cr.sendIRC(text)
 			}
 			return messages, true
 		}
@@ -1140,37 +1147,9 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 				if cr.cfg.RenderMarkdown {
 					textFinal = markdowntoirc.MarkdownToIRC(textFinal)
 				}
-				chCfg := cr.network.GetChannelConfig(cr.channel)
-				if chCfg.Pastebin {
-					lines := wrapForIRC(textFinal)
-					if len(lines) >= chCfg.GetMaxLines() {
-						pasteTitle := cr.cfg.Service + "/" + cr.cfg.Model
-						url, err := uploadToPastebin(rawText, pasteTitle)
-						n := getNotices()
-						if err != nil {
-							cr.sendIRC(errorNotice(n.DB.PastebinUpload, map[string]string{"error": err.Error()}))
-							preview := chCfg.GetMaxLines()
-							if preview > len(lines) {
-								preview = len(lines)
-							}
-							for i := 0; i < preview; i++ {
-								cr.sendIRC(lines[i])
-							}
-							cr.sendIRC(n.Pastebin.Failed)
-						} else {
-							preview := chCfg.GetPastebinPreviewLines(config.Pastebin)
-							if preview > len(lines) {
-								preview = len(lines)
-							}
-							for i := 0; i < preview; i++ {
-								cr.sendIRC(lines[i])
-							}
-							cr.sendIRC(expandNotice(n.Pastebin.Link, map[string]string{"url": url}))
-						}
-						return messages, true
-					}
+				if cr.sendWithPastebin(textFinal, rawText) {
+					return messages, true
 				}
-				cr.sendIRC(textFinal)
 			}
 			return messages, true
 		}
@@ -1335,13 +1314,8 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 		resolvedUser = resolvedUserFromCtx(ctx)
 	}
 	if resolvedUser == nil {
-		casemapping := getCasemapping(network.Name)
-		account := ""
-		if u := c.LookupUser(nick); u != nil {
-			account = u.Extras.Account
-		}
 		var err error
-		resolvedUser, err = resolveUser(network.Name, nick, e.Source.Ident, e.Source.Host, account, casemapping)
+		resolvedUser, err = resolveIRCUser(network, c, nick, e.Source)
 		if err != nil {
 			runner.logger.Error("failed to resolve user in chat()", "error", err)
 		}

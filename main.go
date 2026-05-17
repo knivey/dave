@@ -72,6 +72,55 @@ func buildSystemPromptData(network Network, client *girc.Client, channel, userNi
 	return data
 }
 
+func resolveIRCUser(network Network, c *girc.Client, nick string, source *girc.Source) (*User, error) {
+	casemapping := getCasemapping(network.Name)
+	account := ""
+	if u := c.LookupUser(nick); u != nil {
+		account = u.Extras.Account
+	}
+	return resolveUser(network.Name, nick, source.Ident, source.Host, account, casemapping)
+}
+
+func getSessionConfig(session *Session) (AIConfig, bool) {
+	var cfg AIConfig
+	var ok bool
+	readConfig(func() {
+		cfg, ok = config.Commands.Chats[session.ChatCommand]
+	})
+	if session.SettingsID != nil {
+		settings, err := sessionMgr.GetSessionSettings(*session.SettingsID)
+		if err == nil && settings != nil {
+			cfg = ApplySettings(settings, cfg)
+			ok = true
+		}
+	}
+	return cfg, ok
+}
+
+func replyIfQueued(client *girc.Client, event girc.Event, position int) {
+	if position > 0 {
+		var queueMsg string
+		readConfig(func() { queueMsg = config.Notices.QueueMsg(position, 0) })
+		client.Cmd.Reply(event, queueMsg)
+	}
+}
+
+func drainToChannel(client *girc.Client, channel string, throttle time.Duration, outCh <-chan string, ctx context.Context) {
+	for msg := range outCh {
+		if ctx != nil && ctx.Err() != nil {
+			for range outCh {
+			}
+			break
+		}
+		if action, ok := isIRCAction(msg); ok {
+			client.Cmd.Action(channel, action)
+		} else {
+			client.Cmd.Message(channel, "\x02\x02"+msg)
+		}
+		time.Sleep(throttle)
+	}
+}
+
 var commandsMutex sync.RWMutex
 var configMu sync.RWMutex
 
@@ -640,12 +689,6 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 	msg := event.Params[len(event.Params)-1]
 	channel := normalizeIRC(event.Params[0], getCasemapping(network.Name))
 
-	casemapping := getCasemapping(network.Name)
-	account := ""
-	if u := client.LookupUser(event.Source.Name); u != nil {
-		account = u.Extras.Account
-	}
-
 	isTrigger := strings.HasPrefix(msg, network.Trigger)
 
 	if !isTrigger {
@@ -664,7 +707,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 	// For the trigger path we defer it until after confirming the message matches
 	// an actual command, so that "-random_text" that matches nothing skips the DB work.
 	if !isTrigger {
-		resolvedUser, err := resolveUser(network.Name, event.Source.Name, event.Source.Ident, event.Source.Host, account, casemapping)
+		resolvedUser, err := resolveIRCUser(network, client, event.Source.Name, event.Source)
 		if err != nil {
 			logger.Error("failed to resolve user", "error", err)
 		}
@@ -702,17 +745,10 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 		if session == nil {
 			return
 		}
-		var sessionCfg AIConfig
-		readConfig(func() {
-			sessionCfg, _ = config.Commands.Chats[session.ChatCommand]
-		})
-		if session.SettingsID != nil {
-			settings, err := sessionMgr.GetSessionSettings(*session.SettingsID)
-			if err != nil {
-				logger.Warn("failed to load stored settings, using current", "error", err)
-			} else if settings != nil {
-				sessionCfg = ApplySettings(settings, sessionCfg)
-			}
+		sessionCfg, cfgOk := getSessionConfig(session)
+		if !cfgOk {
+			logger.Warn("chat command not found for session, ignoring mention", "command", session.ChatCommand)
+			return
 		}
 		logger.Info("Running chat completion with existing context")
 
@@ -721,11 +757,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 			func(cx context.Context, output chan<- string) {
 				chat(network, client, event, sessionCfg, cx, output, resolvedUser, msg)
 			})
-		if position > 0 {
-			var queueMsg string
-			readConfig(func() { queueMsg = config.Notices.QueueMsg(position, 0) })
-			client.Cmd.Reply(event, queueMsg)
-		}
+		replyIfQueued(client, event, position)
 		return
 	}
 
@@ -735,7 +767,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 	// amibanned is a special case: it must work even for banned users,
 	// so it resolves the user and returns before the ban check.
 	if stripped == "amibanned" {
-		resolvedUser, err := resolveUser(network.Name, event.Source.Name, event.Source.Ident, event.Source.Host, account, casemapping)
+		resolvedUser, err := resolveIRCUser(network, client, event.Source.Name, event.Source)
 		if err != nil {
 			logger.Error("failed to resolve user", "error", err)
 		}
@@ -802,7 +834,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 	}
 
 	// Command matched — now resolve user and check bans.
-	resolvedUser, err := resolveUser(network.Name, event.Source.Name, event.Source.Ident, event.Source.Host, account, casemapping)
+	resolvedUser, err := resolveIRCUser(network, client, event.Source.Name, event.Source)
 	if err != nil {
 		logger.Error("failed to resolve user", "error", err)
 	}
@@ -833,11 +865,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 				func(cx context.Context, output chan<- string) {
 					match.cmd(network, client, event, ctxWithResolvedUser(cx, resolvedUser), output, match.args...)
 				})
-			if position > 0 {
-				var queueMsg string
-				readConfig(func() { queueMsg = config.Notices.QueueMsg(position, 0) })
-				client.Cmd.Reply(event, queueMsg)
-			}
+			replyIfQueued(client, event, position)
 			return
 		}
 
@@ -851,11 +879,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 				func(cx context.Context, output chan<- string) {
 					match.cmd(network, client, event, ctxWithResolvedUser(cx, resolvedUser), output, match.args...)
 				})
-			if position > 0 {
-				var queueMsg string
-				readConfig(func() { queueMsg = config.Notices.QueueMsg(position, 0) })
-				client.Cmd.Reply(event, queueMsg)
-			}
+			replyIfQueued(client, event, position)
 			return
 		}
 
@@ -869,16 +893,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 			defer close(outCh)
 			match.cmd(network, client, event, ctxWithResolvedUser(context.Background(), resolvedUser), outCh, match.args...)
 		}()
-		go func() {
-			for msg := range outCh {
-				if action, ok := isIRCAction(msg); ok {
-					client.Cmd.Action(channel, action)
-				} else {
-					client.Cmd.Message(channel, "\x02\x02"+msg)
-				}
-				time.Sleep(time.Millisecond * time.Duration(network.Throttle))
-			}
-		}()
+		go drainToChannel(client, channel, time.Millisecond*network.Throttle, outCh, nil)
 		return
 	}
 
@@ -898,16 +913,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 			defer close(outCh)
 			match.cmd(network, client, event, ctxWithResolvedUser(context.Background(), resolvedUser), outCh, match.args...)
 		}()
-		go func() {
-			for m := range outCh {
-				if action, ok := isIRCAction(m); ok {
-					client.Cmd.Action(channel, action)
-				} else {
-					client.Cmd.Message(channel, "\x02\x02"+m)
-				}
-				time.Sleep(time.Millisecond * time.Duration(network.Throttle))
-			}
-		}()
+		go drainToChannel(client, channel, time.Millisecond*network.Throttle, outCh, nil)
 		return
 	}
 	if chatCmds[match.re] {
@@ -918,11 +924,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 		func(cx context.Context, output chan<- string) {
 			match.cmd(network, client, event, ctxWithResolvedUser(cx, resolvedUser), output, match.args...)
 		})
-	if position > 0 {
-		var queueMsg string
-		readConfig(func() { queueMsg = config.Notices.QueueMsg(position, 0) })
-		client.Cmd.Reply(event, queueMsg)
-	}
+	replyIfQueued(client, event, position)
 }
 
 func getServiceForConfigCmd(r *regexp.Regexp) string {
@@ -1062,12 +1064,7 @@ func ircClient(network Network) {
 		if nick == client.GetNick() {
 			return
 		}
-		casemapping := getCasemapping(network.Name)
-		account := ""
-		if u := client.LookupUser(nick); u != nil {
-			account = u.Extras.Account
-		}
-		_, err := resolveUser(network.Name, nick, event.Source.Ident, event.Source.Host, account, casemapping)
+		_, err := resolveIRCUser(network, client, nick, event.Source)
 		if err != nil {
 			log.Error("failed to resolve user on join", "nick", nick, "error", err)
 		}

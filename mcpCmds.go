@@ -121,12 +121,7 @@ func mcpCmdAsync(network Network, c *girc.Client, e girc.Event, cfg MCPCommandCo
 		return
 	}
 
-	casemapping := getCasemapping(network.Name)
-	userAccount := ""
-	if u := c.LookupUser(nick); u != nil {
-		userAccount = u.Extras.Account
-	}
-	resolvedUser, _ := resolveUser(network.Name, nick, e.Source.Ident, e.Source.Host, userAccount, casemapping)
+	resolvedUser, _ := resolveIRCUser(network, c, nick, e.Source)
 	var userID int64
 	if resolvedUser != nil {
 		userID = resolvedUser.ID

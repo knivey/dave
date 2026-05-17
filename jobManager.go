@@ -22,30 +22,128 @@ func modelNeedsUserSuffix(model string) bool {
 
 var loggerJM = logxi.New("jobManager")
 
-type asyncJob struct {
-	JobID          string
-	SessionID      int64
-	ToolName       string
-	MCPServer      string
-	Network        string
-	Channel        string
-	Nick           string
-	UserID         int64
-	cancel         context.CancelFunc
+func init() {
+	loggerJM.SetLevel(logxi.LevelAll)
+}
+
+// --- Generic job manager ---
+
+type asyncJobPayload struct {
+	sessionID      int64
 	inlineResultCh chan string
 }
 
-var jobMgr struct {
+type toolJobPayload struct {
+	prompt      string
+	submittedAt time.Time
+}
+
+type jobEntry[T any] struct {
+	jobID     string
+	payload   T
+	toolName  string
+	mcpServer string
+	network   string
+	channel   string
+	nick      string
+	userID    int64
+	cancel    context.CancelFunc
+}
+
+type genericJobMgr[T any] struct {
 	mu     sync.Mutex
-	jobs   map[string]*asyncJob
+	jobs   map[string]*jobEntry[T]
 	ctx    context.Context
 	cancel context.CancelFunc
 }
 
-func init() {
-	loggerJM.SetLevel(logxi.LevelAll)
-	jobMgr.jobs = make(map[string]*asyncJob)
+func newGenericJobMgr[T any]() *genericJobMgr[T] {
+	return &genericJobMgr[T]{
+		jobs: make(map[string]*jobEntry[T]),
+	}
 }
+
+func (m *genericJobMgr[T]) start() {
+	m.ctx, m.cancel = context.WithCancel(context.Background())
+}
+
+func (m *genericJobMgr[T]) stop() {
+	if m.cancel != nil {
+		m.cancel()
+	}
+}
+
+func (m *genericJobMgr[T]) contains(jobID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, exists := m.jobs[jobID]
+	return exists
+}
+
+func (m *genericJobMgr[T]) register(entry *jobEntry[T], waitFn func(context.Context, *jobEntry[T])) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.jobs[entry.jobID]; exists {
+		return false
+	}
+	ctx, cancel := context.WithCancel(m.ctx)
+	entry.cancel = cancel
+	m.jobs[entry.jobID] = entry
+	go waitFn(ctx, entry)
+	return true
+}
+
+func (m *genericJobMgr[T]) remove(jobID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.jobs, jobID)
+}
+
+type jobWaitResult struct {
+	resultText string
+	err        error
+	cancelled  bool
+}
+
+func (m *genericJobMgr[T]) waitForResult(ctx context.Context, entry *jobEntry[T]) jobWaitResult {
+	result, err := waitForJobWithRetry(ctx, entry.jobID, entry.mcpServer)
+
+	if ctx.Err() != nil {
+		loggerJM.Info("job wait cancelled", "job_id", entry.jobID)
+		return jobWaitResult{cancelled: true}
+	}
+
+	var resultText string
+	if err != nil {
+		resultText = fmt.Sprintf("error waiting for job: %s", err.Error())
+		loggerJM.Error("job wait failed", "job_id", entry.jobID, "error", err)
+	} else {
+		resultText = mcpToolResultToText(result)
+		loggerJM.Info("job completed", "job_id", entry.jobID, "result_len", len(resultText))
+	}
+
+	return jobWaitResult{resultText: resultText, err: err}
+}
+
+func (m *genericJobMgr[T]) cancelWhere(predicate func(*jobEntry[T]) bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, entry := range m.jobs {
+		if !predicate(entry) {
+			continue
+		}
+		loggerJM.Info("cancelling job", "job_id", entry.jobID)
+		entry.cancel()
+		if _, err := callMCPToolWithTimeout("cancel_job", map[string]any{
+			"job_id": entry.jobID,
+		}, 10*time.Second); err != nil {
+			loggerJM.Warn("failed to cancel job in MCP server", "job_id", entry.jobID, "error", err)
+		}
+		delete(m.jobs, entry.jobID)
+	}
+}
+
+// --- Shared helpers ---
 
 type chatRunnerInterface interface {
 	setChannel(channel, nick string, userID int64)
@@ -109,120 +207,85 @@ func waitForJobWithRetry(ctx context.Context, jobID, mcpServer string) (*mcp.Cal
 	return result, err
 }
 
+// --- Async job manager (session-based LLM continuation) ---
+
+var asyncJobMgr = newGenericJobMgr[asyncJobPayload]()
+
 func startJobManager() {
-	jobMgr.ctx, jobMgr.cancel = context.WithCancel(context.Background())
+	asyncJobMgr.start()
 	loggerJM.Info("Job manager started")
 }
 
 func stopJobManager() {
-	if jobMgr.cancel != nil {
-		jobMgr.cancel()
-		loggerJM.Info("Job manager stopped")
-	}
+	asyncJobMgr.stop()
+	loggerJM.Info("Job manager stopped")
 }
 
 func cancelAsyncJobsForSession(sessionID int64) {
-	jobMgr.mu.Lock()
-	defer jobMgr.mu.Unlock()
-
-	for _, job := range jobMgr.jobs {
-		if job.SessionID != sessionID {
-			continue
-		}
-		loggerJM.Info("cancelling async job for session", "job_id", job.JobID, "session_id", sessionID)
-		job.cancel()
-		if _, err := callMCPToolWithTimeout("cancel_job", map[string]any{
-			"job_id": job.JobID,
-		}, 10*time.Second); err != nil {
-			loggerJM.Warn("failed to cancel job in MCP server", "job_id", job.JobID, "error", err)
-		}
-		delete(jobMgr.jobs, job.JobID)
-	}
+	asyncJobMgr.cancelWhere(func(e *jobEntry[asyncJobPayload]) bool {
+		return e.payload.sessionID == sessionID
+	})
 }
 
-func registerAsyncJob(jobID string, sessionID int64, toolName, mcpServer, network, channel, nick string, userID int64) *asyncJob {
-	jobMgr.mu.Lock()
-	defer jobMgr.mu.Unlock()
-
-	if _, exists := jobMgr.jobs[jobID]; exists {
+func registerAsyncJob(jobID string, sessionID int64, toolName, mcpServer, network, channel, nick string, userID int64) *jobEntry[asyncJobPayload] {
+	entry := &jobEntry[asyncJobPayload]{
+		jobID: jobID,
+		payload: asyncJobPayload{
+			sessionID:      sessionID,
+			inlineResultCh: make(chan string),
+		},
+		toolName:  toolName,
+		mcpServer: mcpServer,
+		network:   network,
+		channel:   channel,
+		nick:      nick,
+		userID:    userID,
+	}
+	if !asyncJobMgr.register(entry, waitForAsyncJob) {
 		loggerJM.Warn("job already registered", "job_id", jobID)
 		return nil
 	}
-
-	ctx, cancel := context.WithCancel(jobMgr.ctx)
-	job := &asyncJob{
-		JobID:          jobID,
-		SessionID:      sessionID,
-		ToolName:       toolName,
-		MCPServer:      mcpServer,
-		Network:        network,
-		Channel:        channel,
-		Nick:           nick,
-		UserID:         userID,
-		cancel:         cancel,
-		inlineResultCh: make(chan string),
-	}
-	jobMgr.jobs[jobID] = job
-
-	go waitForAsyncJob(ctx, job)
 	loggerJM.Info("registered async job", "job_id", jobID, "server", mcpServer, "tool", toolName)
-	return job
+	return entry
 }
 
-func waitForAsyncJob(ctx context.Context, job *asyncJob) {
-	result, err := waitForJobWithRetry(ctx, job.JobID, job.MCPServer)
-
-	if ctx.Err() != nil {
-		jobMgr.mu.Lock()
-		delete(jobMgr.jobs, job.JobID)
-		jobMgr.mu.Unlock()
-		loggerJM.Info("job wait cancelled", "job_id", job.JobID)
+func waitForAsyncJob(ctx context.Context, entry *jobEntry[asyncJobPayload]) {
+	wr := asyncJobMgr.waitForResult(ctx, entry)
+	if wr.cancelled {
+		asyncJobMgr.remove(entry.jobID)
 		return
-	}
-
-	var resultText string
-	if err != nil {
-		resultText = fmt.Sprintf("error waiting for job: %s", err.Error())
-		loggerJM.Error("job wait failed", "job_id", job.JobID, "error", err)
-	} else {
-		resultText = mcpToolResultToText(result)
-		loggerJM.Info("job completed", "job_id", job.JobID, "result_len", len(resultText))
 	}
 
 	select {
-	case job.inlineResultCh <- resultText:
-		jobMgr.mu.Lock()
-		delete(jobMgr.jobs, job.JobID)
-		jobMgr.mu.Unlock()
-		if err := deliverInlinePendingJob(job.JobID, resultText); err != nil {
-			loggerJM.Error("failed to deliver inline job in DB", "job_id", job.JobID, "error", err)
+	case entry.payload.inlineResultCh <- wr.resultText:
+		asyncJobMgr.remove(entry.jobID)
+		if err := deliverInlinePendingJob(entry.jobID, wr.resultText); err != nil {
+			loggerJM.Error("failed to deliver inline job in DB", "job_id", entry.jobID, "error", err)
 		}
 	default:
-		onAsyncJobCompleted(job, resultText)
+		onAsyncJobCompleted(entry, wr.resultText)
 	}
 }
 
-func onAsyncJobCompleted(job *asyncJob, resultText string) {
-	jobMgr.mu.Lock()
-	delete(jobMgr.jobs, job.JobID)
-	jobMgr.mu.Unlock()
+func onAsyncJobCompleted(entry *jobEntry[asyncJobPayload], resultText string) {
+	asyncJobMgr.remove(entry.jobID)
 
-	if err := completePendingJob(job.JobID, resultText); err != nil {
-		loggerJM.Error("failed to mark job completed in DB", "job_id", job.JobID, "error", err)
+	if err := completePendingJob(entry.jobID, resultText); err != nil {
+		loggerJM.Error("failed to mark job completed in DB", "job_id", entry.jobID, "error", err)
 		return
 	}
 
-	queueMgr.Enqueue(job.Network, job.Channel, job.UserID, job.Nick, "", job.ToolName,
+	queueMgr.Enqueue(entry.network, entry.channel, entry.userID, entry.nick, "", entry.toolName,
 		func(ctx context.Context, output chan<- string) {
-			deliverAsyncResult(job, ctx, output)
+			deliverAsyncResult(entry, ctx, output)
 		})
 }
 
-func deliverAsyncResult(job *asyncJob, ctx context.Context, output chan<- string) {
-	activeSession, _ := sessionMgr.GetActiveSession(job.Network, job.Channel, job.UserID)
+func deliverAsyncResult(entry *jobEntry[asyncJobPayload], ctx context.Context, output chan<- string) {
+	activeSession, _ := sessionMgr.GetActiveSession(entry.network, entry.channel, entry.userID)
 
-	if activeSession == nil || activeSession.ID != job.SessionID {
-		if msg := switchToSession(job); msg != "" {
+	if activeSession == nil || activeSession.ID != entry.payload.sessionID {
+		if msg := switchToSession(entry); msg != "" {
 			select {
 			case output <- msg:
 			case <-ctx.Done():
@@ -231,15 +294,15 @@ func deliverAsyncResult(job *asyncJob, ctx context.Context, output chan<- string
 		}
 	}
 
-	bot := getBotFn(job.Network)
+	bot := getBotFn(entry.network)
 	if bot == nil || bot.Client == nil {
-		loggerJM.Error("no IRC client for network", "network", job.Network)
+		loggerJM.Error("no IRC client for network", "network", entry.network)
 		return
 	}
 
-	session, err := sessionMgr.GetSession(job.SessionID)
+	session, err := sessionMgr.GetSession(entry.payload.sessionID)
 	if err != nil || session == nil {
-		loggerJM.Warn("no session found, skipping LLM turn", "job_id", job.JobID)
+		loggerJM.Warn("no session found, skipping LLM turn", "job_id", entry.jobID)
 		return
 	}
 
@@ -252,26 +315,26 @@ func deliverAsyncResult(job *asyncJob, ctx context.Context, output chan<- string
 	}
 
 	runner := newChatRunnerFn(bot.Network, bot.Client, currentCfg, ctx, output)
-	runner.setChannel(job.Channel, job.Nick, job.UserID)
+	runner.setChannel(entry.channel, entry.nick, entry.userID)
 	convID := ""
 	if session.ConvID != nil {
 		convID = *session.ConvID
 	}
-	runner.setSessionInfo(job.SessionID, convID)
+	runner.setSessionInfo(entry.payload.sessionID, convID)
 
 	for {
 		if ctx.Err() != nil {
 			return
 		}
-		completedJobs, err := getCompletedPendingJobs(job.SessionID)
+		completedJobs, err := getCompletedPendingJobs(entry.payload.sessionID)
 		if err != nil || len(completedJobs) == 0 {
 			break
 		}
 		for _, cj := range completedJobs {
-			injectAsyncResultFromDB(job.SessionID, currentCfg, cj, job.Network, job.Channel, job.Nick)
+			injectAsyncResultFromDB(entry.payload.sessionID, currentCfg, cj, entry.network, entry.channel, entry.nick)
 			markPendingJobDelivered(cj.JobID)
 		}
-		messages, _ := sessionMgr.GetMessages(job.SessionID, currentCfg.MaxHistory)
+		messages, _ := sessionMgr.GetMessages(entry.payload.sessionID, currentCfg.MaxHistory)
 		var done bool
 		messages, done = runner.runTurn(messages)
 		if done {
@@ -280,10 +343,10 @@ func deliverAsyncResult(job *asyncJob, ctx context.Context, output chan<- string
 	}
 }
 
-func switchToSession(job *asyncJob) string {
-	session, err := sessionMgr.GetSession(job.SessionID)
+func switchToSession(entry *jobEntry[asyncJobPayload]) string {
+	session, err := sessionMgr.GetSession(entry.payload.sessionID)
 	if err != nil || session == nil {
-		loggerJM.Error("failed to load session for switch", "id", job.SessionID, "error", err)
+		loggerJM.Error("failed to load session for switch", "id", entry.payload.sessionID, "error", err)
 		return ""
 	}
 
@@ -294,29 +357,29 @@ func switchToSession(job *asyncJob) string {
 		return ""
 	}
 
-	oldID, err := sessionMgr.SwitchActive(job.Network, job.Channel, job.UserID, job.SessionID)
+	oldID, err := sessionMgr.SwitchActive(entry.network, entry.channel, entry.userID, entry.payload.sessionID)
 	if err != nil {
 		loggerJM.Error("failed to switch session", "error", err)
 		return ""
 	}
 
-	apiLogger.RestoreSession(job.SessionID, job.Network, job.Channel, job.UserID)
+	apiLogger.RestoreSession(entry.payload.sessionID, entry.network, entry.channel, entry.userID)
 
 	var switchMsg string
 	if oldID != 0 {
-		bot := getBotFn(job.Network)
+		bot := getBotFn(entry.network)
 		if bot != nil && bot.Client != nil {
 			n := getNotices()
 			switchMsg = expandNotice(n.Sessions.Switched, map[string]string{
-				"nick":    job.Nick,
-				"id":      fmt.Sprintf("%d", job.SessionID),
+				"nick":    entry.nick,
+				"id":      fmt.Sprintf("%d", entry.payload.sessionID),
 				"trigger": bot.Network.Trigger,
 				"old_id":  fmt.Sprintf("%d", oldID),
 			})
 		}
 	}
 
-	loggerJM.Info("switched sessions", "from", oldID, "to", job.SessionID, "nick", job.Nick)
+	loggerJM.Info("switched sessions", "from", oldID, "to", entry.payload.sessionID, "nick", entry.nick)
 	return switchMsg
 }
 
@@ -378,46 +441,38 @@ func recoverPendingJobs() {
 	}
 }
 
-type toolAsyncJob struct {
-	JobID       string
-	ToolName    string
-	MCPServer   string
-	Network     string
-	Channel     string
-	Nick        string
-	UserID      int64
-	Prompt      string
-	SubmittedAt time.Time
-	cancel      context.CancelFunc
-}
+// --- Tool job manager (async image generation) ---
 
-var toolJobMgr struct {
-	mu     sync.Mutex
-	jobs   map[string]*toolAsyncJob
-	ctx    context.Context
-	cancel context.CancelFunc
-}
-
-func init() {
-	toolJobMgr.jobs = make(map[string]*toolAsyncJob)
-}
+var toolJobMgr = newGenericJobMgr[toolJobPayload]()
 
 func startToolJobManager() {
-	toolJobMgr.ctx, toolJobMgr.cancel = context.WithCancel(context.Background())
+	toolJobMgr.start()
 	loggerJM.Info("Tool job manager started")
 }
 
 func stopToolJobManager() {
-	if toolJobMgr.cancel != nil {
-		toolJobMgr.cancel()
-		loggerJM.Info("Tool job manager stopped")
-	}
+	toolJobMgr.stop()
+	loggerJM.Info("Tool job manager stopped")
 }
 
 func registerToolAsyncJob(jobID, toolName, mcpServer, network, channel, nick, prompt string, userID int64) {
-	if !registerToolAsyncJobMem(jobID, toolName, mcpServer, network, channel, nick, prompt, userID) {
+	entry := &jobEntry[toolJobPayload]{
+		jobID: jobID,
+		payload: toolJobPayload{
+			prompt:      prompt,
+			submittedAt: time.Now(),
+		},
+		toolName:  toolName,
+		mcpServer: mcpServer,
+		network:   network,
+		channel:   channel,
+		nick:      nick,
+		userID:    userID,
+	}
+	if !toolJobMgr.register(entry, waitForToolAsyncJob) {
 		return
 	}
+	loggerJM.Info("registered tool async job", "job_id", jobID, "tool", toolName)
 
 	if theDB != nil {
 		if err := createToolPendingJob(jobID, toolName, mcpServer, network, channel, nick, userID); err != nil {
@@ -427,75 +482,47 @@ func registerToolAsyncJob(jobID, toolName, mcpServer, network, channel, nick, pr
 }
 
 func recoverToolAsyncJob(jobID, toolName, mcpServer, network, channel, nick, prompt string, userID int64) {
-	registerToolAsyncJobMem(jobID, toolName, mcpServer, network, channel, nick, prompt, userID)
+	entry := &jobEntry[toolJobPayload]{
+		jobID: jobID,
+		payload: toolJobPayload{
+			prompt:      prompt,
+			submittedAt: time.Now(),
+		},
+		toolName:  toolName,
+		mcpServer: mcpServer,
+		network:   network,
+		channel:   channel,
+		nick:      nick,
+		userID:    userID,
+	}
+	toolJobMgr.register(entry, waitForToolAsyncJob)
 }
 
-func registerToolAsyncJobMem(jobID, toolName, mcpServer, network, channel, nick, prompt string, userID int64) bool {
-	toolJobMgr.mu.Lock()
-	defer toolJobMgr.mu.Unlock()
-
-	if _, exists := toolJobMgr.jobs[jobID]; exists {
-		loggerJM.Warn("tool job already registered", "job_id", jobID)
-		return false
-	}
-
-	ctx, cancel := context.WithCancel(toolJobMgr.ctx)
-	job := &toolAsyncJob{
-		JobID:       jobID,
-		ToolName:    toolName,
-		MCPServer:   mcpServer,
-		Network:     network,
-		Channel:     channel,
-		Nick:        nick,
-		UserID:      userID,
-		Prompt:      prompt,
-		SubmittedAt: time.Now(),
-		cancel:      cancel,
-	}
-	toolJobMgr.jobs[jobID] = job
-
-	go waitForToolAsyncJob(ctx, job)
-	loggerJM.Info("registered tool async job", "job_id", jobID, "tool", toolName)
-	return true
-}
-
-func waitForToolAsyncJob(ctx context.Context, job *toolAsyncJob) {
-	result, err := waitForJobWithRetry(ctx, job.JobID, job.MCPServer)
-
-	if ctx.Err() != nil {
-		loggerJM.Info("tool job wait cancelled", "job_id", job.JobID)
+func waitForToolAsyncJob(ctx context.Context, entry *jobEntry[toolJobPayload]) {
+	wr := toolJobMgr.waitForResult(ctx, entry)
+	if wr.cancelled {
+		toolJobMgr.remove(entry.jobID)
 		return
 	}
 
-	var resultText string
-	if err != nil {
-		resultText = fmt.Sprintf("error waiting for job: %s", err.Error())
-		loggerJM.Error("tool job wait failed", "job_id", job.JobID, "error", err)
-	} else {
-		resultText = mcpToolResultToText(result)
-		loggerJM.Info("tool job completed", "job_id", job.JobID, "result_len", len(resultText))
-	}
-
-	onToolAsyncJobCompleted(job, resultText)
+	onToolAsyncJobCompleted(entry, wr.resultText)
 }
 
-func onToolAsyncJobCompleted(job *toolAsyncJob, resultText string) {
-	toolJobMgr.mu.Lock()
-	delete(toolJobMgr.jobs, job.JobID)
-	toolJobMgr.mu.Unlock()
+func onToolAsyncJobCompleted(entry *jobEntry[toolJobPayload], resultText string) {
+	toolJobMgr.remove(entry.jobID)
 
 	if theDB != nil {
-		if err := completePendingJob(job.JobID, resultText); err != nil {
-			loggerJM.Error("failed to mark tool job completed in DB", "job_id", job.JobID, "error", err)
+		if err := completePendingJob(entry.jobID, resultText); err != nil {
+			loggerJM.Error("failed to mark tool job completed in DB", "job_id", entry.jobID, "error", err)
 		}
 	}
 
 	startedOverride := getNotices().Tools.ToolAsyncStarted
-	queueMgr.EnqueueAtWithPrompt(job.Network, job.Channel, job.UserID, job.Nick, "", job.ToolName, job.Prompt,
+	queueMgr.EnqueueAtWithPrompt(entry.network, entry.channel, entry.userID, entry.nick, "", entry.toolName, entry.payload.prompt,
 		startedOverride,
-		job.SubmittedAt,
+		entry.payload.submittedAt,
 		func(ctx context.Context, output chan<- string) {
-			deliverToolAsyncResult(job, resultText, ctx, output)
+			deliverToolAsyncResult(entry, resultText, ctx, output)
 		})
 }
 
@@ -510,7 +537,7 @@ type waitForJobInner struct {
 	Images []mcpImageData `json:"images"`
 }
 
-func deliverToolAsyncResult(job *toolAsyncJob, resultText string, ctx context.Context, output chan<- string) {
+func deliverToolAsyncResult(entry *jobEntry[toolJobPayload], resultText string, ctx context.Context, output chan<- string) {
 	n := getNotices()
 	var waitResult waitForJobResult
 	if err := json.Unmarshal([]byte(resultText), &waitResult); err == nil {
@@ -533,13 +560,13 @@ func deliverToolAsyncResult(job *toolAsyncJob, resultText string, ctx context.Co
 			}
 		} else if waitResult.Status == StatusCompleted {
 			select {
-			case output <- expandNotice(n.Images.NoImages, map[string]string{"nick": job.Nick}):
+			case output <- expandNotice(n.Images.NoImages, map[string]string{"nick": entry.nick}):
 			case <-ctx.Done():
 			}
 		} else {
 			select {
 			case output <- expandNotice(n.Images.JobStatus, map[string]string{
-				"nick":   job.Nick,
+				"nick":   entry.nick,
 				"status": waitResult.Status,
 				"error":  waitResult.Error,
 			}):
@@ -551,27 +578,16 @@ func deliverToolAsyncResult(job *toolAsyncJob, resultText string, ctx context.Co
 	}
 
 	if theDB != nil {
-		if err := markPendingJobDelivered(job.JobID); err != nil {
-			loggerJM.Error("failed to mark tool job delivered in DB", "job_id", job.JobID, "error", err)
+		if err := markPendingJobDelivered(entry.jobID); err != nil {
+			loggerJM.Error("failed to mark tool job delivered in DB", "job_id", entry.jobID, "error", err)
 		}
 	}
 }
 
 func cancelToolAsyncJobsForChannel(network, channel string) {
-	toolJobMgr.mu.Lock()
-	defer toolJobMgr.mu.Unlock()
-
-	for _, job := range toolJobMgr.jobs {
-		if job.Network == network && job.Channel == channel {
-			loggerJM.Info("cancelling tool async job", "job_id", job.JobID, "channel", channel)
-			job.cancel()
-			if _, err := callMCPToolWithTimeout("cancel_job", map[string]any{
-				"job_id": job.JobID,
-			}, 10*time.Second); err != nil {
-				loggerJM.Warn("failed to cancel job in MCP server", "job_id", job.JobID, "error", err)
-			}
-		}
-	}
+	toolJobMgr.cancelWhere(func(e *jobEntry[toolJobPayload]) bool {
+		return e.network == network && e.channel == channel
+	})
 }
 
 func recoverToolPendingJobs() {
@@ -607,16 +623,16 @@ func recoverToolPendingJobs() {
 			submittedAt := j.CreatedAt
 			queueMgr.EnqueueAt(network, channel, userID, nick, "", j.ToolName, submittedAt,
 				func(ctx context.Context, output chan<- string) {
-					job := &toolAsyncJob{
-						JobID:     j.JobID,
-						ToolName:  j.ToolName,
-						MCPServer: j.MCPServer,
-						Network:   network,
-						Channel:   channel,
-						Nick:      nick,
-						UserID:    userID,
+					entry := &jobEntry[toolJobPayload]{
+						jobID:     j.JobID,
+						toolName:  j.ToolName,
+						mcpServer: j.MCPServer,
+						network:   network,
+						channel:   channel,
+						nick:      nick,
+						userID:    userID,
 					}
-					deliverToolAsyncResult(job, *j.Result, ctx, output)
+					deliverToolAsyncResult(entry, *j.Result, ctx, output)
 				})
 			loggerJM.Info("recovered completed tool job, enqueuing delivery", "job_id", j.JobID)
 			continue

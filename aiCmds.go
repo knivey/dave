@@ -964,10 +964,7 @@ func (cr *chatRunner) handleRegisterBackgroundJob(messages []ChatMessage, tc Too
 		return messages
 	}
 
-	jobMgr.mu.Lock()
-	_, alreadyRegistered := jobMgr.jobs[args.JobID]
-	jobMgr.mu.Unlock()
-	if alreadyRegistered {
+	if asyncJobMgr.contains(args.JobID) {
 		toolMsg := toolResultMsg(tc.ID, "Job already registered and being monitored.")
 		messages = append(messages, toolMsg)
 		cr.addContext(toolMsg)
@@ -994,7 +991,7 @@ func (cr *chatRunner) handleRegisterBackgroundJob(messages []ChatMessage, tc Too
 	job := registerAsyncJob(args.JobID, cr.sessionID, args.ToolName, args.ServerName, cr.network.Name, cr.channel, cr.nick, cr.userID)
 	if job != nil {
 		select {
-		case resultText := <-job.inlineResultCh:
+		case resultText := <-job.payload.inlineResultCh:
 			toolMsg := toolResultMsg(tc.ID, resultText)
 			messages = append(messages, toolMsg)
 			cr.addContext(toolMsg)

@@ -51,21 +51,21 @@ func TestHistoryDelete_CancelsAsyncJobs(t *testing.T) {
 	network := Network{Name: "testnet", Trigger: "!"}
 	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 
-	jobMgr.jobs["job-delete-1"] = &asyncJob{
-		JobID:     "job-delete-1",
-		SessionID: sid,
-		Network:   "testnet",
-		Channel:   "#test",
-		Nick:      "testuser",
-		cancel:    func() {},
+	asyncJobMgr.jobs["job-delete-1"] = &jobEntry[asyncJobPayload]{
+		jobID:   "job-delete-1",
+		payload: asyncJobPayload{sessionID: sid},
+		network: "testnet",
+		channel: "#test",
+		nick:    "testuser",
+		cancel:  func() {},
 	}
-	jobMgr.jobs["job-delete-2"] = &asyncJob{
-		JobID:     "job-delete-2",
-		SessionID: sid,
-		Network:   "testnet",
-		Channel:   "#test",
-		Nick:      "testuser",
-		cancel:    func() {},
+	asyncJobMgr.jobs["job-delete-2"] = &jobEntry[asyncJobPayload]{
+		jobID:   "job-delete-2",
+		payload: asyncJobPayload{sessionID: sid},
+		network: "testnet",
+		channel: "#test",
+		nick:    "testuser",
+		cancel:  func() {},
 	}
 
 	client := bots["testnet"].Client
@@ -73,8 +73,8 @@ func TestHistoryDelete_CancelsAsyncJobs(t *testing.T) {
 
 	historyDelete(network, client, e, "1")
 
-	assert.NotContains(t, jobMgr.jobs, "job-delete-1", "job-delete-1 should be removed after session delete")
-	assert.NotContains(t, jobMgr.jobs, "job-delete-2", "job-delete-2 should be removed after session delete")
+	assert.NotContains(t, asyncJobMgr.jobs, "job-delete-1", "job-delete-1 should be removed after session delete")
+	assert.NotContains(t, asyncJobMgr.jobs, "job-delete-2", "job-delete-2 should be removed after session delete")
 }
 
 func TestHistoryDelete_NoAsyncJobs(t *testing.T) {
@@ -113,13 +113,13 @@ func TestHistoryDelete_OwnershipCheck(t *testing.T) {
 	network := Network{Name: "testnet", Trigger: "!"}
 	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 
-	jobMgr.jobs["job-owned"] = &asyncJob{
-		JobID:     "job-owned",
-		SessionID: sid,
-		Network:   "testnet",
-		Channel:   "#test",
-		Nick:      "testuser",
-		cancel:    func() {},
+	asyncJobMgr.jobs["job-owned"] = &jobEntry[asyncJobPayload]{
+		jobID:   "job-owned",
+		payload: asyncJobPayload{sessionID: sid},
+		network: "testnet",
+		channel: "#test",
+		nick:    "testuser",
+		cancel:  func() {},
 	}
 
 	client := bots["testnet"].Client
@@ -127,7 +127,7 @@ func TestHistoryDelete_OwnershipCheck(t *testing.T) {
 
 	historyDelete(network, client, e, "1")
 
-	assert.Contains(t, jobMgr.jobs, "job-owned", "job-owned should NOT be removed when different user deletes")
+	assert.Contains(t, asyncJobMgr.jobs, "job-owned", "job-owned should NOT be removed when different user deletes")
 }
 
 // drainOutput collects up to maxMsgs messages from the channel until it

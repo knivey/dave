@@ -34,14 +34,14 @@ func setupTestJobManager(t *testing.T) {
 	queueMgr = NewQueueManager(NoticesConfig{Queue: QueueNotices{Msg: "queued", Started: "started"}}, 5)
 	queueMgr.UpdateServiceLimits(map[string]Service{"testsvc": {Parallel: 1}})
 	queueMgr.Start()
-	jobMgr.jobs = make(map[string]*asyncJob)
-	jobMgr.ctx, jobMgr.cancel = context.WithCancel(context.Background())
+	asyncJobMgr = newGenericJobMgr[asyncJobPayload]()
+	asyncJobMgr.ctx, asyncJobMgr.cancel = context.WithCancel(context.Background())
 	t.Cleanup(func() {
 		if queueMgr != nil {
 			queueMgr.Stop()
 		}
-		if jobMgr.cancel != nil {
-			jobMgr.cancel()
+		if asyncJobMgr.cancel != nil {
+			asyncJobMgr.cancel()
 		}
 	})
 }
@@ -183,18 +183,18 @@ func TestDeliverAsyncResult_SameSession(t *testing.T) {
 	require.NoError(t, createPendingJob(sid, "job-1", "generate_image_async", "img-mcp"), "createPendingJob")
 	require.NoError(t, completePendingJob("job-1", "image generated successfully"), "completePendingJob")
 
-	job := &asyncJob{
-		JobID:     "job-1",
-		SessionID: sid,
-		ToolName:  "generate_image_async",
-		MCPServer: "img-mcp",
-		Network:   "testnet",
-		Channel:   "#test",
-		Nick:      "testuser",
+	entry := &jobEntry[asyncJobPayload]{
+		jobID:     "job-1",
+		payload:   asyncJobPayload{sessionID: sid},
+		toolName:  "generate_image_async",
+		mcpServer: "img-mcp",
+		network:   "testnet",
+		channel:   "#test",
+		nick:      "testuser",
 	}
 
 	output := make(chan string, 100)
-	deliverAsyncResult(job, context.Background(), output)
+	deliverAsyncResult(entry, context.Background(), output)
 
 	msgs, err := sessionMgr.GetMessages(sid, 20)
 	require.NoError(t, err)
@@ -226,19 +226,19 @@ func TestDeliverAsyncResult_DifferentSession(t *testing.T) {
 	require.NoError(t, createPendingJob(sessionA, "job-1", "generate_image_async", "img-mcp"), "createPendingJob")
 	require.NoError(t, completePendingJob("job-1", "image url: http://example.com/img.png"), "completePendingJob")
 
-	job := &asyncJob{
-		JobID:     "job-1",
-		SessionID: sessionA,
-		ToolName:  "generate_image_async",
-		MCPServer: "img-mcp",
-		Network:   "testnet",
-		Channel:   "#test",
-		Nick:      "testuser",
-		UserID:    ensureTestUser(t, "testnet", "testuser"),
+	entry := &jobEntry[asyncJobPayload]{
+		jobID:     "job-1",
+		payload:   asyncJobPayload{sessionID: sessionA},
+		toolName:  "generate_image_async",
+		mcpServer: "img-mcp",
+		network:   "testnet",
+		channel:   "#test",
+		nick:      "testuser",
+		userID:    ensureTestUser(t, "testnet", "testuser"),
 	}
 
 	output := make(chan string, 100)
-	deliverAsyncResult(job, context.Background(), output)
+	deliverAsyncResult(entry, context.Background(), output)
 
 	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", ensureTestUser(t, "testnet", "testuser"))
 	require.NotNil(t, activeSession)
@@ -288,18 +288,18 @@ func TestOnAsyncJobCompleted_UserBusyWaitsThenDelivers(t *testing.T) {
 		})
 	time.Sleep(100 * time.Millisecond)
 
-	job := &asyncJob{
-		JobID:     "job-1",
-		SessionID: sessionA,
-		ToolName:  "generate_image_async",
-		MCPServer: "img-mcp",
-		Network:   "testnet",
-		Channel:   "#test",
-		Nick:      "testuser",
-		UserID:    ensureTestUser(t, "testnet", "testuser"),
+	entry := &jobEntry[asyncJobPayload]{
+		jobID:     "job-1",
+		payload:   asyncJobPayload{sessionID: sessionA},
+		toolName:  "generate_image_async",
+		mcpServer: "img-mcp",
+		network:   "testnet",
+		channel:   "#test",
+		nick:      "testuser",
+		userID:    ensureTestUser(t, "testnet", "testuser"),
 	}
 
-	onAsyncJobCompleted(job, "result text")
+	onAsyncJobCompleted(entry, "result text")
 	time.Sleep(100 * time.Millisecond)
 
 	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", ensureTestUser(t, "testnet", "testuser"))
@@ -336,19 +336,19 @@ func TestOnAsyncJobCompleted_MultipleJobsWhileBusy(t *testing.T) {
 		})
 	time.Sleep(100 * time.Millisecond)
 
-	job1 := &asyncJob{
-		JobID: "job-1", SessionID: sessionA,
-		ToolName: "generate_image_async", MCPServer: "img-mcp",
-		Network: "testnet", Channel: "#test", Nick: "testuser",
+	entry1 := &jobEntry[asyncJobPayload]{
+		jobID: "job-1", payload: asyncJobPayload{sessionID: sessionA},
+		toolName: "generate_image_async", mcpServer: "img-mcp",
+		network: "testnet", channel: "#test", nick: "testuser",
 	}
-	job2 := &asyncJob{
-		JobID: "job-2", SessionID: sessionA,
-		ToolName: "generate_image_async", MCPServer: "img-mcp",
-		Network: "testnet", Channel: "#test", Nick: "testuser",
+	entry2 := &jobEntry[asyncJobPayload]{
+		jobID: "job-2", payload: asyncJobPayload{sessionID: sessionA},
+		toolName: "generate_image_async", mcpServer: "img-mcp",
+		network: "testnet", channel: "#test", nick: "testuser",
 	}
 
-	onAsyncJobCompleted(job1, "image 1 ready")
-	onAsyncJobCompleted(job2, "image 2 ready")
+	onAsyncJobCompleted(entry1, "image 1 ready")
+	onAsyncJobCompleted(entry2, "image 2 ready")
 
 	time.Sleep(100 * time.Millisecond)
 
@@ -381,13 +381,13 @@ func TestSwitchToSession_CompletesOldSession(t *testing.T) {
 	insertTestMessage(t, sessionB, "system", "sys prompt B")
 	insertTestMessage(t, sessionB, "user", "hello B")
 
-	job := &asyncJob{
-		JobID: "job-1", SessionID: sessionA,
-		Network: "testnet", Channel: "#test", Nick: "testuser",
-		UserID: ensureTestUser(t, "testnet", "testuser"),
+	entry := &jobEntry[asyncJobPayload]{
+		jobID: "job-1", payload: asyncJobPayload{sessionID: sessionA},
+		network: "testnet", channel: "#test", nick: "testuser",
+		userID: ensureTestUser(t, "testnet", "testuser"),
 	}
 
-	switchToSession(job)
+	switchToSession(entry)
 
 	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", ensureTestUser(t, "testnet", "testuser"))
 	require.NotNil(t, activeSession)
@@ -419,13 +419,13 @@ func TestSwitchToSession_NoOldSession(t *testing.T) {
 	insertTestMessage(t, sessionA, "system", "sys prompt A")
 	insertTestMessage(t, sessionA, "user", "hello A")
 
-	job := &asyncJob{
-		JobID: "job-1", SessionID: sessionA,
-		Network: "testnet", Channel: "#test", Nick: "testuser",
-		UserID: ensureTestUser(t, "testnet", "testuser"),
+	entry := &jobEntry[asyncJobPayload]{
+		jobID: "job-1", payload: asyncJobPayload{sessionID: sessionA},
+		network: "testnet", channel: "#test", nick: "testuser",
+		userID: ensureTestUser(t, "testnet", "testuser"),
 	}
 
-	switchToSession(job)
+	switchToSession(entry)
 
 	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", ensureTestUser(t, "testnet", "testuser"))
 	require.NotNil(t, activeSession)
@@ -441,13 +441,13 @@ func TestSwitchToSession_SameSessionIsNoop(t *testing.T) {
 	insertTestMessage(t, sid, "system", "sys")
 	insertTestMessage(t, sid, "user", "hello")
 
-	job := &asyncJob{
-		JobID: "job-1", SessionID: sid,
-		Network: "testnet", Channel: "#test", Nick: "testuser",
-		UserID: ensureTestUser(t, "testnet", "testuser"),
+	entry := &jobEntry[asyncJobPayload]{
+		jobID: "job-1", payload: asyncJobPayload{sessionID: sid},
+		network: "testnet", channel: "#test", nick: "testuser",
+		userID: ensureTestUser(t, "testnet", "testuser"),
 	}
 
-	switchToSession(job)
+	switchToSession(entry)
 
 	sess, _ := getDBSessionByID(sid)
 	assert.Equal(t, "active", sess.Status, "session status")
@@ -463,12 +463,12 @@ func TestSwitchToSession_InvalidChatCommand(t *testing.T) {
 
 	sessionB := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 
-	job := &asyncJob{
-		JobID: "job-1", SessionID: sessionA,
-		Network: "testnet", Channel: "#test", Nick: "testuser",
+	entry := &jobEntry[asyncJobPayload]{
+		jobID: "job-1", payload: asyncJobPayload{sessionID: sessionA},
+		network: "testnet", channel: "#test", nick: "testuser",
 	}
 
-	msg := switchToSession(job)
+	msg := switchToSession(entry)
 	assert.Equal(t, "", msg, "should return empty string when chat command not found")
 
 	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", ensureTestUser(t, "testnet", "testuser"))
@@ -487,13 +487,13 @@ func TestDeliverAsyncResult_NoContext(t *testing.T) {
 	require.NoError(t, createPendingJob(sessionA, "job-1", "generate_image_async", "img-mcp"), "createPendingJob")
 	completePendingJob("job-1", "result")
 
-	job := &asyncJob{
-		JobID: "job-1", SessionID: sessionA,
-		Network: "testnet", Channel: "#test", Nick: "testuser",
+	entry := &jobEntry[asyncJobPayload]{
+		jobID: "job-1", payload: asyncJobPayload{sessionID: sessionA},
+		network: "testnet", channel: "#test", nick: "testuser",
 	}
 
 	output := make(chan string, 100)
-	deliverAsyncResult(job, context.Background(), output)
+	deliverAsyncResult(entry, context.Background(), output)
 
 	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", ensureTestUser(t, "testnet", "testuser"))
 	require.NotNil(t, activeSession)
@@ -533,14 +533,14 @@ func TestDeliverAsyncResult_UsesMockRunner(t *testing.T) {
 	}
 	defer func() { newChatRunnerFn = origNewRunner }()
 
-	job := &asyncJob{
-		JobID: "job-1", SessionID: sid,
-		ToolName: "generate_image_async", MCPServer: "img-mcp",
-		Network: "testnet", Channel: "#test", Nick: "testuser",
+	entry := &jobEntry[asyncJobPayload]{
+		jobID: "job-1", payload: asyncJobPayload{sessionID: sid},
+		toolName: "generate_image_async", mcpServer: "img-mcp",
+		network: "testnet", channel: "#test", nick: "testuser",
 	}
 
 	output := make(chan string, 100)
-	deliverAsyncResult(job, context.Background(), output)
+	deliverAsyncResult(entry, context.Background(), output)
 
 	require.NotNil(t, runner, "runner was never created")
 	assert.True(t, runner.setChannelCalled, "setChannel was not called")
@@ -572,14 +572,14 @@ func TestDeliverAsyncResult_RunnerSeesInjectedResult(t *testing.T) {
 	}
 	defer func() { newChatRunnerFn = origNewRunner }()
 
-	job := &asyncJob{
-		JobID: "job-1", SessionID: sid,
-		ToolName: "generate_image_async", MCPServer: "img-mcp",
-		Network: "testnet", Channel: "#test", Nick: "testuser",
+	entry := &jobEntry[asyncJobPayload]{
+		jobID: "job-1", payload: asyncJobPayload{sessionID: sid},
+		toolName: "generate_image_async", mcpServer: "img-mcp",
+		network: "testnet", channel: "#test", nick: "testuser",
 	}
 
 	output := make(chan string, 100)
-	deliverAsyncResult(job, context.Background(), output)
+	deliverAsyncResult(entry, context.Background(), output)
 
 	foundInjected := false
 	for _, m := range receivedMessages {
@@ -618,14 +618,14 @@ func TestDeliverAsyncResult_MultipleCompletedJobs(t *testing.T) {
 	}
 	defer func() { newChatRunnerFn = origNewRunner }()
 
-	job := &asyncJob{
-		JobID: "job-1", SessionID: sid,
-		ToolName: "generate_image_async", MCPServer: "img-mcp",
-		Network: "testnet", Channel: "#test", Nick: "testuser",
+	entry := &jobEntry[asyncJobPayload]{
+		jobID: "job-1", payload: asyncJobPayload{sessionID: sid},
+		toolName: "generate_image_async", mcpServer: "img-mcp",
+		network: "testnet", channel: "#test", nick: "testuser",
 	}
 
 	output := make(chan string, 100)
-	deliverAsyncResult(job, context.Background(), output)
+	deliverAsyncResult(entry, context.Background(), output)
 
 	assert.Equal(t, 1, turnCount, "runTurn should be called once (both jobs delivered in one turn)")
 
@@ -778,16 +778,16 @@ func TestOnAsyncJobCompleted_RemovesJobFromMap(t *testing.T) {
 
 	createPendingJob(sid, "job-1", "generate_image_async", "img-mcp")
 
-	jobMgr.jobs["job-1"] = &asyncJob{JobID: "job-1"}
+	asyncJobMgr.jobs["job-1"] = &jobEntry[asyncJobPayload]{jobID: "job-1"}
 
-	job := &asyncJob{
-		JobID: "job-1", SessionID: sid,
-		Network: "testnet", Channel: "#test", Nick: "testuser",
+	entry := &jobEntry[asyncJobPayload]{
+		jobID: "job-1", payload: asyncJobPayload{sessionID: sid},
+		network: "testnet", channel: "#test", nick: "testuser",
 	}
 
-	onAsyncJobCompleted(job, "result")
+	onAsyncJobCompleted(entry, "result")
 
-	_, exists := jobMgr.jobs["job-1"]
+	_, exists := asyncJobMgr.jobs["job-1"]
 	assert.False(t, exists, "job should be removed from in-memory map after completion")
 }
 
@@ -801,12 +801,12 @@ func TestOnAsyncJobCompleted_MarksCompletedInDB(t *testing.T) {
 
 	createPendingJob(sid, "job-1", "generate_image_async", "img-mcp")
 
-	job := &asyncJob{
-		JobID: "job-1", SessionID: sid,
-		Network: "testnet", Channel: "#test", Nick: "testuser",
+	entry := &jobEntry[asyncJobPayload]{
+		jobID: "job-1", payload: asyncJobPayload{sessionID: sid},
+		network: "testnet", channel: "#test", nick: "testuser",
 	}
 
-	onAsyncJobCompleted(job, "the image result")
+	onAsyncJobCompleted(entry, "the image result")
 
 	var pj PendingJob
 	deadline := time.Now().Add(3 * time.Second)
@@ -833,13 +833,13 @@ func TestDeliverAsyncResult_MarksJobsDelivered(t *testing.T) {
 	createPendingJob(sid, "job-1", "generate_image_async", "img-mcp")
 	completePendingJob("job-1", "result")
 
-	job := &asyncJob{
-		JobID: "job-1", SessionID: sid,
-		Network: "testnet", Channel: "#test", Nick: "testuser",
+	entry := &jobEntry[asyncJobPayload]{
+		jobID: "job-1", payload: asyncJobPayload{sessionID: sid},
+		network: "testnet", channel: "#test", nick: "testuser",
 	}
 
 	output := make(chan string, 100)
-	deliverAsyncResult(job, context.Background(), output)
+	deliverAsyncResult(entry, context.Background(), output)
 
 	var pj PendingJob
 	require.NoError(t, theDB.Where("job_id = ?", "job-1").First(&pj).Error, "query job")
@@ -876,18 +876,18 @@ func TestDeliverAsyncResult_NoContextLoaded_LoadsFromDB(t *testing.T) {
 	require.NoError(t, createPendingJob(sid, "job-1", "generate_image_async", "img-mcp"), "createPendingJob")
 	require.NoError(t, completePendingJob("job-1", "image url: http://example.com/img.png"), "completePendingJob")
 
-	job := &asyncJob{
-		JobID:     "job-1",
-		SessionID: sid,
-		ToolName:  "generate_image_async",
-		MCPServer: "img-mcp",
-		Network:   "testnet",
-		Channel:   "#test",
-		Nick:      "testuser",
+	entry := &jobEntry[asyncJobPayload]{
+		jobID:     "job-1",
+		payload:   asyncJobPayload{sessionID: sid},
+		toolName:  "generate_image_async",
+		mcpServer: "img-mcp",
+		network:   "testnet",
+		channel:   "#test",
+		nick:      "testuser",
 	}
 
 	output := make(chan string, 100)
-	deliverAsyncResult(job, context.Background(), output)
+	deliverAsyncResult(entry, context.Background(), output)
 
 	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", ensureTestUser(t, "testnet", "testuser"))
 	require.NotNil(t, activeSession)
@@ -920,15 +920,12 @@ func TestSwitchToSession_NoCurrentSession_NoSwitchMessage(t *testing.T) {
 	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sid, "system", "you are helpful")
 
-	job := &asyncJob{
-		JobID:     "job-1",
-		SessionID: sid,
-		Network:   "testnet",
-		Channel:   "#test",
-		Nick:      "testuser",
+	entry := &jobEntry[asyncJobPayload]{
+		jobID: "job-1", payload: asyncJobPayload{sessionID: sid},
+		network: "testnet", channel: "#test", nick: "testuser",
 	}
 
-	msg := switchToSession(job)
+	msg := switchToSession(entry)
 	assert.Equal(t, "", msg, "switchToSession should return empty string when no prior session")
 
 	activeSession, _ := sessionMgr.GetActiveSession("testnet", "#test", ensureTestUser(t, "testnet", "testuser"))
@@ -950,12 +947,12 @@ func TestSwitchToSession_RestoresConvIDAndResponseID(t *testing.T) {
 	sidB := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 	insertTestMessage(t, sidB, "system", "sys2")
 
-	job := &asyncJob{
-		JobID: "job-1", SessionID: sidA,
-		Network: "testnet", Channel: "#test", Nick: "testuser",
+	entry := &jobEntry[asyncJobPayload]{
+		jobID: "job-1", payload: asyncJobPayload{sessionID: sidA},
+		network: "testnet", channel: "#test", nick: "testuser",
 	}
 
-	switchToSession(job)
+	switchToSession(entry)
 
 	session, err := sessionMgr.GetSession(sidA)
 	require.NoError(t, err)
@@ -976,17 +973,17 @@ func TestRecoverPendingJobs(t *testing.T) {
 
 	createPendingJob(sid, "recovery-job-1", "generate_image_async", "img-mcp")
 
-	jobMgr.cancel()
-	jobMgr.ctx, jobMgr.cancel = context.WithCancel(context.Background())
+	asyncJobMgr.cancel()
+	asyncJobMgr.ctx, asyncJobMgr.cancel = context.WithCancel(context.Background())
 
 	recoverPendingJobs()
 
-	jobMgr.mu.Lock()
-	_, exists := jobMgr.jobs["recovery-job-1"]
-	jobMgr.mu.Unlock()
+	asyncJobMgr.mu.Lock()
+	_, exists := asyncJobMgr.jobs["recovery-job-1"]
+	asyncJobMgr.mu.Unlock()
 	assert.True(t, exists, "expected job to be recovered in memory")
 
-	jobMgr.cancel()
+	asyncJobMgr.cancel()
 	time.Sleep(100 * time.Millisecond)
 }
 
@@ -998,15 +995,15 @@ func TestRecoverPendingJobs_NoDB(t *testing.T) {
 
 func TestRegisterAsyncJob_Duplicate(t *testing.T) {
 	setupTestJobManager(t)
-	jobMgr.ctx, jobMgr.cancel = context.WithCancel(context.Background())
-	defer jobMgr.cancel()
+	asyncJobMgr.ctx, asyncJobMgr.cancel = context.WithCancel(context.Background())
+	defer asyncJobMgr.cancel()
 
 	registerAsyncJob("dup-job", 1, "tool", "server", "net", "#chan", "user", 0)
 	registerAsyncJob("dup-job", 1, "tool", "server", "net", "#chan", "user", 0)
 
-	jobMgr.mu.Lock()
-	count := len(jobMgr.jobs)
-	jobMgr.mu.Unlock()
+	asyncJobMgr.mu.Lock()
+	count := len(asyncJobMgr.jobs)
+	asyncJobMgr.mu.Unlock()
 	assert.Equal(t, 1, count, "expected 1 job (duplicate should be ignored)")
 }
 
@@ -1028,11 +1025,11 @@ func TestSwitchToSession_DBMessagesWithToolCalls(t *testing.T) {
 
 	_ = createTestSession(t, "testnet", "#test", "testuser", "testchat")
 
-	job := &asyncJob{
-		JobID: "job-1", SessionID: sessionA,
-		Network: "testnet", Channel: "#test", Nick: "testuser",
+	entry := &jobEntry[asyncJobPayload]{
+		jobID: "job-1", payload: asyncJobPayload{sessionID: sessionA},
+		network: "testnet", channel: "#test", nick: "testuser",
 	}
-	switchToSession(job)
+	switchToSession(entry)
 
 	msgs, err := sessionMgr.GetMessages(sessionA, 20)
 	require.NoError(t, err)
@@ -1069,11 +1066,11 @@ func TestSwitchToSession_TruncatesHistory(t *testing.T) {
 
 	config.Commands.Chats["testchat"] = cfg
 
-	job := &asyncJob{
-		JobID: "job-1", SessionID: sessionA,
-		Network: "testnet", Channel: "#test", Nick: "testuser",
+	entry := &jobEntry[asyncJobPayload]{
+		jobID: "job-1", payload: asyncJobPayload{sessionID: sessionA},
+		network: "testnet", channel: "#test", nick: "testuser",
 	}
-	switchToSession(job)
+	switchToSession(entry)
 
 	msgs, err := sessionMgr.GetMessages(sessionA, cfg.MaxHistory)
 	require.NoError(t, err)
@@ -1108,13 +1105,13 @@ func TestDeliverAsyncResult_RunningDuringTurn(t *testing.T) {
 	}
 	defer func() { newChatRunnerFn = origNewRunner }()
 
-	job := &asyncJob{
-		JobID: "job-1", SessionID: sid,
-		Network: "testnet", Channel: "#test", Nick: "testuser",
+	entry := &jobEntry[asyncJobPayload]{
+		jobID: "job-1", payload: asyncJobPayload{sessionID: sid},
+		network: "testnet", channel: "#test", nick: "testuser",
 	}
 
 	queueMgr.Enqueue("testnet", "#test", ensureTestUser(t, "testnet", "testuser"), "testuser", "testsvc", "", func(ctx context.Context, output chan<- string) {
-		deliverAsyncResult(job, ctx, output)
+		deliverAsyncResult(entry, ctx, output)
 	})
 
 	wg.Wait()
@@ -1230,40 +1227,40 @@ func TestCancelAsyncJobsForSession_CancelsMatchingJobs(t *testing.T) {
 
 	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 
-	jobMgr.jobs["job-a"] = &asyncJob{
-		JobID:     "job-a",
-		SessionID: sid,
-		Network:   "testnet",
-		Channel:   "#test",
-		Nick:      "testuser",
-		cancel:    func() {},
+	asyncJobMgr.jobs["job-a"] = &jobEntry[asyncJobPayload]{
+		jobID:   "job-a",
+		payload: asyncJobPayload{sessionID: sid},
+		network: "testnet",
+		channel: "#test",
+		nick:    "testuser",
+		cancel:  func() {},
 	}
-	jobMgr.jobs["job-b"] = &asyncJob{
-		JobID:     "job-b",
-		SessionID: sid,
-		Network:   "testnet",
-		Channel:   "#test",
-		Nick:      "testuser",
-		cancel:    func() {},
+	asyncJobMgr.jobs["job-b"] = &jobEntry[asyncJobPayload]{
+		jobID:   "job-b",
+		payload: asyncJobPayload{sessionID: sid},
+		network: "testnet",
+		channel: "#test",
+		nick:    "testuser",
+		cancel:  func() {},
 	}
 
 	otherSID := createTestSession(t, "testnet", "#test", "otheruser", "testchat")
-	jobMgr.jobs["job-c"] = &asyncJob{
-		JobID:     "job-c",
-		SessionID: otherSID,
-		Network:   "testnet",
-		Channel:   "#test",
-		Nick:      "otheruser",
-		cancel:    func() {},
+	asyncJobMgr.jobs["job-c"] = &jobEntry[asyncJobPayload]{
+		jobID:   "job-c",
+		payload: asyncJobPayload{sessionID: otherSID},
+		network: "testnet",
+		channel: "#test",
+		nick:    "otheruser",
+		cancel:  func() {},
 	}
 
 	cancelAsyncJobsForSession(sid)
 
-	_, exists := jobMgr.jobs["job-a"]
-	assert.False(t, exists, "job-a should be removed from jobMgr.jobs")
-	_, exists = jobMgr.jobs["job-b"]
-	assert.False(t, exists, "job-b should be removed from jobMgr.jobs")
-	_, exists = jobMgr.jobs["job-c"]
+	_, exists := asyncJobMgr.jobs["job-a"]
+	assert.False(t, exists, "job-a should be removed from asyncJobMgr.jobs")
+	_, exists = asyncJobMgr.jobs["job-b"]
+	assert.False(t, exists, "job-b should be removed from asyncJobMgr.jobs")
+	_, exists = asyncJobMgr.jobs["job-c"]
 	assert.True(t, exists, "job-c should still exist (different session)")
 }
 
@@ -1281,18 +1278,18 @@ func TestCancelAsyncJobsForSession_DeletesFromMap(t *testing.T) {
 
 	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
 
-	jobMgr.jobs["job-x"] = &asyncJob{
-		JobID:     "job-x",
-		SessionID: sid,
-		Network:   "testnet",
-		Channel:   "#test",
-		Nick:      "testuser",
-		cancel:    func() {},
+	asyncJobMgr.jobs["job-x"] = &jobEntry[asyncJobPayload]{
+		jobID:   "job-x",
+		payload: asyncJobPayload{sessionID: sid},
+		network: "testnet",
+		channel: "#test",
+		nick:    "testuser",
+		cancel:  func() {},
 	}
 
 	cancelAsyncJobsForSession(sid)
 
-	assert.Empty(t, jobMgr.jobs, "expected 0 jobs in map")
+	assert.Empty(t, asyncJobMgr.jobs, "expected 0 jobs in map")
 }
 
 func setupBlockingWaitMCP(t *testing.T) {
@@ -1356,29 +1353,29 @@ func TestWaitForAsyncJob_CleanupOnCancel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	job := &asyncJob{
-		JobID:     "job-cancel-test",
-		SessionID: 1,
-		Network:   "testnet",
-		Channel:   "#test",
-		Nick:      "testuser",
-		cancel:    cancel,
+	entry := &jobEntry[asyncJobPayload]{
+		jobID:   "job-cancel-test",
+		payload: asyncJobPayload{sessionID: 1},
+		network: "testnet",
+		channel: "#test",
+		nick:    "testuser",
+		cancel:  cancel,
 	}
-	jobMgr.jobs["job-cancel-test"] = job
+	asyncJobMgr.jobs["job-cancel-test"] = entry
 
 	go func() {
 		time.Sleep(50 * time.Millisecond)
 		cancel()
 	}()
 
-	waitForAsyncJob(ctx, job)
+	waitForAsyncJob(ctx, entry)
 
 	time.Sleep(100 * time.Millisecond)
 
-	jobMgr.mu.Lock()
-	_, exists := jobMgr.jobs["job-cancel-test"]
-	jobMgr.mu.Unlock()
-	assert.False(t, exists, "cancelled job should be removed from jobMgr.jobs")
+	asyncJobMgr.mu.Lock()
+	_, exists := asyncJobMgr.jobs["job-cancel-test"]
+	asyncJobMgr.mu.Unlock()
+	assert.False(t, exists, "cancelled job should be removed from asyncJobMgr.jobs")
 }
 
 func setupImmediateResultMCP(t *testing.T, resultText string) {
@@ -1448,7 +1445,7 @@ func TestWaitForAsyncJob_InlineDelivery(t *testing.T) {
 	received := make(chan struct{})
 	go func() {
 		select {
-		case inlineResult = <-job.inlineResultCh:
+		case inlineResult = <-job.payload.inlineResultCh:
 			close(received)
 		case <-time.After(3 * time.Second):
 		}
@@ -1463,10 +1460,10 @@ func TestWaitForAsyncJob_InlineDelivery(t *testing.T) {
 	assert.Contains(t, inlineResult, "inline-1", "inline result should contain job_id")
 	assert.Contains(t, inlineResult, "completed", "inline result should contain status")
 
-	jobMgr.mu.Lock()
-	_, exists := jobMgr.jobs["inline-1"]
-	jobMgr.mu.Unlock()
-	assert.False(t, exists, "job should be removed from jobMgr.jobs after inline delivery")
+	asyncJobMgr.mu.Lock()
+	_, exists := asyncJobMgr.jobs["inline-1"]
+	asyncJobMgr.mu.Unlock()
+	assert.False(t, exists, "job should be removed from asyncJobMgr.jobs after inline delivery")
 
 	var pj PendingJob
 	err := theDB.Where("job_id = ?", "inline-1").First(&pj).Error
@@ -1493,7 +1490,7 @@ func TestWaitForAsyncJob_AsyncDeliveryWhenNotWaiting(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	select {
-	case <-job.inlineResultCh:
+	case <-job.payload.inlineResultCh:
 		t.Fatal("inlineResultCh should not receive when no one is waiting")
 	default:
 	}

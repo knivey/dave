@@ -71,13 +71,6 @@ func newDeliverySlot() *deliverySlot {
 	return ds
 }
 
-func (ds *deliverySlot) enqueue(item *QueueItem) {
-	ds.mu.Lock()
-	ds.queue = append(ds.queue, item)
-	ds.cond.Broadcast()
-	ds.mu.Unlock()
-}
-
 func (ds *deliverySlot) waitTurn(item *QueueItem) {
 	ds.mu.Lock()
 	defer ds.mu.Unlock()
@@ -113,6 +106,9 @@ type QueueManager struct {
 	queueMsg     string
 	startedMsg   string
 	running      atomic.Bool
+	botReady     func(network, channel string) bool
+	getBot       func(network string) *Bot
+	wg           sync.WaitGroup
 }
 
 var queueMgr *QueueManager
@@ -129,6 +125,8 @@ func NewQueueManager(notices NoticesConfig, maxDepth int) *QueueManager {
 		maxDepth:     maxDepth,
 		queueMsg:     notices.Queue.Msg,
 		startedMsg:   notices.Queue.Started,
+		botReady:     botReadyFn,
+		getBot:       getBotFn,
 	}
 }
 
@@ -142,7 +140,6 @@ func (qm *QueueManager) Stop() {
 	qm.running.Store(false)
 	qm.notify()
 	qm.mu.Lock()
-	defer qm.mu.Unlock()
 	for _, cq := range qm.channels {
 		for _, item := range cq.running {
 			if item.cancel != nil {
@@ -156,6 +153,8 @@ func (qm *QueueManager) Stop() {
 		}
 		cq.pending = nil
 	}
+	qm.mu.Unlock()
+	qm.wg.Wait()
 }
 
 func (qm *QueueManager) notify() {
@@ -180,23 +179,6 @@ func (qm *QueueManager) getOrCreateChannelQueue(key string) *ChannelQueue {
 
 func (qm *QueueManager) Enqueue(network, channel string, userID int64, nick, service, desc string, fn func(ctx context.Context, output chan<- string)) int {
 	return qm.EnqueueAt(network, channel, userID, nick, service, desc, time.Now(), fn)
-}
-
-// deliveryPosition returns the number of items ahead of the given item in the
-// delivery slot queue. This reflects how many outputs the user will see before
-// theirs, regardless of parallel execution settings.
-func (ds *deliverySlot) deliveryPosition(item *QueueItem) int {
-	pos := 0
-	for i, q := range ds.queue {
-		if q.ID == item.ID {
-			pos = i
-			break
-		}
-	}
-	if ds.current != nil {
-		pos++
-	}
-	return pos
 }
 
 func (qm *QueueManager) newQueueItem(network, channel string, userID int64, nick, service, desc string, enqueuedAt time.Time, fn func(ctx context.Context, output chan<- string)) *QueueItem {
@@ -231,9 +213,20 @@ func (qm *QueueManager) newQueueItem(network, channel string, userID int64, nick
 
 func (qm *QueueManager) enqueueItem(item *QueueItem) int {
 	ds := qm.getDeliverySlot(item.Network, item.Channel)
-	ds.enqueue(item)
-
-	deliveryPos := ds.deliveryPosition(item)
+	var deliveryPos int
+	ds.mu.Lock()
+	ds.queue = append(ds.queue, item)
+	ds.cond.Broadcast()
+	for i, q := range ds.queue {
+		if q.ID == item.ID {
+			deliveryPos = i
+			break
+		}
+	}
+	if ds.current != nil {
+		deliveryPos++
+	}
+	ds.mu.Unlock()
 
 	key := channelKey(item.Network, item.Channel)
 	cq := qm.channels[key]
@@ -246,6 +239,7 @@ func (qm *QueueManager) enqueueItem(item *QueueItem) int {
 	}
 
 	cq.running[item.ID] = item
+	qm.wg.Add(1)
 	go qm.runJob(item)
 	return deliveryPos
 }
@@ -439,6 +433,7 @@ func (qm *QueueManager) schedule() {
 				continue
 			}
 			cq.running[item.ID] = item
+			qm.wg.Add(1)
 			go qm.runJob(item)
 		}
 		cq.pending = remaining
@@ -446,6 +441,8 @@ func (qm *QueueManager) schedule() {
 }
 
 func (qm *QueueManager) runJob(item *QueueItem) {
+	defer qm.wg.Done()
+	defer qm.executionComplete(item)
 	qm.mu.Lock()
 	slotRef := qm.execSlots[item.Service]
 	qm.mu.Unlock()
@@ -481,10 +478,9 @@ func (qm *QueueManager) runJob(item *QueueItem) {
 	go func() {
 		<-execDone
 		releaseSlot()
-		qm.executionComplete(item)
 	}()
 
-	for !botReadyFn(item.Network, item.Channel) {
+	for !qm.botReady(item.Network, item.Channel) {
 		if item.ctx.Err() != nil {
 			for range item.outputCh {
 			}
@@ -495,7 +491,7 @@ func (qm *QueueManager) runJob(item *QueueItem) {
 		time.Sleep(1 * time.Second)
 	}
 
-	bot := getBotFn(item.Network)
+	bot := qm.getBot(item.Network)
 	if bot == nil || bot.Client == nil {
 		for range item.outputCh {
 		}

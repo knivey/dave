@@ -15,11 +15,15 @@ import (
 
 func newTestQM(t *testing.T) *QueueManager {
 	t.Helper()
-	origBotReady := botReadyFn
-	botReadyFn = func(_, _ string) bool { return true }
-	t.Cleanup(func() { botReadyFn = origBotReady })
 
 	qm := NewQueueManager(NoticesConfig{Queue: QueueNotices{Msg: "queued (position {position})", Started: "started"}}, 5)
+	qm.botReady = func(_, _ string) bool { return true }
+	qm.getBot = func(network string) *Bot {
+		return &Bot{
+			Client:  girc.New(girc.Config{Server: "localhost", Port: 6667, Nick: "testbot"}),
+			Network: Network{Name: network, Throttle: 0},
+		}
+	}
 	qm.UpdateServiceLimits(map[string]Service{"svc": {Parallel: 1}})
 	qm.Start()
 	t.Cleanup(func() { qm.Stop() })
@@ -181,6 +185,13 @@ func TestQueueManager_StopCurrentStartsNext(t *testing.T) {
 
 func TestQueueManager_DifferentChannelsParallel(t *testing.T) {
 	qm := NewQueueManager(NoticesConfig{Queue: QueueNotices{Msg: "queued", Started: "started"}}, 5)
+	qm.botReady = func(_, _ string) bool { return true }
+	qm.getBot = func(network string) *Bot {
+		return &Bot{
+			Client:  girc.New(girc.Config{Server: "localhost", Port: 6667, Nick: "testbot"}),
+			Network: Network{Name: network, Throttle: 0},
+		}
+	}
 	qm.UpdateServiceLimits(map[string]Service{"svc": {Parallel: 2}})
 	qm.Start()
 	t.Cleanup(func() { qm.Stop() })
@@ -417,6 +428,13 @@ func TestQueueManager_CrossUserFIFOOrder(t *testing.T) {
 
 func TestQueueManager_ConcurrentExecutionFIFODelivery(t *testing.T) {
 	qm := NewQueueManager(NoticesConfig{Queue: QueueNotices{Msg: "queued", Started: "started"}}, 5)
+	qm.botReady = func(_, _ string) bool { return true }
+	qm.getBot = func(network string) *Bot {
+		return &Bot{
+			Client:  girc.New(girc.Config{Server: "localhost", Port: 6667, Nick: "testbot"}),
+			Network: Network{Name: network, Throttle: 0},
+		}
+	}
 	qm.UpdateServiceLimits(map[string]Service{"svc": {Parallel: 2}})
 	qm.Start()
 	t.Cleanup(func() { qm.Stop() })
@@ -453,29 +471,13 @@ func TestQueueManager_ConcurrentExecutionFIFODelivery(t *testing.T) {
 	wg.Wait()
 }
 
-// setupDeliveryTest creates a QM with mocked getBotFn/botReadyFn.
+// setupDeliveryTest creates a QM with mocked botReady/getBot fields.
 // Since girc drops messages without a real connection, we test delivery
 // ordering by capturing outputCh contents directly via a wrapped Execute.
 func setupDeliveryTest(t *testing.T, parallel int) *QueueManager {
 	t.Helper()
 
-	origBotReady := botReadyFn
-	origGetBot := getBotFn
-	botReadyFn = func(_, _ string) bool { return true }
-
 	client := girc.New(girc.Config{Server: "localhost", Port: 6667, Nick: "testbot"})
-
-	getBotFn = func(network string) *Bot {
-		return &Bot{
-			Client:  client,
-			Network: Network{Name: network, Throttle: 0},
-		}
-	}
-
-	t.Cleanup(func() {
-		botReadyFn = origBotReady
-		getBotFn = origGetBot
-	})
 
 	qm := NewQueueManager(NoticesConfig{
 		Queue: QueueNotices{
@@ -483,6 +485,13 @@ func setupDeliveryTest(t *testing.T, parallel int) *QueueManager {
 			Started: "\x0306\u25b6 {nick}: Processing your request (waited {wait})...{prompt}\x0f",
 		},
 	}, 5)
+	qm.botReady = func(_, _ string) bool { return true }
+	qm.getBot = func(network string) *Bot {
+		return &Bot{
+			Client:  client,
+			Network: Network{Name: network, Throttle: 0},
+		}
+	}
 	qm.UpdateServiceLimits(map[string]Service{"svc": {Parallel: parallel}})
 	qm.Start()
 	t.Cleanup(func() { qm.Stop() })
@@ -581,23 +590,16 @@ func TestQueueManager_ParallelDeliveryOrder(t *testing.T) {
 
 func TestQueueManager_ParallelDeliveryWaitedFlag(t *testing.T) {
 	qm := NewQueueManager(NoticesConfig{Queue: QueueNotices{Msg: "queued", Started: "started"}}, 5)
-	qm.UpdateServiceLimits(map[string]Service{"svc": {Parallel: 2}})
-	qm.Start()
-	t.Cleanup(func() { qm.Stop() })
-
-	origBotReady := botReadyFn
-	origGetBot := getBotFn
-	botReadyFn = func(_, _ string) bool { return true }
-	getBotFn = func(network string) *Bot {
+	qm.botReady = func(_, _ string) bool { return true }
+	qm.getBot = func(network string) *Bot {
 		return &Bot{
 			Client:  girc.New(girc.Config{Server: "localhost", Port: 6667, Nick: "testbot"}),
 			Network: Network{Name: network, Throttle: 0},
 		}
 	}
-	t.Cleanup(func() {
-		botReadyFn = origBotReady
-		getBotFn = origGetBot
-	})
+	qm.UpdateServiceLimits(map[string]Service{"svc": {Parallel: 2}})
+	qm.Start()
+	t.Cleanup(func() { qm.Stop() })
 
 	unblock := make(chan struct{})
 	var wg sync.WaitGroup
@@ -671,6 +673,13 @@ func TestQueueManager_ServiceParallel1(t *testing.T) {
 
 func TestQueueManager_ServiceParallel0(t *testing.T) {
 	qm := NewQueueManager(NoticesConfig{Queue: QueueNotices{Msg: "queued", Started: "started"}}, 5)
+	qm.botReady = func(_, _ string) bool { return true }
+	qm.getBot = func(network string) *Bot {
+		return &Bot{
+			Client:  girc.New(girc.Config{Server: "localhost", Port: 6667, Nick: "testbot"}),
+			Network: Network{Name: network, Throttle: 0},
+		}
+	}
 	qm.UpdateServiceLimits(map[string]Service{"svc": {Parallel: 0}})
 	qm.Start()
 	t.Cleanup(func() { qm.Stop() })
@@ -724,6 +733,13 @@ func TestQueueManager_CancellationPropagation(t *testing.T) {
 
 func TestQueueManager_SchedulerFairness(t *testing.T) {
 	qm := NewQueueManager(NoticesConfig{Queue: QueueNotices{Msg: "queued", Started: "started"}}, 5)
+	qm.botReady = func(_, _ string) bool { return true }
+	qm.getBot = func(network string) *Bot {
+		return &Bot{
+			Client:  girc.New(girc.Config{Server: "localhost", Port: 6667, Nick: "testbot"}),
+			Network: Network{Name: network, Throttle: 0},
+		}
+	}
 	qm.UpdateServiceLimits(map[string]Service{"svc": {Parallel: 1}})
 	qm.Start()
 	t.Cleanup(func() { qm.Stop() })

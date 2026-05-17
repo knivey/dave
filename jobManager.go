@@ -51,15 +51,20 @@ type jobEntry[T any] struct {
 }
 
 type genericJobMgr[T any] struct {
-	mu     sync.Mutex
-	jobs   map[string]*jobEntry[T]
-	ctx    context.Context
-	cancel context.CancelFunc
+	mu            sync.Mutex
+	jobs          map[string]*jobEntry[T]
+	ctx           context.Context
+	cancel        context.CancelFunc
+	getBot        func(network string) *Bot
+	newChatRunner func(network Network, client *girc.Client, cfg AIConfig, ctx context.Context, output chan<- string) chatRunnerInterface
+	wg            sync.WaitGroup
 }
 
 func newGenericJobMgr[T any]() *genericJobMgr[T] {
 	return &genericJobMgr[T]{
-		jobs: make(map[string]*jobEntry[T]),
+		jobs:          make(map[string]*jobEntry[T]),
+		getBot:        getBotFn,
+		newChatRunner: newChatRunnerFn,
 	}
 }
 
@@ -71,6 +76,7 @@ func (m *genericJobMgr[T]) stop() {
 	if m.cancel != nil {
 		m.cancel()
 	}
+	m.wg.Wait()
 }
 
 func (m *genericJobMgr[T]) contains(jobID string) bool {
@@ -89,7 +95,11 @@ func (m *genericJobMgr[T]) register(entry *jobEntry[T], waitFn func(context.Cont
 	ctx, cancel := context.WithCancel(m.ctx)
 	entry.cancel = cancel
 	m.jobs[entry.jobID] = entry
-	go waitFn(ctx, entry)
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		waitFn(ctx, entry)
+	}()
 	return true
 }
 
@@ -241,7 +251,11 @@ func registerAsyncJob(jobID string, sessionID int64, toolName, mcpServer, networ
 		nick:      nick,
 		userID:    userID,
 	}
-	if !asyncJobMgr.register(entry, waitForAsyncJob) {
+	mgr := asyncJobMgr
+	qm := queueMgr
+	if !mgr.register(entry, func(ctx context.Context, e *jobEntry[asyncJobPayload]) {
+		waitForAsyncJobWithMgr(mgr, qm, ctx, e)
+	}) {
 		loggerJM.Warn("job already registered", "job_id", jobID)
 		return nil
 	}
@@ -249,33 +263,41 @@ func registerAsyncJob(jobID string, sessionID int64, toolName, mcpServer, networ
 	return entry
 }
 
-func waitForAsyncJob(ctx context.Context, entry *jobEntry[asyncJobPayload]) {
-	wr := asyncJobMgr.waitForResult(ctx, entry)
-	if wr.cancelled {
-		asyncJobMgr.remove(entry.jobID)
+func waitForAsyncJobWithMgr(mgr *genericJobMgr[asyncJobPayload], qm *QueueManager, ctx context.Context, entry *jobEntry[asyncJobPayload]) {
+	wr := mgr.waitForResult(ctx, entry)
+	if wr.cancelled || ctx.Err() != nil {
+		mgr.remove(entry.jobID)
 		return
 	}
 
 	select {
 	case entry.payload.inlineResultCh <- wr.resultText:
-		asyncJobMgr.remove(entry.jobID)
+		mgr.remove(entry.jobID)
 		if err := deliverInlinePendingJob(entry.jobID, wr.resultText); err != nil {
 			loggerJM.Error("failed to deliver inline job in DB", "job_id", entry.jobID, "error", err)
 		}
 	default:
-		onAsyncJobCompleted(entry, wr.resultText)
+		onAsyncJobCompletedWithMgr(mgr, qm, entry, wr.resultText)
 	}
 }
 
+func waitForAsyncJob(ctx context.Context, entry *jobEntry[asyncJobPayload]) {
+	waitForAsyncJobWithMgr(asyncJobMgr, queueMgr, ctx, entry)
+}
+
 func onAsyncJobCompleted(entry *jobEntry[asyncJobPayload], resultText string) {
-	asyncJobMgr.remove(entry.jobID)
+	onAsyncJobCompletedWithMgr(asyncJobMgr, queueMgr, entry, resultText)
+}
+
+func onAsyncJobCompletedWithMgr(mgr *genericJobMgr[asyncJobPayload], qm *QueueManager, entry *jobEntry[asyncJobPayload], resultText string) {
+	mgr.remove(entry.jobID)
 
 	if err := completePendingJob(entry.jobID, resultText); err != nil {
 		loggerJM.Error("failed to mark job completed in DB", "job_id", entry.jobID, "error", err)
 		return
 	}
 
-	queueMgr.Enqueue(entry.network, entry.channel, entry.userID, entry.nick, "", entry.toolName,
+	qm.Enqueue(entry.network, entry.channel, entry.userID, entry.nick, "", entry.toolName,
 		func(ctx context.Context, output chan<- string) {
 			deliverAsyncResult(entry, ctx, output)
 		})
@@ -294,7 +316,7 @@ func deliverAsyncResult(entry *jobEntry[asyncJobPayload], ctx context.Context, o
 		}
 	}
 
-	bot := getBotFn(entry.network)
+	bot := asyncJobMgr.getBot(entry.network)
 	if bot == nil || bot.Client == nil {
 		loggerJM.Error("no IRC client for network", "network", entry.network)
 		return
@@ -314,7 +336,7 @@ func deliverAsyncResult(entry *jobEntry[asyncJobPayload], ctx context.Context, o
 		return
 	}
 
-	runner := newChatRunnerFn(bot.Network, bot.Client, currentCfg, ctx, output)
+	runner := asyncJobMgr.newChatRunner(bot.Network, bot.Client, currentCfg, ctx, output)
 	runner.setChannel(entry.channel, entry.nick, entry.userID)
 	convID := ""
 	if session.ConvID != nil {
@@ -367,7 +389,7 @@ func switchToSession(entry *jobEntry[asyncJobPayload]) string {
 
 	var switchMsg string
 	if oldID != 0 {
-		bot := getBotFn(entry.network)
+		bot := asyncJobMgr.getBot(entry.network)
 		if bot != nil && bot.Client != nil {
 			n := getNotices()
 			switchMsg = expandNotice(n.Sessions.Switched, map[string]string{

@@ -74,23 +74,18 @@ func setupMockDeps(t *testing.T) *mockBot {
 	t.Helper()
 	mb := newMockBot("testnet", "!")
 
-	origGetBot := getBotFn
-	origBotReady := botReadyFn
-	origNewRunner := newChatRunnerFn
-	origConfig := config
-
-	getBotFn = func(network string) *Bot {
+	mockGetBot := func(network string) *Bot {
 		if network == "testnet" {
 			return &Bot{Client: mb.client, Network: mb.network}
 		}
 		return nil
 	}
 
-	botReadyFn = func(network, channel string) bool {
+	mockBotReady := func(network, channel string) bool {
 		return network == "testnet"
 	}
 
-	newChatRunnerFn = func(network Network, client *girc.Client, cfg AIConfig, _ context.Context, _ chan<- string) chatRunnerInterface {
+	mockNewRunner := func(network Network, client *girc.Client, cfg AIConfig, _ context.Context, _ chan<- string) chatRunnerInterface {
 		return &mockChatRunner{
 			runTurnFn: func(messages []ChatMessage) ([]ChatMessage, bool) {
 				return messages, true
@@ -98,6 +93,16 @@ func setupMockDeps(t *testing.T) *mockBot {
 		}
 	}
 
+	if queueMgr != nil {
+		queueMgr.botReady = mockBotReady
+		queueMgr.getBot = mockGetBot
+	}
+	if asyncJobMgr != nil {
+		asyncJobMgr.getBot = mockGetBot
+		asyncJobMgr.newChatRunner = mockNewRunner
+	}
+
+	configMu.Lock()
 	config = Config{
 		Commands: Commands{
 			Chats: map[string]AIConfig{
@@ -105,13 +110,7 @@ func setupMockDeps(t *testing.T) *mockBot {
 			},
 		},
 	}
-
-	t.Cleanup(func() {
-		getBotFn = origGetBot
-		botReadyFn = origBotReady
-		newChatRunnerFn = origNewRunner
-		config = origConfig
-	})
+	configMu.Unlock()
 
 	return mb
 }
@@ -467,8 +466,8 @@ func TestDeliverAsyncResult_UsesMockRunner(t *testing.T) {
 	completePendingJob("job-1", "result data")
 
 	var runner *mockChatRunner
-	origNewRunner := newChatRunnerFn
-	newChatRunnerFn = func(network Network, client *girc.Client, c AIConfig, _ context.Context, _ chan<- string) chatRunnerInterface {
+	origNewRunner := asyncJobMgr.newChatRunner
+	asyncJobMgr.newChatRunner = func(network Network, client *girc.Client, c AIConfig, _ context.Context, _ chan<- string) chatRunnerInterface {
 		runner = &mockChatRunner{
 			runTurnFn: func(messages []ChatMessage) ([]ChatMessage, bool) {
 				return messages, true
@@ -476,7 +475,7 @@ func TestDeliverAsyncResult_UsesMockRunner(t *testing.T) {
 		}
 		return runner
 	}
-	defer func() { newChatRunnerFn = origNewRunner }()
+	defer func() { asyncJobMgr.newChatRunner = origNewRunner }()
 
 	entry := &jobEntry[asyncJobPayload]{
 		jobID: "job-1", payload: asyncJobPayload{sessionID: sid},
@@ -506,8 +505,8 @@ func TestDeliverAsyncResult_RunnerSeesInjectedResult(t *testing.T) {
 	completePendingJob("job-1", "image url: http://example.com/img.png")
 
 	var receivedMessages []ChatMessage
-	origNewRunner := newChatRunnerFn
-	newChatRunnerFn = func(network Network, client *girc.Client, c AIConfig, _ context.Context, _ chan<- string) chatRunnerInterface {
+	origNewRunner := asyncJobMgr.newChatRunner
+	asyncJobMgr.newChatRunner = func(network Network, client *girc.Client, c AIConfig, _ context.Context, _ chan<- string) chatRunnerInterface {
 		return &mockChatRunner{
 			runTurnFn: func(messages []ChatMessage) ([]ChatMessage, bool) {
 				receivedMessages = messages
@@ -515,7 +514,7 @@ func TestDeliverAsyncResult_RunnerSeesInjectedResult(t *testing.T) {
 			},
 		}
 	}
-	defer func() { newChatRunnerFn = origNewRunner }()
+	defer func() { asyncJobMgr.newChatRunner = origNewRunner }()
 
 	entry := &jobEntry[asyncJobPayload]{
 		jobID: "job-1", payload: asyncJobPayload{sessionID: sid},
@@ -552,8 +551,8 @@ func TestDeliverAsyncResult_MultipleCompletedJobs(t *testing.T) {
 	completePendingJob("job-2", "image 2")
 
 	turnCount := 0
-	origNewRunner := newChatRunnerFn
-	newChatRunnerFn = func(network Network, client *girc.Client, c AIConfig, _ context.Context, _ chan<- string) chatRunnerInterface {
+	origNewRunner := asyncJobMgr.newChatRunner
+	asyncJobMgr.newChatRunner = func(network Network, client *girc.Client, c AIConfig, _ context.Context, _ chan<- string) chatRunnerInterface {
 		return &mockChatRunner{
 			runTurnFn: func(messages []ChatMessage) ([]ChatMessage, bool) {
 				turnCount++
@@ -561,7 +560,7 @@ func TestDeliverAsyncResult_MultipleCompletedJobs(t *testing.T) {
 			},
 		}
 	}
-	defer func() { newChatRunnerFn = origNewRunner }()
+	defer func() { asyncJobMgr.newChatRunner = origNewRunner }()
 
 	entry := &jobEntry[asyncJobPayload]{
 		jobID: "job-1", payload: asyncJobPayload{sessionID: sid},
@@ -941,7 +940,6 @@ func TestRecoverPendingJobs_NoDB(t *testing.T) {
 func TestRegisterAsyncJob_Duplicate(t *testing.T) {
 	setupTestJobManager(t)
 	asyncJobMgr.ctx, asyncJobMgr.cancel = context.WithCancel(context.Background())
-	defer asyncJobMgr.cancel()
 
 	registerAsyncJob("dup-job", 1, "tool", "server", "net", "#chan", "user", 0)
 	registerAsyncJob("dup-job", 1, "tool", "server", "net", "#chan", "user", 0)
@@ -950,6 +948,9 @@ func TestRegisterAsyncJob_Duplicate(t *testing.T) {
 	count := len(asyncJobMgr.jobs)
 	asyncJobMgr.mu.Unlock()
 	assert.Equal(t, 1, count, "expected 1 job (duplicate should be ignored)")
+
+	asyncJobMgr.cancel()
+	asyncJobMgr.wg.Wait()
 }
 
 func TestSwitchToSession_DBMessagesWithToolCalls(t *testing.T) {
@@ -1038,8 +1039,8 @@ func TestDeliverAsyncResult_RunningDuringTurn(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 
-	origNewRunner := newChatRunnerFn
-	newChatRunnerFn = func(network Network, client *girc.Client, c AIConfig, _ context.Context, _ chan<- string) chatRunnerInterface {
+	origNewRunner := asyncJobMgr.newChatRunner
+	asyncJobMgr.newChatRunner = func(network Network, client *girc.Client, c AIConfig, _ context.Context, _ chan<- string) chatRunnerInterface {
 		return &mockChatRunner{
 			runTurnFn: func(messages []ChatMessage) ([]ChatMessage, bool) {
 				runningDuringTurn = queueMgr.IsRunning("testnet", "#test", ensureTestUser(t, "testnet", "testuser"))
@@ -1048,7 +1049,7 @@ func TestDeliverAsyncResult_RunningDuringTurn(t *testing.T) {
 			},
 		}
 	}
-	defer func() { newChatRunnerFn = origNewRunner }()
+	defer func() { asyncJobMgr.newChatRunner = origNewRunner }()
 
 	entry := &jobEntry[asyncJobPayload]{
 		jobID: "job-1", payload: asyncJobPayload{sessionID: sid},

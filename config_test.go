@@ -7,6 +7,7 @@ import (
 	"text/template"
 	"time"
 
+	logxi "github.com/mgutz/logxi/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -465,8 +466,8 @@ func TestSystemPromptTemplateValidation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tmpl, err := template.New("test").Parse(tt.templateStr)
 			require.NoError(t, err, "failed to parse template")
-			err = validateSystemPromptTemplate(tmpl)
-			assert.Equal(t, tt.wantErr, err != nil, "validateSystemPromptTemplate() error")
+			err = validateTemplate(tmpl)
+			assert.Equal(t, tt.wantErr, err != nil, "validateTemplate() error")
 		})
 	}
 }
@@ -1445,4 +1446,66 @@ system = "test"
 	assert.Equal(t, []string{"ban_user"}, chat.DisabledBuiltinTools, "command should inherit root→service→command disabled_builtin_tools")
 	assert.Equal(t, []string{"wait_for_job", "cancel_job"}, chat.HiddenMCPTools, "command should inherit root→service→command hidden_mcp_tools")
 	assert.Equal(t, []string{"img-async-management"}, chat.HiddenMCPToolSets, "command should inherit root→service→command hidden_mcp_tool_sets")
+}
+
+func TestRegisterCommandsLocked_InvalidRegex(t *testing.T) {
+	if logger == nil {
+		logger = logxi.New("test")
+		logger.SetLevel(logxi.LevelAll)
+	}
+
+	t.Run("invalid completions regex returns error", func(t *testing.T) {
+		cmds := Commands{
+			Completions: map[string]AIConfig{
+				"bad": {Regex: "[invalid"},
+			},
+		}
+		err := registerCommandsLocked(cmds)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid regex for completions command")
+		assert.Contains(t, err.Error(), "[invalid")
+	})
+
+	t.Run("invalid chats regex returns error", func(t *testing.T) {
+		cmds := Commands{
+			Chats: map[string]AIConfig{
+				"bad": {Regex: "(?P<name"},
+			},
+		}
+		err := registerCommandsLocked(cmds)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid regex for chats command")
+	})
+
+	t.Run("invalid tools regex returns error", func(t *testing.T) {
+		cmds := Commands{
+			Tools: map[string]MCPCommandConfig{
+				"bad": {Regex: "[a-z", MCP: "test", Tool: "test"},
+			},
+		}
+		err := registerCommandsLocked(cmds)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid regex for tools command")
+	})
+
+	t.Run("valid regex does not return error", func(t *testing.T) {
+		cmds := Commands{
+			Completions: map[string]AIConfig{
+				"ok": {Regex: `test\d+`},
+			},
+		}
+		err := registerCommandsLocked(cmds)
+		require.NoError(t, err)
+	})
+
+	t.Run("error does not mutate configCmds", func(t *testing.T) {
+		orig := configCmds
+		cmds := Commands{
+			Chats: map[string]AIConfig{
+				"bad": {Regex: "[invalid"},
+			},
+		}
+		_ = registerCommandsLocked(cmds)
+		assert.Equal(t, orig, configCmds, "configCmds should not be mutated on error")
+	})
 }

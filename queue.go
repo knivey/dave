@@ -495,7 +495,7 @@ func (qm *QueueManager) runJob(item *QueueItem) {
 				loggerQM.Error("execute panicked", "id", item.ID, "error", r)
 				n := getNotices()
 				select {
-				case item.outputCh <- errorMsg(expandNotice(n.DB.InternalError, map[string]string{"error": fmt.Sprintf("%v", r)})):
+				case item.outputCh <- errorNotice(n.DB.InternalError, map[string]string{"error": fmt.Sprintf("%v", r)}):
 				case <-item.ctx.Done():
 				default:
 				}

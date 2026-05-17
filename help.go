@@ -177,7 +177,7 @@ func help(network Network, client *girc.Client, event girc.Event, ctx context.Co
 			n := getNotices()
 			if err != nil {
 				select {
-				case output <- errorMsg(expandNotice(n.DB.PastebinUpload, map[string]string{"error": err.Error()})):
+				case output <- errorNotice(n.DB.PastebinUpload, map[string]string{"error": err.Error()}):
 				case <-ctx.Done():
 					return
 				}

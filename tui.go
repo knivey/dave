@@ -18,6 +18,8 @@ import (
 )
 
 var (
+	tuiDBNotAvailable = "[red]Database not available[white]\n"
+
 	tuiApp       *tview.Application
 	logView      *tview.TextView
 	statusBar    *tview.TextView
@@ -616,7 +618,7 @@ func handleTUICommand(text string) {
 			break
 		}
 		if theDB == nil {
-			fmt.Fprintf(logView, "[red]Database not available[white]\n")
+			fmt.Fprint(logView, tuiDBNotAvailable)
 			break
 		}
 		parts = strings.SplitN(text, " ", 5)
@@ -657,7 +659,7 @@ func handleTUICommand(text string) {
 			break
 		}
 		if theDB == nil {
-			fmt.Fprintf(logView, "[red]Database not available[white]\n")
+			fmt.Fprint(logView, tuiDBNotAvailable)
 			break
 		}
 		network, unbanNick := parts[1], parts[2]
@@ -674,7 +676,7 @@ func handleTUICommand(text string) {
 		fmt.Fprintf(logView, "[green]Unbanned %s on %s[white]\n", unbanNick, network)
 	case "/bans":
 		if theDB == nil {
-			fmt.Fprintf(logView, "[red]Database not available[white]\n")
+			fmt.Fprint(logView, tuiDBNotAvailable)
 			break
 		}
 		network := ""
@@ -713,7 +715,7 @@ func handleTUICommand(text string) {
 			break
 		}
 		if theDB == nil {
-			fmt.Fprintf(logView, "[red]Database not available[white]\n")
+			fmt.Fprint(logView, tuiDBNotAvailable)
 			break
 		}
 		network, histNick := parts[1], parts[2]
@@ -750,7 +752,7 @@ func handleTUICommand(text string) {
 			break
 		}
 		if theDB == nil {
-			fmt.Fprintf(logView, "[red]Database not available[white]\n")
+			fmt.Fprint(logView, tuiDBNotAvailable)
 			break
 		}
 		network, userRef := parts[1], parts[2]
@@ -790,7 +792,7 @@ func handleTUICommand(text string) {
 			break
 		}
 		if theDB == nil {
-			fmt.Fprintf(logView, "[red]Database not available[white]\n")
+			fmt.Fprint(logView, tuiDBNotAvailable)
 			break
 		}
 		network, query := parts[1], parts[2]
@@ -823,7 +825,7 @@ func handleTUICommand(text string) {
 			break
 		}
 		if theDB == nil {
-			fmt.Fprintf(logView, "[red]Database not available[white]\n")
+			fmt.Fprint(logView, tuiDBNotAvailable)
 			break
 		}
 		ghostID, err := strconv.ParseInt(parts[1], 10, 64)
@@ -891,7 +893,7 @@ func handleTUICommand(text string) {
 			break
 		}
 		if theDB == nil {
-			fmt.Fprintf(logView, "[red]Database not available[white]\n")
+			fmt.Fprint(logView, tuiDBNotAvailable)
 			break
 		}
 		network, userRef := parts[1], parts[2]
@@ -970,7 +972,7 @@ func handleTUICommand(text string) {
 			break
 		}
 		if theDB == nil {
-			fmt.Fprintf(logView, "[red]Database not available[white]\n")
+			fmt.Fprint(logView, tuiDBNotAvailable)
 			break
 		}
 		network, userRef := parts[1], parts[2]

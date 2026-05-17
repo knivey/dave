@@ -35,6 +35,14 @@ type ChatMessage struct {
 	Name             string
 }
 
+func toolResultMsg(callID, content string) ChatMessage {
+	return ChatMessage{
+		Role:       RoleTool,
+		Content:    content,
+		ToolCallID: callID,
+	}
+}
+
 type MessagePart struct {
 	Type     string
 	Text     string

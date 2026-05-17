@@ -16,6 +16,14 @@ import (
 
 var theDB *gorm.DB
 
+const (
+	StatusActive    = "active"
+	StatusCompleted = "completed"
+	StatusPending   = "pending"
+	StatusRunning   = "running"
+	StatusDelivered = "delivered"
+)
+
 type DatabaseConfig struct {
 	Driver     string `toml:"driver"`
 	Path       string `toml:"path"`
@@ -341,10 +349,10 @@ func insertDBTurnUsage(sessionID int64, usage *Usage, finishReason, apiPath stri
 
 func completeDBOrphanedSessions() (int64, error) {
 	result := theDB.Model(&Session{}).
-		Where("status = ? AND id NOT IN (?)", "active",
-			theDB.Model(&Session{}).Select("MAX(id)").Where("status = ?", "active").Group("network, channel, user_id"),
+		Where("status = ? AND id NOT IN (?)", StatusActive,
+			theDB.Model(&Session{}).Select("MAX(id)").Where("status = ?", StatusActive).Group("network, channel, user_id"),
 		).
-		Update("status", "completed")
+		Update("status", StatusCompleted)
 	return result.RowsAffected, result.Error
 }
 
@@ -454,8 +462,8 @@ func getLastTurnUsageForSession(sessionID int64) (*TurnUsage, error) {
 func cleanupDBSessions(maxAgeDays int) (int64, error) {
 	cutoff := time.Now().AddDate(0, 0, -maxAgeDays)
 	result := theDB.Model(&Session{}).
-		Where("status = ? AND last_active < ?", "active", cutoff).
-		Update("status", "completed")
+		Where("status = ? AND last_active < ?", StatusActive, cutoff).
+		Update("status", StatusCompleted)
 	return result.RowsAffected, result.Error
 }
 
@@ -534,7 +542,7 @@ func createPendingJob(sessionID int64, jobID, toolName, mcpServer string) error 
 		JobID:     jobID,
 		ToolName:  toolName,
 		MCPServer: mcpServer,
-		Status:    "pending",
+		Status:    StatusPending,
 	}
 	return theDB.Create(&job).Error
 }
@@ -542,23 +550,23 @@ func createPendingJob(sessionID int64, jobID, toolName, mcpServer string) error 
 func completePendingJob(jobID, resultText string) error {
 	now := time.Now()
 	return theDB.Model(&PendingJob{}).Where("job_id = ?", jobID).
-		Updates(map[string]interface{}{"status": "completed", "result": resultText, "completed_at": &now}).Error
+		Updates(map[string]interface{}{"status": StatusCompleted, "result": resultText, "completed_at": &now}).Error
 }
 
 func markPendingJobDelivered(jobID string) error {
 	return theDB.Model(&PendingJob{}).Where("job_id = ?", jobID).
-		Update("status", "delivered").Error
+		Update("status", StatusDelivered).Error
 }
 
 func deliverInlinePendingJob(jobID, resultText string) error {
 	now := time.Now()
-	return theDB.Model(&PendingJob{}).Where("job_id = ? AND status = ?", jobID, "pending").
-		Updates(map[string]interface{}{"status": "delivered", "result": resultText, "completed_at": &now}).Error
+	return theDB.Model(&PendingJob{}).Where("job_id = ? AND status = ?", jobID, StatusPending).
+		Updates(map[string]interface{}{"status": StatusDelivered, "result": resultText, "completed_at": &now}).Error
 }
 
 func getCompletedPendingJobs(sessionID int64) ([]PendingJob, error) {
 	var jobs []PendingJob
-	err := theDB.Where("session_id = ? AND status = ?", sessionID, "completed").
+	err := theDB.Where("session_id = ? AND status = ?", sessionID, StatusCompleted).
 		Order("completed_at ASC").Find(&jobs).Error
 	return jobs, err
 }
@@ -567,7 +575,7 @@ func getPendingJobsForUser(network, channel string, userID int64) ([]PendingJob,
 	var jobs []PendingJob
 	err := theDB.Joins("JOIN sessions ON sessions.id = pending_jobs.session_id AND sessions.deleted_at IS NULL").
 		Where("sessions.network = ? AND sessions.channel = ? AND sessions.user_id = ?", network, channel, userID).
-		Where("pending_jobs.status IN ?", []string{"pending", "running", "completed"}).
+		Where("pending_jobs.status IN ?", []string{StatusPending, StatusRunning, StatusCompleted}).
 		Order("pending_jobs.created_at DESC").
 		Find(&jobs).Error
 	return jobs, err
@@ -575,7 +583,7 @@ func getPendingJobsForUser(network, channel string, userID int64) ([]PendingJob,
 
 func getPendingJobsForRecovery() ([]PendingJob, error) {
 	var jobs []PendingJob
-	err := theDB.Where("status IN ? AND session_id IS NOT NULL", []string{"pending", "running"}).
+	err := theDB.Where("status IN ? AND session_id IS NOT NULL", []string{StatusPending, StatusRunning}).
 		Find(&jobs).Error
 	return jobs, err
 }
@@ -585,7 +593,7 @@ func createToolPendingJob(jobID, toolName, mcpServer, network, channel, nick str
 		JobID:     jobID,
 		ToolName:  toolName,
 		MCPServer: mcpServer,
-		Status:    "pending",
+		Status:    StatusPending,
 		Network:   &network,
 		Channel:   &channel,
 		Nick:      &nick,
@@ -597,12 +605,12 @@ func createToolPendingJob(jobID, toolName, mcpServer, network, channel, nick str
 func completeToolPendingJob(jobID, resultText string) error {
 	now := time.Now()
 	return theDB.Model(&PendingJob{}).Where("job_id = ?", jobID).
-		Updates(map[string]interface{}{"status": "completed", "result": resultText, "completed_at": &now}).Error
+		Updates(map[string]interface{}{"status": StatusCompleted, "result": resultText, "completed_at": &now}).Error
 }
 
 func getToolPendingJobsForRecovery() ([]PendingJob, error) {
 	var jobs []PendingJob
-	err := theDB.Where("status IN ? AND session_id IS NULL", []string{"pending", "running"}).
+	err := theDB.Where("status IN ? AND session_id IS NULL", []string{StatusPending, StatusRunning}).
 		Find(&jobs).Error
 	return jobs, err
 }
@@ -688,8 +696,8 @@ func cloneDBSession(sourceSessionID int64, targetNetwork, targetChannel string, 
 
 	if err := tx.Model(&Session{}).
 		Where("network = ? AND channel = ? AND user_id = ? AND status = ?",
-			targetNetwork, targetChannel, targetUserID, "active").
-		Update("status", "completed").Error; err != nil {
+			targetNetwork, targetChannel, targetUserID, StatusActive).
+		Update("status", StatusCompleted).Error; err != nil {
 		return 0, fmt.Errorf("complete existing active session: %w", err)
 	}
 
@@ -703,7 +711,7 @@ func cloneDBSession(sourceSessionID int64, targetNetwork, targetChannel string, 
 		ResponseID:  nil,
 		Service:     source.Service,
 		Model:       source.Model,
-		Status:      "active",
+		Status:      StatusActive,
 		SettingsID:  newSettingsID,
 	}
 	if err := tx.Create(&newSession).Error; err != nil {

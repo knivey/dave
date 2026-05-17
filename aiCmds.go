@@ -633,7 +633,7 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 						url, err := uploadToPastebin(rawText, pasteTitle)
 						n := getNotices()
 						if err != nil {
-							cr.sendIRC(errorMsg(expandNotice(n.DB.PastebinUpload, map[string]string{"error": err.Error()})))
+							cr.sendIRC(errorNotice(n.DB.PastebinUpload, map[string]string{"error": err.Error()}))
 							preview := chCfg.GetMaxLines()
 							if preview > len(lines) {
 								preview = len(lines)
@@ -693,9 +693,9 @@ func (cr *chatRunner) executeToolCalls(messages []ChatMessage, toolCalls []ToolC
 	registeredJob := false
 
 	var hiddenTools []string
-	readConfig(func() { hiddenTools = config.HiddenTools })
 	var hiddenMCPTools []string
 	readConfig(func() {
+		hiddenTools = config.HiddenTools
 		hiddenMCPTools = cr.cfg.resolveHiddenMCPTools(config.MCPToolSets)
 	})
 	verbose := cr.cfg.ToolVerbose == nil || *cr.cfg.ToolVerbose
@@ -726,11 +726,7 @@ func (cr *chatRunner) executeToolCalls(messages []ChatMessage, toolCalls []ToolC
 	for _, tc := range toolCalls {
 		if entry, ok := builtinTools[tc.Function.Name]; ok {
 			if isToolDisabled(tc.Function.Name, cr.cfg.DisabledBuiltinTools) {
-				toolMsg := ChatMessage{
-					Role:       RoleTool,
-					Content:    fmt.Sprintf("error: tool %q is disabled for this command", tc.Function.Name),
-					ToolCallID: tc.ID,
-				}
+				toolMsg := toolResultMsg(tc.ID, fmt.Sprintf("error: tool %q is disabled for this command", tc.Function.Name))
 				messages = append(messages, toolMsg)
 				cr.addContext(toolMsg)
 				continue
@@ -748,11 +744,7 @@ func (cr *chatRunner) executeToolCalls(messages []ChatMessage, toolCalls []ToolC
 		}
 		serverName := getMCPServerForTool(tc.Function.Name)
 		if isMCPToolHidden(tc.Function.Name, serverName, hiddenMCPTools) {
-			toolMsg := ChatMessage{
-				Role:       RoleTool,
-				Content:    fmt.Sprintf("error: tool %q is hidden for this command", tc.Function.Name),
-				ToolCallID: tc.ID,
-			}
+			toolMsg := toolResultMsg(tc.ID, fmt.Sprintf("error: tool %q is hidden for this command", tc.Function.Name))
 			messages = append(messages, toolMsg)
 			cr.addContext(toolMsg)
 			continue
@@ -764,22 +756,14 @@ func (cr *chatRunner) executeToolCalls(messages []ChatMessage, toolCalls []ToolC
 		json.Unmarshal([]byte(tc.Function.Arguments), &toolArgs)
 		result, err := callMCPToolWithContext(cr.ctx, tc.Function.Name, toolArgs)
 		if err != nil {
-			toolMsg := ChatMessage{
-				Role:       RoleTool,
-				Content:    "error: " + err.Error(),
-				ToolCallID: tc.ID,
-			}
+			toolMsg := toolResultMsg(tc.ID, "error: "+err.Error())
 			messages = append(messages, toolMsg)
 			cr.addContext(toolMsg)
 			continue
 		}
 		toolText := mcpToolResultToText(result)
 		cr.logger.Info("MCP tool result", "tool", tc.Function.Name, "result", toolText)
-		toolMsg := ChatMessage{
-			Role:       RoleTool,
-			Content:    toolText,
-			ToolCallID: tc.ID,
-		}
+		toolMsg := toolResultMsg(tc.ID, toolText)
 		messages = append(messages, toolMsg)
 		cr.addContext(toolMsg)
 	}
@@ -793,22 +777,14 @@ func (cr *chatRunner) handleRegisterBackgroundJob(messages []ChatMessage, tc Too
 		ServerName string `json:"server_name"`
 	}
 	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-		toolMsg := ChatMessage{
-			Role:       RoleTool,
-			Content:    "error: failed to parse arguments: " + err.Error(),
-			ToolCallID: tc.ID,
-		}
+		toolMsg := toolResultMsg(tc.ID, "error: failed to parse arguments: "+err.Error())
 		messages = append(messages, toolMsg)
 		cr.addContext(toolMsg)
 		return messages
 	}
 
 	if args.JobID == "" || args.ToolName == "" || args.ServerName == "" {
-		toolMsg := ChatMessage{
-			Role:       RoleTool,
-			Content:    "error: job_id, tool_name, and server_name are required",
-			ToolCallID: tc.ID,
-		}
+		toolMsg := toolResultMsg(tc.ID, "error: job_id, tool_name, and server_name are required")
 		messages = append(messages, toolMsg)
 		cr.addContext(toolMsg)
 		return messages
@@ -818,11 +794,7 @@ func (cr *chatRunner) handleRegisterBackgroundJob(messages []ChatMessage, tc Too
 	_, alreadyRegistered := jobMgr.jobs[args.JobID]
 	jobMgr.mu.Unlock()
 	if alreadyRegistered {
-		toolMsg := ChatMessage{
-			Role:       RoleTool,
-			Content:    "Job already registered and being monitored.",
-			ToolCallID: tc.ID,
-		}
+		toolMsg := toolResultMsg(tc.ID, "Job already registered and being monitored.")
 		messages = append(messages, toolMsg)
 		cr.addContext(toolMsg)
 		return messages
@@ -831,11 +803,7 @@ func (cr *chatRunner) handleRegisterBackgroundJob(messages []ChatMessage, tc Too
 	cr.logger.Info("registering background job", "job_id", args.JobID, "tool", args.ToolName, "server", args.ServerName)
 
 	if cr.sessionID == 0 {
-		toolMsg := ChatMessage{
-			Role:       RoleTool,
-			Content:    "error: no active session to register job against",
-			ToolCallID: tc.ID,
-		}
+		toolMsg := toolResultMsg(tc.ID, "error: no active session to register job against")
 		messages = append(messages, toolMsg)
 		cr.addContext(toolMsg)
 		return messages
@@ -843,11 +811,7 @@ func (cr *chatRunner) handleRegisterBackgroundJob(messages []ChatMessage, tc Too
 
 	if err := createPendingJob(cr.sessionID, args.JobID, args.ToolName, args.ServerName); err != nil {
 		cr.logger.Error("failed to create pending job", "error", err)
-		toolMsg := ChatMessage{
-			Role:       RoleTool,
-			Content:    "error: failed to register job: " + err.Error(),
-			ToolCallID: tc.ID,
-		}
+		toolMsg := toolResultMsg(tc.ID, "error: failed to register job: "+err.Error())
 		messages = append(messages, toolMsg)
 		cr.addContext(toolMsg)
 		return messages
@@ -857,32 +821,20 @@ func (cr *chatRunner) handleRegisterBackgroundJob(messages []ChatMessage, tc Too
 	if job != nil {
 		select {
 		case resultText := <-job.inlineResultCh:
-			toolMsg := ChatMessage{
-				Role:       RoleTool,
-				Content:    resultText,
-				ToolCallID: tc.ID,
-			}
+			toolMsg := toolResultMsg(tc.ID, resultText)
 			messages = append(messages, toolMsg)
 			cr.addContext(toolMsg)
 			return messages
 		case <-time.After(500 * time.Millisecond):
 		case <-cr.ctx.Done():
-			toolMsg := ChatMessage{
-				Role:       RoleTool,
-				Content:    "error: context cancelled while waiting for job result",
-				ToolCallID: tc.ID,
-			}
+			toolMsg := toolResultMsg(tc.ID, "error: context cancelled while waiting for job result")
 			messages = append(messages, toolMsg)
 			cr.addContext(toolMsg)
 			return messages
 		}
 	}
 
-	toolMsg := ChatMessage{
-		Role:       RoleTool,
-		Content:    "Job registered. You will receive the result when it completes.",
-		ToolCallID: tc.ID,
-	}
+	toolMsg := toolResultMsg(tc.ID, "Job registered. You will receive the result when it completes.")
 	messages = append(messages, toolMsg)
 	cr.addContext(toolMsg)
 	return messages
@@ -894,35 +846,19 @@ func (cr *chatRunner) handleBanUser(messages []ChatMessage, tc ToolCall) []ChatM
 		Duration string `json:"duration"`
 	}
 	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-		return append(messages, ChatMessage{
-			Role:       RoleTool,
-			Content:    fmt.Sprintf("error: failed to parse arguments: %s", err),
-			ToolCallID: tc.ID,
-		})
+		return append(messages, toolResultMsg(tc.ID, fmt.Sprintf("error: failed to parse arguments: %s", err)))
 	}
 
 	if cr.userID == 0 {
-		return append(messages, ChatMessage{
-			Role:       RoleTool,
-			Content:    "Cannot ban: no user associated with this conversation.",
-			ToolCallID: tc.ID,
-		})
+		return append(messages, toolResultMsg(tc.ID, "Cannot ban: no user associated with this conversation."))
 	}
 
 	user, err := getUserByID(cr.userID)
 	if err != nil {
-		return append(messages, ChatMessage{
-			Role:       RoleTool,
-			Content:    fmt.Sprintf("Error looking up user: %s", err),
-			ToolCallID: tc.ID,
-		})
+		return append(messages, toolResultMsg(tc.ID, fmt.Sprintf("Error looking up user: %s", err)))
 	}
 	if user == nil {
-		return append(messages, ChatMessage{
-			Role:       RoleTool,
-			Content:    "Cannot ban: user not found.",
-			ToolCallID: tc.ID,
-		})
+		return append(messages, toolResultMsg(tc.ID, "Cannot ban: user not found."))
 	}
 
 	var maxDur, defaultDur time.Duration
@@ -942,11 +878,7 @@ func (cr *chatRunner) handleBanUser(messages []ChatMessage, tc ToolCall) []ChatM
 	if args.Duration != "" {
 		parsed, err := parseBanDuration(args.Duration)
 		if err != nil {
-			return append(messages, ChatMessage{
-				Role:       RoleTool,
-				Content:    fmt.Sprintf("Invalid duration format: %s. Use formats like '5m', '30m', '1h', '6h'.", args.Duration),
-				ToolCallID: tc.ID,
-			})
+			return append(messages, toolResultMsg(tc.ID, fmt.Sprintf("Invalid duration format: %s. Use formats like '5m', '30m', '1h', '6h'.", args.Duration)))
 		}
 		duration = parsed
 	}
@@ -962,11 +894,7 @@ func (cr *chatRunner) handleBanUser(messages []ChatMessage, tc ToolCall) []ChatM
 
 	_, err = createBan(theDB, user.ID, cr.network.Name, cr.channel, "", args.Reason, duration, bannerUserID, cr.network.Nick+":"+cr.cfg.Name)
 	if err != nil {
-		return append(messages, ChatMessage{
-			Role:       RoleTool,
-			Content:    fmt.Sprintf("Failed to create ban: %s", err),
-			ToolCallID: tc.ID,
-		})
+		return append(messages, toolResultMsg(tc.ID, fmt.Sprintf("Failed to create ban: %s", err)))
 	}
 
 	accountInfo := ""
@@ -974,53 +902,29 @@ func (cr *chatRunner) handleBanUser(messages []ChatMessage, tc ToolCall) []ChatM
 		accountInfo = " (has account, strong ban)"
 	}
 
-	return append(messages, ChatMessage{
-		Role:       RoleTool,
-		Content:    fmt.Sprintf("User %s (id: %d) banned for %s: %s%s", displayNick(user), user.ID, formatDuration(duration), args.Reason, accountInfo),
-		ToolCallID: tc.ID,
-	})
+	return append(messages, toolResultMsg(tc.ID, fmt.Sprintf("User %s (id: %d) banned for %s: %s%s", displayNick(user), user.ID, formatDuration(duration), args.Reason, accountInfo)))
 }
 
 func (cr *chatRunner) handleCheckBanHistory(messages []ChatMessage, tc ToolCall) []ChatMessage {
 	if cr.userID == 0 {
-		return append(messages, ChatMessage{
-			Role:       RoleTool,
-			Content:    "Cannot look up ban history: no user associated with this conversation.",
-			ToolCallID: tc.ID,
-		})
+		return append(messages, toolResultMsg(tc.ID, "Cannot look up ban history: no user associated with this conversation."))
 	}
 
 	user, err := getUserByID(cr.userID)
 	if err != nil {
-		return append(messages, ChatMessage{
-			Role:       RoleTool,
-			Content:    fmt.Sprintf("Error looking up user: %s", err),
-			ToolCallID: tc.ID,
-		})
+		return append(messages, toolResultMsg(tc.ID, fmt.Sprintf("Error looking up user: %s", err)))
 	}
 	if user == nil {
-		return append(messages, ChatMessage{
-			Role:       RoleTool,
-			Content:    "Cannot look up ban history: user not found.",
-			ToolCallID: tc.ID,
-		})
+		return append(messages, toolResultMsg(tc.ID, "Cannot look up ban history: user not found."))
 	}
 
 	bans, err := getBanHistory(theDB, user.ID)
 	if err != nil {
-		return append(messages, ChatMessage{
-			Role:       RoleTool,
-			Content:    fmt.Sprintf("Error fetching ban history: %s", err),
-			ToolCallID: tc.ID,
-		})
+		return append(messages, toolResultMsg(tc.ID, fmt.Sprintf("Error fetching ban history: %s", err)))
 	}
 
 	if len(bans) == 0 {
-		return append(messages, ChatMessage{
-			Role:       RoleTool,
-			Content:    fmt.Sprintf("User %s has no ban history.", displayNick(user)),
-			ToolCallID: tc.ID,
-		})
+		return append(messages, toolResultMsg(tc.ID, fmt.Sprintf("User %s has no ban history.", displayNick(user))))
 	}
 
 	var lines []string
@@ -1033,11 +937,7 @@ func (cr *chatRunner) handleCheckBanHistory(messages []ChatMessage, tc ToolCall)
 		lines = append(lines, fmt.Sprintf("#%d [%s] %s (%s) by %s, %s ago", b.ID, status, b.Reason, formatDuration(b.Duration), b.BannerNick, ago))
 	}
 
-	return append(messages, ChatMessage{
-		Role:       RoleTool,
-		Content:    fmt.Sprintf("Ban history for %s:\n%s", displayNick(user), strings.Join(lines, "\n")),
-		ToolCallID: tc.ID,
-	})
+	return append(messages, toolResultMsg(tc.ID, fmt.Sprintf("Ban history for %s:\n%s", displayNick(user), strings.Join(lines, "\n"))))
 }
 
 func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, bool) {
@@ -1255,7 +1155,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 						url, err := uploadToPastebin(rawText, pasteTitle)
 						n := getNotices()
 						if err != nil {
-							cr.sendIRC(errorMsg(expandNotice(n.DB.PastebinUpload, map[string]string{"error": err.Error()})))
+							cr.sendIRC(errorNotice(n.DB.PastebinUpload, map[string]string{"error": err.Error()}))
 							preview := chCfg.GetMaxLines()
 							if preview > len(lines) {
 								preview = len(lines)

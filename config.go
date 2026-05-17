@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"text/template"
 	"time"
@@ -275,13 +276,7 @@ type SystemPromptData struct {
 	Vars      map[string]string
 }
 
-func validateSystemPromptTemplate(tmpl *template.Template) error {
-	dummy := SystemPromptData{Nick: "dummy", BotNick: "dummy", Channel: "dummy", Network: "dummy", ChanNicks: `["dummy1","dummy2"]`, Date: "2025-01-01", Vars: map[string]string{"example": "test"}}
-	var buf strings.Builder
-	return tmpl.Execute(&buf, dummy)
-}
-
-func validateAPIUserTemplate(tmpl *template.Template) error {
+func validateTemplate(tmpl *template.Template) error {
 	dummy := SystemPromptData{Nick: "dummy", BotNick: "dummy", Channel: "dummy", Network: "dummy", ChanNicks: `["dummy1","dummy2"]`, Date: "2025-01-01", Vars: map[string]string{"example": "test"}}
 	var buf strings.Builder
 	return tmpl.Execute(&buf, dummy)
@@ -651,9 +646,9 @@ func loadTemplateVarsFile(dir string, config *Config) error {
 func loadReloadableDir(dir string, config *Config) error {
 	var tmpConfig Config
 
-	tmpConfig.DisabledBuiltinTools = config.DisabledBuiltinTools
-	tmpConfig.HiddenMCPTools = config.HiddenMCPTools
-	tmpConfig.HiddenMCPToolSets = config.HiddenMCPToolSets
+	tmpConfig.DisabledBuiltinTools = slices.Clone(config.DisabledBuiltinTools)
+	tmpConfig.HiddenMCPTools = slices.Clone(config.HiddenMCPTools)
+	tmpConfig.HiddenMCPToolSets = slices.Clone(config.HiddenMCPToolSets)
 
 	if err := loadMCPsFile(dir, &tmpConfig); err != nil {
 		return err
@@ -718,7 +713,7 @@ func loadCommandsDir(dir string, config *Config) (Commands, error) {
 	return commands, nil
 }
 
-func loadCommandFile(path string, dest interface{}) error {
+func loadCommandFile(path string, dest any) error {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return nil
 	}
@@ -735,15 +730,8 @@ func validateCommands(commands *Commands, config *Config) error {
 		if err := validateMCPRefsFor("completions", name, cfg.MCPs, config); err != nil {
 			return err
 		}
-		if cfg.APIUser != "" {
-			tmpl, err := template.New(name + "_api_user").Parse(cfg.APIUser)
-			if err != nil {
-				return fmt.Errorf("commands.completions.%s api_user template parse error: %w", name, err)
-			}
-			if err := validateAPIUserTemplate(tmpl); err != nil {
-				return fmt.Errorf("commands.completions.%s api_user template validation error: %w", name, err)
-			}
-			cfg.apiUserTmpl = tmpl
+		if err := validateAndSetAPIUserTemplate(&cfg, name, "completions"); err != nil {
+			return err
 		}
 		commands.Completions[name] = cfg
 	}
@@ -780,22 +768,15 @@ func validateCommands(commands *Commands, config *Config) error {
 				return fmt.Errorf("commands.chats.%s system prompt template parse error: %w", name, err)
 			}
 			cfg.SystemTmpl = tmpl
-			if err := validateSystemPromptTemplate(cfg.SystemTmpl); err != nil {
+			if err := validateTemplate(cfg.SystemTmpl); err != nil {
 				return fmt.Errorf("commands.chats.%s system prompt template validation error: %w", name, err)
 			}
 		}
 		if err := validateMCPRefsFor("chats", name, cfg.MCPs, config); err != nil {
 			return err
 		}
-		if cfg.APIUser != "" {
-			tmpl, err := template.New(name + "_api_user").Parse(cfg.APIUser)
-			if err != nil {
-				return fmt.Errorf("commands.chats.%s api_user template parse error: %w", name, err)
-			}
-			if err := validateAPIUserTemplate(tmpl); err != nil {
-				return fmt.Errorf("commands.chats.%s api_user template validation error: %w", name, err)
-			}
-			cfg.apiUserTmpl = tmpl
+		if err := validateAndSetAPIUserTemplate(&cfg, name, "chats"); err != nil {
+			return err
 		}
 		commands.Chats[name] = cfg
 	}
@@ -821,6 +802,21 @@ func validateCommands(commands *Commands, config *Config) error {
 		commands.Tools[name] = cfg
 	}
 
+	return nil
+}
+
+func validateAndSetAPIUserTemplate(cfg *AIConfig, name, section string) error {
+	if cfg.APIUser == "" {
+		return nil
+	}
+	tmpl, err := template.New(name + "_api_user").Parse(cfg.APIUser)
+	if err != nil {
+		return fmt.Errorf("commands.%s.%s api_user template parse error: %w", section, name, err)
+	}
+	if err := validateTemplate(tmpl); err != nil {
+		return fmt.Errorf("commands.%s.%s api_user template validation error: %w", section, name, err)
+	}
+	cfg.apiUserTmpl = tmpl
 	return nil
 }
 

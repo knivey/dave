@@ -553,7 +553,7 @@ func deliverToolAsyncResult(job *toolAsyncJob, resultText string, ctx context.Co
 					}
 				}
 			}
-		} else if waitResult.Status == "completed" {
+		} else if waitResult.Status == StatusCompleted {
 			select {
 			case output <- expandNotice(n.Images.NoImages, map[string]string{"nick": job.Nick}):
 			case <-ctx.Done():

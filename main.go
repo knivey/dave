@@ -153,6 +153,20 @@ func warnMsg(msg string) string {
 	return noticeWarnPrefix.Load().(string) + msg
 }
 
+func errorNotice(tmpl string, vars map[string]string) string {
+	return errorMsg(expandNotice(tmpl, vars))
+}
+
+func extractSubmatchArgs(re *regexp.Regexp, input string) []string {
+	var args []string
+	for i, m := range re.FindSubmatch([]byte(input)) {
+		if i != 0 && len(m) > 0 {
+			args = append(args, string(m))
+		}
+	}
+	return args
+}
+
 var builtInCmds = CmdMap{
 	stop_re: func(n Network, c *girc.Client, e girc.Event, _ context.Context, _ chan<- string, s ...string) {
 		stop(n, c, e, nil, s...)
@@ -217,27 +231,33 @@ func isBuiltinDisabled(name string) bool {
 	return false
 }
 
-func registerCommands(cmds Commands) {
+func registerCommands(cmds Commands) error {
 	commandsMutex.Lock()
 	defer commandsMutex.Unlock()
-	registerCommandsLocked(cmds)
+	return registerCommandsLocked(cmds)
 }
 
-func registerCommandsLocked(cmds Commands) {
+func registerCommandsLocked(cmds Commands) error {
 	newConfigCmds := CmdMap{}
 	newExemptCmds := make(map[*regexp.Regexp]bool)
 	newChatCmds := make(map[*regexp.Regexp]bool)
 
 	for _, c := range cmds.Completions {
 		logger.Debug("added Completions command", c)
-		re := regexp.MustCompile("^" + c.Regex + " (.+)$")
+		re, err := regexp.Compile("^" + c.Regex + " (.+)$")
+		if err != nil {
+			return fmt.Errorf("invalid regex for completions command %q: %w", c.Regex, err)
+		}
 		newConfigCmds[re] = func(network Network, client *girc.Client, e girc.Event, ctx context.Context, output chan<- string, args ...string) {
 			completion(network, client, e, c, ctx, output, args...)
 		}
 	}
 	for _, c := range cmds.Chats {
 		logger.Debug("added Chats command", c)
-		re := regexp.MustCompile("^" + c.Regex + " (.+)$")
+		re, err := regexp.Compile("^" + c.Regex + " (.+)$")
+		if err != nil {
+			return fmt.Errorf("invalid regex for chats command %q: %w", c.Regex, err)
+		}
 		newConfigCmds[re] = func(network Network, client *girc.Client, e girc.Event, ctx context.Context, output chan<- string, args ...string) {
 			chat(network, client, e, c, ctx, output, nil, args...)
 		}
@@ -249,7 +269,10 @@ func registerCommandsLocked(cmds Commands) {
 		if c.Arg != "" {
 			pattern = "^" + c.Regex + " (.+)$"
 		}
-		re := regexp.MustCompile(pattern)
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			return fmt.Errorf("invalid regex for tools command %q: %w", c.Regex, err)
+		}
 		newConfigCmds[re] = func(network Network, client *girc.Client, e girc.Event, ctx context.Context, output chan<- string, args ...string) {
 			mcpCmd(network, client, e, c, ctx, output, args...)
 		}
@@ -261,6 +284,7 @@ func registerCommandsLocked(cmds Commands) {
 	configCmds = newConfigCmds
 	rateExemptCmds = newExemptCmds
 	chatCmds = newChatCmds
+	return nil
 }
 
 func reloadAll() error {
@@ -286,7 +310,9 @@ func reloadAll() error {
 	initAPILogger(config, configDir)
 	initIncidentLogger(config)
 	reloadMCPClients(config.MCPs)
-	registerCommandsLocked(config.Commands)
+	if err := registerCommandsLocked(config.Commands); err != nil {
+		return err
+	}
 	if queueMgr != nil {
 		queueMgr.UpdateServiceLimits(config.Services)
 		queueMgr.UpdateNotices(config.Notices)
@@ -341,7 +367,10 @@ func main() {
 	queueMgr.Start()
 	startJobManager()
 	startToolJobManager()
-	registerCommands(config.Commands)
+	if err := registerCommands(config.Commands); err != nil {
+		fmt.Fprintf(os.Stderr, "error registering commands: %v\n", err)
+		os.Exit(1)
+	}
 
 	ignorePath := filepath.Join(configDir, "ignores.txt")
 	loadIgnores(ignorePath)
@@ -701,14 +730,8 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 	commandsMutex.RLock()
 	for r, cmd := range builtInCmds {
 		if r.Match([]byte(stripped)) {
-			var args []string
-			for i, m := range r.FindSubmatch([]byte(stripped)) {
-				if i != 0 && len(m) > 0 {
-					args = append(args, string(m))
-				}
-			}
 			match = &cmdMatch{
-				cmd: cmd, re: r, args: args,
+				cmd: cmd, re: r, args: extractSubmatchArgs(r, stripped),
 				builtin: true, disabled: isBuiltinDisabled(builtInNames[r]),
 			}
 			break
@@ -717,13 +740,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 	if match == nil {
 		for r, cmd := range configCmds {
 			if r.Match([]byte(stripped)) {
-				var args []string
-				for i, m := range r.FindSubmatch([]byte(stripped)) {
-					if i != 0 && len(m) > 0 {
-						args = append(args, string(m))
-					}
-				}
-				match = &cmdMatch{cmd: cmd, re: r, args: args}
+				match = &cmdMatch{cmd: cmd, re: r, args: extractSubmatchArgs(r, stripped)}
 				break
 			}
 		}

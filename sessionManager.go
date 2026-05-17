@@ -49,7 +49,7 @@ func NewSessionManager(db *gorm.DB) *SessionManager {
 func (sm *SessionManager) GetActiveSession(network, channel string, userID int64) (*Session, error) {
 	var session Session
 	err := sm.db.Where("network = ? AND channel = ? AND user_id = ? AND status = ?",
-		network, channel, userID, "active").First(&session).Error
+		network, channel, userID, StatusActive).First(&session).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
@@ -67,8 +67,8 @@ func (sm *SessionManager) ContextExists(network, channel string, userID int64) b
 func (sm *SessionManager) CreateSession(network, channel string, userID int64, chatCommand, service, model string) (int64, error) {
 	if err := sm.db.Model(&Session{}).
 		Where("network = ? AND channel = ? AND user_id = ? AND status = ?",
-			network, channel, userID, "active").
-		Update("status", "completed").Error; err != nil {
+			network, channel, userID, StatusActive).
+		Update("status", StatusCompleted).Error; err != nil {
 		loggerSM.Warn("failed to complete previous active sessions", "network", network, "channel", channel, "user_id", userID, "error", err)
 	}
 
@@ -81,7 +81,7 @@ func (sm *SessionManager) CreateSession(network, channel string, userID int64, c
 		ConvID:      &convID,
 		Service:     service,
 		Model:       model,
-		Status:      "active",
+		Status:      StatusActive,
 	}
 	if err := sm.db.Create(&session).Error; err != nil {
 		return 0, err
@@ -144,12 +144,12 @@ func (sm *SessionManager) CompleteSession(sessionID int64) error {
 	_, file, line, _ := runtime.Caller(1)
 	loggerSM.Info("completing session", "id", sessionID, "caller", fmt.Sprintf("%s:%d", file, line))
 	return sm.db.Model(&Session{}).Where("id = ?", sessionID).
-		Update("status", "completed").Error
+		Update("status", StatusCompleted).Error
 }
 
 func (sm *SessionManager) ActivateSession(sessionID int64) error {
 	return sm.db.Model(&Session{}).Where("id = ?", sessionID).
-		Update("status", "active").Error
+		Update("status", StatusActive).Error
 }
 
 func (sm *SessionManager) SwitchActive(network, channel string, userID int64, newSessionID int64) (int64, error) {
@@ -157,7 +157,7 @@ func (sm *SessionManager) SwitchActive(network, channel string, userID int64, ne
 
 	var currentActive []Session
 	sm.db.Where("network = ? AND channel = ? AND user_id = ? AND status = ?",
-		network, channel, userID, "active").Find(&currentActive)
+		network, channel, userID, StatusActive).Find(&currentActive)
 
 	if len(currentActive) > 0 {
 		oldID = currentActive[0].ID
@@ -180,7 +180,7 @@ func (sm *SessionManager) SwitchActive(network, channel string, userID int64, ne
 
 func (sm *SessionManager) IsSessionActive(sessionID int64) bool {
 	var count int64
-	sm.db.Model(&Session{}).Where("id = ? AND status = ?", sessionID, "active").Count(&count)
+	sm.db.Model(&Session{}).Where("id = ? AND status = ?", sessionID, StatusActive).Count(&count)
 	return count > 0
 }
 

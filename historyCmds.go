@@ -42,7 +42,7 @@ func historySessions(network Network, c *girc.Client, e girc.Event, ctx context.
 		results, err := getChannelDBSessions(network.Name, channel, maxHistory)
 		if err != nil {
 			select {
-			case output <- errorMsg(expandNotice(n.DB.QuerySessions, map[string]string{"error": err.Error()})):
+			case output <- errorNotice(n.DB.QuerySessions, map[string]string{"error": err.Error()}):
 			case <-ctx.Done():
 			}
 			return
@@ -92,7 +92,7 @@ func historySessions(network Network, c *girc.Client, e girc.Event, ctx context.
 		sessions, err := getUserDBSessions(network.Name, channel, targetUser.ID, maxHistory)
 		if err != nil {
 			select {
-			case output <- errorMsg(expandNotice(n.DB.QuerySessions, map[string]string{"error": err.Error()})):
+			case output <- errorNotice(n.DB.QuerySessions, map[string]string{"error": err.Error()}):
 			case <-ctx.Done():
 			}
 			return
@@ -120,7 +120,7 @@ func historySessions(network Network, c *girc.Client, e girc.Event, ctx context.
 	sessions, err := getUserDBSessions(network.Name, channel, userID, maxHistory)
 	if err != nil {
 		select {
-		case output <- errorMsg(expandNotice(n.DB.QuerySessions, map[string]string{"error": err.Error()})):
+		case output <- errorNotice(n.DB.QuerySessions, map[string]string{"error": err.Error()}):
 		case <-ctx.Done():
 		}
 		return
@@ -268,7 +268,7 @@ func historyShow(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 	}
 
 	if len(args) == 0 || args[0] == "" {
-		sendErr(errorMsg(expandNotice(n.Sessions.HistoryUsage, map[string]string{"trigger": network.Trigger})))
+		sendErr(errorNotice(n.Sessions.HistoryUsage, map[string]string{"trigger": network.Trigger}))
 		return
 	}
 
@@ -306,7 +306,7 @@ func historyShow(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 
 	messages, err := loadDBSessionMessagesAll(sessionID)
 	if err != nil {
-		sendErr(errorMsg(expandNotice(n.DB.LoadMessages, map[string]string{"error": err.Error()})))
+		sendErr(errorNotice(n.DB.LoadMessages, map[string]string{"error": err.Error()}))
 		return
 	}
 
@@ -423,7 +423,7 @@ func historyStats(network Network, c *girc.Client, e girc.Event, args ...string)
 
 	sessionCount, messageCount, err := getUserDBStats(network.Name, channel, userID)
 	if err != nil {
-		c.Cmd.Reply(e, errorMsg(expandNotice(n.DB.QueryStats, map[string]string{"error": err.Error()})))
+		c.Cmd.Reply(e, errorNotice(n.DB.QueryStats, map[string]string{"error": err.Error()}))
 		return
 	}
 
@@ -438,7 +438,7 @@ func historyDelete(network Network, c *girc.Client, e girc.Event, args ...string
 	}
 
 	if len(args) == 0 || args[0] == "" {
-		c.Cmd.Reply(e, errorMsg(expandNotice(n.Sessions.DeleteUsage, map[string]string{"trigger": network.Trigger})))
+		c.Cmd.Reply(e, errorNotice(n.Sessions.DeleteUsage, map[string]string{"trigger": network.Trigger}))
 		return
 	}
 
@@ -477,7 +477,7 @@ func historyDelete(network Network, c *girc.Client, e girc.Event, args ...string
 	cancelAsyncJobsForSession(sessionID)
 
 	if err := deleteDBSession(sessionID); err != nil {
-		c.Cmd.Reply(e, errorMsg(expandNotice(n.DB.DeleteFailed, map[string]string{"error": err.Error()})))
+		c.Cmd.Reply(e, errorNotice(n.DB.DeleteFailed, map[string]string{"error": err.Error()}))
 		return
 	}
 
@@ -492,7 +492,7 @@ func historyResume(network Network, c *girc.Client, e girc.Event, args ...string
 	}
 
 	if len(args) == 0 || args[0] == "" {
-		c.Cmd.Reply(e, errorMsg(expandNotice(n.Sessions.ResumeUsage, map[string]string{"trigger": network.Trigger})))
+		c.Cmd.Reply(e, errorNotice(n.Sessions.ResumeUsage, map[string]string{"trigger": network.Trigger}))
 		return
 	}
 
@@ -543,13 +543,13 @@ func historyResume(network Network, c *girc.Client, e girc.Event, args ...string
 		}
 	}
 	if !cfgOk {
-		c.Cmd.Reply(e, errorMsg(expandNotice(n.Sessions.CommandGone, map[string]string{"command": session.ChatCommand})))
+		c.Cmd.Reply(e, errorNotice(n.Sessions.CommandGone, map[string]string{"command": session.ChatCommand}))
 		return
 	}
 
 	dbMsgs, err := loadDBSessionMessages(sessionID)
 	if err != nil {
-		c.Cmd.Reply(e, errorMsg(expandNotice(n.DB.LoadMessages, map[string]string{"error": err.Error()})))
+		c.Cmd.Reply(e, errorNotice(n.DB.LoadMessages, map[string]string{"error": err.Error()}))
 		return
 	}
 
@@ -670,7 +670,7 @@ func historyJobs(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 	jobs, err := getPendingJobsForUser(network.Name, channel, userID)
 	if err != nil {
 		select {
-		case output <- errorMsg(expandNotice(n.DB.QueryJobs, map[string]string{"error": err.Error()})):
+		case output <- errorNotice(n.DB.QueryJobs, map[string]string{"error": err.Error()}):
 		case <-ctx.Done():
 		}
 		return
@@ -762,7 +762,7 @@ func historyCompact(network Network, c *girc.Client, e girc.Event, ctx context.C
 		}
 	}
 	if !cfgOk {
-		send(errorMsg(expandNotice(n.Sessions.CommandGone, map[string]string{"command": session.ChatCommand})))
+		send(errorNotice(n.Sessions.CommandGone, map[string]string{"command": session.ChatCommand}))
 		return
 	}
 
@@ -783,9 +783,9 @@ func historyCompact(network Network, c *girc.Client, e girc.Event, ctx context.C
 		case ErrCompactionInProgress:
 			send(errorMsg(n.Compaction.InProgress))
 		case ErrCompactionEmptyResult:
-			send(errorMsg(expandNotice(n.Compaction.Failed, map[string]string{"error": "summarizer returned empty content"})))
+			send(errorNotice(n.Compaction.Failed, map[string]string{"error": "summarizer returned empty content"}))
 		default:
-			send(errorMsg(expandNotice(n.Compaction.Failed, map[string]string{"error": cErr.Error()})))
+			send(errorNotice(n.Compaction.Failed, map[string]string{"error": cErr.Error()}))
 		}
 		return
 	}
@@ -807,7 +807,7 @@ func historyClone(network Network, c *girc.Client, e girc.Event, ctx context.Con
 	}
 
 	if len(args) == 0 || args[0] == "" {
-		send(errorMsg(expandNotice(n.Clone.Usage, map[string]string{"trigger": network.Trigger})))
+		send(errorNotice(n.Clone.Usage, map[string]string{"trigger": network.Trigger}))
 		return
 	}
 
@@ -820,7 +820,7 @@ func historyClone(network Network, c *girc.Client, e girc.Event, ctx context.Con
 	}
 	resolvedUser, err := resolveUser(network.Name, e.Source.Name, e.Source.Ident, e.Source.Host, account, casemapping)
 	if err != nil || resolvedUser == nil {
-		send(errorMsg(expandNotice(n.Clone.Usage, map[string]string{"trigger": network.Trigger})))
+		send(errorNotice(n.Clone.Usage, map[string]string{"trigger": network.Trigger}))
 		return
 	}
 	callingUserID := resolvedUser.ID
@@ -836,12 +836,12 @@ func historyClone(network Network, c *girc.Client, e girc.Event, ctx context.Con
 		}
 		src, dbErr := getDBSessionByID(sessionID)
 		if dbErr != nil {
-			send(errorMsg(expandNotice(n.Clone.SessionNotFound, map[string]string{"id": args[0]})))
+			send(errorNotice(n.Clone.SessionNotFound, map[string]string{"id": args[0]}))
 			return
 		}
 		normChannel := normalizeIRC(src.Channel, casemapping)
 		if src.Network != network.Name || normChannel != channel {
-			send(errorMsg(expandNotice(n.Clone.WrongChannel, map[string]string{"id": args[0]})))
+			send(errorNotice(n.Clone.WrongChannel, map[string]string{"id": args[0]}))
 			return
 		}
 		sourceSession = src
@@ -849,12 +849,12 @@ func historyClone(network Network, c *girc.Client, e girc.Event, ctx context.Con
 		nick := args[0]
 		targetUser, rErr := resolveUserByNick(network.Name, nick, casemapping)
 		if rErr != nil || targetUser == nil {
-			send(errorMsg(expandNotice(n.Clone.TargetNotFound, map[string]string{"nick": nick})))
+			send(errorNotice(n.Clone.TargetNotFound, map[string]string{"nick": nick}))
 			return
 		}
 		activeSession, aErr := sessionMgr.GetActiveSession(network.Name, channel, targetUser.ID)
 		if aErr != nil || activeSession == nil {
-			send(errorMsg(expandNotice(n.Clone.NoTargetSession, map[string]string{"nick": displayNick(targetUser)})))
+			send(errorNotice(n.Clone.NoTargetSession, map[string]string{"nick": displayNick(targetUser)}))
 			return
 		}
 		sourceSession = activeSession
@@ -863,11 +863,11 @@ func historyClone(network Network, c *girc.Client, e girc.Event, ctx context.Con
 
 	incomplete, icErr := sessionHasIncompleteToolCalls(sourceSession.ID)
 	if icErr != nil {
-		send(errorMsg(expandNotice(n.DB.QuerySessions, map[string]string{"error": icErr.Error()})))
+		send(errorNotice(n.DB.QuerySessions, map[string]string{"error": icErr.Error()}))
 		return
 	}
 	if incomplete {
-		send(errorMsg(expandNotice(n.Clone.IncompleteCalls, map[string]string{"id": fmt.Sprintf("%d", sourceSession.ID)})))
+		send(errorNotice(n.Clone.IncompleteCalls, map[string]string{"id": fmt.Sprintf("%d", sourceSession.ID)}))
 		return
 	}
 
@@ -884,7 +884,7 @@ func historyClone(network Network, c *girc.Client, e girc.Event, ctx context.Con
 		}
 	}
 	if !cfgOk {
-		send(errorMsg(expandNotice(n.Clone.CommandGone, map[string]string{"command": sourceSession.ChatCommand})))
+		send(errorNotice(n.Clone.CommandGone, map[string]string{"command": sourceSession.ChatCommand}))
 		return
 	}
 
@@ -894,7 +894,7 @@ func historyClone(network Network, c *girc.Client, e girc.Event, ctx context.Con
 
 	newSessionID, cloneErr := cloneDBSession(sourceSession.ID, network.Name, channel, callingUserID)
 	if cloneErr != nil {
-		send(errorMsg(expandNotice(n.DB.InternalError, map[string]string{"error": cloneErr.Error()})))
+		send(errorNotice(n.DB.InternalError, map[string]string{"error": cloneErr.Error()}))
 		return
 	}
 

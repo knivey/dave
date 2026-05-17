@@ -58,7 +58,7 @@ func mcpCmd(network Network, c *girc.Client, e girc.Event, cfg MCPCommandConfig,
 	result, err := callMCPToolWithTimeoutContext(ctx, cfg.Tool, toolArgs, cfg.Timeout)
 	if err != nil {
 		select {
-		case output <- errorMsg(expandNotice(n.Tools.Failed, map[string]string{"error": err.Error()})):
+		case output <- errorNotice(n.Tools.Failed, map[string]string{"error": err.Error()}):
 		case <-ctx.Done():
 		}
 		log.Error("MCP tool call failed", "error", err.Error())
@@ -88,7 +88,7 @@ func mcpCmdAsync(network Network, c *girc.Client, e girc.Event, cfg MCPCommandCo
 	result, err := callMCPToolWithTimeoutContext(ctx, asyncTool, toolArgs, cfg.Timeout)
 	if err != nil {
 		select {
-		case output <- errorMsg(expandNotice(n.Tools.Failed, map[string]string{"error": err.Error()})):
+		case output <- errorNotice(n.Tools.Failed, map[string]string{"error": err.Error()}):
 		case <-ctx.Done():
 		}
 		log.Error("async MCP tool call failed", "error", err.Error())

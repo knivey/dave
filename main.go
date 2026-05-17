@@ -691,79 +691,83 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 
 	isTrigger := strings.HasPrefix(msg, network.Trigger)
 
+	var mentionMsg string
 	if !isTrigger {
 		botnick := client.GetNick()
-		if !strings.HasPrefix(msg, botnick+", ") && !strings.HasPrefix(msg, botnick+": ") {
+		if strings.HasPrefix(msg, botnick+", ") {
+			mentionMsg = msg[len(botnick+", "):]
+		} else if strings.HasPrefix(msg, botnick+": ") {
+			mentionMsg = msg[len(botnick+": "):]
+		} else {
 			return
 		}
 	}
+
 	if isIgnored(host) {
 		logger.Info("Ignoring host", host)
 		return
 	}
 
-	// DESIGN NOTE: resolveUser does multiple DB queries (account lookup, nick lookup,
-	// host recovery). For the non-trigger (mention) path we need it immediately.
-	// For the trigger path we defer it until after confirming the message matches
-	// an actual command, so that "-random_text" that matches nothing skips the DB work.
 	if !isTrigger {
-		resolvedUser, err := resolveIRCUser(network, client, event.Source.Name, event.Source)
-		if err != nil {
-			logger.Error("failed to resolve user", "error", err)
-		}
-		proceed, userID := handleResolveResult(client, event, resolvedUser, err)
-		if !proceed {
-			return
-		}
+		handleMention(network, client, event, channel, mentionMsg)
+		return
+	}
+	handleTrigger(network, client, event, channel, msg, strings.TrimPrefix(msg, network.Trigger))
+}
 
-		if isBanned(theDB, userID, network.Name, channel, "") {
-			logger.Info("User is banned", "user_id", userID, "nick", event.Source.Name)
-			return
-		}
-
-		botnick := client.GetNick()
-		if !ContextExists(network.Name, channel, userID) {
-			logger.Info("Ignoring message due to no existing chat context")
-			var noCtxMsg string
-			readConfig(func() { noCtxMsg = config.Notices.Context.NoContext })
-			client.Cmd.Reply(event, warnMsg(noCtxMsg))
-			return
-		}
-		if !checkRate(network, channel) {
-			var rateMsg string
-			readConfig(func() { rateMsg = config.Notices.Ratemsg() })
-			client.Cmd.Reply(event, warnMsg(rateMsg))
-			return
-		}
-		msg = msg[len(botnick+", "):]
-
-		session, err := sessionMgr.GetActiveSession(network.Name, channel, userID)
-		if err != nil {
-			logger.Error("failed to get active session", "error", err)
-			return
-		}
-		if session == nil {
-			return
-		}
-		sessionCfg, cfgOk := getSessionConfig(session)
-		if !cfgOk {
-			logger.Warn("chat command not found for session, ignoring mention", "command", session.ChatCommand)
-			return
-		}
-		logger.Info("Running chat completion with existing context")
-
-		position := queueMgr.Enqueue(network.Name, channel, userID, event.Source.Name,
-			sessionCfg.Service, "chat",
-			func(cx context.Context, output chan<- string) {
-				chat(network, client, event, sessionCfg, cx, output, resolvedUser, msg)
-			})
-		replyIfQueued(client, event, position)
+func handleMention(network Network, client *girc.Client, event girc.Event, channel, msg string) {
+	resolvedUser, err := resolveIRCUser(network, client, event.Source.Name, event.Source)
+	if err != nil {
+		logger.Error("failed to resolve user", "error", err)
+	}
+	proceed, userID := handleResolveResult(client, event, resolvedUser, err)
+	if !proceed {
 		return
 	}
 
-	// --- Trigger path ---
-	stripped := strings.TrimPrefix(msg, network.Trigger)
+	if isBanned(theDB, userID, network.Name, channel, "") {
+		logger.Info("User is banned", "user_id", userID, "nick", event.Source.Name)
+		return
+	}
 
+	if !ContextExists(network.Name, channel, userID) {
+		logger.Info("Ignoring message due to no existing chat context")
+		var noCtxMsg string
+		readConfig(func() { noCtxMsg = config.Notices.Context.NoContext })
+		client.Cmd.Reply(event, warnMsg(noCtxMsg))
+		return
+	}
+	if !checkRate(network, channel) {
+		var rateMsg string
+		readConfig(func() { rateMsg = config.Notices.Ratemsg() })
+		client.Cmd.Reply(event, warnMsg(rateMsg))
+		return
+	}
+
+	session, err := sessionMgr.GetActiveSession(network.Name, channel, userID)
+	if err != nil {
+		logger.Error("failed to get active session", "error", err)
+		return
+	}
+	if session == nil {
+		return
+	}
+	sessionCfg, cfgOk := getSessionConfig(session)
+	if !cfgOk {
+		logger.Warn("chat command not found for session, ignoring mention", "command", session.ChatCommand)
+		return
+	}
+	logger.Info("Running chat completion with existing context")
+
+	position := queueMgr.Enqueue(network.Name, channel, userID, event.Source.Name,
+		sessionCfg.Service, "chat",
+		func(cx context.Context, output chan<- string) {
+			chat(network, client, event, sessionCfg, cx, output, resolvedUser, msg)
+		})
+	replyIfQueued(client, event, position)
+}
+
+func handleTrigger(network Network, client *girc.Client, event girc.Event, channel, msg, stripped string) {
 	// amibanned is a special case: it must work even for banned users,
 	// so it resolves the user and returns before the ban check.
 	if stripped == "amibanned" {

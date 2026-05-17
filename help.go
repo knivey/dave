@@ -88,51 +88,15 @@ func help(network Network, client *girc.Client, event girc.Event, ctx context.Co
 	}
 
 	if len(completions) > 0 {
-		var entries []helpEntry
-		completionKeys := make([]string, 0, len(completions))
-		for k := range completions {
-			completionKeys = append(completionKeys, k)
-		}
-		sort.Slice(completionKeys, func(i, j int) bool {
-			iInfo := formatModelInfo(completions[completionKeys[i]].Service, completions[completionKeys[i]].Model, completions[completionKeys[i]].DetectImages)
-			jInfo := formatModelInfo(completions[completionKeys[j]].Service, completions[completionKeys[j]].Model, completions[completionKeys[j]].DetectImages)
-			return iInfo < jInfo
-		})
-		for _, k := range completionKeys {
-			c := completions[k]
-			entries = append(entries, helpEntry{
-				cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
-				info: formatModelInfo(c.Service, c.Model, c.DetectImages),
-				desc: formatDesc(c.Description, false),
-			})
-		}
 		lines = append(lines, "\x02Completions:\x02")
-		for _, l := range formatTable(entries) {
+		for _, l := range formatTable(sortedAIConfigEntries(network.Trigger, completions)) {
 			lines = append(lines, "  "+l)
 		}
 	}
 
 	if len(chats) > 0 {
-		var entries []helpEntry
-		chatKeys := make([]string, 0, len(chats))
-		for k := range chats {
-			chatKeys = append(chatKeys, k)
-		}
-		sort.Slice(chatKeys, func(i, j int) bool {
-			iInfo := formatModelInfo(chats[chatKeys[i]].Service, chats[chatKeys[i]].Model, chats[chatKeys[i]].DetectImages)
-			jInfo := formatModelInfo(chats[chatKeys[j]].Service, chats[chatKeys[j]].Model, chats[chatKeys[j]].DetectImages)
-			return iInfo < jInfo
-		})
-		for _, k := range chatKeys {
-			c := chats[k]
-			entries = append(entries, helpEntry{
-				cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
-				info: formatModelInfo(c.Service, c.Model, c.DetectImages),
-				desc: formatDesc(c.Description, false),
-			})
-		}
 		lines = append(lines, "\x02Chats:\x02")
-		for _, l := range formatTable(entries) {
+		for _, l := range formatTable(sortedAIConfigEntries(network.Trigger, chats)) {
 			lines = append(lines, "  "+l)
 		}
 	}
@@ -241,6 +205,42 @@ func formatModelInfo(service, model string, detectImages bool) string {
 	return fmt.Sprintf("[%s/%s]%s", service, model, icon)
 }
 
+func matchesCommand(cmdName, name, regex string) bool {
+	if name == cmdName || regex == cmdName {
+		return true
+	}
+	if regex != name {
+		re := regexp.MustCompile("^" + regex + "$")
+		return re.MatchString(cmdName)
+	}
+	return false
+}
+
+func buildAIConfigEntry(trigger string, c AIConfig) helpEntry {
+	return helpEntry{
+		cmd:     formatCmd(trigger, c.Regex, c.Name),
+		info:    formatModelInfo(c.Service, c.Model, c.DetectImages),
+		desc:    formatDesc(c.Description, false),
+		mcpInfo: getMCPServerNames(c.MCPs),
+	}
+}
+
+var builtinHelpEntries = map[string]struct {
+	cmdSuffix string
+	desc      string
+}{
+	"stop":     {"stop", "Stop text generation (including this help message)"},
+	"sessions": {"sessions [nick|*]", "List sessions. No args = yours, <nick> = another user's, * = all in channel"},
+	"history":  {"history <session-id>", "Show messages from a session (first/last 2 with ... in between, tool calls hidden)"},
+	"resume":   {"resume <session-id>", "Resume a previous session, pausing any current active session"},
+	"delete":   {"delete <session-id>", "Delete a session and its messages"},
+	"mystats":  {"mystats", "Show your total sessions and messages on this network/channel"},
+	"jobs":     {"jobs", "List your chat queue status and pending/running/completed background jobs"},
+	"compact":  {"compact", "Summarize the first 2/3 of your active session into a single message to free context tokens"},
+	"clone":    {"clone <nick|id>", "Clone another user's session (or your own, to fork it). Creates a new session with a copy of the source's message history"},
+	"support":  {"support", "Support dave's development"},
+}
+
 func findCommandHelp(network Network, cmdName string) (helpEntry, bool) {
 	var completions map[string]AIConfig
 	var chats map[string]AIConfig
@@ -251,128 +251,53 @@ func findCommandHelp(network Network, cmdName string) (helpEntry, bool) {
 		tools = config.Commands.Tools
 	})
 	for _, c := range completions {
-		if c.Name == cmdName || c.Regex == cmdName {
-			return helpEntry{
-				cmd:     formatCmd(network.Trigger, c.Regex, c.Name),
-				info:    formatModelInfo(c.Service, c.Model, c.DetectImages),
-				desc:    formatDesc(c.Description, false),
-				mcpInfo: getMCPServerNames(c.MCPs),
-			}, true
-		}
-		if c.Regex != c.Name {
-			re := regexp.MustCompile("^" + c.Regex + "$")
-			if re.MatchString(cmdName) {
-				return helpEntry{
-					cmd:     formatCmd(network.Trigger, c.Regex, c.Name),
-					info:    formatModelInfo(c.Service, c.Model, c.DetectImages),
-					desc:    formatDesc(c.Description, false),
-					mcpInfo: getMCPServerNames(c.MCPs),
-				}, true
-			}
+		if matchesCommand(cmdName, c.Name, c.Regex) {
+			return buildAIConfigEntry(network.Trigger, c), true
 		}
 	}
 	for _, c := range chats {
-		if c.Name == cmdName || c.Regex == cmdName {
-			return helpEntry{
-				cmd:     formatCmd(network.Trigger, c.Regex, c.Name),
-				info:    formatModelInfo(c.Service, c.Model, c.DetectImages),
-				desc:    formatDesc(c.Description, false),
-				mcpInfo: getMCPServerNames(c.MCPs),
-			}, true
-		}
-		if c.Regex != c.Name {
-			re := regexp.MustCompile("^" + c.Regex + "$")
-			if re.MatchString(cmdName) {
-				return helpEntry{
-					cmd:     formatCmd(network.Trigger, c.Regex, c.Name),
-					info:    formatModelInfo(c.Service, c.Model, c.DetectImages),
-					desc:    formatDesc(c.Description, false),
-					mcpInfo: getMCPServerNames(c.MCPs),
-				}, true
-			}
+		if matchesCommand(cmdName, c.Name, c.Regex) {
+			return buildAIConfigEntry(network.Trigger, c), true
 		}
 	}
 	for _, c := range tools {
-		if c.Name == cmdName || c.Regex == cmdName {
+		if matchesCommand(cmdName, c.Name, c.Regex) {
 			return helpEntry{
 				cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
 				info: formatToolInfo(c.MCP, c.Tool),
 				desc: formatDesc(c.Description, false),
 			}, true
 		}
-		if c.Regex != c.Name {
-			re := regexp.MustCompile("^" + c.Regex + "$")
-			if re.MatchString(cmdName) {
-				return helpEntry{
-					cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
-					info: formatToolInfo(c.MCP, c.Tool),
-					desc: formatDesc(c.Description, false),
-				}, true
-			}
-		}
 	}
-	if cmdName == "stop" {
+	if tmpl, ok := builtinHelpEntries[cmdName]; ok {
 		return helpEntry{
-			cmd:  network.Trigger + "stop",
-			info: "",
-			desc: "Stop text generation (including this help message)",
-		}, true
-	}
-	if cmdName == "sessions" {
-		return helpEntry{
-			cmd:  network.Trigger + "sessions [nick|*]",
-			desc: "List sessions. No args = yours, <nick> = another user's, * = all in channel",
-		}, true
-	}
-	if cmdName == "history" {
-		return helpEntry{
-			cmd:  network.Trigger + "history <session-id>",
-			desc: "Show messages from a session (first/last 2 with ... in between, tool calls hidden)",
-		}, true
-	}
-	if cmdName == "resume" {
-		return helpEntry{
-			cmd:  network.Trigger + "resume <session-id>",
-			desc: "Resume a previous session, pausing any current active session",
-		}, true
-	}
-	if cmdName == "delete" {
-		return helpEntry{
-			cmd:  network.Trigger + "delete <session-id>",
-			desc: "Delete a session and its messages",
-		}, true
-	}
-	if cmdName == "mystats" {
-		return helpEntry{
-			cmd:  network.Trigger + "mystats",
-			desc: "Show your total sessions and messages on this network/channel",
-		}, true
-	}
-	if cmdName == "jobs" {
-		return helpEntry{
-			cmd:  network.Trigger + "jobs",
-			desc: "List your chat queue status and pending/running/completed background jobs",
-		}, true
-	}
-	if cmdName == "compact" {
-		return helpEntry{
-			cmd:  network.Trigger + "compact",
-			desc: "Summarize the first 2/3 of your active session into a single message to free context tokens",
-		}, true
-	}
-	if cmdName == "clone" {
-		return helpEntry{
-			cmd:  network.Trigger + "clone <nick|id>",
-			desc: "Clone another user's session (or your own, to fork it). Creates a new session with a copy of the source's message history",
-		}, true
-	}
-	if cmdName == "support" {
-		return helpEntry{
-			cmd:  network.Trigger + "support",
-			desc: "Support dave's development",
+			cmd:  network.Trigger + tmpl.cmdSuffix,
+			desc: tmpl.desc,
 		}, true
 	}
 	return helpEntry{}, false
+}
+
+func sortedAIConfigEntries(trigger string, m map[string]AIConfig) []helpEntry {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		iInfo := formatModelInfo(m[keys[i]].Service, m[keys[i]].Model, m[keys[i]].DetectImages)
+		jInfo := formatModelInfo(m[keys[j]].Service, m[keys[j]].Model, m[keys[j]].DetectImages)
+		return iInfo < jInfo
+	})
+	entries := make([]helpEntry, 0, len(m))
+	for _, k := range keys {
+		c := m[k]
+		entries = append(entries, helpEntry{
+			cmd:  formatCmd(trigger, c.Regex, c.Name),
+			info: formatModelInfo(c.Service, c.Model, c.DetectImages),
+			desc: formatDesc(c.Description, false),
+		})
+	}
+	return entries
 }
 
 func formatCmd(trigger, regex, name string) string {

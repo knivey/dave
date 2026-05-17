@@ -702,7 +702,7 @@ func mcpToolResultToText(result *mcp.CallToolResult) string {
 	if len(parts) == 0 {
 		return "(no output)"
 	}
-	return joinStrings(parts, "\n")
+	return strings.Join(parts, "\n")
 }
 
 func embeddedResourceToText(r *mcp.EmbeddedResource) (string, bool) {
@@ -716,17 +716,6 @@ func embeddedResourceToText(r *mcp.EmbeddedResource) (string, bool) {
 		return fmt.Sprintf("[blob resource: %s]", r.Resource.URI), true
 	}
 	return "", false
-}
-
-func joinStrings(parts []string, sep string) string {
-	if len(parts) == 0 {
-		return ""
-	}
-	result := parts[0]
-	for _, s := range parts[1:] {
-		result += sep + s
-	}
-	return result
 }
 
 func readMCPResource(serverName, uri string) (*mcp.ReadResourceResult, error) {
@@ -821,12 +810,12 @@ func getMCPToolInfo(serverNames []string) string {
 		for _, t := range srv.Tools {
 			toolNames = append(toolNames, t.Name)
 		}
-		parts = append(parts, serverName+"("+joinStrings(toolNames, ",")+")")
+		parts = append(parts, serverName+"("+strings.Join(toolNames, ",")+")")
 	}
 	if len(parts) == 0 {
 		return ""
 	}
-	return "MCP tools: " + joinStrings(parts, " ")
+	return "MCP tools: " + strings.Join(parts, " ")
 }
 
 func getMCPServerNames(serverNames []string) string {
@@ -842,7 +831,7 @@ func getMCPServerNames(serverNames []string) string {
 	if len(found) == 0 {
 		return ""
 	}
-	return "MCP servers: " + joinStrings(found, ", ")
+	return "MCP servers: " + strings.Join(found, ", ")
 }
 
 func getAllMCPServerInfo() []string {

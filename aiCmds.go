@@ -912,10 +912,7 @@ func (cr *chatRunner) handleBanUser(messages []ChatMessage, tc ToolCall) []ChatM
 		duration = maxDur
 	}
 
-	var bannerUserID *int64
-	if cr.userID != 0 {
-		bannerUserID = &cr.userID
-	}
+	bannerUserID := &cr.userID
 
 	_, err = createBan(theDB, user.ID, cr.network.Name, cr.channel, "", args.Reason, duration, bannerUserID, cr.network.Nick+":"+cr.cfg.Name)
 	if err != nil {

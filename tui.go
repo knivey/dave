@@ -1257,9 +1257,3 @@ func requestShutdown() {
 		}
 	}()
 }
-
-func stopTUI() {
-	if tuiApp != nil {
-		tuiApp.Stop()
-	}
-}

@@ -495,9 +495,7 @@ func recoverToolAsyncJob(jobID, toolName, mcpServer, network, channel, nick, pro
 		nick:      nick,
 		userID:    userID,
 	}
-	if !toolJobMgr.register(entry, waitForToolAsyncJob) {
-		loggerJM.Warn("recoverToolAsyncJob: duplicate job ID, skipping", "jobID", jobID)
-	}
+	toolJobMgr.register(entry, waitForToolAsyncJob)
 }
 
 func waitForToolAsyncJob(ctx context.Context, entry *jobEntry[toolJobPayload]) {

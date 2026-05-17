@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/lrstanley/girc"
-	logxi "github.com/mgutz/logxi/v1"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
@@ -35,26 +34,25 @@ func ensureTestUser(t *testing.T, network, nick string) int64 {
 	return user.ID
 }
 
-func setupTestDB(t *testing.T) (*gorm.DB, func()) {
+func setupTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "test.db")
-	db, err := initDB(DatabaseConfig{Path: dbPath, MaxAgeDays: 90}, logxi.New("test"))
+	db, err := initDB(DatabaseConfig{Path: dbPath, MaxAgeDays: 90}, newLogger("test"))
 	require.NoError(t, err, "failed to init test db")
 	oldDB := theDB
 	oldSM := sessionMgr
 	theDB = db
 	sessionMgr = NewSessionManager(db)
-	cleanup := func() {
+	t.Cleanup(func() {
 		sessionMgr = oldSM
 		theDB = oldDB
 		sqlDB, _ := db.DB()
 		if sqlDB != nil {
 			sqlDB.Close()
 		}
-	}
-	t.Cleanup(cleanup)
-	return db, cleanup
+	})
+	return db
 }
 
 func createTestSession(t *testing.T, network, channel, nick, chatCmd, service, model string) int64 {
@@ -107,9 +105,9 @@ func makeTestAIConfig() AIConfig {
 	}
 }
 
-func setupBotTest(t *testing.T) (*girc.Client, func()) {
+func setupBotTest(t *testing.T) *girc.Client {
 	t.Helper()
-	_, dbCleanup := setupTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	setupCancelTestMCP(t)
 	setupNoticesDefaults(t)
@@ -126,5 +124,5 @@ func setupBotTest(t *testing.T) (*girc.Client, func()) {
 	}
 	t.Cleanup(func() { bots = origBots })
 
-	return client, dbCleanup
+	return client
 }

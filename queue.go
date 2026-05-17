@@ -251,9 +251,6 @@ func (qm *QueueManager) enqueueItem(item *QueueItem) int {
 }
 
 func (qm *QueueManager) EnqueueAt(network, channel string, userID int64, nick, service, desc string, enqueuedAt time.Time, fn func(ctx context.Context, output chan<- string)) int {
-	if !qm.running.Load() {
-		return -1
-	}
 	qm.mu.Lock()
 	defer qm.mu.Unlock()
 
@@ -266,9 +263,6 @@ func (qm *QueueManager) EnqueueAt(network, channel string, userID int64, nick, s
 }
 
 func (qm *QueueManager) EnqueueAtWithPrompt(network, channel string, userID int64, nick, service, desc, prompt, startedMsgOverride string, enqueuedAt time.Time, fn func(ctx context.Context, output chan<- string)) int {
-	if !qm.running.Load() {
-		return -1
-	}
 	qm.mu.Lock()
 	defer qm.mu.Unlock()
 

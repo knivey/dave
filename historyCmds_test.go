@@ -24,8 +24,7 @@ func makeHistoryEvent(channel, nick string) girc.Event {
 }
 
 func TestHistoryDelete_CancelsAsyncJobs(t *testing.T) {
-	_, cleanup := setupBotTest(t)
-	defer cleanup()
+	setupBotTest(t)
 
 	network := Network{Name: "testnet", Trigger: "!"}
 	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
@@ -57,8 +56,7 @@ func TestHistoryDelete_CancelsAsyncJobs(t *testing.T) {
 }
 
 func TestHistoryDelete_NoAsyncJobs(t *testing.T) {
-	_, cleanup := setupBotTest(t)
-	defer cleanup()
+	setupBotTest(t)
 
 	network := Network{Name: "testnet", Trigger: "!"}
 	createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
@@ -70,8 +68,7 @@ func TestHistoryDelete_NoAsyncJobs(t *testing.T) {
 }
 
 func TestHistoryDelete_DeletesSession(t *testing.T) {
-	_, cleanup := setupBotTest(t)
-	defer cleanup()
+	setupBotTest(t)
 
 	network := Network{Name: "testnet", Trigger: "!"}
 	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
@@ -86,8 +83,7 @@ func TestHistoryDelete_DeletesSession(t *testing.T) {
 }
 
 func TestHistoryDelete_OwnershipCheck(t *testing.T) {
-	_, cleanup := setupBotTest(t)
-	defer cleanup()
+	setupBotTest(t)
 
 	network := Network{Name: "testnet", Trigger: "!"}
 	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
@@ -136,8 +132,7 @@ func drainOutput(t *testing.T, ch <-chan string, maxMsgs int, maxWait time.Durat
 // `^sessions$` command output even after the session has been compacted and
 // most messages are archived.
 func TestHistorySessions_StarterPreservedAfterCompaction(t *testing.T) {
-	_, cleanup := setupBotTest(t)
-	defer cleanup()
+	setupBotTest(t)
 
 	stub := newSummarizerStubServer(t, "Compacted summary text.")
 	defer stub.Close()
@@ -193,8 +188,7 @@ func TestHistorySessions_StarterPreservedAfterCompaction(t *testing.T) {
 // after the session has been compacted (the original message is now
 // archived, but should still appear in the displayed head).
 func TestHistoryShow_StarterInHeadAfterCompaction(t *testing.T) {
-	_, cleanup := setupBotTest(t)
-	defer cleanup()
+	setupBotTest(t)
 
 	stub := newSummarizerStubServer(t, "Compacted summary text.")
 	defer stub.Close()
@@ -247,8 +241,7 @@ func TestHistoryShow_StarterInHeadAfterCompaction(t *testing.T) {
 // twice in succession on a synthetically large session and asserting both
 // runs succeed and produce distinct compaction rows.
 func TestRepeatAutoCompaction(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	stub := newSummarizerStubServer(t, "Summary v1.")
 	defer stub.Close()
@@ -312,8 +305,7 @@ func TestRepeatAutoCompaction(t *testing.T) {
 // tail-copy ghosts (which duplicate content already covered by an earlier
 // summary) must NOT inflate the count.
 func TestHistorySessions_ArchivedCountExcludesSupersededRows(t *testing.T) {
-	_, cleanup := setupBotTest(t)
-	defer cleanup()
+	setupBotTest(t)
 
 	stub := newSummarizerStubServer(t, "Summary.")
 	defer stub.Close()
@@ -395,8 +387,7 @@ func TestHistorySessions_ArchivedCountExcludesSupersededRows(t *testing.T) {
 // loadDBSessionMessagesAll, which is now filtered. The user should never
 // see duplicate archived content from earlier compactions.
 func TestHistoryShow_DoesNotShowSupersededRows(t *testing.T) {
-	_, cleanup := setupBotTest(t)
-	defer cleanup()
+	setupBotTest(t)
 
 	stub := newSummarizerStubServer(t, "Summary.")
 	defer stub.Close()

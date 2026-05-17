@@ -148,8 +148,7 @@ func TestCompactSession_LiveHistoryStartsWithUserAfterSystem(t *testing.T) {
 	// Invariant test: after a successful compaction, the live history's
 	// first non-system message must be RoleUser. This protects against
 	// providers that reject system→assistant chains.
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	stub := newSummarizerStubServer(t, "Summary text.")
 	defer stub.Close()
@@ -230,8 +229,7 @@ func TestStripImagesForSummary(t *testing.T) {
 }
 
 func TestLoadDBSessionMessages_FiltersArchived(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	sid := createTestSession(t, "net", "#c", "u1", "cmd", "svc", "model")
 	for i := 0; i < 4; i++ {
@@ -255,8 +253,7 @@ func TestLoadDBSessionMessages_FiltersArchived(t *testing.T) {
 }
 
 func TestArchiveMessagesRange(t *testing.T) {
-	db, cleanup := setupTestDB(t)
-	defer cleanup()
+	db := setupTestDB(t)
 
 	sid := createTestSession(t, "net", "#c", "u1", "cmd", "svc", "model")
 	for i := 0; i < 5; i++ {
@@ -283,8 +280,7 @@ func TestArchiveMessagesRange(t *testing.T) {
 }
 
 func TestCompactSession_RefusesShort(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	sid := createTestSession(t, "net", "#c", "u1", "cmd", "svc", "model")
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
@@ -297,8 +293,7 @@ func TestCompactSession_RefusesShort(t *testing.T) {
 }
 
 func TestCompactSession_EnforcesMinTurns(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	stub := newSummarizerStubServer(t, "Summary.")
 	defer stub.Close()
@@ -356,8 +351,7 @@ func TestCompactSession_EnforcesMinTurns(t *testing.T) {
 }
 
 func TestCompactSession_EndToEnd(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	// Stub the summarizer transport: any HTTP call returns a minimal
 	// chat-completion JSON. We rely on the openai SDK pointing at a stub
@@ -437,8 +431,7 @@ func TestCompactSession_EndToEnd(t *testing.T) {
 }
 
 func TestCompactSession_Concurrency(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	stub := newSummarizerStubServer(t, "Summary.")
 	defer stub.Close()
@@ -487,8 +480,7 @@ func TestCompactSession_Concurrency(t *testing.T) {
 }
 
 func TestShouldAutoCompact(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	sid := createTestSession(t, "net", "#c", "u1", "cmd", "svc", "model")
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "u"}))
@@ -523,8 +515,7 @@ func TestShouldAutoCompact(t *testing.T) {
 // SourceCompactionID = comp.ID. This tag is what the next compaction uses
 // to identify duplicates so it can supersede them instead of double-counting.
 func TestCompactSession_TagsTailCopiesWithSourceCompactionID(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	stub := newSummarizerStubServer(t, "Summary.")
 	defer stub.Close()
@@ -581,8 +572,7 @@ func TestCompactSession_TagsTailCopiesWithSourceCompactionID(t *testing.T) {
 // those rows duplicate content already covered by summary #1 and would
 // mislead the user about how much actual conversation got compacted.
 func TestRepeatCompaction_DoesNotInflateArchivedCount(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	stub := newSummarizerStubServer(t, "Summary text.")
 	defer stub.Close()

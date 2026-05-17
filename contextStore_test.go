@@ -17,8 +17,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestDBSessionRoundtrip(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	sid := createTestSession(t, "net", "#chan", "user", "testcmd", "testservice", "testmodel")
 
@@ -43,8 +42,7 @@ func TestDBSessionRoundtrip(t *testing.T) {
 }
 
 func TestDBCreateSessionSettings(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	cfg := AIConfig{
 		Name:             "chat",
@@ -187,8 +185,7 @@ func TestDBApplySettings(t *testing.T) {
 }
 
 func TestDBSessionSettingsNilWhenNone(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	sid := createTestSession(t, "net", "#chan", "user", "chat", "openai", "gpt-4o")
 
@@ -198,8 +195,7 @@ func TestDBSessionSettingsNilWhenNone(t *testing.T) {
 }
 
 func TestDBCleanupByAge(t *testing.T) {
-	db, cleanup := setupTestDB(t)
-	defer cleanup()
+	db := setupTestDB(t)
 	_ = db
 
 	sid := createTestSession(t, "net", "#chan", "user", "testcmd", "", "")
@@ -218,8 +214,7 @@ func TestDBCleanupByAge(t *testing.T) {
 }
 
 func TestDBSessionCreateAndMessage(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	sid := createTestSession(t, "net", "#chan", "nick", "chat", "", "")
 	assert.NotZero(t, sid, "expected non-zero session id")
@@ -235,8 +230,7 @@ func TestDBSessionCreateAndMessage(t *testing.T) {
 }
 
 func TestDBSessionComplete(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	sid := createTestSession(t, "net", "#chan", "nick", "chat", "", "")
 
@@ -249,8 +243,7 @@ func TestDBSessionComplete(t *testing.T) {
 }
 
 func TestDBDeleteSession(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	sid := createTestSession(t, "net", "#chan", "nick", "chat", "", "")
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: "user", Content: "hello"}))
@@ -263,8 +256,7 @@ func TestDBDeleteSession(t *testing.T) {
 }
 
 func TestDBUserSessions(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	for i := 0; i < 3; i++ {
 		createTestSession(t, "net", "#chan", "nick", "chat", "", "")
@@ -277,8 +269,7 @@ func TestDBUserSessions(t *testing.T) {
 }
 
 func TestDBUserSessionsByNetwork(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	createTestSession(t, "net", "#chan1", "nick", "chat", "", "")
 	createTestSession(t, "net", "#chan2", "nick", "chat", "", "")
@@ -301,8 +292,7 @@ func TestDBUserSessionsByNetwork(t *testing.T) {
 }
 
 func TestDBUserStats(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	sid1 := createTestSession(t, "net", "#chan", "nick", "chat", "", "")
 	sessionMgr.AddMessage(sid1, ChatMessage{Role: "system", Content: "sys"})
@@ -318,8 +308,7 @@ func TestDBUserStats(t *testing.T) {
 }
 
 func TestDBDeleteUserSessions(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	createTestSession(t, "net", "#chan", "nick", "chat", "", "")
 	createTestSession(t, "net", "#chan", "nick", "chat", "", "")
@@ -334,8 +323,7 @@ func TestDBDeleteUserSessions(t *testing.T) {
 }
 
 func TestDBSoftDeletePreservesData(t *testing.T) {
-	db, cleanup := setupTestDB(t)
-	defer cleanup()
+	db := setupTestDB(t)
 
 	sid := createTestSession(t, "net", "#chan", "nick", "chat", "", "")
 	sessionMgr.AddMessage(sid, ChatMessage{Role: "user", Content: "hello"})
@@ -376,8 +364,7 @@ func TestDatabaseConfigNoOverwrite(t *testing.T) {
 }
 
 func TestDBToolCalls(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	sid := createTestSession(t, "net", "#chan", "nick", "chat", "", "")
 
@@ -404,8 +391,7 @@ func TestDBToolCalls(t *testing.T) {
 }
 
 func TestDBFirstMessage(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	sid := createTestSession(t, "testnet", "#chan", "user", "testcmd", "", "")
 
@@ -427,8 +413,7 @@ func TestDBFirstMessage(t *testing.T) {
 }
 
 func TestDBMultiContent(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	sid := createTestSession(t, "net", "#chan", "nick", "chat", "", "")
 
@@ -461,8 +446,7 @@ func TestDBMultiContent(t *testing.T) {
 }
 
 func TestDBMultiContentWithToolCalls(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	sid := createTestSession(t, "net", "#chan", "nick", "chat", "", "")
 
@@ -497,8 +481,7 @@ func TestDBMultiContentWithToolCalls(t *testing.T) {
 }
 
 func TestDBFirstMessageWithMultiContent(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	sid := createTestSession(t, "testnet", "#chan", "user", "testcmd", "", "")
 
@@ -514,8 +497,7 @@ func TestDBFirstMessageWithMultiContent(t *testing.T) {
 }
 
 func TestDBFirstMessageMultiContentNoText(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	sid := createTestSession(t, "testnet", "#chan", "user", "testcmd", "", "")
 
@@ -582,8 +564,7 @@ func TestTextContentFromMessage(t *testing.T) {
 }
 
 func TestClearContextCompletesSession(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	sid := createTestSession(t, "testnet", "#chan", "user", "testcmd", "", "")
 
@@ -599,8 +580,7 @@ func TestClearContextCompletesSession(t *testing.T) {
 }
 
 func TestSessionManagerGetActiveSession(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	session, err := sessionMgr.GetActiveSession("testnet", "#chan", ensureTestUser(t, "testnet", "user"))
 	require.NoError(t, err)
@@ -616,8 +596,7 @@ func TestSessionManagerGetActiveSession(t *testing.T) {
 }
 
 func TestSessionManagerSwitchActive(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	sidA := createTestSession(t, "testnet", "#chan", "user", "testcmd", "", "")
 	sessionMgr.AddMessage(sidA, ChatMessage{Role: "user", Content: "msg A"})
@@ -641,8 +620,7 @@ func TestSessionManagerSwitchActive(t *testing.T) {
 }
 
 func TestSessionManagerUpdateResponseID(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	sid := createTestSession(t, "testnet", "#chan", "user", "testcmd", "", "")
 
@@ -660,8 +638,7 @@ func TestSessionManagerUpdateResponseID(t *testing.T) {
 // serialized by the per-user sessionCreationMu lock. This is a regression test
 // for the bug where two -commands arriving close together would share one session.
 func TestConcurrentCreateSessionIsolation(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	const numGoroutines = 10
 	var wg sync.WaitGroup
@@ -704,8 +681,7 @@ func TestConcurrentCreateSessionIsolation(t *testing.T) {
 }
 
 func TestConcurrentCreateSessionWithoutLockRaces(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	// Without the lock, concurrent CreateSession calls for the same key would
 	// cause session reuse. This test confirms the lock prevents that by running

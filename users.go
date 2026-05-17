@@ -843,9 +843,7 @@ func getUserInfo(userID int64) (*UserInfo, error) {
 
 	info := &UserInfo{User: *user}
 
-	if err := theDB.Where("user_id = ?", userID).Order("last_seen DESC").Find(&info.Hosts).Error; err != nil {
-		return nil, fmt.Errorf("getting user hosts: %w", err)
-	}
+	theDB.Where("user_id = ?", userID).Order("last_seen DESC").Find(&info.Hosts)
 
 	info.SessionCount, info.MessageCount, err = getUserDBStats(userID, "", "")
 	if err != nil {
@@ -853,14 +851,10 @@ func getUserInfo(userID int64) (*UserInfo, error) {
 	}
 
 	now := time.Now()
-	if err := theDB.Where("user_id = ? AND active = ? AND expires_at > ?", userID, true, now).
-		Order("created_at DESC").Find(&info.ActiveBans).Error; err != nil {
-		return nil, fmt.Errorf("getting user bans: %w", err)
-	}
+	theDB.Where("user_id = ? AND active = ? AND expires_at > ?", userID, true, now).
+		Order("created_at DESC").Find(&info.ActiveBans)
 
-	if err := theDB.Where("user_id = ?", userID).Order("created_at DESC").Limit(20).Find(&info.NickChanges).Error; err != nil {
-		return nil, fmt.Errorf("getting user nick changes: %w", err)
-	}
+	theDB.Where("user_id = ?", userID).Order("created_at DESC").Limit(20).Find(&info.NickChanges)
 
 	return info, nil
 }

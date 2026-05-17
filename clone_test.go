@@ -14,8 +14,7 @@ import (
 )
 
 func TestSessionHasIncompleteToolCalls_NoToolCalls(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	sid := createTestSession(t, "net", "#c", "u1", "cmd", "svc", "m")
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
@@ -28,8 +27,7 @@ func TestSessionHasIncompleteToolCalls_NoToolCalls(t *testing.T) {
 }
 
 func TestSessionHasIncompleteToolCalls_CompletePairs(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	sid := createTestSession(t, "net", "#c", "u1", "cmd", "svc", "m")
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
@@ -51,8 +49,7 @@ func TestSessionHasIncompleteToolCalls_CompletePairs(t *testing.T) {
 }
 
 func TestSessionHasIncompleteToolCalls_MissingResponse(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	sid := createTestSession(t, "net", "#c", "u1", "cmd", "svc", "m")
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
@@ -69,8 +66,7 @@ func TestSessionHasIncompleteToolCalls_MissingResponse(t *testing.T) {
 }
 
 func TestSessionHasIncompleteToolCalls_MultipleToolsOneMissing(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	sid := createTestSession(t, "net", "#c", "u1", "cmd", "svc", "m")
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
@@ -95,8 +91,7 @@ func TestSessionHasIncompleteToolCalls_MultipleToolsOneMissing(t *testing.T) {
 }
 
 func TestSessionHasIncompleteToolCalls_MultipleRoundsAllComplete(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	sid := createTestSession(t, "net", "#c", "u1", "cmd", "svc", "m")
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
@@ -128,8 +123,7 @@ func TestSessionHasIncompleteToolCalls_MultipleRoundsAllComplete(t *testing.T) {
 }
 
 func TestCloneDBSession_BasicClone(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	srcUserID := ensureTestUser(t, "net", "srcnick")
 	srcSid, err := sessionMgr.CreateSession("net", "#c", srcUserID, "testchat", "svc", "model")
@@ -168,8 +162,7 @@ func TestCloneDBSession_BasicClone(t *testing.T) {
 }
 
 func TestCloneDBSession_CloneCompletesExistingActiveSession(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	tgtUserID := ensureTestUser(t, "net", "tgtnick")
 	existingSid, err := sessionMgr.CreateSession("net", "#c", tgtUserID, "oldchat", "svc", "m")
@@ -192,8 +185,7 @@ func TestCloneDBSession_CloneCompletesExistingActiveSession(t *testing.T) {
 }
 
 func TestCloneDBSession_OnlyLiveMessagesCloned(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	srcUserID := ensureTestUser(t, "net", "srcnick")
 	srcSid, err := sessionMgr.CreateSession("net", "#c", srcUserID, "chat", "svc", "m")
@@ -220,8 +212,7 @@ func TestCloneDBSession_OnlyLiveMessagesCloned(t *testing.T) {
 }
 
 func TestCloneDBSession_SourceUntouched(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	srcUserID := ensureTestUser(t, "net", "srcnick")
 	srcSid, err := sessionMgr.CreateSession("net", "#c", srcUserID, "chat", "svc", "m")
@@ -243,8 +234,7 @@ func TestCloneDBSession_SourceUntouched(t *testing.T) {
 }
 
 func TestCloneDBSession_SettingsCopied(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	srcUserID := ensureTestUser(t, "net", "srcnick")
 	srcSid, err := sessionMgr.CreateSession("net", "#c", srcUserID, "chat", "svc", "m")
@@ -285,8 +275,7 @@ func TestCloneDBSession_SettingsCopied(t *testing.T) {
 }
 
 func TestCloneDBSession_WithToolCalls(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	srcUserID := ensureTestUser(t, "net", "srcnick")
 	srcSid, err := sessionMgr.CreateSession("net", "#c", srcUserID, "chat", "svc", "m")
@@ -331,8 +320,7 @@ func TestCloneDBSession_WithToolCalls(t *testing.T) {
 }
 
 func TestGetChannelDBSessions(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	u1 := ensureTestUser(t, "net", "alice")
 	u2 := ensureTestUser(t, "net", "bob")
@@ -358,8 +346,7 @@ func TestGetChannelDBSessions(t *testing.T) {
 }
 
 func TestHistoryClone_ByNick(t *testing.T) {
-	_, cleanup := setupBotTest(t)
-	defer cleanup()
+	setupBotTest(t)
 
 	network := Network{Name: "testnet", Trigger: "!"}
 	channel := "#test"
@@ -416,8 +403,7 @@ func TestHistoryClone_ByNick(t *testing.T) {
 }
 
 func TestHistoryClone_ByNick_TargetNotFound(t *testing.T) {
-	_, cleanup := setupBotTest(t)
-	defer cleanup()
+	setupBotTest(t)
 
 	network := Network{Name: "testnet", Trigger: "!"}
 	client := bots["testnet"].Client
@@ -438,8 +424,7 @@ func TestHistoryClone_ByNick_TargetNotFound(t *testing.T) {
 }
 
 func TestHistoryClone_ByNick_NoActiveSession(t *testing.T) {
-	_, cleanup := setupBotTest(t)
-	defer cleanup()
+	setupBotTest(t)
 
 	network := Network{Name: "testnet", Trigger: "!"}
 	ensureTestUser(t, network.Name, "inactiveuser")
@@ -462,8 +447,7 @@ func TestHistoryClone_ByNick_NoActiveSession(t *testing.T) {
 }
 
 func TestHistoryClone_ByID(t *testing.T) {
-	_, cleanup := setupBotTest(t)
-	defer cleanup()
+	setupBotTest(t)
 
 	network := Network{Name: "testnet", Trigger: "!"}
 	channel := "#test"
@@ -503,8 +487,7 @@ func TestHistoryClone_ByID(t *testing.T) {
 }
 
 func TestHistoryClone_ByID_WrongChannel(t *testing.T) {
-	_, cleanup := setupBotTest(t)
-	defer cleanup()
+	setupBotTest(t)
 
 	network := Network{Name: "testnet", Trigger: "!"}
 
@@ -531,8 +514,7 @@ func TestHistoryClone_ByID_WrongChannel(t *testing.T) {
 }
 
 func TestHistoryClone_ByID_NotFound(t *testing.T) {
-	_, cleanup := setupBotTest(t)
-	defer cleanup()
+	setupBotTest(t)
 
 	network := Network{Name: "testnet", Trigger: "!"}
 	client := bots["testnet"].Client
@@ -553,8 +535,7 @@ func TestHistoryClone_ByID_NotFound(t *testing.T) {
 }
 
 func TestHistoryClone_IncompleteToolCalls(t *testing.T) {
-	_, cleanup := setupBotTest(t)
-	defer cleanup()
+	setupBotTest(t)
 
 	network := Network{Name: "testnet", Trigger: "!"}
 	channel := "#test"
@@ -590,8 +571,7 @@ func TestHistoryClone_IncompleteToolCalls(t *testing.T) {
 }
 
 func TestHistoryClone_SelfClone(t *testing.T) {
-	_, cleanup := setupBotTest(t)
-	defer cleanup()
+	setupBotTest(t)
 
 	network := Network{Name: "testnet", Trigger: "!"}
 	channel := "#test"
@@ -631,8 +611,7 @@ func TestHistoryClone_SelfClone(t *testing.T) {
 }
 
 func TestHistoryClone_CommandGone(t *testing.T) {
-	_, cleanup := setupBotTest(t)
-	defer cleanup()
+	setupBotTest(t)
 
 	network := Network{Name: "testnet", Trigger: "!"}
 	channel := "#test"

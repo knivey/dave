@@ -19,9 +19,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func setupSessionWithResponseID(t *testing.T, responseID string) (int64, func()) {
+func setupSessionWithResponseID(t *testing.T, responseID string) int64 {
 	t.Helper()
-	db, cleanup := setupTestDB(t)
+	db := setupTestDB(t)
 	_ = db
 
 	sid, err := sessionMgr.CreateSession("testnet", "#101", ensureTestUser(t, "testnet", "shrew"), "testcmd", "testservice", "testmodel")
@@ -30,7 +30,7 @@ func setupSessionWithResponseID(t *testing.T, responseID string) (int64, func())
 		require.NoError(t, sessionMgr.UpdateResponseID(sid, &responseID))
 	}
 
-	return sid, cleanup
+	return sid
 }
 
 func TestExecuteToolCalls_SingleToolSendsCallNotice(t *testing.T) {
@@ -285,8 +285,7 @@ func makeResponsesAPIResponse(id, text string) map[string]any {
 }
 
 func TestRunTurnResponses_ConcurrentSerialization(t *testing.T) {
-	_, cleanup := setupSessionWithResponseID(t, "resp-initial")
-	defer cleanup()
+	setupSessionWithResponseID(t, "resp-initial")
 
 	var (
 		mu                   sync.Mutex
@@ -393,8 +392,7 @@ func TestRunTurnResponses_ConcurrentSerialization(t *testing.T) {
 }
 
 func TestRunTurnResponses_DifferentCtxKeysParallel(t *testing.T) {
-	_, cleanup := setupTestDB(t)
-	defer cleanup()
+	setupTestDB(t)
 
 	cfg := AIConfig{
 		Model:              "test-model",

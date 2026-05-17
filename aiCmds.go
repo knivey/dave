@@ -431,10 +431,6 @@ func (cr *chatRunner) handleToolCallResponse(messages []ChatMessage, text string
 	return messages
 }
 
-// handleResponseIDSave persists the response ID when the response produced output
-// (text or tool calls). If the response had an ID but produced no output, we clear
-// the stored ID to prevent chaining from a dead-end response — see isResponseIDError()
-// in responses.go for why expired/invalid IDs must not be reused.
 func (cr *chatRunner) handleResponseIDSave(respID, text string, toolCalls []ToolCall, currentResponseID string) string {
 	if respID != "" && (text != "" || len(toolCalls) > 0) {
 		SetContextResponseID(cr.network.Name, cr.channel, cr.userID, respID)
@@ -634,9 +630,7 @@ StreamLoop:
 			if len(chunk.Choices) > 0 {
 				if f, ok := chunk.Choices[0].Delta.JSON.ExtraFields["reasoning_content"]; ok && f.Valid() {
 					var rc string
-					if err := json.Unmarshal([]byte(f.Raw()), &rc); err != nil {
-						cr.logger.Debug("failed to unmarshal reasoning_content", "error", err)
-					}
+					json.Unmarshal([]byte(f.Raw()), &rc)
 					chunkReasoning = rc
 				}
 			}
@@ -1392,7 +1386,6 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 		if err != nil {
 			mu.Unlock()
 			runner.logger.Error("Failed to create session", "error", err)
-			runner.sendError(errorNotice(getNotices().DB.InternalError, map[string]string{"error": err.Error()}))
 			return
 		}
 		if _, err := sessionMgr.CreateSessionSettings(sid, cfg); err != nil {
@@ -1407,7 +1400,6 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 		mu.Unlock()
 		if err != nil || session == nil {
 			runner.logger.Error("Failed to get session after creation", "id", sid, "error", err)
-			runner.sendError(errorNotice(getNotices().DB.InternalError, map[string]string{"error": "session not available after creation"}))
 			return
 		}
 	}
@@ -1417,8 +1409,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 		messages, err := sessionMgr.GetMessages(session.ID, cfg.MaxHistory)
 		if err != nil {
 			runner.logger.Error("failed to load messages for image detection", "error", err)
-			runner.sendError(errorNotice(getNotices().DB.LoadMessages, map[string]string{"error": err.Error()}))
-			return
+			messages = nil
 		}
 
 		cleanText, imageUrls := detectImageURLs(args[0])
@@ -1457,11 +1448,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 		}
 	}
 
-	if err := sessionMgr.AddMessage(session.ID, userMsg); err != nil {
-		runner.logger.Error("failed to persist user message", "error", err)
-		runner.sendError(errorNotice(getNotices().DB.InternalError, map[string]string{"error": err.Error()}))
-		return
-	}
+	sessionMgr.AddMessage(session.ID, userMsg)
 
 	runner.sessionID = session.ID
 	if session.ConvID != nil {

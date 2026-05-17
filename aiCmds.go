@@ -431,6 +431,10 @@ func (cr *chatRunner) handleToolCallResponse(messages []ChatMessage, text string
 	return messages
 }
 
+// handleResponseIDSave persists the response ID when the response produced output
+// (text or tool calls). If the response had an ID but produced no output, we clear
+// the stored ID to prevent chaining from a dead-end response — see isResponseIDError()
+// in responses.go for why expired/invalid IDs must not be reused.
 func (cr *chatRunner) handleResponseIDSave(respID, text string, toolCalls []ToolCall, currentResponseID string) string {
 	if respID != "" && (text != "" || len(toolCalls) > 0) {
 		SetContextResponseID(cr.network.Name, cr.channel, cr.userID, respID)

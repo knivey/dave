@@ -12,27 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func setupHistoryTest(t *testing.T) (*girc.Client, func()) {
-	t.Helper()
-	setupJMTestDB(t)
-	setupTestJobManager(t)
-	setupCancelTestMCP(t)
-
-	client := girc.New(girc.Config{
-		Server: "localhost",
-		Port:   6667,
-		Nick:   "testbot",
-	})
-
-	origBots := bots
-	bots = map[string]*Bot{
-		"testnet": {Client: client},
-	}
-	t.Cleanup(func() { bots = origBots })
-
-	return client, func() {}
-}
-
 func makeHistoryEvent(channel, nick string) girc.Event {
 	return girc.Event{
 		Source: &girc.Source{
@@ -45,11 +24,11 @@ func makeHistoryEvent(channel, nick string) girc.Event {
 }
 
 func TestHistoryDelete_CancelsAsyncJobs(t *testing.T) {
-	_, cleanup := setupHistoryTest(t)
+	_, cleanup := setupBotTest(t)
 	defer cleanup()
 
 	network := Network{Name: "testnet", Trigger: "!"}
-	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 
 	asyncJobMgr.jobs["job-delete-1"] = &jobEntry[asyncJobPayload]{
 		jobID:   "job-delete-1",
@@ -78,11 +57,11 @@ func TestHistoryDelete_CancelsAsyncJobs(t *testing.T) {
 }
 
 func TestHistoryDelete_NoAsyncJobs(t *testing.T) {
-	_, cleanup := setupHistoryTest(t)
+	_, cleanup := setupBotTest(t)
 	defer cleanup()
 
 	network := Network{Name: "testnet", Trigger: "!"}
-	createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 
 	client := bots["testnet"].Client
 	e := makeHistoryEvent("#test", "testuser")
@@ -91,11 +70,11 @@ func TestHistoryDelete_NoAsyncJobs(t *testing.T) {
 }
 
 func TestHistoryDelete_DeletesSession(t *testing.T) {
-	_, cleanup := setupHistoryTest(t)
+	_, cleanup := setupBotTest(t)
 	defer cleanup()
 
 	network := Network{Name: "testnet", Trigger: "!"}
-	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 
 	client := bots["testnet"].Client
 	e := makeHistoryEvent("#test", "testuser")
@@ -107,11 +86,11 @@ func TestHistoryDelete_DeletesSession(t *testing.T) {
 }
 
 func TestHistoryDelete_OwnershipCheck(t *testing.T) {
-	_, cleanup := setupHistoryTest(t)
+	_, cleanup := setupBotTest(t)
 	defer cleanup()
 
 	network := Network{Name: "testnet", Trigger: "!"}
-	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 
 	asyncJobMgr.jobs["job-owned"] = &jobEntry[asyncJobPayload]{
 		jobID:   "job-owned",
@@ -157,7 +136,7 @@ func drainOutput(t *testing.T, ch <-chan string, maxMsgs int, maxWait time.Durat
 // `^sessions$` command output even after the session has been compacted and
 // most messages are archived.
 func TestHistorySessions_StarterPreservedAfterCompaction(t *testing.T) {
-	_, cleanup := setupHistoryTest(t)
+	_, cleanup := setupBotTest(t)
 	defer cleanup()
 
 	stub := newSummarizerStubServer(t, "Compacted summary text.")
@@ -175,7 +154,7 @@ func TestHistorySessions_StarterPreservedAfterCompaction(t *testing.T) {
 
 	network := Network{Name: "testnet", Trigger: "!"}
 	channel := "#test"
-	sid := createTestSession(t, network.Name, channel, "testuser", "testchat")
+	sid := createTestSession(t, network.Name, channel, "testuser", "testchat", "", "")
 	starter := "what is the meaning of life and everything else"
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: starter}))
@@ -214,7 +193,7 @@ func TestHistorySessions_StarterPreservedAfterCompaction(t *testing.T) {
 // after the session has been compacted (the original message is now
 // archived, but should still appear in the displayed head).
 func TestHistoryShow_StarterInHeadAfterCompaction(t *testing.T) {
-	_, cleanup := setupHistoryTest(t)
+	_, cleanup := setupBotTest(t)
 	defer cleanup()
 
 	stub := newSummarizerStubServer(t, "Compacted summary text.")
@@ -227,7 +206,7 @@ func TestHistoryShow_StarterInHeadAfterCompaction(t *testing.T) {
 
 	network := Network{Name: "testnet", Trigger: "!"}
 	channel := "#test"
-	sid := createTestSession(t, network.Name, channel, "testuser", "testchat")
+	sid := createTestSession(t, network.Name, channel, "testuser", "testchat", "", "")
 	starter := "DISTINCTIVE_STARTER_TOKEN"
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: starter}))
@@ -279,7 +258,7 @@ func TestRepeatAutoCompaction(t *testing.T) {
 	}
 	defer func() { config.Services = prevServices }()
 
-	sid := testCreateSession(t, "net", "#c", "u1", "cmd", "stubsvc", "stubmodel")
+	sid := createTestSession(t, "net", "#c", "u1", "cmd", "stubsvc", "stubmodel")
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
 	for i := 0; i < 12; i++ {
 		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: fmt.Sprintf("u%d", i)}))
@@ -333,7 +312,7 @@ func TestRepeatAutoCompaction(t *testing.T) {
 // tail-copy ghosts (which duplicate content already covered by an earlier
 // summary) must NOT inflate the count.
 func TestHistorySessions_ArchivedCountExcludesSupersededRows(t *testing.T) {
-	_, cleanup := setupHistoryTest(t)
+	_, cleanup := setupBotTest(t)
 	defer cleanup()
 
 	stub := newSummarizerStubServer(t, "Summary.")
@@ -351,7 +330,7 @@ func TestHistorySessions_ArchivedCountExcludesSupersededRows(t *testing.T) {
 
 	network := Network{Name: "testnet", Trigger: "!"}
 	channel := "#test"
-	sid := createTestSession(t, network.Name, channel, "testuser", "testchat")
+	sid := createTestSession(t, network.Name, channel, "testuser", "testchat", "", "")
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
 	for i := 0; i < 12; i++ {
 		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: fmt.Sprintf("u%d", i)}))
@@ -416,7 +395,7 @@ func TestHistorySessions_ArchivedCountExcludesSupersededRows(t *testing.T) {
 // loadDBSessionMessagesAll, which is now filtered. The user should never
 // see duplicate archived content from earlier compactions.
 func TestHistoryShow_DoesNotShowSupersededRows(t *testing.T) {
-	_, cleanup := setupHistoryTest(t)
+	_, cleanup := setupBotTest(t)
 	defer cleanup()
 
 	stub := newSummarizerStubServer(t, "Summary.")
@@ -429,7 +408,7 @@ func TestHistoryShow_DoesNotShowSupersededRows(t *testing.T) {
 
 	network := Network{Name: "testnet", Trigger: "!"}
 	channel := "#test"
-	sid := createTestSession(t, network.Name, channel, "testuser", "testchat")
+	sid := createTestSession(t, network.Name, channel, "testuser", "testchat", "", "")
 
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
 	for i := 0; i < 12; i++ {

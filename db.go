@@ -16,6 +16,8 @@ import (
 
 var theDB *gorm.DB
 
+var loggerDB = newLogger("db")
+
 const (
 	StatusActive    = "active"
 	StatusCompleted = "completed"
@@ -651,6 +653,7 @@ func sessionHasIncompleteToolCalls(sessionID int64) (bool, error) {
 				ID string `json:"id"`
 			}
 			if err := json.Unmarshal([]byte(*m.ToolCalls), &calls); err != nil {
+				loggerDB.Warn("sessionHasIncompleteToolCalls: failed to unmarshal tool_calls", "session_id", sessionID, "message_id", m.ID, "error", err)
 				continue
 			}
 			for _, tc := range calls {

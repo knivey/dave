@@ -9,7 +9,7 @@ import (
 )
 
 func TestCreateBan(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	userID := ensureTestUser(t, "testnet", "BadUser")
@@ -34,7 +34,7 @@ func TestCreateBan(t *testing.T) {
 }
 
 func TestCreateBanWithBanner(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	userID := ensureTestUser(t, "testnet", "BadUser")
@@ -47,7 +47,7 @@ func TestCreateBanWithBanner(t *testing.T) {
 }
 
 func TestIsBannedActive(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	userID := ensureTestUser(t, "testnet", "BadUser")
@@ -60,7 +60,7 @@ func TestIsBannedActive(t *testing.T) {
 }
 
 func TestIsBannedChannelSpecific(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	userID := ensureTestUser(t, "testnet", "BadUser")
@@ -73,7 +73,7 @@ func TestIsBannedChannelSpecific(t *testing.T) {
 }
 
 func TestIsBannedDifferentNetwork(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	userID := ensureTestUser(t, "testnet", "BadUser")
@@ -85,7 +85,7 @@ func TestIsBannedDifferentNetwork(t *testing.T) {
 }
 
 func TestIsBannedExpiredLazyDeactivation(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	userID := ensureTestUser(t, "testnet", "BadUser")
@@ -108,7 +108,7 @@ func TestIsBannedNilDB(t *testing.T) {
 }
 
 func TestDeactivateBan(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	userID := ensureTestUser(t, "testnet", "BadUser")
@@ -128,7 +128,7 @@ func TestDeactivateBan(t *testing.T) {
 }
 
 func TestDeactivateBansForUser(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	userID := ensureTestUser(t, "testnet", "BadUser")
@@ -146,7 +146,7 @@ func TestDeactivateBansForUser(t *testing.T) {
 }
 
 func TestDeactivateBansForUserNetworkSpecific(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	userID := ensureTestUser(t, "testnet", "BadUser")
@@ -164,7 +164,7 @@ func TestDeactivateBansForUserNetworkSpecific(t *testing.T) {
 }
 
 func TestGetActiveBans(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	user1 := ensureTestUser(t, "testnet", "User1")
@@ -185,7 +185,7 @@ func TestGetActiveBans(t *testing.T) {
 }
 
 func TestGetActiveBansExcludesInactive(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	userID := ensureTestUser(t, "testnet", "BadUser")
@@ -202,7 +202,7 @@ func TestGetActiveBansExcludesInactive(t *testing.T) {
 }
 
 func TestGetBanHistory(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	userID := ensureTestUser(t, "testnet", "BadUser")
@@ -218,7 +218,7 @@ func TestGetBanHistory(t *testing.T) {
 }
 
 func TestGetBanHistoryEmpty(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	userID := ensureTestUser(t, "testnet", "GoodUser")
@@ -229,7 +229,7 @@ func TestGetBanHistoryEmpty(t *testing.T) {
 }
 
 func TestSweepExpiredBans(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	user1 := ensureTestUser(t, "testnet", "User1")
@@ -311,7 +311,7 @@ func TestParseBanDuration(t *testing.T) {
 }
 
 func TestIsBannedServiceScope(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	userID := ensureTestUser(t, "testnet", "BadUser")
@@ -325,7 +325,7 @@ func TestIsBannedServiceScope(t *testing.T) {
 }
 
 func TestGetActiveBansForUser(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	userID := ensureTestUser(t, "testnet", "BadUser")
@@ -347,7 +347,7 @@ func TestGetActiveBansForUser(t *testing.T) {
 }
 
 func TestGetActiveBansForUserExpired(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	userID := ensureTestUser(t, "testnet", "BadUser")
@@ -362,7 +362,7 @@ func TestGetActiveBansForUserExpired(t *testing.T) {
 }
 
 func TestGetActiveBansForUserDifferentNetwork(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	userID := ensureTestUser(t, "testnet", "BadUser")
@@ -380,7 +380,7 @@ func TestGetActiveBansForUserNilDB(t *testing.T) {
 }
 
 func TestGetActiveBansForUserNone(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	userID := ensureTestUser(t, "testnet", "GoodUser")
@@ -390,7 +390,7 @@ func TestGetActiveBansForUserNone(t *testing.T) {
 }
 
 func TestMultipleBansOneActive(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	userID := ensureTestUser(t, "testnet", "BadUser")

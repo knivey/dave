@@ -159,7 +159,7 @@ func TestCompactSession_LiveHistoryStartsWithUserAfterSystem(t *testing.T) {
 	}
 	defer func() { config.Services = prevServices }()
 
-	sid := testCreateSession(t, "net", "#c", "u1", "cmd", "stubsvc", "stubmodel")
+	sid := createTestSession(t, "net", "#c", "u1", "cmd", "stubsvc", "stubmodel")
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
 	for i := 0; i < 6; i++ {
 		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "u"}))
@@ -233,7 +233,7 @@ func TestLoadDBSessionMessages_FiltersArchived(t *testing.T) {
 	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	sid := testCreateSession(t, "net", "#c", "u1", "cmd", "svc", "model")
+	sid := createTestSession(t, "net", "#c", "u1", "cmd", "svc", "model")
 	for i := 0; i < 4; i++ {
 		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "m"}))
 	}
@@ -258,7 +258,7 @@ func TestArchiveMessagesRange(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	sid := testCreateSession(t, "net", "#c", "u1", "cmd", "svc", "model")
+	sid := createTestSession(t, "net", "#c", "u1", "cmd", "svc", "model")
 	for i := 0; i < 5; i++ {
 		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "m"}))
 	}
@@ -286,7 +286,7 @@ func TestCompactSession_RefusesShort(t *testing.T) {
 	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	sid := testCreateSession(t, "net", "#c", "u1", "cmd", "svc", "model")
+	sid := createTestSession(t, "net", "#c", "u1", "cmd", "svc", "model")
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "hi"}))
 
@@ -333,7 +333,7 @@ func TestCompactSession_EnforcesMinTurns(t *testing.T) {
 				MinTurns:    tc.minTurns,
 			}
 
-			sid := testCreateSession(t, "net", "#c", "u1", "cmd", "stubsvc", "stubmodel")
+			sid := createTestSession(t, "net", "#c", "u1", "cmd", "stubsvc", "stubmodel")
 			require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
 			for i := 0; i < tc.numTurns; i++ {
 				require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "u"}))
@@ -372,7 +372,7 @@ func TestCompactSession_EndToEnd(t *testing.T) {
 	}
 	defer func() { config.Services = prevServices }()
 
-	sid := testCreateSession(t, "net", "#c", "u1", "cmd", "stubsvc", "stubmodel")
+	sid := createTestSession(t, "net", "#c", "u1", "cmd", "stubsvc", "stubmodel")
 	// Seed: system + 6 turns (12 user/assistant messages) so we have
 	// enough material.
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
@@ -448,7 +448,7 @@ func TestCompactSession_Concurrency(t *testing.T) {
 	}
 	defer func() { config.Services = prevServices }()
 
-	sid := testCreateSession(t, "net", "#c", "u1", "cmd", "stubsvc", "stubmodel")
+	sid := createTestSession(t, "net", "#c", "u1", "cmd", "stubsvc", "stubmodel")
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
 	for i := 0; i < 6; i++ {
 		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "u"}))
@@ -490,7 +490,7 @@ func TestShouldAutoCompact(t *testing.T) {
 	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	sid := testCreateSession(t, "net", "#c", "u1", "cmd", "svc", "model")
+	sid := createTestSession(t, "net", "#c", "u1", "cmd", "svc", "model")
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "u"}))
 
 	// Insert a TurnUsage row.
@@ -534,7 +534,7 @@ func TestCompactSession_TagsTailCopiesWithSourceCompactionID(t *testing.T) {
 	}
 	defer func() { config.Services = prevServices }()
 
-	sid := testCreateSession(t, "net", "#c", "u1", "cmd", "stubsvc", "stubmodel")
+	sid := createTestSession(t, "net", "#c", "u1", "cmd", "stubsvc", "stubmodel")
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
 	for i := 0; i < 6; i++ {
 		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "u"}))
@@ -592,7 +592,7 @@ func TestRepeatCompaction_DoesNotInflateArchivedCount(t *testing.T) {
 	}
 	defer func() { config.Services = prevServices }()
 
-	sid := testCreateSession(t, "net", "#c", "u1", "cmd", "stubsvc", "stubmodel")
+	sid := createTestSession(t, "net", "#c", "u1", "cmd", "stubsvc", "stubmodel")
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
 	for i := 0; i < 12; i++ {
 		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "u"}))

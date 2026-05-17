@@ -7,24 +7,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	logxi "github.com/mgutz/logxi/v1"
 )
 
-func setupUserTestDB(t *testing.T) func() {
-	t.Helper()
-	db, err := initDB(DatabaseConfig{Path: t.TempDir() + "/test.db"}, logxi.New("test"))
-	require.NoError(t, err, "initDB")
-	oldDB := theDB
-	theDB = db
-	return func() {
-		closeDB(theDB)
-		theDB = oldDB
-	}
-}
-
 func TestResolveUserCreatesNew(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	user, err := resolveUser("testnet", "TestNick", "ident1", "host1.example.com", "", "rfc1459")
@@ -45,7 +31,7 @@ func TestResolveUserCreatesNew(t *testing.T) {
 }
 
 func TestResolveUserByAccount(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	user, err := resolveUser("testnet", "Nick1", "ident1", "host1", "myaccount", "rfc1459")
@@ -62,7 +48,7 @@ func TestResolveUserByAccount(t *testing.T) {
 }
 
 func TestResolveUserByNickContinuity(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	user, err := resolveUser("testnet", "MyNick", "ident1", "host1", "", "rfc1459")
@@ -76,7 +62,7 @@ func TestResolveUserByNickContinuity(t *testing.T) {
 }
 
 func TestResolveUserNickCasingUpdate(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	user, err := resolveUser("testnet", "TestNick", "ident1", "host1", "", "rfc1459")
@@ -91,7 +77,7 @@ func TestResolveUserNickCasingUpdate(t *testing.T) {
 }
 
 func TestResolveUserByKnownHostRecovery(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	user, err := resolveUser("testnet", "Original", "ident1", "host1", "", "rfc1459")
@@ -107,7 +93,7 @@ func TestResolveUserByKnownHostRecovery(t *testing.T) {
 }
 
 func TestResolveUserByKnownHostMultiMatchDisambiguation(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	user1, err := createNewUser("testnet", "UserOne", "userone", "", "shared", "shared.host")
@@ -129,7 +115,7 @@ func TestResolveUserByKnownHostMultiMatchDisambiguation(t *testing.T) {
 }
 
 func TestResolveUserByKnownHostAmbiguousCreatesNew(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	user1, err := createNewUser("testnet", "UserOne", "userone", "", "shared", "shared.host")
@@ -149,7 +135,7 @@ func TestResolveUserByKnownHostAmbiguousCreatesNew(t *testing.T) {
 }
 
 func TestResolveUserAccountUpdatesExisting(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	user, err := resolveUser("testnet", "Nick1", "ident1", "host1", "", "rfc1459")
@@ -165,7 +151,7 @@ func TestResolveUserAccountUpdatesExisting(t *testing.T) {
 }
 
 func TestResolveUserByNick(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	user, err := resolveUser("testnet", "TestNick", "ident1", "host1", "", "rfc1459")
@@ -183,7 +169,7 @@ func TestResolveUserByNick(t *testing.T) {
 }
 
 func TestRecordNickChange(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	user, err := resolveUser("testnet", "OldNick", "ident1", "host1", "", "rfc1459")
@@ -209,7 +195,7 @@ func TestRecordNickChange(t *testing.T) {
 }
 
 func TestRecordNickChangeUntracked(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	ok := recordNickChange("testnet", "Nobody", "Somebody", "rfc1459")
@@ -217,7 +203,7 @@ func TestRecordNickChangeUntracked(t *testing.T) {
 }
 
 func TestUpsertKnownHost(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	user, err := createNewUser("testnet", "Nick", "nick", "", "ident1", "host1")
@@ -245,7 +231,7 @@ func TestUpsertKnownHost(t *testing.T) {
 }
 
 func TestResolveUserDifferentNetworks(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	user1, err := resolveUser("net1", "SameNick", "ident1", "host1", "", "rfc1459")
@@ -269,7 +255,7 @@ func TestResolveUserDBNil(t *testing.T) {
 }
 
 func TestCasemappingInResolution(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	user, err := resolveUser("testnet", "[Test]", "ident1", "host1", "", "rfc1459")
@@ -284,7 +270,7 @@ func TestCasemappingInResolution(t *testing.T) {
 }
 
 func TestReleaseUserNick(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	user, err := resolveUser("testnet", "TestNick", "ident1", "host1", "", "rfc1459")
@@ -307,7 +293,7 @@ func TestReleaseUserNick(t *testing.T) {
 }
 
 func TestHasNoKnownHosts(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	user, err := createNewUser("testnet", "Ghost", "ghost", "", "", "")
@@ -324,7 +310,7 @@ func TestHasNoKnownHosts(t *testing.T) {
 }
 
 func TestMergeUser(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	ghost, err := createNewUser("testnet", "Ghost", "ghost", "", "", "")
@@ -378,7 +364,7 @@ func TestMergeUser(t *testing.T) {
 }
 
 func TestMergeUserReassignsBannerUserID(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	ghost, err := createNewUser("testnet", "Ghost", "ghost", "", "", "")
@@ -400,7 +386,7 @@ func TestMergeUserReassignsBannerUserID(t *testing.T) {
 }
 
 func TestRecordNickChangeCollisionMergeGhost(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	ghost, err := createNewUser("testnet", "UserA", "usera", "", "", "")
@@ -433,7 +419,7 @@ func TestRecordNickChangeCollisionMergeGhost(t *testing.T) {
 }
 
 func TestRecordNickChangeCollisionReleaseReal(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	userA, err := resolveUser("testnet", "UserA", "identA", "hostA", "", "rfc1459")
@@ -464,7 +450,7 @@ func TestRecordNickChangeCollisionReleaseReal(t *testing.T) {
 }
 
 func TestRecordNickChangeNoCollision(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	user, err := resolveUser("testnet", "OldNick", "ident1", "host1", "", "rfc1459")
@@ -486,7 +472,7 @@ func TestRecordNickChangeNoCollision(t *testing.T) {
 }
 
 func TestResolveUserSkipsReleasedNick(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	user, err := resolveUser("testnet", "TestNick", "ident1", "host1", "", "rfc1459")
@@ -503,7 +489,7 @@ func TestResolveUserSkipsReleasedNick(t *testing.T) {
 }
 
 func TestResolveUserByNickSkipsReleased(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	user, err := resolveUser("testnet", "TestNick", "ident1", "host1", "", "rfc1459")
@@ -519,7 +505,7 @@ func TestResolveUserByNickSkipsReleased(t *testing.T) {
 }
 
 func TestNickTakeoverScenario(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	userA, err := resolveUser("testnet", "UserA", "identA", "hostA", "", "rfc1459")
@@ -587,7 +573,7 @@ func TestNickTakeoverScenario(t *testing.T) {
 }
 
 func TestNickTakeoverMergeGhostScenario(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	ghost, err := createNewUser("testnet", "UserA", "usera", "", "", "")
@@ -640,7 +626,7 @@ func TestNickTakeoverMergeGhostScenario(t *testing.T) {
 }
 
 func TestGetUserInfo(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	user, err := resolveUser("testnet", "TestUser", "ident1", "host1", "myaccount", "rfc1459")
@@ -676,7 +662,7 @@ func TestGetUserInfo(t *testing.T) {
 }
 
 func TestGetUserInfoWithBansAndNickChanges(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	user, err := resolveUser("testnet", "TestUser", "ident1", "host1", "", "rfc1459")
@@ -699,7 +685,7 @@ func TestGetUserInfoWithBansAndNickChanges(t *testing.T) {
 }
 
 func TestSearchUsersByNick(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	_, err := resolveUser("testnet", "AlphaUser", "ident1", "host1", "", "rfc1459")
@@ -730,7 +716,7 @@ func TestSearchUsersByNick(t *testing.T) {
 }
 
 func TestSearchUsersByID(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	user, err := resolveUser("testnet", "TestUser", "ident1", "host1", "", "rfc1459")
@@ -743,7 +729,7 @@ func TestSearchUsersByID(t *testing.T) {
 }
 
 func TestSearchUsersByHost(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	_, err := resolveUser("testnet", "TestUser", "myident", "myhost.example.com", "", "rfc1459")
@@ -757,7 +743,7 @@ func TestSearchUsersByHost(t *testing.T) {
 }
 
 func TestSearchUsersReleased(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	user, err := resolveUser("testnet", "TestUser", "ident1", "host1", "", "rfc1459")
@@ -772,7 +758,7 @@ func TestSearchUsersReleased(t *testing.T) {
 }
 
 func TestSearchUsersDifferentNetwork(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	_, err := resolveUser("testnet", "TestUser", "ident1", "host1", "", "rfc1459")
@@ -784,7 +770,7 @@ func TestSearchUsersDifferentNetwork(t *testing.T) {
 }
 
 func TestSearchUsersWildcardAll(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	_, err := resolveUser("testnet", "AlphaUser", "ident1", "host1", "", "rfc1459")
@@ -800,7 +786,7 @@ func TestSearchUsersWildcardAll(t *testing.T) {
 }
 
 func TestSearchUsersWildcardPrefix(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	_, err := resolveUser("testnet", "FooBar", "ident1", "host1", "", "rfc1459")
@@ -817,7 +803,7 @@ func TestSearchUsersWildcardPrefix(t *testing.T) {
 }
 
 func TestSearchUsersWildcardSuffix(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	_, err := resolveUser("testnet", "FooBar", "ident1", "host1", "", "rfc1459")
@@ -832,7 +818,7 @@ func TestSearchUsersWildcardSuffix(t *testing.T) {
 }
 
 func TestSearchUsersWildcardContains(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	_, err := resolveUser("testnet", "FooBar", "ident1", "host1", "", "rfc1459")
@@ -852,7 +838,7 @@ func TestSearchUsersWildcardContains(t *testing.T) {
 }
 
 func TestSearchUsersWildcardMiddle(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	_, err := resolveUser("testnet", "FooBarBaz", "ident1", "host1", "", "rfc1459")
@@ -892,7 +878,7 @@ func TestComputeMergeHash(t *testing.T) {
 }
 
 func TestGetUserDBStatsAllNetworks(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	user, err := resolveUser("testnet", "TestUser", "ident1", "host1", "", "rfc1459")
@@ -939,7 +925,7 @@ func TestGetUserDBStatsAllNetworks(t *testing.T) {
 // came from migration or admin intervention) rather than going through
 // resolveUser.
 func TestResolveUserAccountPathReleasesCollidingRealUser(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	// userA: the real "SpartaN" with account, currently released.
@@ -997,7 +983,7 @@ func TestResolveUserAccountPathReleasesCollidingRealUser(t *testing.T) {
 // branch: when the colliding user has no known hosts, they are merged into
 // the account-matched user (deleted, with all their sessions reassigned).
 func TestResolveUserAccountPathMergesGhostHoldingNick(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	// userA: real user with account.
@@ -1055,7 +1041,7 @@ func TestResolveUserAccountPathMergesGhostHoldingNick(t *testing.T) {
 // collision, account-matched user already has the right normalized_nick)
 // triggers no extra DB work and produces no error.
 func TestResolveUserAccountPathSameNickNoOp(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	userA, err := resolveUser("testnet", "Stable", "ident1", "host1", "acct", "rfc1459")
@@ -1081,7 +1067,7 @@ func TestResolveUserAccountPathSameNickNoOp(t *testing.T) {
 // real-user collision (release).
 func TestClaimNickForHelper(t *testing.T) {
 	t.Run("same nick is no-op", func(t *testing.T) {
-		cleanup := setupUserTestDB(t)
+		_, cleanup := setupTestDB(t)
 		defer cleanup()
 
 		user, err := resolveUser("net", "Alice", "ident", "host", "", "rfc1459")
@@ -1096,7 +1082,7 @@ func TestClaimNickForHelper(t *testing.T) {
 	})
 
 	t.Run("free nick is no-op", func(t *testing.T) {
-		cleanup := setupUserTestDB(t)
+		_, cleanup := setupTestDB(t)
 		defer cleanup()
 
 		user, err := resolveUser("net", "Alice", "ident", "host", "", "rfc1459")
@@ -1111,7 +1097,7 @@ func TestClaimNickForHelper(t *testing.T) {
 	})
 
 	t.Run("ghost collision triggers merge", func(t *testing.T) {
-		cleanup := setupUserTestDB(t)
+		_, cleanup := setupTestDB(t)
 		defer cleanup()
 
 		user, err := resolveUser("net", "Alice", "ident", "host", "", "rfc1459")
@@ -1129,7 +1115,7 @@ func TestClaimNickForHelper(t *testing.T) {
 	})
 
 	t.Run("real-user collision triggers release", func(t *testing.T) {
-		cleanup := setupUserTestDB(t)
+		_, cleanup := setupTestDB(t)
 		defer cleanup()
 
 		userA, err := resolveUser("net", "Alice", "identA", "hostA", "", "rfc1459")
@@ -1212,7 +1198,7 @@ func TestDisplayNick(t *testing.T) {
 // Note: userB is staged via direct DB insertion to bypass the released-nick
 // fallback that would otherwise merge them with userA.
 func TestResolveUserFallbackCreatesFlaggedRow(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	// userA: real user, account, with host. Will be released to set up the
@@ -1255,7 +1241,7 @@ func TestResolveUserFallbackCreatesFlaggedRow(t *testing.T) {
 }
 
 func TestFlaggedUserRowSkippedByAccountLookup(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	// Real user with account.
@@ -1284,7 +1270,7 @@ func TestFlaggedUserRowSkippedByAccountLookup(t *testing.T) {
 }
 
 func TestFlaggedUserRowSkippedByNickLookup(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	// Only a flagged row exists with the target normalized_nick. With the
@@ -1308,7 +1294,7 @@ func TestFlaggedUserRowSkippedByNickLookup(t *testing.T) {
 }
 
 func TestGetFlaggedUsers(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	// Three flagged users (2 on 'net', 1 on 'other') plus one normal user
@@ -1355,7 +1341,7 @@ func TestGetFlaggedUsers(t *testing.T) {
 }
 
 func TestCountFlaggedUsers(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	n, err := countFlaggedUsers()
@@ -1388,7 +1374,7 @@ func TestCountFlaggedUsers(t *testing.T) {
 // flagged rows for the same (network, normalized_nick) can coexist while
 // awaiting admin merge.
 func TestFlaggedFallbackAllowsMultipleRows(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	cause := fmt.Errorf("UNIQUE constraint failed: synthetic")
@@ -1415,7 +1401,7 @@ func TestFlaggedFallbackAllowsMultipleRows(t *testing.T) {
 // upsertKnownHost) would be re-surfaced on the next message and become a
 // vector for displacing real users via claimNickFor.
 func TestResolveUserHostRecoverySkipsFlagged(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	cause := fmt.Errorf("UNIQUE constraint failed: synthetic")
@@ -1449,7 +1435,7 @@ func TestResolveUserHostRecoverySkipsFlagged(t *testing.T) {
 // resolveUser call would create a brand new user row, splitting userA's
 // identity. With the fallback it should re-attach to the original row.
 func TestResolveUserRecoversReleasedNick_SameNickDifferentHost(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	// userA appears, gets known host (foo, abcd).
@@ -1487,7 +1473,7 @@ func TestResolveUserRecoversReleasedNick_SameNickDifferentHost(t *testing.T) {
 // ident also changed between sessions (e.g. user reconfigured their client).
 // Nick alone should still be enough to re-attach.
 func TestResolveUserRecoversReleasedNick_DifferentIdent(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	first, err := resolveUser("net", "userA", "foo", "abcd", "", "rfc1459")
@@ -1508,7 +1494,7 @@ func TestResolveUserRecoversReleasedNick_DifferentIdent(t *testing.T) {
 // priority order: when both a released-by-host match and a released-by-nick
 // match are possible, host recovery wins (it ran first).
 func TestResolveUserReleasedNickFallback_HostRecoveryWinsFirst(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	// userA: released, has known host (foo, abcd).
@@ -1542,7 +1528,7 @@ func TestResolveUserReleasedNickFallback_HostRecoveryWinsFirst(t *testing.T) {
 // released rows with the same nick. The fallback should pick the row with
 // the most recent updated_at.
 func TestResolveUserReleasedNickFallback_MultipleMatchesPicksNewest(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	now := time.Now()
@@ -1577,7 +1563,7 @@ func TestResolveUserReleasedNickFallback_MultipleMatchesPicksNewest(t *testing.T
 // no released row matches the nick (and host/account misses too), a fresh
 // user is created — fallback doesn't accidentally pick up unrelated rows.
 func TestResolveUserReleasedNickFallback_NoMatchCreatesNew(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	// Stage an unrelated released row to confirm it isn't matched.
@@ -1606,7 +1592,7 @@ func TestResolveUserReleasedNickFallback_NoMatchCreatesNew(t *testing.T) {
 // a released row from before the account was registered, and the fallback
 // links them together.
 func TestResolveUserReleasedNickFallback_AccountBranch(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	// Released row from when userA had no account.
@@ -1636,7 +1622,7 @@ func TestResolveUserReleasedNickFallback_AccountBranch(t *testing.T) {
 // flagged rows are excluded from the released-nick fallback. A flagged row
 // is a diagnostic placeholder, never an identity match.
 func TestResolveUserReleasedNickFallback_DoesNotMatchFlagged(t *testing.T) {
-	cleanup := setupUserTestDB(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	now := time.Now()

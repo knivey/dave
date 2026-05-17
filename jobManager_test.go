@@ -10,65 +10,10 @@ import (
 	"time"
 
 	"github.com/lrstanley/girc"
-	logxi "github.com/mgutz/logxi/v1"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func setupJMTestDB(t *testing.T) {
-	t.Helper()
-	db, err := initDB(DatabaseConfig{Path: t.TempDir() + "/test.db"}, logxi.New("test"))
-	require.NoError(t, err, "initDB")
-	theDB = db
-	sessionMgr = NewSessionManager(db)
-	t.Cleanup(func() {
-		closeDB(theDB)
-		theDB = nil
-		sessionMgr = nil
-	})
-}
-
-func setupTestJobManager(t *testing.T) {
-	t.Helper()
-	queueMgr = NewQueueManager(NoticesConfig{Queue: QueueNotices{Msg: "queued", Started: "started"}}, 5)
-	queueMgr.UpdateServiceLimits(map[string]Service{"testsvc": {Parallel: 1}})
-	queueMgr.Start()
-	asyncJobMgr = newGenericJobMgr[asyncJobPayload]()
-	asyncJobMgr.ctx, asyncJobMgr.cancel = context.WithCancel(context.Background())
-	t.Cleanup(func() {
-		if queueMgr != nil {
-			queueMgr.Stop()
-		}
-		if asyncJobMgr.cancel != nil {
-			asyncJobMgr.cancel()
-		}
-	})
-}
-
-func createTestSession(t *testing.T, network, channel, nick, chatCmd string) int64 {
-	t.Helper()
-	userID := ensureTestUser(t, network, nick)
-	sid, err := sessionMgr.CreateSession(network, channel, userID, chatCmd, "", "")
-	require.NoError(t, err, "CreateSession")
-	return sid
-}
-
-func insertTestMessage(t *testing.T, sessionID int64, role, content string) {
-	t.Helper()
-	err := insertDBMessage(sessionID, role, content, nil, nil, nil, nil)
-	require.NoError(t, err, "insertDBMessage")
-}
-
-func makeTestAIConfig() AIConfig {
-	return AIConfig{
-		Name:       "testchat",
-		Service:    "testsvc",
-		Model:      "test-model",
-		MaxHistory: 20,
-		Timeout:    30 * time.Second,
-	}
-}
 
 type mockChatRunner struct {
 	setChannelCalled bool
@@ -172,11 +117,11 @@ func setupMockDeps(t *testing.T) *mockBot {
 }
 
 func TestDeliverAsyncResult_SameSession(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	mb := setupMockDeps(t)
 
-	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sid, "system", "you are helpful")
 	insertTestMessage(t, sid, "user", "draw me a picture")
 
@@ -211,15 +156,15 @@ func TestDeliverAsyncResult_SameSession(t *testing.T) {
 }
 
 func TestDeliverAsyncResult_DifferentSession(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	mb := setupMockDeps(t)
 
-	sessionA := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sessionA := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sessionA, "system", "you are helpful")
 	insertTestMessage(t, sessionA, "user", "draw me a picture")
 
-	sessionB := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sessionB := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sessionB, "system", "you are helpful")
 	insertTestMessage(t, sessionB, "user", "tell me a joke")
 
@@ -265,17 +210,17 @@ func TestDeliverAsyncResult_DifferentSession(t *testing.T) {
 }
 
 func TestOnAsyncJobCompleted_UserBusyWaitsThenDelivers(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
 	queueMgr.UpdateServiceLimits(map[string]Service{"testsvc": {Parallel: 1}, "": {Parallel: 1}})
 
-	sessionA := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sessionA := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sessionA, "system", "you are helpful")
 	insertTestMessage(t, sessionA, "user", "draw me a picture")
 
-	sessionB := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sessionB := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sessionB, "system", "you are helpful")
 	insertTestMessage(t, sessionB, "user", "tell me a joke")
 
@@ -314,15 +259,15 @@ func TestOnAsyncJobCompleted_UserBusyWaitsThenDelivers(t *testing.T) {
 }
 
 func TestOnAsyncJobCompleted_MultipleJobsWhileBusy(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	sessionA := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sessionA := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sessionA, "system", "you are helpful")
 	insertTestMessage(t, sessionA, "user", "draw me a picture")
 
-	sessionB := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sessionB := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sessionB, "system", "you are helpful")
 	insertTestMessage(t, sessionB, "user", "tell me a joke")
 
@@ -369,15 +314,15 @@ func TestOnAsyncJobCompleted_MultipleJobsWhileBusy(t *testing.T) {
 }
 
 func TestSwitchToSession_CompletesOldSession(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	sessionA := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sessionA := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sessionA, "system", "sys prompt A")
 	insertTestMessage(t, sessionA, "user", "hello A")
 
-	sessionB := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sessionB := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sessionB, "system", "sys prompt B")
 	insertTestMessage(t, sessionB, "user", "hello B")
 
@@ -411,11 +356,11 @@ func TestSwitchToSession_CompletesOldSession(t *testing.T) {
 }
 
 func TestSwitchToSession_NoOldSession(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	sessionA := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sessionA := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sessionA, "system", "sys prompt A")
 	insertTestMessage(t, sessionA, "user", "hello A")
 
@@ -433,11 +378,11 @@ func TestSwitchToSession_NoOldSession(t *testing.T) {
 }
 
 func TestSwitchToSession_SameSessionIsNoop(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sid, "system", "sys")
 	insertTestMessage(t, sid, "user", "hello")
 
@@ -454,14 +399,14 @@ func TestSwitchToSession_SameSessionIsNoop(t *testing.T) {
 }
 
 func TestSwitchToSession_InvalidChatCommand(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	sessionA := createTestSession(t, "testnet", "#test", "testuser", "deletedcmd")
+	sessionA := createTestSession(t, "testnet", "#test", "testuser", "deletedcmd", "", "")
 	insertTestMessage(t, sessionA, "system", "sys")
 
-	sessionB := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sessionB := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 
 	entry := &jobEntry[asyncJobPayload]{
 		jobID: "job-1", payload: asyncJobPayload{sessionID: sessionA},
@@ -478,11 +423,11 @@ func TestSwitchToSession_InvalidChatCommand(t *testing.T) {
 }
 
 func TestDeliverAsyncResult_NoContext(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	sessionA := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sessionA := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sessionA, "system", "sys")
 	require.NoError(t, createPendingJob(sessionA, "job-1", "generate_image_async", "img-mcp"), "createPendingJob")
 	completePendingJob("job-1", "result")
@@ -511,11 +456,11 @@ func TestDeliverAsyncResult_NoContext(t *testing.T) {
 }
 
 func TestDeliverAsyncResult_UsesMockRunner(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sid, "system", "sys")
 
 	createPendingJob(sid, "job-1", "generate_image_async", "img-mcp")
@@ -550,11 +495,11 @@ func TestDeliverAsyncResult_UsesMockRunner(t *testing.T) {
 }
 
 func TestDeliverAsyncResult_RunnerSeesInjectedResult(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sid, "system", "sys")
 
 	createPendingJob(sid, "job-1", "generate_image_async", "img-mcp")
@@ -594,11 +539,11 @@ func TestDeliverAsyncResult_RunnerSeesInjectedResult(t *testing.T) {
 }
 
 func TestDeliverAsyncResult_MultipleCompletedJobs(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sid, "system", "sys")
 
 	createPendingJob(sid, "job-1", "generate_image_async", "img-mcp")
@@ -634,11 +579,11 @@ func TestDeliverAsyncResult_MultipleCompletedJobs(t *testing.T) {
 }
 
 func TestInjectAsyncResultFromDB(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 
 	cfg := makeTestAIConfig()
 
-	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	sessionMgr.AddMessage(sid, ChatMessage{Role: "system", Content: "sys"})
 
 	result := "image url: http://example.com/test.png"
@@ -664,12 +609,12 @@ func TestInjectAsyncResultFromDB(t *testing.T) {
 }
 
 func TestInjectAsyncResultFromDB_AnthropicUserSuffix(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 
 	cfg := makeTestAIConfig()
 	cfg.Model = "anthropic/claude-sonnet-4.6"
 
-	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	sessionMgr.AddMessage(sid, ChatMessage{Role: "system", Content: "sys"})
 
 	result := "image url: http://example.com/test.png"
@@ -694,12 +639,12 @@ func TestInjectAsyncResultFromDB_AnthropicUserSuffix(t *testing.T) {
 }
 
 func TestInjectAsyncResultFromDB_NeedsUserSuffixConfig(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 
 	cfg := makeTestAIConfig()
 	cfg.NeedsUserSuffix = true
 
-	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	sessionMgr.AddMessage(sid, ChatMessage{Role: "system", Content: "sys"})
 
 	result := "image url: http://example.com/test.png"
@@ -721,11 +666,11 @@ func TestInjectAsyncResultFromDB_NeedsUserSuffixConfig(t *testing.T) {
 }
 
 func TestInjectAsyncResultFromDB_NilResult(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 
 	cfg := makeTestAIConfig()
 
-	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	sessionMgr.AddMessage(sid, ChatMessage{Role: "system", Content: "sys"})
 
 	pj := PendingJob{
@@ -769,11 +714,11 @@ func TestModelNeedsUserSuffix(t *testing.T) {
 }
 
 func TestOnAsyncJobCompleted_RemovesJobFromMap(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sid, "system", "sys")
 
 	createPendingJob(sid, "job-1", "generate_image_async", "img-mcp")
@@ -792,11 +737,11 @@ func TestOnAsyncJobCompleted_RemovesJobFromMap(t *testing.T) {
 }
 
 func TestOnAsyncJobCompleted_MarksCompletedInDB(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sid, "system", "sys")
 
 	createPendingJob(sid, "job-1", "generate_image_async", "img-mcp")
@@ -823,11 +768,11 @@ func TestOnAsyncJobCompleted_MarksCompletedInDB(t *testing.T) {
 }
 
 func TestDeliverAsyncResult_MarksJobsDelivered(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sid, "system", "sys")
 
 	createPendingJob(sid, "job-1", "generate_image_async", "img-mcp")
@@ -865,11 +810,11 @@ func waitForActiveSession(t *testing.T, network, channel string, userID int64, e
 }
 
 func TestDeliverAsyncResult_NoContextLoaded_LoadsFromDB(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sid, "system", "you are helpful")
 	insertTestMessage(t, sid, "user", "draw me a picture")
 
@@ -913,11 +858,11 @@ func TestDeliverAsyncResult_NoContextLoaded_LoadsFromDB(t *testing.T) {
 }
 
 func TestSwitchToSession_NoCurrentSession_NoSwitchMessage(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sid, "system", "you are helpful")
 
 	entry := &jobEntry[asyncJobPayload]{
@@ -934,17 +879,17 @@ func TestSwitchToSession_NoCurrentSession_NoSwitchMessage(t *testing.T) {
 }
 
 func TestSwitchToSession_RestoresConvIDAndResponseID(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	sidA := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sidA := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sidA, "system", "sys")
 	require.NoError(t, theDB.Model(&Session{}).Where("id = ?", sidA).Update("conv_id", "grok-conv-123").Error, "update conv_id")
 	respID := "resp-abc-456"
 	require.NoError(t, updateDBSessionResponseID(sidA, &respID), "updateDBSessionResponseID")
 
-	sidB := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sidB := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sidB, "system", "sys2")
 
 	entry := &jobEntry[asyncJobPayload]{
@@ -964,11 +909,11 @@ func TestSwitchToSession_RestoresConvIDAndResponseID(t *testing.T) {
 }
 
 func TestRecoverPendingJobs(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sid, "system", "sys")
 
 	createPendingJob(sid, "recovery-job-1", "generate_image_async", "img-mcp")
@@ -1008,11 +953,11 @@ func TestRegisterAsyncJob_Duplicate(t *testing.T) {
 }
 
 func TestSwitchToSession_DBMessagesWithToolCalls(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	sessionA := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sessionA := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 
 	toolCallsJSON, _ := json.Marshal([]ToolCall{
 		{ID: "tc-1", Type: "function", Function: FunctionCall{Name: "test_tool", Arguments: `{"arg":"val"}`}},
@@ -1023,7 +968,7 @@ func TestSwitchToSession_DBMessagesWithToolCalls(t *testing.T) {
 	toolCallID := "tc-1"
 	insertDBMessage(sessionA, "tool", "tool result", nil, &toolCallID, nil, nil)
 
-	_ = createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	_ = createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 
 	entry := &jobEntry[asyncJobPayload]{
 		jobID: "job-1", payload: asyncJobPayload{sessionID: sessionA},
@@ -1049,20 +994,20 @@ func TestSwitchToSession_DBMessagesWithToolCalls(t *testing.T) {
 }
 
 func TestSwitchToSession_TruncatesHistory(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
 	cfg := makeTestAIConfig()
 	cfg.MaxHistory = 3
 
-	sessionA := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sessionA := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sessionA, "system", "sys")
 	for i := 0; i < 10; i++ {
 		insertTestMessage(t, sessionA, "user", fmt.Sprintf("msg %d", i))
 	}
 
-	_ = createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	_ = createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 
 	config.Commands.Chats["testchat"] = cfg
 
@@ -1079,11 +1024,11 @@ func TestSwitchToSession_TruncatesHistory(t *testing.T) {
 }
 
 func TestDeliverAsyncResult_RunningDuringTurn(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
-	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sid, "system", "sys")
 
 	createPendingJob(sid, "job-1", "generate_image_async", "img-mcp")
@@ -1120,7 +1065,7 @@ func TestDeliverAsyncResult_RunningDuringTurn(t *testing.T) {
 }
 
 func TestDeliverAsyncResult_RunningDuringTurn_BusyPath(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
 
@@ -1221,11 +1166,11 @@ func setupCancelTestMCP(t *testing.T) {
 }
 
 func TestCancelAsyncJobsForSession_CancelsMatchingJobs(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	setupCancelTestMCP(t)
 
-	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 
 	asyncJobMgr.jobs["job-a"] = &jobEntry[asyncJobPayload]{
 		jobID:   "job-a",
@@ -1244,7 +1189,7 @@ func TestCancelAsyncJobsForSession_CancelsMatchingJobs(t *testing.T) {
 		cancel:  func() {},
 	}
 
-	otherSID := createTestSession(t, "testnet", "#test", "otheruser", "testchat")
+	otherSID := createTestSession(t, "testnet", "#test", "otheruser", "testchat", "", "")
 	asyncJobMgr.jobs["job-c"] = &jobEntry[asyncJobPayload]{
 		jobID:   "job-c",
 		payload: asyncJobPayload{sessionID: otherSID},
@@ -1265,18 +1210,18 @@ func TestCancelAsyncJobsForSession_CancelsMatchingJobs(t *testing.T) {
 }
 
 func TestCancelAsyncJobsForSession_NoJobs(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 
 	cancelAsyncJobsForSession(99999)
 }
 
 func TestCancelAsyncJobsForSession_DeletesFromMap(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	setupCancelTestMCP(t)
 
-	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 
 	asyncJobMgr.jobs["job-x"] = &jobEntry[asyncJobPayload]{
 		jobID:   "job-x",
@@ -1347,7 +1292,7 @@ func setupBlockingWaitMCP(t *testing.T) {
 }
 
 func TestWaitForAsyncJob_CleanupOnCancel(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	setupBlockingWaitMCP(t)
 
@@ -1431,11 +1376,11 @@ func setupImmediateResultMCP(t *testing.T, resultText string) {
 }
 
 func TestWaitForAsyncJob_InlineDelivery(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	setupImmediateResultMCP(t, `{"job_id":"inline-1","status":"completed","result":{"images":[{"url":"http://example.com/img.png"}]}}`)
 
-	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	require.NoError(t, createPendingJob(sid, "inline-1", "generate_image_async", "img-mcp"), "createPendingJob")
 
 	job := registerAsyncJob("inline-1", sid, "generate_image_async", "img-mcp", "testnet", "#test", "testuser", ensureTestUser(t, "testnet", "testuser"))
@@ -1472,14 +1417,14 @@ func TestWaitForAsyncJob_InlineDelivery(t *testing.T) {
 }
 
 func TestWaitForAsyncJob_AsyncDeliveryWhenNotWaiting(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 	setupTestJobManager(t)
 	setupImmediateResultMCP(t, `{"job_id":"async-1","status":"completed"}`)
 	_ = setupMockDeps(t)
 
 	queueMgr.UpdateServiceLimits(map[string]Service{"testsvc": {Parallel: 1}, "": {Parallel: 1}})
 
-	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sid, "system", "sys")
 
 	require.NoError(t, createPendingJob(sid, "async-1", "generate_image_async", "img-mcp"), "createPendingJob")
@@ -1502,9 +1447,9 @@ func TestWaitForAsyncJob_AsyncDeliveryWhenNotWaiting(t *testing.T) {
 }
 
 func TestDeliverInlinePendingJob_SkipsCompletedState(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 
-	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	require.NoError(t, createPendingJob(sid, "inline-db-1", "generate_image_async", "img-mcp"), "createPendingJob")
 
 	var pj PendingJob
@@ -1523,9 +1468,9 @@ func TestDeliverInlinePendingJob_SkipsCompletedState(t *testing.T) {
 }
 
 func TestDeliverInlinePendingJob_IdempotentOnWrongStatus(t *testing.T) {
-	setupJMTestDB(t)
+	setupTestDB(t)
 
-	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat")
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	require.NoError(t, createPendingJob(sid, "inline-db-2", "generate_image_async", "img-mcp"), "createPendingJob")
 	require.NoError(t, completePendingJob("inline-db-2", "already done"), "completePendingJob")
 

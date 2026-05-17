@@ -3,55 +3,24 @@ package main
 import (
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	logxi "github.com/mgutz/logxi/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gorm.io/gorm"
 )
-
-func testCreateSession(t *testing.T, network, channel, nick, chatCmd, service, model string) int64 {
-	t.Helper()
-	userID := ensureTestUser(t, network, nick)
-	sid, err := sessionMgr.CreateSession(network, channel, userID, chatCmd, service, model)
-	require.NoError(t, err, "CreateSession")
-	return sid
-}
 
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
-}
-
-func setupTestDB(t *testing.T) (*gorm.DB, func()) {
-	t.Helper()
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.db")
-	db, err := initDB(DatabaseConfig{Path: dbPath, MaxAgeDays: 90}, logxi.New("test"))
-	require.NoError(t, err, "failed to init test db")
-	oldDB := theDB
-	oldSM := sessionMgr
-	theDB = db
-	sessionMgr = NewSessionManager(db)
-	return db, func() {
-		sessionMgr = oldSM
-		theDB = oldDB
-		sqlDB, _ := db.DB()
-		if sqlDB != nil {
-			sqlDB.Close()
-		}
-	}
 }
 
 func TestDBSessionRoundtrip(t *testing.T) {
 	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	sid := testCreateSession(t, "net", "#chan", "user", "testcmd", "testservice", "testmodel")
+	sid := createTestSession(t, "net", "#chan", "user", "testcmd", "testservice", "testmodel")
 
 	msgs := []ChatMessage{
 		{Role: "system", Content: "You are a helpful assistant"},
@@ -88,7 +57,7 @@ func TestDBCreateSessionSettings(t *testing.T) {
 		ReasoningEffort:  "high",
 	}
 
-	sid := testCreateSession(t, "net", "#chan", "user", "chat", "openai", "gpt-4o")
+	sid := createTestSession(t, "net", "#chan", "user", "chat", "openai", "gpt-4o")
 
 	settingsID, err := sessionMgr.CreateSessionSettings(sid, cfg)
 	require.NoError(t, err)
@@ -221,7 +190,7 @@ func TestDBSessionSettingsNilWhenNone(t *testing.T) {
 	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	sid := testCreateSession(t, "net", "#chan", "user", "chat", "openai", "gpt-4o")
+	sid := createTestSession(t, "net", "#chan", "user", "chat", "openai", "gpt-4o")
 
 	session, err := sessionMgr.GetSession(sid)
 	require.NoError(t, err)
@@ -233,7 +202,7 @@ func TestDBCleanupByAge(t *testing.T) {
 	defer cleanup()
 	_ = db
 
-	sid := testCreateSession(t, "net", "#chan", "user", "testcmd", "", "")
+	sid := createTestSession(t, "net", "#chan", "user", "testcmd", "", "")
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: "user", Content: "hello"}))
 
 	pastTime := time.Now().AddDate(0, 0, -100)
@@ -252,7 +221,7 @@ func TestDBSessionCreateAndMessage(t *testing.T) {
 	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	sid := testCreateSession(t, "net", "#chan", "nick", "chat", "", "")
+	sid := createTestSession(t, "net", "#chan", "nick", "chat", "", "")
 	assert.NotZero(t, sid, "expected non-zero session id")
 
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: "system", Content: "You are helpful"}))
@@ -269,7 +238,7 @@ func TestDBSessionComplete(t *testing.T) {
 	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	sid := testCreateSession(t, "net", "#chan", "nick", "chat", "", "")
+	sid := createTestSession(t, "net", "#chan", "nick", "chat", "", "")
 
 	err := sessionMgr.CompleteSession(sid)
 	require.NoError(t, err, "CompleteSession failed")
@@ -283,7 +252,7 @@ func TestDBDeleteSession(t *testing.T) {
 	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	sid := testCreateSession(t, "net", "#chan", "nick", "chat", "", "")
+	sid := createTestSession(t, "net", "#chan", "nick", "chat", "", "")
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: "user", Content: "hello"}))
 
 	err := deleteDBSession(sid)
@@ -298,9 +267,9 @@ func TestDBUserSessions(t *testing.T) {
 	defer cleanup()
 
 	for i := 0; i < 3; i++ {
-		testCreateSession(t, "net", "#chan", "nick", "chat", "", "")
+		createTestSession(t, "net", "#chan", "nick", "chat", "", "")
 	}
-	testCreateSession(t, "net", "#chan", "other", "chat", "", "")
+	createTestSession(t, "net", "#chan", "other", "chat", "", "")
 
 	sessions, err := getUserDBSessions("net", "#chan", ensureTestUser(t, "net", "nick"), 10)
 	require.NoError(t, err, "getUserDBSessions failed")
@@ -311,10 +280,10 @@ func TestDBUserSessionsByNetwork(t *testing.T) {
 	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	testCreateSession(t, "net", "#chan1", "nick", "chat", "", "")
-	testCreateSession(t, "net", "#chan2", "nick", "chat", "", "")
-	testCreateSession(t, "net", "#chan2", "nick", "chat", "", "")
-	testCreateSession(t, "other", "#chan1", "nick", "chat", "", "")
+	createTestSession(t, "net", "#chan1", "nick", "chat", "", "")
+	createTestSession(t, "net", "#chan2", "nick", "chat", "", "")
+	createTestSession(t, "net", "#chan2", "nick", "chat", "", "")
+	createTestSession(t, "other", "#chan1", "nick", "chat", "", "")
 
 	userID := ensureTestUser(t, "net", "nick")
 	sessions, err := getUserDBSessionsByNetwork("net", userID, 10)
@@ -335,11 +304,11 @@ func TestDBUserStats(t *testing.T) {
 	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	sid1 := testCreateSession(t, "net", "#chan", "nick", "chat", "", "")
+	sid1 := createTestSession(t, "net", "#chan", "nick", "chat", "", "")
 	sessionMgr.AddMessage(sid1, ChatMessage{Role: "system", Content: "sys"})
 	sessionMgr.AddMessage(sid1, ChatMessage{Role: "user", Content: "hello"})
 
-	sid2 := testCreateSession(t, "net", "#chan", "nick", "chat", "", "")
+	sid2 := createTestSession(t, "net", "#chan", "nick", "chat", "", "")
 	sessionMgr.AddMessage(sid2, ChatMessage{Role: "system", Content: "sys"})
 
 	sessionCount, messageCount, err := getUserDBStats(ensureTestUser(t, "net", "nick"), "net", "#chan")
@@ -352,9 +321,9 @@ func TestDBDeleteUserSessions(t *testing.T) {
 	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	testCreateSession(t, "net", "#chan", "nick", "chat", "", "")
-	testCreateSession(t, "net", "#chan", "nick", "chat", "", "")
-	testCreateSession(t, "net", "#chan", "other", "chat", "", "")
+	createTestSession(t, "net", "#chan", "nick", "chat", "", "")
+	createTestSession(t, "net", "#chan", "nick", "chat", "", "")
+	createTestSession(t, "net", "#chan", "other", "chat", "", "")
 
 	affected, err := deleteUserDBSessions("net", "#chan", ensureTestUser(t, "net", "nick"))
 	require.NoError(t, err, "deleteUserDBSessions failed")
@@ -368,7 +337,7 @@ func TestDBSoftDeletePreservesData(t *testing.T) {
 	db, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	sid := testCreateSession(t, "net", "#chan", "nick", "chat", "", "")
+	sid := createTestSession(t, "net", "#chan", "nick", "chat", "", "")
 	sessionMgr.AddMessage(sid, ChatMessage{Role: "user", Content: "hello"})
 
 	err := deleteDBSession(sid)
@@ -410,7 +379,7 @@ func TestDBToolCalls(t *testing.T) {
 	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	sid := testCreateSession(t, "net", "#chan", "nick", "chat", "", "")
+	sid := createTestSession(t, "net", "#chan", "nick", "chat", "", "")
 
 	toolCalls := []ToolCall{
 		{ID: "tc1", Type: "function", Function: FunctionCall{Name: "get_weather", Arguments: `{"city":"sf"}`}},
@@ -438,7 +407,7 @@ func TestDBFirstMessage(t *testing.T) {
 	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	sid := testCreateSession(t, "testnet", "#chan", "user", "testcmd", "", "")
+	sid := createTestSession(t, "testnet", "#chan", "user", "testcmd", "", "")
 
 	session, err := getDBSessionByID(sid)
 	require.NoError(t, err, "getDBSessionByID failed")
@@ -461,7 +430,7 @@ func TestDBMultiContent(t *testing.T) {
 	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	sid := testCreateSession(t, "net", "#chan", "nick", "chat", "", "")
+	sid := createTestSession(t, "net", "#chan", "nick", "chat", "", "")
 
 	parts := []MessagePart{
 		{Type: PartTypeText, Text: "check this image"},
@@ -495,7 +464,7 @@ func TestDBMultiContentWithToolCalls(t *testing.T) {
 	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	sid := testCreateSession(t, "net", "#chan", "nick", "chat", "", "")
+	sid := createTestSession(t, "net", "#chan", "nick", "chat", "", "")
 
 	toolCalls := []ToolCall{
 		{ID: "tc1", Type: "function", Function: FunctionCall{Name: "get_weather", Arguments: `{"city":"sf"}`}},
@@ -531,7 +500,7 @@ func TestDBFirstMessageWithMultiContent(t *testing.T) {
 	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	sid := testCreateSession(t, "testnet", "#chan", "user", "testcmd", "", "")
+	sid := createTestSession(t, "testnet", "#chan", "user", "testcmd", "", "")
 
 	parts := []MessagePart{
 		{Type: PartTypeText, Text: "what is in this image"},
@@ -548,7 +517,7 @@ func TestDBFirstMessageMultiContentNoText(t *testing.T) {
 	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	sid := testCreateSession(t, "testnet", "#chan", "user", "testcmd", "", "")
+	sid := createTestSession(t, "testnet", "#chan", "user", "testcmd", "", "")
 
 	parts := []MessagePart{
 		{Type: PartTypeImageURL, ImageURL: &ImageURL{URL: "data:image/png;base64,iVBORw==", Detail: ImageDetailAuto}},
@@ -616,7 +585,7 @@ func TestClearContextCompletesSession(t *testing.T) {
 	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	sid := testCreateSession(t, "testnet", "#chan", "user", "testcmd", "", "")
+	sid := createTestSession(t, "testnet", "#chan", "user", "testcmd", "", "")
 
 	sessionMgr.AddMessage(sid, ChatMessage{Role: "user", Content: "hello"})
 
@@ -637,7 +606,7 @@ func TestSessionManagerGetActiveSession(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, session, "expected nil when no active session")
 
-	sid := testCreateSession(t, "testnet", "#chan", "user", "testcmd", "", "")
+	sid := createTestSession(t, "testnet", "#chan", "user", "testcmd", "", "")
 
 	session, err = sessionMgr.GetActiveSession("testnet", "#chan", ensureTestUser(t, "testnet", "user"))
 	require.NoError(t, err)
@@ -650,10 +619,10 @@ func TestSessionManagerSwitchActive(t *testing.T) {
 	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	sidA := testCreateSession(t, "testnet", "#chan", "user", "testcmd", "", "")
+	sidA := createTestSession(t, "testnet", "#chan", "user", "testcmd", "", "")
 	sessionMgr.AddMessage(sidA, ChatMessage{Role: "user", Content: "msg A"})
 
-	sidB := testCreateSession(t, "testnet", "#chan", "user", "testcmd", "", "")
+	sidB := createTestSession(t, "testnet", "#chan", "user", "testcmd", "", "")
 	sessionMgr.AddMessage(sidB, ChatMessage{Role: "user", Content: "msg B"})
 
 	session, _ := sessionMgr.GetActiveSession("testnet", "#chan", ensureTestUser(t, "testnet", "user"))
@@ -675,7 +644,7 @@ func TestSessionManagerUpdateResponseID(t *testing.T) {
 	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
-	sid := testCreateSession(t, "testnet", "#chan", "user", "testcmd", "", "")
+	sid := createTestSession(t, "testnet", "#chan", "user", "testcmd", "", "")
 
 	respID := "resp-123"
 	require.NoError(t, sessionMgr.UpdateResponseID(sid, strPtrOrNil(respID)))
@@ -707,7 +676,7 @@ func TestConcurrentCreateSessionIsolation(t *testing.T) {
 
 			mu := getSessionCreationLock("testnet", "#chan", ensureTestUser(t, "testnet", "user"))
 			mu.Lock()
-			sid := testCreateSession(t, "testnet", "#chan", "user", "testcmd", "", "")
+			sid := createTestSession(t, "testnet", "#chan", "user", "testcmd", "", "")
 			sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "system"})
 			sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "hello"})
 			mu.Unlock()
@@ -755,7 +724,7 @@ func TestConcurrentCreateSessionWithoutLockRaces(t *testing.T) {
 			if session == nil {
 				mu := getSessionCreationLock("testnet", "#chan", ensureTestUser(t, "testnet", "user"))
 				mu.Lock()
-				sid := testCreateSession(t, "testnet", "#chan", "user", "testcmd", "", "")
+				sid := createTestSession(t, "testnet", "#chan", "user", "testcmd", "", "")
 				sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "system"})
 				session, _ = sessionMgr.GetSession(sid)
 				mu.Unlock()

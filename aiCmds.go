@@ -630,7 +630,9 @@ StreamLoop:
 			if len(chunk.Choices) > 0 {
 				if f, ok := chunk.Choices[0].Delta.JSON.ExtraFields["reasoning_content"]; ok && f.Valid() {
 					var rc string
-					json.Unmarshal([]byte(f.Raw()), &rc)
+					if err := json.Unmarshal([]byte(f.Raw()), &rc); err != nil {
+						cr.logger.Debug("failed to unmarshal reasoning_content", "error", err)
+					}
 					chunkReasoning = rc
 				}
 			}
@@ -1386,6 +1388,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 		if err != nil {
 			mu.Unlock()
 			runner.logger.Error("Failed to create session", "error", err)
+			runner.sendError(errorNotice(getNotices().DB.InternalError, map[string]string{"error": err.Error()}))
 			return
 		}
 		if _, err := sessionMgr.CreateSessionSettings(sid, cfg); err != nil {
@@ -1400,6 +1403,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 		mu.Unlock()
 		if err != nil || session == nil {
 			runner.logger.Error("Failed to get session after creation", "id", sid, "error", err)
+			runner.sendError(errorNotice(getNotices().DB.InternalError, map[string]string{"error": "session not available after creation"}))
 			return
 		}
 	}
@@ -1409,7 +1413,8 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 		messages, err := sessionMgr.GetMessages(session.ID, cfg.MaxHistory)
 		if err != nil {
 			runner.logger.Error("failed to load messages for image detection", "error", err)
-			messages = nil
+			runner.sendError(errorNotice(getNotices().DB.LoadMessages, map[string]string{"error": err.Error()}))
+			return
 		}
 
 		cleanText, imageUrls := detectImageURLs(args[0])
@@ -1448,7 +1453,11 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 		}
 	}
 
-	sessionMgr.AddMessage(session.ID, userMsg)
+	if err := sessionMgr.AddMessage(session.ID, userMsg); err != nil {
+		runner.logger.Error("failed to persist user message", "error", err)
+		runner.sendError(errorNotice(getNotices().DB.InternalError, map[string]string{"error": err.Error()}))
+		return
+	}
 
 	runner.sessionID = session.ID
 	if session.ConvID != nil {

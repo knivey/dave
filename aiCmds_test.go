@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -18,41 +17,11 @@ import (
 	"github.com/openai/openai-go/v3/option"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gorm.io/gorm"
 )
-
-func setupNoticesDefaults(t *testing.T) {
-	t.Helper()
-	var n NoticesConfig
-	setNoticesDefaults(&n)
-	configMu.Lock()
-	config.Notices = n
-	configMu.Unlock()
-}
-
-func setupTestDBForRunner(t *testing.T) (*gorm.DB, func()) {
-	t.Helper()
-	tmpDir := t.TempDir()
-	dbPath := filepath.Join(tmpDir, "test.db")
-	db, err := initDB(DatabaseConfig{Path: dbPath, MaxAgeDays: 90}, logxi.New("test"))
-	require.NoError(t, err, "failed to init test db")
-	oldDB := theDB
-	oldSM := sessionMgr
-	theDB = db
-	sessionMgr = NewSessionManager(db)
-	return db, func() {
-		sessionMgr = oldSM
-		theDB = oldDB
-		sqlDB, _ := db.DB()
-		if sqlDB != nil {
-			sqlDB.Close()
-		}
-	}
-}
 
 func setupSessionWithResponseID(t *testing.T, responseID string) (int64, func()) {
 	t.Helper()
-	db, cleanup := setupTestDBForRunner(t)
+	db, cleanup := setupTestDB(t)
 	_ = db
 
 	sid, err := sessionMgr.CreateSession("testnet", "#101", ensureTestUser(t, "testnet", "shrew"), "testcmd", "testservice", "testmodel")
@@ -424,7 +393,7 @@ func TestRunTurnResponses_ConcurrentSerialization(t *testing.T) {
 }
 
 func TestRunTurnResponses_DifferentCtxKeysParallel(t *testing.T) {
-	_, cleanup := setupTestDBForRunner(t)
+	_, cleanup := setupTestDB(t)
 	defer cleanup()
 
 	cfg := AIConfig{

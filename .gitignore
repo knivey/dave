@@ -13,6 +13,7 @@ mcps/img-mcp/img-mcp
 mcps/img-mcp/data/*
 mcps/yt-mcp/yt-mcp
 mcps/yt-mcp/config.toml
+mcps/yt-mcp/proxies.txt
 data/*
 logs/
 tools/backfill-session-meta/backfill-session-meta

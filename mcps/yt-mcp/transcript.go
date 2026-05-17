@@ -33,7 +33,7 @@ func extractVideoID(url string) (string, error) {
 	return matches[1], nil
 }
 
-func fetchTranscript(ctx context.Context, cfg YtdlpConfig, url, language string) (string, error) {
+func fetchTranscript(ctx context.Context, cfg YtdlpConfig, url, language string, rotator *ProxyRotator) (string, error) {
 	videoID, err := extractVideoID(url)
 	if err != nil {
 		return "", err
@@ -45,16 +45,30 @@ func fetchTranscript(ctx context.Context, cfg YtdlpConfig, url, language string)
 
 	outputPath := filepath.Join(cfg.TempDir, fmt.Sprintf("%s.%s.json3", videoID, language))
 
+	proxy := rotator.Next()
+	result, err := fetchTranscriptWithProxy(ctx, cfg, url, language, outputPath, proxy)
+	for attempts := 0; err != nil && attempts < cfg.Retries; attempts++ {
+		proxy = rotator.Next()
+		loggerTools.Info("retrying transcript fetch", "videoID", videoID, "attempt", attempts+1, "proxy", proxy)
+		result, err = fetchTranscriptWithProxy(ctx, cfg, url, language, outputPath, proxy)
+	}
+	return result, err
+}
+
+func fetchTranscriptWithProxy(ctx context.Context, cfg YtdlpConfig, url, language, outputPath, proxy string) (string, error) {
 	args := []string{
 		"--write-auto-sub",
 		"--sub-lang", language,
 		"--skip-download",
 		"--sub-format", "json3",
 		"-o", outputPath,
-		url,
 	}
+	if proxy != "" {
+		args = append(args, "--proxy", proxy)
+	}
+	args = append(args, url)
 
-	loggerTools.Info("fetching transcript", "url", url, "videoID", videoID, "lang", language)
+	loggerTools.Info("fetching transcript", "url", url, "lang", language, "proxy", proxy)
 
 	cmd := exec.CommandContext(ctx, cfg.Path, args...)
 	output, err := cmd.CombinedOutput()
@@ -116,14 +130,28 @@ type VideoInfo struct {
 	URL         string `json:"url"`
 }
 
-func fetchVideoInfo(ctx context.Context, cfg YtdlpConfig, url string) (*VideoInfo, error) {
+func fetchVideoInfo(ctx context.Context, cfg YtdlpConfig, url string, rotator *ProxyRotator) (*VideoInfo, error) {
+	proxy := rotator.Next()
+	result, err := fetchVideoInfoWithProxy(ctx, cfg, url, proxy)
+	for attempts := 0; err != nil && attempts < cfg.Retries; attempts++ {
+		proxy = rotator.Next()
+		loggerTools.Info("retrying video info fetch", "url", url, "attempt", attempts+1, "proxy", proxy)
+		result, err = fetchVideoInfoWithProxy(ctx, cfg, url, proxy)
+	}
+	return result, err
+}
+
+func fetchVideoInfoWithProxy(ctx context.Context, cfg YtdlpConfig, url, proxy string) (*VideoInfo, error) {
 	args := []string{
 		"--dump-json",
 		"--no-download",
-		url,
 	}
+	if proxy != "" {
+		args = append(args, "--proxy", proxy)
+	}
+	args = append(args, url)
 
-	loggerTools.Info("fetching video info", "url", url)
+	loggerTools.Info("fetching video info", "url", url, "proxy", proxy)
 
 	cmd := exec.CommandContext(ctx, cfg.Path, args...)
 	output, err := cmd.Output()

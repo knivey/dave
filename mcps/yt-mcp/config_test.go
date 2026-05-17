@@ -31,6 +31,33 @@ func TestLoadConfigNoFile(t *testing.T) {
 	assert.Equal(t, 50000, cfg.Ytdlp.MaxLength)
 	assert.Equal(t, os.TempDir(), cfg.Ytdlp.TempDir)
 	assert.Empty(t, cfg.Auth.APIKey)
+	assert.Empty(t, cfg.Ytdlp.ProxyFile)
+	assert.Empty(t, cfg.Ytdlp.ResolvedProxyFile)
+	assert.Equal(t, 1, cfg.Ytdlp.Retries)
+}
+
+func TestLoadConfigCustomRetries(t *testing.T) {
+	dir := t.TempDir()
+	writeTestConfigFile(t, dir, `
+[ytdlp]
+retries = 3
+`)
+	cfg, err := loadConfig(filepath.Join(dir, "config.toml"))
+	require.NoError(t, err)
+
+	assert.Equal(t, 3, cfg.Ytdlp.Retries)
+}
+
+func TestLoadConfigZeroRetries(t *testing.T) {
+	dir := t.TempDir()
+	writeTestConfigFile(t, dir, `
+[ytdlp]
+retries = 0
+`)
+	cfg, err := loadConfig(filepath.Join(dir, "config.toml"))
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, cfg.Ytdlp.Retries)
 }
 
 func TestLoadConfigCustom(t *testing.T) {
@@ -74,6 +101,37 @@ languages = ["en", "es", "fr"]
 	require.NoError(t, err)
 
 	assert.Equal(t, []string{"en", "es", "fr"}, cfg.Ytdlp.Languages)
+}
+
+func TestLoadConfigProxyFile(t *testing.T) {
+	dir := t.TempDir()
+	writeTestConfigFile(t, dir, `
+[ytdlp]
+proxy_file = "proxies.txt"
+`)
+
+	proxyPath := filepath.Join(dir, "proxies.txt")
+	require.NoError(t, os.WriteFile(proxyPath, []byte("socks5://127.0.0.1:1080\n"), 0644))
+
+	cfg, err := loadConfig(filepath.Join(dir, "config.toml"))
+	require.NoError(t, err)
+
+	assert.Equal(t, "proxies.txt", cfg.Ytdlp.ProxyFile)
+	assert.Equal(t, proxyPath, cfg.Ytdlp.ResolvedProxyFile)
+}
+
+func TestLoadConfigProxyFileAbsolutePath(t *testing.T) {
+	dir := t.TempDir()
+	writeTestConfigFile(t, dir, `
+[ytdlp]
+proxy_file = "/etc/yt-mcp/proxies.txt"
+`)
+
+	cfg, err := loadConfig(filepath.Join(dir, "config.toml"))
+	require.NoError(t, err)
+
+	assert.Equal(t, "/etc/yt-mcp/proxies.txt", cfg.Ytdlp.ProxyFile)
+	assert.Equal(t, "/etc/yt-mcp/proxies.txt", cfg.Ytdlp.ResolvedProxyFile)
 }
 
 func TestLoadConfigInvalidToml(t *testing.T) {

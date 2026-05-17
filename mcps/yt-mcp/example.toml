@@ -36,6 +36,17 @@ max_length = 50000
 # Files are named <videoID>.<lang>.json3 to avoid collisions.
 temp_dir = ""
 
+# Path to a proxy list file (one proxy URL per line, # comments and blank lines ignored).
+# Supports HTTP, HTTPS, SOCKS4, SOCKS5 (e.g. socks5://127.0.0.1:1080).
+# Proxies are rotated round-robin. On error the request is retried once with the next proxy.
+# Relative paths resolve from the config file directory. Empty = no proxy.
+# See proxies.txt.example for the file format.
+proxy_file = ""
+
+# Number of retries on yt-dlp failure (each retry rotates to the next proxy).
+# Set to 0 to disable retries. Default: 1.
+retries = 1
+
 [auth]
 # Shared secret for authenticating HTTP requests (required with --http, ignored in stdio mode).
 # Requests must include the X-API-Key header with this value.

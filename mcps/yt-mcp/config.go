@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -26,16 +27,21 @@ type AuthConfig struct {
 }
 
 type YtdlpConfig struct {
-	Path       string        `toml:"path"`
-	Timeout    time.Duration `toml:"timeout"`
-	Languages  []string      `toml:"languages"`
-	PreferAuto bool          `toml:"prefer_auto"`
-	MaxLength  int           `toml:"max_length"`
-	TempDir    string        `toml:"temp_dir"`
+	Path              string        `toml:"path"`
+	Timeout           time.Duration `toml:"timeout"`
+	Languages         []string      `toml:"languages"`
+	PreferAuto        bool          `toml:"prefer_auto"`
+	MaxLength         int           `toml:"max_length"`
+	TempDir           string        `toml:"temp_dir"`
+	ProxyFile         string        `toml:"proxy_file"`
+	ResolvedProxyFile string        `toml:"-"`
+	Retries           int           `toml:"retries"`
 }
 
 func loadConfig(configFile string) (Config, error) {
 	var cfg Config
+
+	configDir := filepath.Dir(configFile)
 
 	if _, err := os.Stat(configFile); err == nil {
 		if _, err := toml.DecodeFile(configFile, &cfg); err != nil {
@@ -58,12 +64,29 @@ func loadConfig(configFile string) (Config, error) {
 		cfg.Ytdlp.MaxLength = 50000
 	}
 	cfg.Ytdlp.TempDir = defaultString(cfg.Ytdlp.TempDir, os.TempDir())
+	if cfg.Ytdlp.Retries == 0 {
+		cfg.Ytdlp.Retries = 1
+	}
+
+	if cfg.Ytdlp.ProxyFile != "" {
+		cfg.Ytdlp.ResolvedProxyFile = resolvePath(configDir, cfg.Ytdlp.ProxyFile)
+	}
 
 	if _, err := exec.LookPath(cfg.Ytdlp.Path); err != nil {
 		return cfg, fmt.Errorf("ytdlp.path %q not found on PATH: %w", cfg.Ytdlp.Path, err)
 	}
 
 	return cfg, nil
+}
+
+func resolvePath(baseDir, path string) string {
+	if path == "" {
+		return ""
+	}
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(baseDir, path)
 }
 
 func defaultString(val, def string) string {

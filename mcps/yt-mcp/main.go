@@ -47,7 +47,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	handlers := NewToolHandlers(cfg)
+	handlers, err := NewToolHandlers(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
+		os.Exit(1)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -69,7 +73,10 @@ func main() {
 				logger.Error("config reload failed", "error", err)
 				continue
 			}
-			handlers.setConfig(newCfg)
+			if err := handlers.setConfig(newCfg); err != nil {
+				logger.Error("config reload failed", "error", err)
+				continue
+			}
 			logger.Info("config reloaded")
 		}
 	}()
@@ -99,7 +106,11 @@ func serveHTTP(ctx context.Context, cfg Config, handlers *ToolHandlers, configPa
 			json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": err.Error()})
 			return
 		}
-		handlers.setConfig(newCfg)
+		if err := handlers.setConfig(newCfg); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"status": "error", "message": err.Error()})
+			return
+		}
 		logger.Info("config reloaded via admin endpoint")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})

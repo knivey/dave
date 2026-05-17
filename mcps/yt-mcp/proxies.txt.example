@@ -1,0 +1,8 @@
+# yt-mcp proxy list
+# One proxy URL per line. Blank lines and lines starting with # are ignored.
+# Supports HTTP, HTTPS, SOCKS4, SOCKS5.
+#
+# Examples:
+# socks5://user:pass@192.168.1.1:1080
+# http://proxy.example.com:8080
+# https://user:pass@proxy.example.com:443

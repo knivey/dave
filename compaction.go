@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -217,27 +216,7 @@ func renderFreshSystemPrompt(cfg AIConfig, network Network, client *girc.Client,
 		}
 		return fallback
 	}
-	templateVars := copyTemplateVars()
-	data := SystemPromptData{
-		Nick:    userNick,
-		BotNick: network.Nick,
-		Channel: channel,
-		Network: network.Name,
-		Date:    time.Now().Format("2006-01-02"),
-		Vars:    templateVars,
-	}
-	if client != nil {
-		data.BotNick = client.GetNick()
-		ch := client.LookupChannel(channel)
-		var nicks []string
-		if ch != nil {
-			for _, u := range ch.Users(client) {
-				nicks = append(nicks, u.Nick)
-			}
-			sort.Strings(nicks)
-		}
-		data.ChanNicks = `["` + strings.Join(nicks, `","`) + `"]`
-	}
+	data := buildSystemPromptData(network, client, channel, userNick)
 	var buf strings.Builder
 	if err := cfg.SystemTmpl.Execute(&buf, data); err != nil {
 		return fallback

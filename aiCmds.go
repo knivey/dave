@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -271,14 +270,7 @@ func (cr *chatRunner) renderAPIUser() string {
 	if cr.cfg.apiUserTmpl == nil {
 		return ""
 	}
-	data := SystemPromptData{
-		Nick:    cr.nick,
-		BotNick: cr.network.Nick,
-		Channel: cr.channel,
-		Network: cr.network.Name,
-		Date:    time.Now().Format("2006-01-02"),
-	}
-	data.Vars = copyTemplateVars()
+	data := buildSystemPromptData(cr.network, nil, cr.channel, cr.nick)
 
 	var buf strings.Builder
 	if err := cr.cfg.apiUserTmpl.Execute(&buf, data); err != nil {
@@ -1382,26 +1374,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 	if session == nil {
 		var systemContent string
 		if cfg.SystemTmpl != nil {
-			templateVars := copyTemplateVars()
-			data := SystemPromptData{
-				Nick:      nick,
-				BotNick:   c.GetNick(),
-				Channel:   channel,
-				Network:   network.Name,
-				ChanNicks: "",
-				Date:      time.Now().Format("2006-01-02"),
-				Vars:      templateVars,
-			}
-
-			ch := c.LookupChannel(channel)
-			var nicks []string
-			if ch != nil {
-				for _, u := range ch.Users(c) {
-					nicks = append(nicks, u.Nick)
-				}
-				sort.Strings(nicks)
-			}
-			data.ChanNicks = `["` + strings.Join(nicks, `","`) + `"]`
+			data := buildSystemPromptData(network, c, channel, nick)
 
 			var buf strings.Builder
 			err := cfg.SystemTmpl.Execute(&buf, data)

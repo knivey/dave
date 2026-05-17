@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,6 +46,30 @@ func copyTemplateVars() map[string]string {
 		vars = make(map[string]string)
 	}
 	return vars
+}
+
+func buildSystemPromptData(network Network, client *girc.Client, channel, userNick string) SystemPromptData {
+	data := SystemPromptData{
+		Nick:    userNick,
+		BotNick: network.Nick,
+		Channel: channel,
+		Network: network.Name,
+		Date:    time.Now().Format("2006-01-02"),
+		Vars:    copyTemplateVars(),
+	}
+	if client != nil {
+		data.BotNick = client.GetNick()
+		ch := client.LookupChannel(channel)
+		var nicks []string
+		if ch != nil {
+			for _, u := range ch.Users(client) {
+				nicks = append(nicks, u.Nick)
+			}
+			sort.Strings(nicks)
+		}
+		data.ChanNicks = `["` + strings.Join(nicks, `","`) + `"]`
+	}
+	return data
 }
 
 var commandsMutex sync.RWMutex

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -900,24 +899,7 @@ func historyClone(network Network, c *girc.Client, e girc.Event, ctx context.Con
 
 	var systemContent string
 	if cfg.SystemTmpl != nil {
-		templateVars := copyTemplateVars()
-		data := SystemPromptData{
-			Nick:    e.Source.Name,
-			BotNick: c.GetNick(),
-			Channel: channel,
-			Network: network.Name,
-			Date:    time.Now().Format("2006-01-02"),
-			Vars:    templateVars,
-		}
-		ch := c.LookupChannel(channel)
-		var nicks []string
-		if ch != nil {
-			for _, u := range ch.Users(c) {
-				nicks = append(nicks, u.Nick)
-			}
-			sort.Strings(nicks)
-		}
-		data.ChanNicks = `["` + strings.Join(nicks, `","`) + `"]`
+		data := buildSystemPromptData(network, c, channel, e.Source.Name)
 
 		var buf strings.Builder
 		if execErr := cfg.SystemTmpl.Execute(&buf, data); execErr != nil {

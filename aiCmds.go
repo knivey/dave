@@ -349,7 +349,6 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 			bufferb := ""
 			fullContent := ""
 			reasoningBuffer := ""
-			logBuf := strings.Builder{}
 			var streamingRenderer *markdowntoirc.StreamingRenderer
 			if cr.cfg.RenderMarkdown {
 				streamingRenderer = markdowntoirc.NewStreamingRenderer()
@@ -468,13 +467,10 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 					fullContent += textDelta
 					if streamingRenderer != nil {
 						for _, line := range streamingRenderer.Process(textDelta) {
-							logBuf.WriteString(line)
-							logBuf.WriteString("\n")
 							cr.sendIRC(line)
 						}
 					} else {
 						if strings.Contains(bufferb, "\n") {
-							logBuf.WriteString(bufferb)
 							cr.sendIRC(bufferb)
 							bufferb = ""
 						}
@@ -511,7 +507,7 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 			streamDurationMs := int(time.Since(apiStart).Milliseconds())
 
 			flushStreamedOutput := func() {
-				cr.logger.Info(fullContent)
+				cr.logger.Info(FormatOutput(fullContent))
 				content := fullContent
 				if content == "" && reasoningBuffer == "" {
 					content = "..."
@@ -523,15 +519,11 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 				})
 				if streamingRenderer != nil {
 					for _, line := range streamingRenderer.Process("") {
-						logBuf.WriteString(line)
-						logBuf.WriteString("\n")
 						cr.sendIRC(line)
 					}
 				} else if bufferb != "" {
-					logBuf.WriteString(bufferb)
 					cr.sendIRC(bufferb)
 				}
-				cr.logger.Info("output", "text", logBuf.String())
 				cr.storeUsage(streamUsage, "chat_completions_stream", streamDurationMs)
 				logTimings(cr.logger, streamTimings)
 				if reasoningBuffer != "" {
@@ -1341,7 +1333,6 @@ func (cr *chatRunner) callResponsesStream(ctx context.Context, params responses.
 		streamingRenderer = markdowntoirc.NewStreamingRenderer()
 	}
 	bufferb := ""
-	logBuf := strings.Builder{}
 
 	idleTimer := time.NewTimer(cr.cfg.StreamTimeout)
 	defer idleTimer.Stop()
@@ -1393,13 +1384,10 @@ func (cr *chatRunner) callResponsesStream(ctx context.Context, params responses.
 				fullText += textDelta
 				if streamingRenderer != nil {
 					for _, line := range streamingRenderer.Process(textDelta) {
-						logBuf.WriteString(line)
-						logBuf.WriteString("\n")
 						cr.sendIRC(line)
 					}
 				} else {
 					if strings.Contains(bufferb, "\n") {
-						logBuf.WriteString(bufferb)
 						cr.sendIRC(bufferb)
 						bufferb = ""
 					}
@@ -1432,16 +1420,13 @@ streamDone:
 
 	if streamingRenderer != nil {
 		for _, line := range streamingRenderer.Process("") {
-			logBuf.WriteString(line)
-			logBuf.WriteString("\n")
 			cr.sendIRC(line)
 		}
 	} else if bufferb != "" {
-		logBuf.WriteString(bufferb)
 		cr.sendIRC(bufferb)
 	}
 
-	cr.logger.Info("output", "text", logBuf.String())
+	cr.logger.Info(FormatOutput(fullText))
 	if reasoningBuffer != "" {
 		cr.logger.Info("reasoning", "content", reasoningBuffer)
 	}

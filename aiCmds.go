@@ -365,6 +365,37 @@ func (cr *chatRunner) checkEmptyRetry(content, reasoning string, emptyRetries, m
 	return false, "..."
 }
 
+type streamOutput struct {
+	renderer *markdowntoirc.StreamingRenderer
+	buffer   string
+}
+
+func (so *streamOutput) HandleDelta(delta string, send func(string)) {
+	so.buffer += delta
+	if so.renderer != nil {
+		for _, line := range so.renderer.Process(delta) {
+			send(line)
+		}
+		return
+	}
+	if strings.Contains(so.buffer, "\n") {
+		send(so.buffer)
+		so.buffer = ""
+	}
+}
+
+func (so *streamOutput) Flush(send func(string)) {
+	if so.renderer != nil {
+		for _, line := range so.renderer.Process("") {
+			send(line)
+		}
+		return
+	}
+	if so.buffer != "" {
+		send(so.buffer)
+	}
+}
+
 func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 	if cr.cfg.ResponsesAPI {
 		return cr.runTurnResponses(messages)
@@ -393,12 +424,11 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 			stream := cr.openaiClient.Chat.Completions.NewStreaming(ctx, params)
 			apiStart := time.Now()
 
-			bufferb := ""
 			fullContent := ""
 			reasoningBuffer := ""
-			var streamingRenderer *markdowntoirc.StreamingRenderer
+			var sOut streamOutput
 			if cr.cfg.RenderMarkdown {
-				streamingRenderer = markdowntoirc.NewStreamingRenderer()
+				sOut.renderer = markdowntoirc.NewStreamingRenderer()
 			}
 
 			var accumulatedToolCalls []ToolCall
@@ -510,18 +540,8 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 					}
 
 					textDelta := delta.Content
-					bufferb += textDelta
 					fullContent += textDelta
-					if streamingRenderer != nil {
-						for _, line := range streamingRenderer.Process(textDelta) {
-							cr.sendIRC(line)
-						}
-					} else {
-						if strings.Contains(bufferb, "\n") {
-							cr.sendIRC(bufferb)
-							bufferb = ""
-						}
-					}
+					sOut.HandleDelta(textDelta, cr.sendIRC)
 
 					if choice.FinishReason == "tool_calls" {
 						streamFinishReason = "tool_calls"
@@ -564,13 +584,7 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 					Content:          content,
 					ReasoningContent: reasoningBuffer,
 				})
-				if streamingRenderer != nil {
-					for _, line := range streamingRenderer.Process("") {
-						cr.sendIRC(line)
-					}
-				} else if bufferb != "" {
-					cr.sendIRC(bufferb)
-				}
+				sOut.Flush(cr.sendIRC)
 				cr.storeUsage(streamUsage, "chat_completions_stream", streamDurationMs)
 				logTimings(cr.logger, streamTimings)
 				if reasoningBuffer != "" {
@@ -608,8 +622,8 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 			}
 			messages = append(messages, assistantMsg)
 
-			if bufferb != "" {
-				text := ExtractFinalText(bufferb)
+			if sOut.buffer != "" {
+				text := ExtractFinalText(sOut.buffer)
 				if cr.cfg.RenderMarkdown {
 					text = markdowntoirc.MarkdownToIRC(text)
 				}
@@ -1204,11 +1218,10 @@ func (cr *chatRunner) callResponsesStream(ctx context.Context, params responses.
 	var fullText string
 	var reasoningBuffer string
 	var completedResponse *responses.Response
-	var streamingRenderer *markdowntoirc.StreamingRenderer
+	var sOut streamOutput
 	if cr.cfg.RenderMarkdown {
-		streamingRenderer = markdowntoirc.NewStreamingRenderer()
+		sOut.renderer = markdowntoirc.NewStreamingRenderer()
 	}
-	bufferb := ""
 
 	idleTimer := time.NewTimer(cr.cfg.StreamTimeout)
 	defer idleTimer.Stop()
@@ -1256,18 +1269,8 @@ func (cr *chatRunner) callResponsesStream(ctx context.Context, params responses.
 			switch event.Type {
 			case "response.output_text.delta":
 				textDelta := event.Delta
-				bufferb += textDelta
 				fullText += textDelta
-				if streamingRenderer != nil {
-					for _, line := range streamingRenderer.Process(textDelta) {
-						cr.sendIRC(line)
-					}
-				} else {
-					if strings.Contains(bufferb, "\n") {
-						cr.sendIRC(bufferb)
-						bufferb = ""
-					}
-				}
+				sOut.HandleDelta(textDelta, cr.sendIRC)
 
 			case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
 				reasoningBuffer += event.Delta
@@ -1294,13 +1297,7 @@ streamDone:
 
 	logStreamCompletion(cr.transport.sessionID, cr.cfg.Model, fullText, reasoningBuffer, nil, sdkResponseUsageToUsage(completedResponse.Usage, string(completedResponse.Status)), RoleAssistant)
 
-	if streamingRenderer != nil {
-		for _, line := range streamingRenderer.Process("") {
-			cr.sendIRC(line)
-		}
-	} else if bufferb != "" {
-		cr.sendIRC(bufferb)
-	}
+	sOut.Flush(cr.sendIRC)
 
 	cr.logger.Info(FormatOutput(fullText))
 	if reasoningBuffer != "" {

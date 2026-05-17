@@ -497,6 +497,51 @@ func getMCPServerForTool(toolName string) string {
 	return mcpToolToServer[toolName]
 }
 
+func withMCPRetry[T any](serverName string, ctx context.Context, opDesc string, fn func(*MCPServer) (T, error)) (T, error) {
+	var zero T
+	mcpServersMu.Lock()
+	srv, ok := mcpServers[serverName]
+	mcpServersMu.Unlock()
+	if !ok {
+		return zero, fmt.Errorf("unknown MCP server: %s", serverName)
+	}
+
+	result, err := fn(srv)
+	if err == nil {
+		srv.reconnectMu.Lock()
+		srv.reconnectCount = 0
+		srv.reconnectMu.Unlock()
+		return result, nil
+	}
+
+	if logger != nil {
+		logger.Warn(fmt.Sprintf("MCP %s failed, attempting reconnect", opDesc), "server", serverName, "error", err)
+	}
+
+	if reconnectErr := reconnectMCPServer(serverName, ctx); reconnectErr != nil {
+		return zero, fmt.Errorf("%s failed (%w) and reconnect failed: %w", opDesc, err, reconnectErr)
+	}
+
+	mcpServersMu.Lock()
+	srv, ok = mcpServers[serverName]
+	mcpServersMu.Unlock()
+	if !ok {
+		return zero, fmt.Errorf("MCP server %q not found after reconnect", serverName)
+	}
+
+	result, err = fn(srv)
+	if err == nil {
+		srv.reconnectMu.Lock()
+		srv.reconnectCount = 0
+		srv.reconnectMu.Unlock()
+	} else {
+		if logger != nil {
+			logger.Error(fmt.Sprintf("MCP %s failed after reconnect", opDesc), "server", serverName, "error", err)
+		}
+	}
+	return result, err
+}
+
 func callMCPTool(toolName string, args map[string]any) (*mcp.CallToolResult, error) {
 	return callMCPToolWithTimeout(toolName, args, 0)
 }
@@ -512,31 +557,17 @@ func callMCPToolWithTimeoutContext(ctx context.Context, toolName string, args ma
 		mcpServersMu.Unlock()
 		return nil, fmt.Errorf("unknown MCP tool: %s", toolName)
 	}
-	srv := mcpServers[serverName]
 	mcpServersMu.Unlock()
 
 	if logger != nil {
 		logger.Info("calling MCP tool", "server", serverName, "tool", toolName, "args", args)
 	}
 
-	result, err := srv.callToolWithContext(ctx, toolName, args, timeout)
+	result, err := withMCPRetry(serverName, ctx, "tool call", func(srv *MCPServer) (*mcp.CallToolResult, error) {
+		return srv.callToolWithContext(ctx, toolName, args, timeout)
+	})
 	if err != nil {
-		if logger != nil {
-			logger.Warn("MCP tool call failed, attempting reconnect", "server", serverName, "tool", toolName, "error", err)
-		}
-		if reconnectErr := reconnectMCPServer(serverName, ctx); reconnectErr != nil {
-			return nil, fmt.Errorf("tool call failed (%w) and reconnect failed: %w", err, reconnectErr)
-		}
-		mcpServersMu.Lock()
-		srv = mcpServers[serverName]
-		mcpServersMu.Unlock()
-		result, err = srv.callToolWithContext(ctx, toolName, args, timeout)
-		if err != nil {
-			if logger != nil {
-				logger.Error("MCP tool call failed after reconnect", "server", serverName, "tool", toolName, "error", err)
-			}
-			return nil, err
-		}
+		return nil, err
 	}
 
 	if result.IsError {
@@ -544,10 +575,6 @@ func callMCPToolWithTimeoutContext(ctx context.Context, toolName string, args ma
 			logger.Warn("MCP tool returned error", "server", serverName, "tool", toolName)
 		}
 	}
-
-	srv.reconnectMu.Lock()
-	srv.reconnectCount = 0
-	srv.reconnectMu.Unlock()
 
 	return result, nil
 }
@@ -559,31 +586,17 @@ func callMCPToolWithTimeout(toolName string, args map[string]any, timeout time.D
 		mcpServersMu.Unlock()
 		return nil, fmt.Errorf("unknown MCP tool: %s", toolName)
 	}
-	srv := mcpServers[serverName]
 	mcpServersMu.Unlock()
 
 	if logger != nil {
 		logger.Info("calling MCP tool", "server", serverName, "tool", toolName, "args", args)
 	}
 
-	result, err := srv.callTool(toolName, args, timeout)
+	result, err := withMCPRetry(serverName, context.Background(), "tool call", func(srv *MCPServer) (*mcp.CallToolResult, error) {
+		return srv.callTool(toolName, args, timeout)
+	})
 	if err != nil {
-		if logger != nil {
-			logger.Warn("MCP tool call failed, attempting reconnect", "server", serverName, "tool", toolName, "error", err)
-		}
-		if reconnectErr := reconnectMCPServer(serverName, context.Background()); reconnectErr != nil {
-			return nil, fmt.Errorf("tool call failed (%w) and reconnect failed: %w", err, reconnectErr)
-		}
-		mcpServersMu.Lock()
-		srv = mcpServers[serverName]
-		mcpServersMu.Unlock()
-		result, err = srv.callTool(toolName, args, timeout)
-		if err != nil {
-			if logger != nil {
-				logger.Error("MCP tool call failed after reconnect", "server", serverName, "tool", toolName, "error", err)
-			}
-			return nil, err
-		}
+		return nil, err
 	}
 
 	if result.IsError {
@@ -592,26 +605,11 @@ func callMCPToolWithTimeout(toolName string, args map[string]any, timeout time.D
 		}
 	}
 
-	srv.reconnectMu.Lock()
-	srv.reconnectCount = 0
-	srv.reconnectMu.Unlock()
-
 	return result, nil
 }
 
 func (srv *MCPServer) callTool(toolName string, args map[string]any, timeout time.Duration) (*mcp.CallToolResult, error) {
-	if srv.Session == nil {
-		return nil, fmt.Errorf("MCP session is nil for server")
-	}
-	if timeout == 0 {
-		timeout = srv.Config.Timeout
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	return srv.Session.CallTool(ctx, &mcp.CallToolParams{
-		Name:      toolName,
-		Arguments: args,
-	})
+	return srv.callToolWithContext(context.Background(), toolName, args, timeout)
 }
 
 func (srv *MCPServer) callToolWithContext(parentCtx context.Context, toolName string, args map[string]any, timeout time.Duration) (*mcp.CallToolResult, error) {
@@ -719,32 +717,9 @@ func embeddedResourceToText(r *mcp.EmbeddedResource) (string, bool) {
 }
 
 func readMCPResource(serverName, uri string) (*mcp.ReadResourceResult, error) {
-	mcpServersMu.Lock()
-	srv, ok := mcpServers[serverName]
-	mcpServersMu.Unlock()
-	if !ok {
-		return nil, fmt.Errorf("unknown MCP server: %s", serverName)
-	}
-
-	result, err := srv.readResource(uri)
-	if err != nil {
-		if logger != nil {
-			logger.Warn("MCP resource read failed, attempting reconnect", "server", serverName, "error", err)
-		}
-		if reconnectErr := reconnectMCPServer(serverName, context.Background()); reconnectErr != nil {
-			return nil, fmt.Errorf("resource read failed (%w) and reconnect failed: %w", err, reconnectErr)
-		}
-		mcpServersMu.Lock()
-		srv = mcpServers[serverName]
-		mcpServersMu.Unlock()
+	return withMCPRetry(serverName, context.Background(), "resource read", func(srv *MCPServer) (*mcp.ReadResourceResult, error) {
 		return srv.readResource(uri)
-	}
-
-	srv.reconnectMu.Lock()
-	srv.reconnectCount = 0
-	srv.reconnectMu.Unlock()
-
-	return result, nil
+	})
 }
 
 func (srv *MCPServer) readResource(uri string) (*mcp.ReadResourceResult, error) {
@@ -757,32 +732,9 @@ func (srv *MCPServer) readResource(uri string) (*mcp.ReadResourceResult, error) 
 }
 
 func getMCPPrompt(serverName, promptName string, args map[string]string) (*mcp.GetPromptResult, error) {
-	mcpServersMu.Lock()
-	srv, ok := mcpServers[serverName]
-	mcpServersMu.Unlock()
-	if !ok {
-		return nil, fmt.Errorf("unknown MCP server: %s", serverName)
-	}
-
-	result, err := srv.getPrompt(promptName, args)
-	if err != nil {
-		if logger != nil {
-			logger.Warn("MCP prompt get failed, attempting reconnect", "server", serverName, "error", err)
-		}
-		if reconnectErr := reconnectMCPServer(serverName, context.Background()); reconnectErr != nil {
-			return nil, fmt.Errorf("prompt get failed (%w) and reconnect failed: %w", err, reconnectErr)
-		}
-		mcpServersMu.Lock()
-		srv = mcpServers[serverName]
-		mcpServersMu.Unlock()
+	return withMCPRetry(serverName, context.Background(), "prompt get", func(srv *MCPServer) (*mcp.GetPromptResult, error) {
 		return srv.getPrompt(promptName, args)
-	}
-
-	srv.reconnectMu.Lock()
-	srv.reconnectCount = 0
-	srv.reconnectMu.Unlock()
-
-	return result, nil
+	})
 }
 
 func (srv *MCPServer) getPrompt(promptName string, args map[string]string) (*mcp.GetPromptResult, error) {

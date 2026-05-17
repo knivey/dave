@@ -217,6 +217,54 @@ func reactivateIfReleased(user *User) bool {
 	return true
 }
 
+func finalizeResolvedUser(user *User, nick, normalizedNick, account, ident, host, network string) error {
+	if account != "" {
+		user.IRCAccount = account
+	}
+	if err := claimNickForFn(network, user, normalizedNick); err != nil {
+		return err
+	}
+	reactivateIfReleased(user)
+	user.CurrentNick = nick
+	user.NormalizedNick = normalizedNick
+	if err := updateDBUser(user); err != nil {
+		return err
+	}
+	if err := upsertKnownHost(user.ID, ident, host); err != nil {
+		loggerUsers.Warn("failed to upsert known host", "error", err)
+	}
+	return nil
+}
+
+func tryReleasedNickFallback(network, nick, normalizedNick, account, ident, host, logMethod string) (*User, error) {
+	match, matchCount, err := getMostRecentReleasedUserByNormalizedNick(network, normalizedNick)
+	if err != nil {
+		return nil, err
+	}
+	if match == nil {
+		return nil, nil
+	}
+	if matchCount > 1 {
+		loggerUsers.Warn("released-nick fallback: multiple released rows match, picking newest",
+			"user_id", match.ID,
+			"match_count", matchCount,
+			"nick", nick, "network", network)
+	}
+	if account != "" {
+		loggerUsers.Info("resolved user", "method", logMethod,
+			"user_id", match.ID, "nick", nick, "account", account, "network", network,
+			"released_at", match.UpdatedAt)
+	} else {
+		loggerUsers.Info("resolved user", "method", logMethod,
+			"user_id", match.ID, "nick", nick, "network", network,
+			"released_at", match.UpdatedAt)
+	}
+	if err := finalizeResolvedUser(match, nick, normalizedNick, account, ident, host, network); err != nil {
+		return nil, err
+	}
+	return match, nil
+}
+
 // resolveUserOnce performs a single resolveUser attempt (the original
 // pre-retry implementation). Callers should not invoke this directly outside
 // of tests; production code uses resolveUser which adds retry + fallback.
@@ -234,17 +282,8 @@ func resolveUserOnce(network, nick, ident, host, account, casemapping string) (*
 		}
 		if user != nil {
 			loggerUsers.Debug("resolved user", "method", "account", "user_id", user.ID, "nick", nick, "account", account, "network", network)
-			if err := claimNickForFn(network, user, norm); err != nil {
+			if err := finalizeResolvedUser(user, nick, norm, account, ident, host, network); err != nil {
 				return nil, err
-			}
-			reactivateIfReleased(user)
-			user.CurrentNick = nick
-			user.NormalizedNick = norm
-			if err := updateDBUser(user); err != nil {
-				return nil, err
-			}
-			if err := upsertKnownHost(user.ID, ident, host); err != nil {
-				loggerUsers.Warn("failed to upsert known host", "error", err)
 			}
 			return user, nil
 		}
@@ -256,14 +295,8 @@ func resolveUserOnce(network, nick, ident, host, account, casemapping string) (*
 		}
 		if nickUser != nil {
 			loggerUsers.Debug("resolved user", "method", "nick+account_link", "user_id", nickUser.ID, "nick", nick, "account", account, "network", network)
-			nickUser.IRCAccount = account
-			nickUser.CurrentNick = nick
-			nickUser.NormalizedNick = norm
-			if err := updateDBUser(nickUser); err != nil {
+			if err := finalizeResolvedUser(nickUser, nick, norm, account, ident, host, network); err != nil {
 				return nil, err
-			}
-			if err := upsertKnownHost(nickUser.ID, ident, host); err != nil {
-				loggerUsers.Warn("failed to upsert known host", "error", err)
 			}
 			return nickUser, nil
 		}
@@ -274,61 +307,17 @@ func resolveUserOnce(network, nick, ident, host, account, casemapping string) (*
 		}
 		if hostUser != nil {
 			loggerUsers.Debug("resolved user", "method", "host_recovery+account_link", "user_id", hostUser.ID, "nick", nick, "account", account, "network", network)
-			if err := claimNickForFn(network, hostUser, norm); err != nil {
+			if err := finalizeResolvedUser(hostUser, nick, norm, account, ident, host, network); err != nil {
 				return nil, err
-			}
-			reactivateIfReleased(hostUser)
-			hostUser.IRCAccount = account
-			hostUser.CurrentNick = nick
-			hostUser.NormalizedNick = norm
-			if err := updateDBUser(hostUser); err != nil {
-				return nil, err
-			}
-			if err := upsertKnownHost(hostUser.ID, ident, host); err != nil {
-				loggerUsers.Warn("failed to upsert known host", "error", err)
 			}
 			return hostUser, nil
 		}
 
-		// Third-tier fallback: released row with same nick. Only reached
-		// when account is unknown to us AND no host history matches, so
-		// nick is the only evidence we have. See
-		// getMostRecentReleasedUserByNormalizedNick for the security note.
-		//
-		// Both voluntarily-released rows (QUIT/PART/KICK) and involuntarily-
-		// released rows (handleNickCollision displacement) are eligible.
-		// See handleNickCollision docstring for the trade-off rationale.
-		//
-		// Race note: under high concurrency two callers may try to reactivate
-		// two different released rows with the same (network, normalized_nick)
-		// simultaneously. One UPDATE will hit the partial UNIQUE constraint
-		// and resolveUser will fall through to resolveUserFallback, producing
-		// a flagged row. Acceptable degraded behavior; the second user will
-		// not be silently merged into the wrong identity.
-		releasedUser, matchCount, err := getMostRecentReleasedUserByNormalizedNick(network, norm)
+		releasedUser, err := tryReleasedNickFallback(network, nick, norm, account, ident, host, "released_nick_fallback+account_link")
 		if err != nil {
 			return nil, err
 		}
 		if releasedUser != nil {
-			if matchCount > 1 {
-				loggerUsers.Warn("released-nick fallback: multiple released rows match, picking newest",
-					"user_id", releasedUser.ID,
-					"match_count", matchCount,
-					"nick", nick, "network", network)
-			}
-			loggerUsers.Info("resolved user", "method", "released_nick_fallback+account_link",
-				"user_id", releasedUser.ID, "nick", nick, "account", account, "network", network,
-				"released_at", releasedUser.UpdatedAt)
-			reactivateIfReleased(releasedUser)
-			releasedUser.IRCAccount = account
-			releasedUser.CurrentNick = nick
-			releasedUser.NormalizedNick = norm
-			if err := updateDBUser(releasedUser); err != nil {
-				return nil, err
-			}
-			if err := upsertKnownHost(releasedUser.ID, ident, host); err != nil {
-				loggerUsers.Warn("failed to upsert known host", "error", err)
-			}
 			return releasedUser, nil
 		}
 
@@ -345,11 +334,11 @@ func resolveUserOnce(network, nick, ident, host, account, casemapping string) (*
 			user.CurrentNick = nick
 			user.NormalizedNick = norm
 			if err := updateDBUser(user); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("updateDBUser failed: %w", err)
 			}
 		}
 		if err := upsertKnownHost(user.ID, ident, host); err != nil {
-			loggerUsers.Warn("failed to upsert known host", "error", err)
+			loggerUsers.Warn("upsertKnownHost failed", "error", err)
 		}
 		return user, nil
 	}
@@ -361,65 +350,17 @@ func resolveUserOnce(network, nick, ident, host, account, casemapping string) (*
 	}
 	if hostUser != nil {
 		loggerUsers.Debug("resolved user", "method", "host_recovery", "user_id", hostUser.ID, "nick", nick, "network", network)
-		if err := claimNickForFn(network, hostUser, norm); err != nil {
+		if err := finalizeResolvedUser(hostUser, nick, norm, "", ident, host, network); err != nil {
 			return nil, err
-		}
-		reactivateIfReleased(hostUser)
-		if hostUser.IRCAccount == "" && account != "" {
-			hostUser.IRCAccount = account
-		}
-		hostUser.CurrentNick = nick
-		hostUser.NormalizedNick = norm
-		if err := updateDBUser(hostUser); err != nil {
-			return nil, err
-		}
-		if err := upsertKnownHost(hostUser.ID, ident, host); err != nil {
-			loggerUsers.Warn("failed to upsert known host", "error", err)
 		}
 		return hostUser, nil
 	}
 
-	// Third-tier fallback: released row with same nick. This handles the
-	// common accountless-network case where a user quits and rejoins from
-	// a new host (mobile networks, ISP DHCP, VPN). See
-	// getMostRecentReleasedUserByNormalizedNick for the security note.
-	//
-	// Both voluntarily-released rows (QUIT/PART/KICK) and involuntarily-
-	// released rows (handleNickCollision displacement) are eligible.
-	// See handleNickCollision docstring for the trade-off rationale.
-	//
-	// Race note: under high concurrency two callers may try to reactivate
-	// two different released rows with the same (network, normalized_nick)
-	// simultaneously. One UPDATE will hit the partial UNIQUE constraint
-	// and resolveUser will fall through to resolveUserFallback, producing
-	// a flagged row. Acceptable degraded behavior; the second user will
-	// not be silently merged into the wrong identity.
-	releasedUser, matchCount, err := getMostRecentReleasedUserByNormalizedNick(network, norm)
+	releasedUser, err := tryReleasedNickFallback(network, nick, norm, "", ident, host, "released_nick_fallback")
 	if err != nil {
 		return nil, err
 	}
 	if releasedUser != nil {
-		if matchCount > 1 {
-			loggerUsers.Warn("released-nick fallback: multiple released rows match, picking newest",
-				"user_id", releasedUser.ID,
-				"match_count", matchCount,
-				"nick", nick, "network", network)
-		}
-		loggerUsers.Info("resolved user", "method", "released_nick_fallback",
-			"user_id", releasedUser.ID, "nick", nick, "network", network,
-			"released_at", releasedUser.UpdatedAt)
-		reactivateIfReleased(releasedUser)
-		if releasedUser.IRCAccount == "" && account != "" {
-			releasedUser.IRCAccount = account
-		}
-		releasedUser.CurrentNick = nick
-		releasedUser.NormalizedNick = norm
-		if err := updateDBUser(releasedUser); err != nil {
-			return nil, err
-		}
-		if err := upsertKnownHost(releasedUser.ID, ident, host); err != nil {
-			loggerUsers.Warn("failed to upsert known host", "error", err)
-		}
 		return releasedUser, nil
 	}
 
@@ -904,7 +845,7 @@ func getUserInfo(userID int64) (*UserInfo, error) {
 
 	theDB.Where("user_id = ?", userID).Order("last_seen DESC").Find(&info.Hosts)
 
-	info.SessionCount, info.MessageCount, err = getUserDBStatsAllNetworks(userID)
+	info.SessionCount, info.MessageCount, err = getUserDBStats(userID, "", "")
 	if err != nil {
 		return nil, fmt.Errorf("getting user stats: %w", err)
 	}
@@ -916,25 +857,6 @@ func getUserInfo(userID int64) (*UserInfo, error) {
 	theDB.Where("user_id = ?", userID).Order("created_at DESC").Limit(20).Find(&info.NickChanges)
 
 	return info, nil
-}
-
-func getUserDBStatsAllNetworks(userID int64) (int, int, error) {
-	var sessionCount int64
-	err := theDB.Model(&Session{}).Where("user_id = ?", userID).Count(&sessionCount).Error
-	if err != nil {
-		return 0, 0, err
-	}
-	var sessionIDs []int64
-	err = theDB.Model(&Session{}).Where("user_id = ?", userID).Pluck("id", &sessionIDs).Error
-	if err != nil {
-		return int(sessionCount), 0, err
-	}
-	if len(sessionIDs) == 0 {
-		return int(sessionCount), 0, nil
-	}
-	var messageCount int64
-	err = theDB.Model(&Message{}).Where("session_id IN ?", sessionIDs).Count(&messageCount).Error
-	return int(sessionCount), int(messageCount), err
 }
 
 type UserSearchResult struct {

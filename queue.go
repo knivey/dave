@@ -199,24 +199,21 @@ func (ds *deliverySlot) deliveryPosition(item *QueueItem) int {
 	return pos
 }
 
-func (qm *QueueManager) EnqueueAt(network, channel string, userID int64, nick, service, desc string, enqueuedAt time.Time, fn func(ctx context.Context, output chan<- string)) int {
+func (qm *QueueManager) newQueueItem(network, channel string, userID int64, nick, service, desc string, enqueuedAt time.Time, fn func(ctx context.Context, output chan<- string)) *QueueItem {
 	if !qm.running.Load() {
-		return -1
+		return nil
 	}
-
-	qm.mu.Lock()
-	defer qm.mu.Unlock()
 
 	key := channelKey(network, channel)
 	cq := qm.getOrCreateChannelQueue(key)
 
 	if len(cq.pending)+len(cq.running) >= qm.maxDepth {
-		return -1
+		return nil
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	item := &QueueItem{
+	return &QueueItem{
 		ID:          qm.idCounter.Add(1),
 		Network:     network,
 		Channel:     channel,
@@ -230,13 +227,18 @@ func (qm *QueueManager) EnqueueAt(network, channel string, userID int64, nick, s
 		ctx:         ctx,
 		cancel:      cancel,
 	}
+}
 
-	ds := qm.getDeliverySlot(network, channel)
+func (qm *QueueManager) enqueueItem(item *QueueItem) int {
+	ds := qm.getDeliverySlot(item.Network, item.Channel)
 	ds.enqueue(item)
 
 	deliveryPos := ds.deliveryPosition(item)
 
-	slot := qm.execSlots[service]
+	key := channelKey(item.Network, item.Channel)
+	cq := qm.channels[key]
+
+	slot := qm.execSlots[item.Service]
 	if slot != nil && !slot.tryAcquire() {
 		cq.pending = append(cq.pending, item)
 		qm.notify()
@@ -248,55 +250,31 @@ func (qm *QueueManager) EnqueueAt(network, channel string, userID int64, nick, s
 	return deliveryPos
 }
 
-func (qm *QueueManager) EnqueueAtWithPrompt(network, channel string, userID int64, nick, service, desc, prompt, startedMsgOverride string, enqueuedAt time.Time, fn func(ctx context.Context, output chan<- string)) int {
-	if !qm.running.Load() {
-		return -1
-	}
-
+func (qm *QueueManager) EnqueueAt(network, channel string, userID int64, nick, service, desc string, enqueuedAt time.Time, fn func(ctx context.Context, output chan<- string)) int {
 	qm.mu.Lock()
 	defer qm.mu.Unlock()
 
-	key := channelKey(network, channel)
-	cq := qm.getOrCreateChannelQueue(key)
-
-	if len(cq.pending)+len(cq.running) >= qm.maxDepth {
+	item := qm.newQueueItem(network, channel, userID, nick, service, desc, enqueuedAt, fn)
+	if item == nil {
 		return -1
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	return qm.enqueueItem(item)
+}
 
-	item := &QueueItem{
-		ID:          qm.idCounter.Add(1),
-		Network:     network,
-		Channel:     channel,
-		Nick:        nick,
-		UserID:      userID,
-		Service:     service,
-		Description: desc,
-		Enqueued:    enqueuedAt,
-		Prompt:      prompt,
-		StartedMsg:  startedMsgOverride,
-		Execute:     fn,
-		outputCh:    make(chan string, outputChannelSize),
-		ctx:         ctx,
-		cancel:      cancel,
+func (qm *QueueManager) EnqueueAtWithPrompt(network, channel string, userID int64, nick, service, desc, prompt, startedMsgOverride string, enqueuedAt time.Time, fn func(ctx context.Context, output chan<- string)) int {
+	qm.mu.Lock()
+	defer qm.mu.Unlock()
+
+	item := qm.newQueueItem(network, channel, userID, nick, service, desc, enqueuedAt, fn)
+	if item == nil {
+		return -1
 	}
 
-	ds := qm.getDeliverySlot(network, channel)
-	ds.enqueue(item)
+	item.Prompt = prompt
+	item.StartedMsg = startedMsgOverride
 
-	deliveryPos := ds.deliveryPosition(item)
-
-	slot := qm.execSlots[service]
-	if slot != nil && !slot.tryAcquire() {
-		cq.pending = append(cq.pending, item)
-		qm.notify()
-		return deliveryPos
-	}
-
-	cq.running[item.ID] = item
-	go qm.runJob(item)
-	return deliveryPos
+	return qm.enqueueItem(item)
 }
 
 func (qm *QueueManager) StopCurrent(network, channel string) bool {

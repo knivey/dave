@@ -915,12 +915,12 @@ func TestGetUserDBStatsAllNetworks(t *testing.T) {
 	require.NoError(t, theDB.Create(&s2).Error)
 	require.NoError(t, insertDBMessage(s2.ID, "user", "msg", nil, nil, nil, nil))
 
-	sessions, messages, err := getUserDBStatsAllNetworks(user.ID)
+	sessions, messages, err := getUserDBStats(user.ID, "", "")
 	require.NoError(t, err)
 	assert.Equal(t, 2, sessions)
 	assert.Equal(t, 3, messages)
 
-	sessions, messages, err = getUserDBStatsAllNetworks(99999)
+	sessions, messages, err = getUserDBStats(99999, "", "")
 	require.NoError(t, err)
 	assert.Equal(t, 0, sessions)
 	assert.Equal(t, 0, messages)

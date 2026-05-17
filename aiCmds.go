@@ -512,6 +512,7 @@ func (cr *chatRunner) runTurnResponsesStream(
 				emptyRetries:      emptyRetries + 1,
 				currentResponseID: currentResponseID,
 				usePrevID:         usePrevID,
+				input:             messagesToResponseInputItems(messages),
 			}
 		} else if newText != text {
 			text = newText

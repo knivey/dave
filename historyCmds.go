@@ -364,7 +364,7 @@ func historyStats(network Network, c *girc.Client, e girc.Event, args ...string)
 	}
 	channel := normalizeIRC(e.Params[0], getCasemapping(network.Name))
 
-	sessionCount, messageCount, err := getUserDBStats(network.Name, channel, userID)
+	sessionCount, messageCount, err := getUserDBStats(userID, network.Name, channel)
 	if err != nil {
 		c.Cmd.Reply(e, errorNotice(n.DB.QueryStats, map[string]string{"error": err.Error()}))
 		return

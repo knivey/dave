@@ -345,7 +345,7 @@ func recoverPendingJobs() {
 		return
 	}
 
-	jobs, err := getPendingJobsForRecovery()
+	jobs, err := getPendingJobsForRecovery(true)
 	if err != nil {
 		loggerJM.Error("failed to query pending jobs for recovery", "error", err)
 		return
@@ -485,7 +485,7 @@ func onToolAsyncJobCompleted(job *toolAsyncJob, resultText string) {
 	toolJobMgr.mu.Unlock()
 
 	if theDB != nil {
-		if err := completeToolPendingJob(job.JobID, resultText); err != nil {
+		if err := completePendingJob(job.JobID, resultText); err != nil {
 			loggerJM.Error("failed to mark tool job completed in DB", "job_id", job.JobID, "error", err)
 		}
 	}
@@ -579,7 +579,7 @@ func recoverToolPendingJobs() {
 		return
 	}
 
-	jobs, err := getToolPendingJobsForRecovery()
+	jobs, err := getPendingJobsForRecovery(false)
 	if err != nil {
 		loggerJM.Error("failed to query tool pending jobs for recovery", "error", err)
 		return

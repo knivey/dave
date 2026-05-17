@@ -342,7 +342,7 @@ func TestDBUserStats(t *testing.T) {
 	sid2 := testCreateSession(t, "net", "#chan", "nick", "chat", "", "")
 	sessionMgr.AddMessage(sid2, ChatMessage{Role: "system", Content: "sys"})
 
-	sessionCount, messageCount, err := getUserDBStats("net", "#chan", ensureTestUser(t, "net", "nick"))
+	sessionCount, messageCount, err := getUserDBStats(ensureTestUser(t, "net", "nick"), "net", "#chan")
 	require.NoError(t, err, "getUserDBStats failed")
 	assert.Equal(t, 2, sessionCount, "session count")
 	assert.Equal(t, 3, messageCount, "message count")

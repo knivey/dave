@@ -511,29 +511,37 @@ func purgeDeletedDBSessions(olderThan time.Duration) (int64, error) {
 	return result.RowsAffected, result.Error
 }
 
-func getUserDBStats(network, channel string, userID int64) (int, int, error) {
-	var sessionCount int64
-	err := theDB.Model(&Session{}).
-		Where("network = ? AND channel = ? AND user_id = ?", network, channel, userID).
-		Count(&sessionCount).Error
+func getUserDBStats(userID int64, network, channel string) (sessionCount int, messageCount int, err error) {
+	q := theDB.Model(&Session{}).Where("user_id = ?", userID)
+	if network != "" {
+		q = q.Where("network = ?", network)
+	}
+	if channel != "" {
+		q = q.Where("channel = ?", channel)
+	}
+	var sc int64
+	err = q.Count(&sc).Error
 	if err != nil {
 		return 0, 0, err
 	}
 	var sessionIDs []int64
-	err = theDB.Model(&Session{}).
-		Where("network = ? AND channel = ? AND user_id = ?", network, channel, userID).
-		Pluck("id", &sessionIDs).Error
+	q2 := theDB.Model(&Session{}).Where("user_id = ?", userID)
+	if network != "" {
+		q2 = q2.Where("network = ?", network)
+	}
+	if channel != "" {
+		q2 = q2.Where("channel = ?", channel)
+	}
+	err = q2.Pluck("id", &sessionIDs).Error
 	if err != nil {
-		return int(sessionCount), 0, err
+		return int(sc), 0, err
 	}
 	if len(sessionIDs) == 0 {
-		return int(sessionCount), 0, nil
+		return int(sc), 0, nil
 	}
-	var messageCount int64
-	err = theDB.Model(&Message{}).
-		Where("session_id IN ?", sessionIDs).
-		Count(&messageCount).Error
-	return int(sessionCount), int(messageCount), err
+	var mc int64
+	err = theDB.Model(&Message{}).Where("session_id IN ?", sessionIDs).Count(&mc).Error
+	return int(sc), int(mc), err
 }
 
 func createPendingJob(sessionID int64, jobID, toolName, mcpServer string) error {
@@ -581,10 +589,15 @@ func getPendingJobsForUser(network, channel string, userID int64) ([]PendingJob,
 	return jobs, err
 }
 
-func getPendingJobsForRecovery() ([]PendingJob, error) {
+func getPendingJobsForRecovery(requireSessionID bool) ([]PendingJob, error) {
 	var jobs []PendingJob
-	err := theDB.Where("status IN ? AND session_id IS NOT NULL", []string{StatusPending, StatusRunning}).
-		Find(&jobs).Error
+	q := theDB.Where("status IN ?", []string{StatusPending, StatusRunning})
+	if requireSessionID {
+		q = q.Where("session_id IS NOT NULL")
+	} else {
+		q = q.Where("session_id IS NULL")
+	}
+	err := q.Find(&jobs).Error
 	return jobs, err
 }
 
@@ -600,19 +613,6 @@ func createToolPendingJob(jobID, toolName, mcpServer, network, channel, nick str
 		UserID:    &userID,
 	}
 	return theDB.Create(&job).Error
-}
-
-func completeToolPendingJob(jobID, resultText string) error {
-	now := time.Now()
-	return theDB.Model(&PendingJob{}).Where("job_id = ?", jobID).
-		Updates(map[string]interface{}{"status": StatusCompleted, "result": resultText, "completed_at": &now}).Error
-}
-
-func getToolPendingJobsForRecovery() ([]PendingJob, error) {
-	var jobs []PendingJob
-	err := theDB.Where("status IN ? AND session_id IS NULL", []string{StatusPending, StatusRunning}).
-		Find(&jobs).Error
-	return jobs, err
 }
 
 type SessionWithUser struct {

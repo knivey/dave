@@ -26,8 +26,7 @@ type mcpAsyncSubmitResult struct {
 }
 
 func mcpCmd(network Network, c *girc.Client, e girc.Event, cfg MCPCommandConfig, ctx context.Context, output chan<- string, args ...string) {
-	log := logxi.New(network.Name + ".mcp." + cfg.Name)
-	log.SetLevel(logxi.LevelAll)
+	log := newLogger(network.Name + ".mcp." + cfg.Name)
 	n := getNotices()
 
 	if cfg.Arg != "" && len(args) == 0 {

@@ -5,15 +5,10 @@ import (
 	"strconv"
 	"time"
 
-	logxi "github.com/mgutz/logxi/v1"
 	"gorm.io/gorm"
 )
 
-var loggerBans = logxi.New("bans")
-
-func init() {
-	loggerBans.SetLevel(logxi.LevelAll)
-}
+var loggerBans = newLogger("bans")
 
 func isBanned(db *gorm.DB, userID int64, network, channel, service string) bool {
 	if db == nil {
@@ -21,7 +16,11 @@ func isBanned(db *gorm.DB, userID int64, network, channel, service string) bool 
 	}
 	now := time.Now()
 	var bans []Ban
-	db.Where("user_id = ? AND active = ? AND network = ?", userID, true, network).Find(&bans)
+	result := db.Where("user_id = ? AND active = ? AND network = ?", userID, true, network).Find(&bans)
+	if result.Error != nil {
+		loggerBans.Error("failed to query bans, assuming banned for safety", "error", result.Error)
+		return true
+	}
 	for i := range bans {
 		if !bans[i].ExpiresAt.IsZero() && bans[i].ExpiresAt.Before(now) {
 			deactivateBan(db, bans[i].ID)

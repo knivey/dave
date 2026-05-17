@@ -8,15 +8,10 @@ import (
 	"syscall"
 	"time"
 
-	logxi "github.com/mgutz/logxi/v1"
 	"gorm.io/gorm"
 )
 
-var loggerM = logxi.New("migrations")
-
-func init() {
-	loggerM.SetLevel(logxi.LevelAll)
-}
+var loggerM = newLogger("migrations")
 
 // When you remove a NOT NULL column from a GORM struct (e.g. Session), GORM's
 // AutoMigrate won't drop it — it only adds missing columns and indexes. The old

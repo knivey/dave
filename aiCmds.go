@@ -33,8 +33,7 @@ func completion(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx
 		option.WithBaseURL(svcBaseURL),
 	)
 
-	logger := logxi.New(network.Name + ".completion." + cfg.Name)
-	logger.SetLevel(logxi.LevelAll)
+	logger := newLogger(network.Name + ".completion." + cfg.Name)
 
 	apiCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
@@ -58,6 +57,11 @@ func completion(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx
 		case <-ctx.Done():
 		}
 		logger.Error(err.Error())
+		return
+	}
+
+	if len(resp.Choices) == 0 {
+		logger.Warn("API returned no choices")
 		return
 	}
 
@@ -185,8 +189,7 @@ func newChatRunner(network Network, client *girc.Client, cfg AIConfig) *chatRunn
 		option.WithMaxRetries(2),
 	)
 
-	logger := logxi.New(network.Name + ".completion." + cfg.Name)
-	logger.SetLevel(logxi.LevelAll)
+	logger := newLogger(network.Name + ".completion." + cfg.Name)
 
 	return &chatRunner{
 		openaiClient: &openaiClient,
@@ -275,14 +278,7 @@ func (cr *chatRunner) renderAPIUser() string {
 		Network: cr.network.Name,
 		Date:    time.Now().Format("2006-01-02"),
 	}
-	var templateVars map[string]string
-	readConfig(func() {
-		templateVars = make(map[string]string, len(config.TemplateVars))
-		for k, v := range config.TemplateVars {
-			templateVars[k] = v
-		}
-	})
-	data.Vars = templateVars
+	data.Vars = copyTemplateVars()
 
 	var buf strings.Builder
 	if err := cr.cfg.apiUserTmpl.Execute(&buf, data); err != nil {
@@ -753,7 +749,12 @@ func (cr *chatRunner) executeToolCalls(messages []ChatMessage, toolCalls []ToolC
 			cr.sendIRC(expandNotice(getNotices().Tools.Call, map[string]string{"server": serverName, "tool": tc.Function.Name}))
 		}
 		var toolArgs map[string]any
-		json.Unmarshal([]byte(tc.Function.Arguments), &toolArgs)
+		if err := json.Unmarshal([]byte(tc.Function.Arguments), &toolArgs); err != nil {
+			toolMsg := toolResultMsg(tc.ID, "error: failed to parse tool arguments: "+err.Error())
+			messages = append(messages, toolMsg)
+			cr.addContext(toolMsg)
+			continue
+		}
 		result, err := callMCPToolWithContext(cr.ctx, tc.Function.Name, toolArgs)
 		if err != nil {
 			toolMsg := toolResultMsg(tc.ID, "error: "+err.Error())
@@ -1373,17 +1374,15 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 	runner.hostmask = e.Source.Name + "!" + e.Source.Ident + "@" + e.Source.Host
 	runner.setChannel(channel, nick, userID)
 
-	session, _ := sessionMgr.GetActiveSession(network.Name, channel, userID)
+	session, err := sessionMgr.GetActiveSession(network.Name, channel, userID)
+	if err != nil {
+		runner.logger.Error("failed to get active session", "error", err)
+		return
+	}
 	if session == nil {
 		var systemContent string
 		if cfg.SystemTmpl != nil {
-			var templateVars map[string]string
-			readConfig(func() {
-				templateVars = make(map[string]string, len(config.TemplateVars))
-				for k, v := range config.TemplateVars {
-					templateVars[k] = v
-				}
-			})
+			templateVars := copyTemplateVars()
 			data := SystemPromptData{
 				Nick:      nick,
 				BotNick:   c.GetNick(),
@@ -1442,7 +1441,11 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 
 	var userMsg ChatMessage
 	if cfg.DetectImages {
-		messages, _ := sessionMgr.GetMessages(session.ID, cfg.MaxHistory)
+		messages, err := sessionMgr.GetMessages(session.ID, cfg.MaxHistory)
+		if err != nil {
+			runner.logger.Error("failed to load messages for image detection", "error", err)
+			messages = nil
+		}
 
 		cleanText, imageUrls := detectImageURLs(args[0])
 
@@ -1490,7 +1493,12 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 	runner.syncAPISessionID()
 	runner.syncConvID()
 
-	messages, _ := sessionMgr.GetMessages(runner.sessionID, cfg.MaxHistory)
+	messages, err := sessionMgr.GetMessages(runner.sessionID, cfg.MaxHistory)
+	if err != nil {
+		runner.logger.Error("failed to load messages", "error", err)
+		runner.sendError("failed to load conversation history")
+		return
+	}
 	runner.logger.Debug("running completion", "summary", summarizeMessages(messages))
 
 	messages, _ = runner.runTurn(messages)
@@ -1511,7 +1519,11 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 				injectAsyncResultFromDB(runner.sessionID, cfg, cj, network.Name, channel, e.Source.Name)
 				markPendingJobDelivered(cj.JobID)
 			}
-			messages, _ = sessionMgr.GetMessages(runner.sessionID, cfg.MaxHistory)
+			messages, err = sessionMgr.GetMessages(runner.sessionID, cfg.MaxHistory)
+			if err != nil {
+				runner.logger.Error("failed to reload messages after job delivery", "error", err)
+				break
+			}
 			messages, _ = runner.runTurn(messages)
 		}
 	}

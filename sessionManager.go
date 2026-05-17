@@ -7,16 +7,11 @@ import (
 	"runtime"
 	"sync"
 
-	logxi "github.com/mgutz/logxi/v1"
 	"gorm.io/gorm"
 )
 
 var sessionMgr *SessionManager
-var loggerSM = logxi.New("sessionManager")
-
-func init() {
-	loggerSM.SetLevel(logxi.LevelAll)
-}
+var loggerSM = newLogger("sessionManager")
 
 // CRITICAL DESIGN NOTE: Per-user session creation lock.
 //
@@ -156,8 +151,10 @@ func (sm *SessionManager) SwitchActive(network, channel string, userID int64, ne
 	var oldID int64
 
 	var currentActive []Session
-	sm.db.Where("network = ? AND channel = ? AND user_id = ? AND status = ?",
-		network, channel, userID, StatusActive).Find(&currentActive)
+	if err := sm.db.Where("network = ? AND channel = ? AND user_id = ? AND status = ?",
+		network, channel, userID, StatusActive).Find(&currentActive).Error; err != nil {
+		return 0, fmt.Errorf("querying active sessions: %w", err)
+	}
 
 	if len(currentActive) > 0 {
 		oldID = currentActive[0].ID

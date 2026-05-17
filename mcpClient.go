@@ -525,7 +525,7 @@ func callMCPToolWithTimeoutContext(ctx context.Context, toolName string, args ma
 			logger.Warn("MCP tool call failed, attempting reconnect", "server", serverName, "tool", toolName, "error", err)
 		}
 		if reconnectErr := reconnectMCPServer(serverName, ctx); reconnectErr != nil {
-			return nil, fmt.Errorf("tool call failed (%v) and reconnect failed: %w", err, reconnectErr)
+			return nil, fmt.Errorf("tool call failed (%w) and reconnect failed: %w", err, reconnectErr)
 		}
 		mcpServersMu.Lock()
 		srv = mcpServers[serverName]
@@ -572,7 +572,7 @@ func callMCPToolWithTimeout(toolName string, args map[string]any, timeout time.D
 			logger.Warn("MCP tool call failed, attempting reconnect", "server", serverName, "tool", toolName, "error", err)
 		}
 		if reconnectErr := reconnectMCPServer(serverName, context.Background()); reconnectErr != nil {
-			return nil, fmt.Errorf("tool call failed (%v) and reconnect failed: %w", err, reconnectErr)
+			return nil, fmt.Errorf("tool call failed (%w) and reconnect failed: %w", err, reconnectErr)
 		}
 		mcpServersMu.Lock()
 		srv = mcpServers[serverName]
@@ -719,6 +719,9 @@ func embeddedResourceToText(r *mcp.EmbeddedResource) (string, bool) {
 }
 
 func joinStrings(parts []string, sep string) string {
+	if len(parts) == 0 {
+		return ""
+	}
 	result := parts[0]
 	for _, s := range parts[1:] {
 		result += sep + s
@@ -740,7 +743,7 @@ func readMCPResource(serverName, uri string) (*mcp.ReadResourceResult, error) {
 			logger.Warn("MCP resource read failed, attempting reconnect", "server", serverName, "error", err)
 		}
 		if reconnectErr := reconnectMCPServer(serverName, context.Background()); reconnectErr != nil {
-			return nil, fmt.Errorf("resource read failed (%v) and reconnect failed: %w", err, reconnectErr)
+			return nil, fmt.Errorf("resource read failed (%w) and reconnect failed: %w", err, reconnectErr)
 		}
 		mcpServersMu.Lock()
 		srv = mcpServers[serverName]
@@ -778,7 +781,7 @@ func getMCPPrompt(serverName, promptName string, args map[string]string) (*mcp.G
 			logger.Warn("MCP prompt get failed, attempting reconnect", "server", serverName, "error", err)
 		}
 		if reconnectErr := reconnectMCPServer(serverName, context.Background()); reconnectErr != nil {
-			return nil, fmt.Errorf("prompt get failed (%v) and reconnect failed: %w", err, reconnectErr)
+			return nil, fmt.Errorf("prompt get failed (%w) and reconnect failed: %w", err, reconnectErr)
 		}
 		mcpServersMu.Lock()
 		srv = mcpServers[serverName]

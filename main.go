@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"maps"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -26,6 +27,26 @@ var config Config
 var configDir string
 var wg sync.WaitGroup
 var logger logxi.Logger
+
+func newLogger(name string) logxi.Logger {
+	l := logxi.New(name)
+	l.SetLevel(logxi.LevelAll)
+	return l
+}
+
+const outputChannelSize = 200
+
+func copyTemplateVars() map[string]string {
+	var vars map[string]string
+	readConfig(func() {
+		vars = maps.Clone(config.TemplateVars)
+	})
+	if vars == nil {
+		vars = make(map[string]string)
+	}
+	return vars
+}
+
 var commandsMutex sync.RWMutex
 var configMu sync.RWMutex
 
@@ -345,8 +366,7 @@ func main() {
 	if os.Getenv("LOGXI_FORMAT") == "" {
 		logxi.ProcessLogxiFormatEnv("maxcol=9999")
 	}
-	logger = logxi.New("main")
-	logger.SetLevel(logxi.LevelAll)
+	logger = newLogger("main")
 	logger.Info("Config loaded", "networks", len(config.Networks))
 	initAPILogger(config, configDir)
 	initIncidentLogger(config)
@@ -649,7 +669,11 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 		}
 		msg = msg[len(botnick+", "):]
 
-		session, _ := sessionMgr.GetActiveSession(network.Name, channel, userID)
+		session, err := sessionMgr.GetActiveSession(network.Name, channel, userID)
+		if err != nil {
+			logger.Error("failed to get active session", "error", err)
+			return
+		}
 		if session == nil {
 			return
 		}
@@ -815,7 +839,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 			return
 		}
 
-		outCh := make(chan string, 200)
+		outCh := make(chan string, outputChannelSize)
 		go func() {
 			defer close(outCh)
 			match.cmd(network, client, event, ctxWithResolvedUser(context.Background(), resolvedUser), outCh, match.args...)
@@ -844,7 +868,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 		if chatCmds[match.re] {
 			ClearContext(network.Name, channel, userID)
 		}
-		outCh := make(chan string, 200)
+		outCh := make(chan string, outputChannelSize)
 		go func() {
 			defer close(outCh)
 			match.cmd(network, client, event, ctxWithResolvedUser(context.Background(), resolvedUser), outCh, match.args...)
@@ -911,8 +935,7 @@ func ircClient(network Network) {
 	wg.Add(1)
 	defer wg.Done()
 
-	log := logxi.New(network.Name)
-	log.SetLevel(logxi.LevelAll)
+	log := newLogger(network.Name)
 
 	ircServer, err := network.getNextServer()
 	if err != nil {

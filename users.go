@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	logxi "github.com/mgutz/logxi/v1"
 	"gorm.io/gorm"
 )
 
@@ -115,11 +114,7 @@ func displayNick(u *User) string {
 	return u.CurrentNick
 }
 
-var loggerUsers = logxi.New("users")
-
-func init() {
-	loggerUsers.SetLevel(logxi.LevelAll)
-}
+var loggerUsers = newLogger("users")
 
 // claimNickFor ensures `user` may safely take `(network, norm)` as its
 // normalized_nick before the caller assigns it and writes the row. If a
@@ -248,7 +243,9 @@ func resolveUserOnce(network, nick, ident, host, account, casemapping string) (*
 			if err := updateDBUser(user); err != nil {
 				return nil, err
 			}
-			_ = upsertKnownHost(user.ID, ident, host)
+			if err := upsertKnownHost(user.ID, ident, host); err != nil {
+				loggerUsers.Warn("failed to upsert known host", "error", err)
+			}
 			return user, nil
 		}
 
@@ -265,7 +262,9 @@ func resolveUserOnce(network, nick, ident, host, account, casemapping string) (*
 			if err := updateDBUser(nickUser); err != nil {
 				return nil, err
 			}
-			_ = upsertKnownHost(nickUser.ID, ident, host)
+			if err := upsertKnownHost(nickUser.ID, ident, host); err != nil {
+				loggerUsers.Warn("failed to upsert known host", "error", err)
+			}
 			return nickUser, nil
 		}
 
@@ -285,7 +284,9 @@ func resolveUserOnce(network, nick, ident, host, account, casemapping string) (*
 			if err := updateDBUser(hostUser); err != nil {
 				return nil, err
 			}
-			_ = upsertKnownHost(hostUser.ID, ident, host)
+			if err := upsertKnownHost(hostUser.ID, ident, host); err != nil {
+				loggerUsers.Warn("failed to upsert known host", "error", err)
+			}
 			return hostUser, nil
 		}
 
@@ -325,7 +326,9 @@ func resolveUserOnce(network, nick, ident, host, account, casemapping string) (*
 			if err := updateDBUser(releasedUser); err != nil {
 				return nil, err
 			}
-			_ = upsertKnownHost(releasedUser.ID, ident, host)
+			if err := upsertKnownHost(releasedUser.ID, ident, host); err != nil {
+				loggerUsers.Warn("failed to upsert known host", "error", err)
+			}
 			return releasedUser, nil
 		}
 
@@ -345,7 +348,9 @@ func resolveUserOnce(network, nick, ident, host, account, casemapping string) (*
 				return nil, err
 			}
 		}
-		_ = upsertKnownHost(user.ID, ident, host)
+		if err := upsertKnownHost(user.ID, ident, host); err != nil {
+			loggerUsers.Warn("failed to upsert known host", "error", err)
+		}
 		return user, nil
 	}
 
@@ -368,7 +373,9 @@ func resolveUserOnce(network, nick, ident, host, account, casemapping string) (*
 		if err := updateDBUser(hostUser); err != nil {
 			return nil, err
 		}
-		_ = upsertKnownHost(hostUser.ID, ident, host)
+		if err := upsertKnownHost(hostUser.ID, ident, host); err != nil {
+			loggerUsers.Warn("failed to upsert known host", "error", err)
+		}
 		return hostUser, nil
 	}
 
@@ -410,7 +417,9 @@ func resolveUserOnce(network, nick, ident, host, account, casemapping string) (*
 		if err := updateDBUser(releasedUser); err != nil {
 			return nil, err
 		}
-		_ = upsertKnownHost(releasedUser.ID, ident, host)
+		if err := upsertKnownHost(releasedUser.ID, ident, host); err != nil {
+			loggerUsers.Warn("failed to upsert known host", "error", err)
+		}
 		return releasedUser, nil
 	}
 
@@ -451,7 +460,9 @@ func resolveUserFallback(network, nick, ident, host, account, casemapping string
 			Err:     cause,
 		}
 	}
-	_ = upsertKnownHost(user.ID, ident, host)
+	if err := upsertKnownHost(user.ID, ident, host); err != nil {
+		loggerUsers.Warn("failed to upsert known host", "error", err)
+	}
 	loggerUsers.Error("flagged_user_created_admin_attention_required",
 		"user_id", user.ID,
 		"network", network,
@@ -632,7 +643,9 @@ func createNewUser(network, nick, normalizedNick, account, ident, host string) (
 	if err := theDB.Create(&user).Error; err != nil {
 		return nil, err
 	}
-	_ = upsertKnownHost(user.ID, ident, host)
+	if err := upsertKnownHost(user.ID, ident, host); err != nil {
+		loggerUsers.Warn("failed to upsert known host", "error", err)
+	}
 	loggerUsers.Info("created new user", "id", user.ID, "network", network, "nick", nick)
 	return &user, nil
 }

@@ -1,14 +1,6 @@
 package main
 
-import (
-	logxi "github.com/mgutz/logxi/v1"
-)
-
-var loggerCS = logxi.New("contextStore")
-
-func init() {
-	loggerCS.SetLevel(logxi.LevelAll)
-}
+var loggerCS = newLogger("contextStore")
 
 func LoadContextStore() {
 	if theDB == nil {

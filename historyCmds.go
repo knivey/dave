@@ -900,13 +900,7 @@ func historyClone(network Network, c *girc.Client, e girc.Event, ctx context.Con
 
 	var systemContent string
 	if cfg.SystemTmpl != nil {
-		var templateVars map[string]string
-		readConfig(func() {
-			templateVars = make(map[string]string, len(config.TemplateVars))
-			for k, v := range config.TemplateVars {
-				templateVars[k] = v
-			}
-		})
+		templateVars := copyTemplateVars()
 		data := SystemPromptData{
 			Nick:    e.Source.Name,
 			BotNick: c.GetNick(),

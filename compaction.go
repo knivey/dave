@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/lrstanley/girc"
-	logxi "github.com/mgutz/logxi/v1"
 	openai "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 	"gorm.io/gorm"
@@ -218,13 +217,7 @@ func renderFreshSystemPrompt(cfg AIConfig, network Network, client *girc.Client,
 		}
 		return fallback
 	}
-	var templateVars map[string]string
-	readConfig(func() {
-		templateVars = make(map[string]string, len(config.TemplateVars))
-		for k, v := range config.TemplateVars {
-			templateVars[k] = v
-		}
-	})
+	templateVars := copyTemplateVars()
 	data := SystemPromptData{
 		Nick:    userNick,
 		BotNick: network.Nick,
@@ -368,8 +361,7 @@ type CompactSessionInputs struct {
 //     archived = true with compaction_id = new row.
 //     - Reset Session.ResponseID to nil so any Responses API chain restarts.
 func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSessionInputs, cfg AIConfig) (*CompactionResult, error) {
-	logger := logxi.New("compaction")
-	logger.SetLevel(logxi.LevelAll)
+	logger := newLogger("compaction")
 
 	mu := getCompactionLock(inputs.SessionID)
 	if !mu.TryLock() {
@@ -735,8 +727,7 @@ func maybeAutoCompact(runner *chatRunner, cfg AIConfig, network Network, c *girc
 			Client:    c,
 			Trigger:   "auto",
 		}, cfg)
-		logger := logxi.New("compaction.auto")
-		logger.SetLevel(logxi.LevelAll)
+		logger := newLogger("compaction.auto")
 		if err != nil {
 			if !errors.Is(err, ErrCompactionInProgress) && !errors.Is(err, ErrCompactionTooShort) {
 				logger.Warn("auto-compaction failed", "session", sessionID, "error", err)

@@ -7,15 +7,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	logxi "github.com/mgutz/logxi/v1"
 )
 
-var loggerQM = logxi.New("queue")
-
-func init() {
-	loggerQM.SetLevel(logxi.LevelAll)
-}
+var loggerQM = newLogger("queue")
 
 type QueueItem struct {
 	ID             int64
@@ -232,7 +226,7 @@ func (qm *QueueManager) EnqueueAt(network, channel string, userID int64, nick, s
 		Description: desc,
 		Enqueued:    enqueuedAt,
 		Execute:     fn,
-		outputCh:    make(chan string, 200),
+		outputCh:    make(chan string, outputChannelSize),
 		ctx:         ctx,
 		cancel:      cancel,
 	}
@@ -283,7 +277,7 @@ func (qm *QueueManager) EnqueueAtWithPrompt(network, channel string, userID int6
 		Prompt:      prompt,
 		StartedMsg:  startedMsgOverride,
 		Execute:     fn,
-		outputCh:    make(chan string, 200),
+		outputCh:    make(chan string, outputChannelSize),
 		ctx:         ctx,
 		cancel:      cancel,
 	}

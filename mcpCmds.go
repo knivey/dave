@@ -30,10 +30,7 @@ func mcpCmd(network Network, c *girc.Client, e girc.Event, cfg MCPCommandConfig,
 	n := getNotices()
 
 	if cfg.Arg != "" && len(args) == 0 {
-		select {
-		case output <- expandNotice(n.Tools.Usage, map[string]string{"arg": cfg.Arg}):
-		case <-ctx.Done():
-		}
+		sendOrDone(ctx, output, expandNotice(n.Tools.Usage, map[string]string{"arg": cfg.Arg}))
 		return
 	}
 
@@ -56,20 +53,14 @@ func mcpCmd(network Network, c *girc.Client, e girc.Event, cfg MCPCommandConfig,
 
 	result, err := callMCPToolWithTimeoutContext(ctx, cfg.Tool, toolArgs, cfg.Timeout)
 	if err != nil {
-		select {
-		case output <- errorNotice(n.Tools.Failed, map[string]string{"error": err.Error()}):
-		case <-ctx.Done():
-		}
+		sendOrDone(ctx, output, errorNotice(n.Tools.Failed, map[string]string{"error": err.Error()}))
 		log.Error("MCP tool call failed", "error", err.Error())
 		return
 	}
 
 	text := mcpToolResultToText(result)
 	if result.IsError {
-		select {
-		case output <- errorMsg(text):
-		case <-ctx.Done():
-		}
+		sendOrDone(ctx, output, errorMsg(text))
 		return
 	}
 
@@ -86,38 +77,27 @@ func mcpCmdAsync(network Network, c *girc.Client, e girc.Event, cfg MCPCommandCo
 
 	result, err := callMCPToolWithTimeoutContext(ctx, asyncTool, toolArgs, cfg.Timeout)
 	if err != nil {
-		select {
-		case output <- errorNotice(n.Tools.Failed, map[string]string{"error": err.Error()}):
-		case <-ctx.Done():
-		}
+		sendOrDone(ctx, output, errorNotice(n.Tools.Failed, map[string]string{"error": err.Error()}))
 		log.Error("async MCP tool call failed", "error", err.Error())
 		return
 	}
 
 	text := mcpToolResultToText(result)
 	if result.IsError {
-		select {
-		case output <- errorMsg(text):
-		case <-ctx.Done():
-		}
+		sendOrDone(ctx, output, errorMsg(text))
 		return
 	}
 
 	var submitResult mcpAsyncSubmitResult
 	if err := json.Unmarshal([]byte(text), &submitResult); err != nil || submitResult.JobID == "" {
 		log.Error("failed to parse async job_id from result", "text", text, "error", err)
-		select {
-		case output <- errorMsg(n.Tools.Unexpected):
-		case <-ctx.Done():
-		}
+		sendOrDone(ctx, output, errorMsg(n.Tools.Unexpected))
 		return
 	}
 
 	log.Info("async job submitted", "job_id", submitResult.JobID, "tool", asyncTool)
 
-	select {
-	case output <- expandNotice(n.Queue.AsyncSubmitted, map[string]string{"nick": nick}):
-	case <-ctx.Done():
+	if !sendOrDone(ctx, output, expandNotice(n.Queue.AsyncSubmitted, map[string]string{"nick": nick})) {
 		return
 	}
 
@@ -134,17 +114,12 @@ func sendImageOrTextResult(text string, ctx context.Context, output chan<- strin
 	var imgResult mcpImageResult
 	if err := json.Unmarshal([]byte(text), &imgResult); err == nil && len(imgResult.Images) > 0 {
 		if imgResult.Error != "" {
-			select {
-			case output <- errorMsg(imgResult.Error):
-			case <-ctx.Done():
-			}
+			sendOrDone(ctx, output, errorMsg(imgResult.Error))
 			return
 		}
 		for _, img := range imgResult.Images {
 			if img.URL != "" {
-				select {
-				case output <- img.URL:
-				case <-ctx.Done():
+				if !sendOrDone(ctx, output, img.URL) {
 					return
 				}
 			}
@@ -156,9 +131,7 @@ func sendImageOrTextResult(text string, ctx context.Context, output chan<- strin
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line != "" {
-			select {
-			case output <- line:
-			case <-ctx.Done():
+			if !sendOrDone(ctx, output, line) {
 				return
 			}
 		}

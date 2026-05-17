@@ -576,14 +576,21 @@ func isIRCAction(line string) (string, bool) {
 	return line, false
 }
 
+func sendOrDone(ctx context.Context, output chan<- string, msg string) bool {
+	select {
+	case output <- msg:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 func sendToOutput(out string, output chan<- string, ctx context.Context) {
 	for _, line := range wrapForIRC(out) {
 		if len(line) <= 0 {
 			continue
 		}
-		select {
-		case output <- line:
-		case <-ctx.Done():
+		if !sendOrDone(ctx, output, line) {
 			return
 		}
 	}

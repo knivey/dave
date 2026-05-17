@@ -47,30 +47,19 @@ func historySessions(network Network, c *girc.Client, e girc.Event, ctx context.
 
 	if arg == "*" {
 		if theDB == nil {
-			select {
-			case output <- errorMsg(n.DB.NotAvailable):
-			case <-ctx.Done():
-			}
+			sendOrDone(ctx, output, errorMsg(n.DB.NotAvailable))
 			return
 		}
 		results, err := getChannelDBSessions(network.Name, channel, maxHistory)
 		if err != nil {
-			select {
-			case output <- errorNotice(n.DB.QuerySessions, map[string]string{"error": err.Error()}):
-			case <-ctx.Done():
-			}
+			sendOrDone(ctx, output, errorNotice(n.DB.QuerySessions, map[string]string{"error": err.Error()}))
 			return
 		}
 		if len(results) == 0 {
-			select {
-			case output <- n.Sessions.None:
-			case <-ctx.Done():
-			}
+			sendOrDone(ctx, output, n.Sessions.None)
 			return
 		}
-		select {
-		case output <- expandNotice(n.Sessions.AllHeader, map[string]string{"network": network.Name, "channel": channel}):
-		case <-ctx.Done():
+		if !sendOrDone(ctx, output, expandNotice(n.Sessions.AllHeader, map[string]string{"network": network.Name, "channel": channel})) {
 			return
 		}
 		sendSessionsLinesWithNick(output, ctx, results, network.Trigger)
@@ -85,38 +74,24 @@ func historySessions(network Network, c *girc.Client, e girc.Event, ctx context.
 
 	if arg != "" {
 		if theDB == nil {
-			select {
-			case output <- errorMsg(n.DB.NotAvailable):
-			case <-ctx.Done():
-			}
+			sendOrDone(ctx, output, errorMsg(n.DB.NotAvailable))
 			return
 		}
 		targetUser, err := resolveUserByNick(network.Name, arg, casemapping)
 		if err != nil || targetUser == nil {
-			select {
-			case output <- expandNotice(n.Sessions.OtherNone, map[string]string{"nick": arg}):
-			case <-ctx.Done():
-			}
+			sendOrDone(ctx, output, expandNotice(n.Sessions.OtherNone, map[string]string{"nick": arg}))
 			return
 		}
 		sessions, err := getUserDBSessions(network.Name, channel, targetUser.ID, maxHistory)
 		if err != nil {
-			select {
-			case output <- errorNotice(n.DB.QuerySessions, map[string]string{"error": err.Error()}):
-			case <-ctx.Done():
-			}
+			sendOrDone(ctx, output, errorNotice(n.DB.QuerySessions, map[string]string{"error": err.Error()}))
 			return
 		}
 		if len(sessions) == 0 {
-			select {
-			case output <- expandNotice(n.Sessions.OtherNone, map[string]string{"nick": arg}):
-			case <-ctx.Done():
-			}
+			sendOrDone(ctx, output, expandNotice(n.Sessions.OtherNone, map[string]string{"nick": arg}))
 			return
 		}
-		select {
-		case output <- expandNotice(n.Sessions.OtherHeader, map[string]string{"nick": displayNick(targetUser), "network": network.Name}):
-		case <-ctx.Done():
+		if !sendOrDone(ctx, output, expandNotice(n.Sessions.OtherHeader, map[string]string{"nick": displayNick(targetUser), "network": network.Name})) {
 			return
 		}
 		var swu []SessionWithUser
@@ -129,24 +104,16 @@ func historySessions(network Network, c *girc.Client, e girc.Event, ctx context.
 
 	sessions, err := getUserDBSessions(network.Name, channel, userID, maxHistory)
 	if err != nil {
-		select {
-		case output <- errorNotice(n.DB.QuerySessions, map[string]string{"error": err.Error()}):
-		case <-ctx.Done():
-		}
+		sendOrDone(ctx, output, errorNotice(n.DB.QuerySessions, map[string]string{"error": err.Error()}))
 		return
 	}
 
 	if len(sessions) == 0 {
-		select {
-		case output <- n.Sessions.None:
-		case <-ctx.Done():
-		}
+		sendOrDone(ctx, output, n.Sessions.None)
 		return
 	}
 
-	select {
-	case output <- expandNotice(n.Sessions.Header, map[string]string{"nick": e.Source.Name, "network": network.Name}):
-	case <-ctx.Done():
+	if !sendOrDone(ctx, output, expandNotice(n.Sessions.Header, map[string]string{"nick": e.Source.Name, "network": network.Name})) {
 		return
 	}
 
@@ -255,9 +222,7 @@ func sendSessionsLines(output chan<- string, ctx context.Context, sessions []Ses
 		}
 
 		for _, wrapped := range wrapLine(line) {
-			select {
-			case output <- wrapped:
-			case <-ctx.Done():
+			if !sendOrDone(ctx, output, wrapped) {
 				return
 			}
 		}
@@ -266,42 +231,36 @@ func sendSessionsLines(output chan<- string, ctx context.Context, sessions []Ses
 
 func historyShow(network Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, args ...string) {
 	n := getNotices()
-	sendErr := func(msg string) {
-		select {
-		case output <- msg:
-		case <-ctx.Done():
-		}
-	}
 	if theDB == nil {
-		sendErr(errorMsg(n.DB.NotAvailable))
+		sendOrDone(ctx, output, errorMsg(n.DB.NotAvailable))
 		return
 	}
 
 	if len(args) == 0 || args[0] == "" {
-		sendErr(errorNotice(n.Sessions.HistoryUsage, map[string]string{"trigger": network.Trigger}))
+		sendOrDone(ctx, output, errorNotice(n.Sessions.HistoryUsage, map[string]string{"trigger": network.Trigger}))
 		return
 	}
 
 	sessionID, err := strconv.ParseInt(args[0], 10, 64)
 	if err != nil {
-		sendErr(errorMsg(n.Sessions.InvalidID))
+		sendOrDone(ctx, output, errorMsg(n.Sessions.InvalidID))
 		return
 	}
 
 	session, err := getDBSessionByID(sessionID)
 	if err != nil {
-		sendErr(errorMsg(n.Sessions.NotFound))
+		sendOrDone(ctx, output, errorMsg(n.Sessions.NotFound))
 		return
 	}
 
 	if ok, msg := verifySessionOwnership(session, network, c, e); !ok {
-		sendErr(msg)
+		sendOrDone(ctx, output, msg)
 		return
 	}
 
 	messages, err := loadDBSessionMessagesAll(sessionID)
 	if err != nil {
-		sendErr(errorNotice(n.DB.LoadMessages, map[string]string{"error": err.Error()}))
+		sendOrDone(ctx, output, errorNotice(n.DB.LoadMessages, map[string]string{"error": err.Error()}))
 		return
 	}
 
@@ -326,8 +285,7 @@ func historyShow(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 		archivedSuffix = fmt.Sprintf(" (%d archived)", archivedCount)
 	}
 
-	select {
-	case output <- expandNotice(n.Sessions.DetailHeader, map[string]string{
+	if !sendOrDone(ctx, output, expandNotice(n.Sessions.DetailHeader, map[string]string{
 		"id":              fmt.Sprintf("%d", sessionID),
 		"command":         session.ChatCommand,
 		"count":           fmt.Sprintf("%d", activeCount),
@@ -335,8 +293,7 @@ func historyShow(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 		"archived":        fmt.Sprintf("%d", archivedCount),
 		"archived_suffix": archivedSuffix,
 		"total":           fmt.Sprintf("%d", len(visible)),
-	}):
-	case <-ctx.Done():
+	})) {
 		return
 	}
 
@@ -372,9 +329,7 @@ func historyShow(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 		}
 		line := fmt.Sprintf("  %s %s%s", roleIcon, archivedTag, content)
 		for _, wrapped := range wrapLine(line) {
-			select {
-			case output <- wrapped:
-			case <-ctx.Done():
+			if !sendOrDone(ctx, output, wrapped) {
 				return
 			}
 		}
@@ -383,9 +338,7 @@ func historyShow(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 	if len(visible) > 4 {
 		sendHistoryMsg(shown[0])
 		sendHistoryMsg(shown[1])
-		select {
-		case output <- expandNotice(n.Sessions.Truncated, map[string]string{"count": fmt.Sprintf("%d", len(visible)-4)}):
-		case <-ctx.Done():
+		if !sendOrDone(ctx, output, expandNotice(n.Sessions.Truncated, map[string]string{"count": fmt.Sprintf("%d", len(visible)-4)})) {
 			return
 		}
 		sendHistoryMsg(shown[2])
@@ -558,9 +511,7 @@ func historyJobs(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 
 	sendLine := func(line string) bool {
 		for _, wrapped := range wrapLine(line) {
-			select {
-			case output <- wrapped:
-			case <-ctx.Done():
+			if !sendOrDone(ctx, output, wrapped) {
 				return false
 			}
 		}
@@ -603,29 +554,20 @@ func historyJobs(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 
 	if theDB == nil {
 		if !hasOutput {
-			select {
-			case output <- n.Jobs.NoJobs:
-			case <-ctx.Done():
-			}
+			sendOrDone(ctx, output, n.Jobs.NoJobs)
 		}
 		return
 	}
 
 	jobs, err := getPendingJobsForUser(network.Name, channel, userID)
 	if err != nil {
-		select {
-		case output <- errorNotice(n.DB.QueryJobs, map[string]string{"error": err.Error()}):
-		case <-ctx.Done():
-		}
+		sendOrDone(ctx, output, errorNotice(n.DB.QueryJobs, map[string]string{"error": err.Error()}))
 		return
 	}
 
 	if len(jobs) == 0 {
 		if !hasOutput {
-			select {
-			case output <- n.Jobs.NoJobs:
-			case <-ctx.Done():
-			}
+			sendOrDone(ctx, output, n.Jobs.NoJobs)
 		}
 		return
 	}
@@ -657,34 +599,28 @@ func historyJobs(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 // failure. See compaction.go for the underlying algorithm.
 func historyCompact(network Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, args ...string) {
 	n := getNotices()
-	send := func(msg string) {
-		select {
-		case output <- msg:
-		case <-ctx.Done():
-		}
-	}
 	if theDB == nil {
-		send(errorMsg(n.DB.NotAvailable))
+		sendOrDone(ctx, output, errorMsg(n.DB.NotAvailable))
 		return
 	}
 
 	var ccfg CompactionConfig
 	readConfig(func() { ccfg = config.Compaction })
 	if !ccfg.Enabled {
-		send(errorMsg(n.Compaction.Disabled))
+		sendOrDone(ctx, output, errorMsg(n.Compaction.Disabled))
 		return
 	}
 
 	channel := normalizeIRC(e.Params[0], getCasemapping(network.Name))
 	resolvedUser, err := resolveIRCUser(network, c, e.Source.Name, e.Source)
 	if err != nil || resolvedUser == nil {
-		send(errorMsg(n.Compaction.NoActive))
+		sendOrDone(ctx, output, errorMsg(n.Compaction.NoActive))
 		return
 	}
 
 	session, err := sessionMgr.GetActiveSession(network.Name, channel, resolvedUser.ID)
 	if err != nil || session == nil {
-		send(errorMsg(n.Compaction.NoActive))
+		sendOrDone(ctx, output, errorMsg(n.Compaction.NoActive))
 		return
 	}
 
@@ -692,11 +628,11 @@ func historyCompact(network Network, c *girc.Client, e girc.Event, ctx context.C
 	var cfgOk bool
 	cfg, cfgOk = getSessionConfig(session)
 	if !cfgOk {
-		send(errorNotice(n.Sessions.CommandGone, map[string]string{"command": session.ChatCommand}))
+		sendOrDone(ctx, output, errorNotice(n.Sessions.CommandGone, map[string]string{"command": session.ChatCommand}))
 		return
 	}
 
-	send(n.Compaction.Started)
+	sendOrDone(ctx, output, n.Compaction.Started)
 
 	res, cErr := sessionMgr.CompactSession(ctx, CompactSessionInputs{
 		SessionID: session.ID,
@@ -709,35 +645,29 @@ func historyCompact(network Network, c *girc.Client, e girc.Event, ctx context.C
 	if cErr != nil {
 		switch cErr {
 		case ErrCompactionTooShort:
-			send(errorMsg(n.Compaction.TooShort))
+			sendOrDone(ctx, output, errorMsg(n.Compaction.TooShort))
 		case ErrCompactionInProgress:
-			send(errorMsg(n.Compaction.InProgress))
+			sendOrDone(ctx, output, errorMsg(n.Compaction.InProgress))
 		case ErrCompactionEmptyResult:
-			send(errorNotice(n.Compaction.Failed, map[string]string{"error": "summarizer returned empty content"}))
+			sendOrDone(ctx, output, errorNotice(n.Compaction.Failed, map[string]string{"error": "summarizer returned empty content"}))
 		default:
-			send(errorNotice(n.Compaction.Failed, map[string]string{"error": cErr.Error()}))
+			sendOrDone(ctx, output, errorNotice(n.Compaction.Failed, map[string]string{"error": cErr.Error()}))
 		}
 		return
 	}
 
-	send(expandNotice(n.Compaction.Completed, compactionNoticeVars(res, session.ID)))
+	sendOrDone(ctx, output, expandNotice(n.Compaction.Completed, compactionNoticeVars(res, session.ID)))
 }
 
 func historyClone(network Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, args ...string) {
 	n := getNotices()
-	send := func(msg string) {
-		select {
-		case output <- msg:
-		case <-ctx.Done():
-		}
-	}
 	if theDB == nil {
-		send(errorMsg(n.DB.NotAvailable))
+		sendOrDone(ctx, output, errorMsg(n.DB.NotAvailable))
 		return
 	}
 
 	if len(args) == 0 || args[0] == "" {
-		send(errorNotice(n.Clone.Usage, map[string]string{"trigger": network.Trigger}))
+		sendOrDone(ctx, output, errorNotice(n.Clone.Usage, map[string]string{"trigger": network.Trigger}))
 		return
 	}
 
@@ -746,7 +676,7 @@ func historyClone(network Network, c *girc.Client, e girc.Event, ctx context.Con
 
 	resolvedUser, err := resolveIRCUser(network, c, e.Source.Name, e.Source)
 	if err != nil || resolvedUser == nil {
-		send(errorNotice(n.Clone.Usage, map[string]string{"trigger": network.Trigger}))
+		sendOrDone(ctx, output, errorNotice(n.Clone.Usage, map[string]string{"trigger": network.Trigger}))
 		return
 	}
 	callingUserID := resolvedUser.ID
@@ -757,17 +687,17 @@ func historyClone(network Network, c *girc.Client, e girc.Event, ctx context.Con
 	if isAllDigits(args[0]) {
 		sessionID, parseErr := strconv.ParseInt(args[0], 10, 64)
 		if parseErr != nil {
-			send(errorMsg(n.Sessions.InvalidID))
+			sendOrDone(ctx, output, errorMsg(n.Sessions.InvalidID))
 			return
 		}
 		src, dbErr := getDBSessionByID(sessionID)
 		if dbErr != nil {
-			send(errorNotice(n.Clone.SessionNotFound, map[string]string{"id": args[0]}))
+			sendOrDone(ctx, output, errorNotice(n.Clone.SessionNotFound, map[string]string{"id": args[0]}))
 			return
 		}
 		normChannel := normalizeIRC(src.Channel, casemapping)
 		if src.Network != network.Name || normChannel != channel {
-			send(errorNotice(n.Clone.WrongChannel, map[string]string{"id": args[0]}))
+			sendOrDone(ctx, output, errorNotice(n.Clone.WrongChannel, map[string]string{"id": args[0]}))
 			return
 		}
 		sourceSession = src
@@ -775,12 +705,12 @@ func historyClone(network Network, c *girc.Client, e girc.Event, ctx context.Con
 		nick := args[0]
 		targetUser, rErr := resolveUserByNick(network.Name, nick, casemapping)
 		if rErr != nil || targetUser == nil {
-			send(errorNotice(n.Clone.TargetNotFound, map[string]string{"nick": nick}))
+			sendOrDone(ctx, output, errorNotice(n.Clone.TargetNotFound, map[string]string{"nick": nick}))
 			return
 		}
 		activeSession, aErr := sessionMgr.GetActiveSession(network.Name, channel, targetUser.ID)
 		if aErr != nil || activeSession == nil {
-			send(errorNotice(n.Clone.NoTargetSession, map[string]string{"nick": displayNick(targetUser)}))
+			sendOrDone(ctx, output, errorNotice(n.Clone.NoTargetSession, map[string]string{"nick": displayNick(targetUser)}))
 			return
 		}
 		sourceSession = activeSession
@@ -789,11 +719,11 @@ func historyClone(network Network, c *girc.Client, e girc.Event, ctx context.Con
 
 	incomplete, icErr := sessionHasIncompleteToolCalls(sourceSession.ID)
 	if icErr != nil {
-		send(errorNotice(n.DB.QuerySessions, map[string]string{"error": icErr.Error()}))
+		sendOrDone(ctx, output, errorNotice(n.DB.QuerySessions, map[string]string{"error": icErr.Error()}))
 		return
 	}
 	if incomplete {
-		send(errorNotice(n.Clone.IncompleteCalls, map[string]string{"id": fmt.Sprintf("%d", sourceSession.ID)}))
+		sendOrDone(ctx, output, errorNotice(n.Clone.IncompleteCalls, map[string]string{"id": fmt.Sprintf("%d", sourceSession.ID)}))
 		return
 	}
 
@@ -801,7 +731,7 @@ func historyClone(network Network, c *girc.Client, e girc.Event, ctx context.Con
 	var cfgOk bool
 	cfg, cfgOk = getSessionConfig(sourceSession)
 	if !cfgOk {
-		send(errorNotice(n.Clone.CommandGone, map[string]string{"command": sourceSession.ChatCommand}))
+		sendOrDone(ctx, output, errorNotice(n.Clone.CommandGone, map[string]string{"command": sourceSession.ChatCommand}))
 		return
 	}
 
@@ -811,7 +741,7 @@ func historyClone(network Network, c *girc.Client, e girc.Event, ctx context.Con
 
 	newSessionID, cloneErr := cloneDBSession(sourceSession.ID, network.Name, channel, callingUserID)
 	if cloneErr != nil {
-		send(errorNotice(n.DB.InternalError, map[string]string{"error": cloneErr.Error()}))
+		sendOrDone(ctx, output, errorNotice(n.DB.InternalError, map[string]string{"error": cloneErr.Error()}))
 		return
 	}
 
@@ -853,7 +783,7 @@ func historyClone(network Network, c *girc.Client, e girc.Event, ctx context.Con
 	newMsgs, _ := loadDBSessionMessages(newSessionID)
 	vars["count"] = fmt.Sprintf("%d", len(newMsgs))
 
-	send(expandNotice(n.Clone.Cloned, vars))
+	sendOrDone(ctx, output, expandNotice(n.Clone.Cloned, vars))
 }
 
 func isAllDigits(s string) bool {

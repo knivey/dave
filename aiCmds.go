@@ -396,6 +396,379 @@ func (so *streamOutput) Flush(send func(string)) {
 	}
 }
 
+func (cr *chatRunner) sendFinalText(content string) {
+	text := ExtractFinalText(content)
+	if text != "" && text != "..." {
+		rawText := text
+		if cr.cfg.RenderMarkdown {
+			text = markdowntoirc.MarkdownToIRC(text)
+		}
+		cr.sendWithPastebin(text, rawText)
+	}
+}
+
+func (cr *chatRunner) handleToolCallResponse(messages []ChatMessage, text string, toolCalls []ToolCall, reasoning string) []ChatMessage {
+	cr.logger.Info("assistant made tool calls", "count", len(toolCalls))
+	assistantMsg := ChatMessage{
+		Role:             RoleAssistant,
+		Content:          text,
+		ReasoningContent: reasoning,
+		ToolCalls:        toolCalls,
+	}
+	messages = append(messages, assistantMsg)
+	cr.addContext(assistantMsg)
+	if text != "" {
+		t := ExtractFinalText(text)
+		if cr.cfg.RenderMarkdown {
+			t = markdowntoirc.MarkdownToIRC(t)
+		}
+		cr.sendIRC(t)
+	}
+	if reasoning != "" {
+		cr.logger.Info("reasoning", "content", reasoning)
+	}
+	messages, _ = cr.executeToolCalls(messages, toolCalls)
+	return messages
+}
+
+func (cr *chatRunner) handleResponseIDSave(respID, text string, toolCalls []ToolCall, currentResponseID string) string {
+	if respID != "" && (text != "" || len(toolCalls) > 0) {
+		SetContextResponseID(cr.network.Name, cr.channel, cr.userID, respID)
+		return respID
+	}
+	if respID != "" {
+		if currentResponseID != "" {
+			SetContextResponseID(cr.network.Name, cr.channel, cr.userID, "")
+		}
+		cr.logger.Warn("response had empty output, clearing previous_response_id", "response_id", respID)
+	}
+	return currentResponseID
+}
+
+func (cr *chatRunner) shouldRetryWithoutResponseID(usePrevID bool, err error, messages []ChatMessage, iteration int, apiPath, currentResponseID string) ([]responses.ResponseInputItemUnionParam, string, bool) {
+	if !usePrevID || !isResponseIDError(err) || iteration != 1 {
+		return nil, currentResponseID, false
+	}
+	cr.logAPIIncident(err, messages, iteration, apiPath)
+	cr.logger.Warn("previous_response_id invalid, retrying without", "response_id", currentResponseID, "error", err)
+	SetContextResponseID(cr.network.Name, cr.channel, cr.userID, "")
+	return messagesToResponseInputItems(messages), "", true
+}
+
+type responsesStreamResult struct {
+	messages          []ChatMessage
+	done              bool
+	emptyRetries      int
+	currentResponseID string
+	usePrevID         bool
+	input             []responses.ResponseInputItemUnionParam
+}
+
+func (cr *chatRunner) runTurnResponsesStream(
+	ctx context.Context,
+	params responses.ResponseNewParams,
+	messages []ChatMessage,
+	iteration int,
+	emptyRetries int,
+	maxEmptyRetries int,
+	currentResponseID string,
+	usePrevID bool,
+) responsesStreamResult {
+	apiStart := time.Now()
+	resp, err := cr.callResponsesStream(ctx, params)
+	durationMs := int(time.Since(apiStart).Milliseconds())
+	if err != nil {
+		if newInput, newResponseID, retry := cr.shouldRetryWithoutResponseID(usePrevID, err, messages, iteration, "responses_stream", currentResponseID); retry {
+			return responsesStreamResult{
+				messages:          messages,
+				currentResponseID: newResponseID,
+				input:             newInput,
+				usePrevID:         false,
+				emptyRetries:      emptyRetries,
+			}
+		}
+		cr.sendError(err.Error())
+		cr.logger.Error(err.Error())
+		cr.logAPIIncident(err, messages, iteration, "responses_stream")
+		return responsesStreamResult{messages: messages, done: true, currentResponseID: currentResponseID, usePrevID: usePrevID, emptyRetries: emptyRetries}
+	}
+
+	if resp == nil {
+		return responsesStreamResult{messages: messages, done: true, currentResponseID: currentResponseID, usePrevID: usePrevID, emptyRetries: emptyRetries}
+	}
+	text, reasoning, toolCalls := parseSDKResponseOutput(*resp)
+	currentResponseID = cr.handleResponseIDSave(resp.ID, text, toolCalls, currentResponseID)
+
+	assistantMsg := ChatMessage{
+		Role:             RoleAssistant,
+		Content:          text,
+		ReasoningContent: reasoning,
+	}
+
+	if len(toolCalls) == 0 {
+		if retry, newText := cr.checkEmptyRetry(text, reasoning, emptyRetries, maxEmptyRetries); retry {
+			return responsesStreamResult{
+				messages:          messages,
+				emptyRetries:      emptyRetries + 1,
+				currentResponseID: currentResponseID,
+				usePrevID:         usePrevID,
+			}
+		} else if newText != text {
+			text = newText
+			assistantMsg.Content = text
+		}
+		messages = append(messages, assistantMsg)
+		cr.addContext(assistantMsg)
+		cr.logger.Info(FormatOutput(text))
+		cr.storeUsage(sdkResponseUsageToUsage(resp.Usage, string(resp.Status)), "responses_stream", durationMs)
+		if reasoning != "" {
+			cr.logger.Info("reasoning", "content", reasoning)
+		}
+		return responsesStreamResult{messages: messages, done: true, currentResponseID: currentResponseID, usePrevID: usePrevID, emptyRetries: emptyRetries}
+	}
+
+	emptyRetries = 0
+	assistantMsg.ToolCalls = toolCalls
+	messages = append(messages, assistantMsg)
+	cr.addContext(assistantMsg)
+	cr.logger.Info("assistant made tool calls", "count", len(toolCalls))
+	cr.storeUsage(sdkResponseUsageToUsage(resp.Usage, string(resp.Status)), "responses_stream", durationMs)
+
+	numToolCalls := len(toolCalls)
+	messages, _ = cr.executeToolCalls(messages, toolCalls)
+
+	var newInput []responses.ResponseInputItemUnionParam
+	if cr.cfg.PreviousResponseID && currentResponseID != "" {
+		toolResultMsgs := messages[len(messages)-numToolCalls:]
+		newInput = toolResultMsgsToInputItems(toolResultMsgs)
+	} else {
+		newInput = messagesToResponseInputItems(messages)
+	}
+	return responsesStreamResult{
+		messages:          messages,
+		emptyRetries:      emptyRetries,
+		currentResponseID: currentResponseID,
+		usePrevID:         usePrevID,
+		input:             newInput,
+	}
+}
+
+func (cr *chatRunner) runTurnStream(ctx context.Context, params openai.ChatCompletionNewParams, messages []ChatMessage, iterations, emptyRetries, maxEmptyRetries int) ([]ChatMessage, bool, int) {
+	stream := cr.openaiClient.Chat.Completions.NewStreaming(ctx, params)
+	apiStart := time.Now()
+
+	fullContent := ""
+	reasoningBuffer := ""
+	var sOut streamOutput
+	if cr.cfg.RenderMarkdown {
+		sOut.renderer = markdowntoirc.NewStreamingRenderer()
+	}
+
+	var accumulatedToolCalls []ToolCall
+	var assistantRole string
+	var streamUsage *Usage
+	var streamTimings *Timings
+	var streamFinishReason string
+	streamDone := false
+	streamModel := cr.cfg.Model
+
+	type recvResult struct {
+		chunk openai.ChatCompletionChunk
+		done  bool
+		err   error
+	}
+
+	idleTimer := time.NewTimer(cr.cfg.StreamTimeout)
+	defer idleTimer.Stop()
+
+StreamLoop:
+	for {
+		if cr.ctx.Err() != nil {
+			cr.logger.Info("Closing stream")
+			stream.Close()
+			return messages, true, emptyRetries
+		}
+
+		ch := make(chan recvResult, 1)
+		go func() {
+			if stream.Next() {
+				ch <- recvResult{chunk: stream.Current()}
+			} else {
+				err := stream.Err()
+				if err == nil {
+					ch <- recvResult{done: true}
+				} else {
+					ch <- recvResult{err: err, done: true}
+				}
+			}
+		}()
+
+		select {
+		case res := <-ch:
+			if res.done {
+				if res.err != nil {
+					stream.Close()
+					cr.sendError(res.err.Error())
+					cr.logger.Error(res.err.Error())
+					cr.logAPIIncident(res.err, messages, iterations, "chat_completions_stream")
+					return messages, true, emptyRetries
+				}
+				cr.logger.Info("Stream completed")
+				stream.Close()
+				break StreamLoop
+			}
+			idleTimer.Reset(cr.cfg.StreamTimeout)
+
+			chunk := res.chunk
+			rawBytes := []byte(chunk.RawJSON())
+			if apiLogger != nil {
+				apiLogger.LogStreamChunk(cr.transport.sessionID, rawBytes)
+			}
+
+			chunkReasoning := ""
+			if len(chunk.Choices) > 0 {
+				if f, ok := chunk.Choices[0].Delta.JSON.ExtraFields["reasoning_content"]; ok && f.Valid() {
+					var rc string
+					json.Unmarshal([]byte(f.Raw()), &rc)
+					chunkReasoning = rc
+				}
+			}
+			if chunkReasoning == "" {
+				chunkReasoning = extractStreamReasoning(rawBytes)
+			}
+			if chunkReasoning == "" {
+				chunkReasoning = extractReasoningFromField(rawBytes)
+			}
+			reasoningBuffer += chunkReasoning
+
+			if chunk.Usage.CompletionTokens > 0 || chunk.Usage.PromptTokens > 0 {
+				streamUsage = sdkChatUsageToUsage(chunk.Usage)
+			}
+			if t := extractTimings(rawBytes); t != nil {
+				streamTimings = t
+			}
+			if len(chunk.Choices) == 0 {
+				continue
+			}
+			choice := chunk.Choices[0]
+			delta := choice.Delta
+
+			if delta.Role != "" {
+				assistantRole = delta.Role
+			}
+
+			for _, tc := range delta.ToolCalls {
+				idx := int(tc.Index)
+				for len(accumulatedToolCalls) <= idx {
+					accumulatedToolCalls = append(accumulatedToolCalls, ToolCall{})
+				}
+				if tc.ID != "" {
+					accumulatedToolCalls[idx].ID = tc.ID
+				}
+				if tc.Type != "" {
+					accumulatedToolCalls[idx].Type = tc.Type
+				}
+				accumulatedToolCalls[idx].Function.Name += tc.Function.Name
+				accumulatedToolCalls[idx].Function.Arguments += tc.Function.Arguments
+			}
+
+			textDelta := delta.Content
+			fullContent += textDelta
+			sOut.HandleDelta(textDelta, cr.sendIRC)
+
+			if choice.FinishReason == "tool_calls" {
+				streamFinishReason = "tool_calls"
+				cr.logger.Info("stream finished with tool calls")
+				stream.Close()
+				break StreamLoop
+			}
+			if choice.FinishReason == "stop" || choice.FinishReason == "length" {
+				streamFinishReason = string(choice.FinishReason)
+				streamDone = true
+				stream.Close()
+				break StreamLoop
+			}
+
+		case <-idleTimer.C:
+			stream.Close()
+			timeoutErr := fmt.Errorf("stream timed out (no data received): timeout=%s", cr.cfg.StreamTimeout)
+			cr.sendError(timeoutErr.Error())
+			cr.logger.Error("stream idle timeout exceeded", "timeout", cr.cfg.StreamTimeout)
+			cr.logAPIIncident(timeoutErr, messages, iterations, "chat_completions_stream")
+			return messages, true, emptyRetries
+		}
+	}
+
+	logStreamCompletion(cr.transport.sessionID, streamModel, fullContent, reasoningBuffer, accumulatedToolCalls, streamUsage, assistantRole)
+
+	if streamUsage != nil {
+		streamUsage.FinishReason = streamFinishReason
+	}
+	streamDurationMs := int(time.Since(apiStart).Milliseconds())
+
+	flushStreamedOutput := func() {
+		cr.logger.Info(FormatOutput(fullContent))
+		content := fullContent
+		if content == "" && reasoningBuffer == "" {
+			content = "..."
+		}
+		cr.addContext(ChatMessage{
+			Role:             RoleAssistant,
+			Content:          content,
+			ReasoningContent: reasoningBuffer,
+		})
+		sOut.Flush(cr.sendIRC)
+		cr.storeUsage(streamUsage, "chat_completions_stream", streamDurationMs)
+		logTimings(cr.logger, streamTimings)
+		if reasoningBuffer != "" {
+			cr.logger.Info("reasoning", "content", reasoningBuffer)
+		}
+	}
+
+	if streamDone || len(accumulatedToolCalls) == 0 {
+		if len(accumulatedToolCalls) == 0 {
+			if retry, newContent := cr.checkEmptyRetry(fullContent, reasoningBuffer, emptyRetries, maxEmptyRetries); retry {
+				emptyRetries++
+				return messages, false, emptyRetries
+			} else if newContent != fullContent {
+				fullContent = newContent
+			}
+		}
+		flushStreamedOutput()
+		return messages, true, emptyRetries
+	}
+
+	emptyRetries = 0
+	cr.logger.Info("stream made tool calls", "count", len(accumulatedToolCalls))
+	cr.storeUsage(streamUsage, "chat_completions_stream", streamDurationMs)
+	logTimings(cr.logger, streamTimings)
+
+	if assistantRole == "" {
+		assistantRole = RoleAssistant
+	}
+
+	assistantMsg := ChatMessage{
+		Role:             assistantRole,
+		Content:          fullContent,
+		ReasoningContent: reasoningBuffer,
+		ToolCalls:        accumulatedToolCalls,
+	}
+	messages = append(messages, assistantMsg)
+
+	if sOut.buffer != "" {
+		text := ExtractFinalText(sOut.buffer)
+		if cr.cfg.RenderMarkdown {
+			text = markdowntoirc.MarkdownToIRC(text)
+		}
+		cr.sendIRC(text)
+	}
+
+	cr.addContext(assistantMsg)
+
+	messages, _ = cr.executeToolCalls(messages, accumulatedToolCalls)
+	return messages, false, emptyRetries
+}
+
 func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 	if cr.cfg.ResponsesAPI {
 		return cr.runTurnResponses(messages)
@@ -421,219 +794,12 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 		params := buildChatCompletionParams(cr.cfg, messages, mcpTools, cr.renderAPIUser())
 
 		if cr.cfg.Streaming {
-			stream := cr.openaiClient.Chat.Completions.NewStreaming(ctx, params)
-			apiStart := time.Now()
-
-			fullContent := ""
-			reasoningBuffer := ""
-			var sOut streamOutput
-			if cr.cfg.RenderMarkdown {
-				sOut.renderer = markdowntoirc.NewStreamingRenderer()
+			var done bool
+			messages, done, emptyRetries = cr.runTurnStream(ctx, params, messages, iterations, emptyRetries, maxEmptyRetries)
+			if !done {
+				continue
 			}
-
-			var accumulatedToolCalls []ToolCall
-			var assistantRole string
-			var streamUsage *Usage
-			var streamTimings *Timings
-			var streamFinishReason string
-			streamDone := false
-			streamModel := cr.cfg.Model
-
-			type recvResult struct {
-				chunk openai.ChatCompletionChunk
-				done  bool
-				err   error
-			}
-
-			idleTimer := time.NewTimer(cr.cfg.StreamTimeout)
-			defer idleTimer.Stop()
-
-		StreamLoop:
-			for {
-				if cr.ctx.Err() != nil {
-					cr.logger.Info("Closing stream")
-					stream.Close()
-					return messages, true
-				}
-
-				ch := make(chan recvResult, 1)
-				go func() {
-					if stream.Next() {
-						ch <- recvResult{chunk: stream.Current()}
-					} else {
-						err := stream.Err()
-						if err == nil {
-							ch <- recvResult{done: true}
-						} else {
-							ch <- recvResult{err: err, done: true}
-						}
-					}
-				}()
-
-				select {
-				case res := <-ch:
-					if res.done {
-						if res.err != nil {
-							stream.Close()
-							cr.sendError(res.err.Error())
-							cr.logger.Error(res.err.Error())
-							cr.logAPIIncident(res.err, messages, iterations, "chat_completions_stream")
-							return messages, true
-						}
-						cr.logger.Info("Stream completed")
-						stream.Close()
-						break StreamLoop
-					}
-					idleTimer.Reset(cr.cfg.StreamTimeout)
-
-					chunk := res.chunk
-					rawBytes := []byte(chunk.RawJSON())
-					if apiLogger != nil {
-						apiLogger.LogStreamChunk(cr.transport.sessionID, rawBytes)
-					}
-
-					chunkReasoning := ""
-					if len(chunk.Choices) > 0 {
-						if f, ok := chunk.Choices[0].Delta.JSON.ExtraFields["reasoning_content"]; ok && f.Valid() {
-							var rc string
-							json.Unmarshal([]byte(f.Raw()), &rc)
-							chunkReasoning = rc
-						}
-					}
-					if chunkReasoning == "" {
-						chunkReasoning = extractStreamReasoning(rawBytes)
-					}
-					if chunkReasoning == "" {
-						chunkReasoning = extractReasoningFromField(rawBytes)
-					}
-					reasoningBuffer += chunkReasoning
-
-					if chunk.Usage.CompletionTokens > 0 || chunk.Usage.PromptTokens > 0 {
-						streamUsage = sdkChatUsageToUsage(chunk.Usage)
-					}
-					if t := extractTimings(rawBytes); t != nil {
-						streamTimings = t
-					}
-					if len(chunk.Choices) == 0 {
-						continue
-					}
-					choice := chunk.Choices[0]
-					delta := choice.Delta
-
-					if delta.Role != "" {
-						assistantRole = delta.Role
-					}
-
-					for _, tc := range delta.ToolCalls {
-						idx := int(tc.Index)
-						for len(accumulatedToolCalls) <= idx {
-							accumulatedToolCalls = append(accumulatedToolCalls, ToolCall{})
-						}
-						if tc.ID != "" {
-							accumulatedToolCalls[idx].ID = tc.ID
-						}
-						if tc.Type != "" {
-							accumulatedToolCalls[idx].Type = tc.Type
-						}
-						accumulatedToolCalls[idx].Function.Name += tc.Function.Name
-						accumulatedToolCalls[idx].Function.Arguments += tc.Function.Arguments
-					}
-
-					textDelta := delta.Content
-					fullContent += textDelta
-					sOut.HandleDelta(textDelta, cr.sendIRC)
-
-					if choice.FinishReason == "tool_calls" {
-						streamFinishReason = "tool_calls"
-						cr.logger.Info("stream finished with tool calls")
-						stream.Close()
-						break StreamLoop
-					}
-					if choice.FinishReason == "stop" || choice.FinishReason == "length" {
-						streamFinishReason = string(choice.FinishReason)
-						streamDone = true
-						stream.Close()
-						break StreamLoop
-					}
-
-				case <-idleTimer.C:
-					stream.Close()
-					timeoutErr := fmt.Errorf("stream timed out (no data received): timeout=%s", cr.cfg.StreamTimeout)
-					cr.sendError(timeoutErr.Error())
-					cr.logger.Error("stream idle timeout exceeded", "timeout", cr.cfg.StreamTimeout)
-					cr.logAPIIncident(timeoutErr, messages, iterations, "chat_completions_stream")
-					return messages, true
-				}
-			}
-
-			logStreamCompletion(cr.transport.sessionID, streamModel, fullContent, reasoningBuffer, accumulatedToolCalls, streamUsage, assistantRole)
-
-			if streamUsage != nil {
-				streamUsage.FinishReason = streamFinishReason
-			}
-			streamDurationMs := int(time.Since(apiStart).Milliseconds())
-
-			flushStreamedOutput := func() {
-				cr.logger.Info(FormatOutput(fullContent))
-				content := fullContent
-				if content == "" && reasoningBuffer == "" {
-					content = "..."
-				}
-				cr.addContext(ChatMessage{
-					Role:             RoleAssistant,
-					Content:          content,
-					ReasoningContent: reasoningBuffer,
-				})
-				sOut.Flush(cr.sendIRC)
-				cr.storeUsage(streamUsage, "chat_completions_stream", streamDurationMs)
-				logTimings(cr.logger, streamTimings)
-				if reasoningBuffer != "" {
-					cr.logger.Info("reasoning", "content", reasoningBuffer)
-				}
-			}
-
-			if streamDone || len(accumulatedToolCalls) == 0 {
-				if len(accumulatedToolCalls) == 0 {
-					if retry, newContent := cr.checkEmptyRetry(fullContent, reasoningBuffer, emptyRetries, maxEmptyRetries); retry {
-						emptyRetries++
-						continue
-					} else if newContent != fullContent {
-						fullContent = newContent
-					}
-				}
-				flushStreamedOutput()
-				return messages, true
-			}
-
-			emptyRetries = 0
-			cr.logger.Info("stream made tool calls", "count", len(accumulatedToolCalls))
-			cr.storeUsage(streamUsage, "chat_completions_stream", streamDurationMs)
-			logTimings(cr.logger, streamTimings)
-
-			if assistantRole == "" {
-				assistantRole = RoleAssistant
-			}
-
-			assistantMsg := ChatMessage{
-				Role:             assistantRole,
-				Content:          fullContent,
-				ReasoningContent: reasoningBuffer,
-				ToolCalls:        accumulatedToolCalls,
-			}
-			messages = append(messages, assistantMsg)
-
-			if sOut.buffer != "" {
-				text := ExtractFinalText(sOut.buffer)
-				if cr.cfg.RenderMarkdown {
-					text = markdowntoirc.MarkdownToIRC(text)
-				}
-				cr.sendIRC(text)
-			}
-
-			cr.addContext(assistantMsg)
-
-			messages, _ = cr.executeToolCalls(messages, accumulatedToolCalls)
-			continue
+			return messages, true
 		}
 
 		cr.transport.setCaptureBody(true)
@@ -674,52 +840,20 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 			})
 			out := FormatOutput(content)
 			cr.logger.Info(out)
-			text := ExtractFinalText(content)
-
 			cr.storeUsage(usage, "chat_completions", durationMs)
 			logTimings(cr.logger, nonStreamTimings)
 			if reasoning != "" {
 				cr.logger.Info("reasoning", "content", reasoning)
 			}
 
-			if text != "" && text != "..." {
-				rawText := text
-				if cr.cfg.RenderMarkdown {
-					text = markdowntoirc.MarkdownToIRC(text)
-				}
-				if cr.sendWithPastebin(text, rawText) {
-					return messages, true
-				}
-			}
+			cr.sendFinalText(content)
 			return messages, true
 		}
 
 		emptyRetries = 0
-		cr.logger.Info("assistant made tool calls", "count", len(toolCalls))
 		cr.storeUsage(usage, "chat_completions", durationMs)
 		logTimings(cr.logger, nonStreamTimings)
-
-		assistantMsg := ChatMessage{
-			Role:             RoleAssistant,
-			Content:          content,
-			ReasoningContent: reasoning,
-			ToolCalls:        toolCalls,
-		}
-		messages = append(messages, assistantMsg)
-
-		cr.addContext(assistantMsg)
-		if content != "" {
-			text := ExtractFinalText(content)
-			if cr.cfg.RenderMarkdown {
-				text = markdowntoirc.MarkdownToIRC(text)
-			}
-			cr.sendIRC(text)
-		}
-		if reasoning != "" {
-			cr.logger.Info("reasoning", "content", reasoning)
-		}
-
-		messages, _ = cr.executeToolCalls(messages, toolCalls)
+		messages = cr.handleToolCallResponse(messages, content, toolCalls, reasoning)
 	}
 }
 
@@ -1019,86 +1153,16 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 		params := buildResponseParams(cr.cfg, input, responseTools, currentResponseID, cr.renderAPIUser())
 
 		if cr.cfg.Streaming {
-			apiStart := time.Now()
-			resp, err := cr.callResponsesStream(ctx, params)
-			durationMs := int(time.Since(apiStart).Milliseconds())
-			if err != nil {
-				if usePrevID && isResponseIDError(err) && iteration == 1 {
-					cr.logAPIIncident(err, messages, iteration, "responses_stream")
-					cr.logger.Warn("previous_response_id invalid, retrying without", "response_id", currentResponseID, "error", err)
-					currentResponseID = ""
-					SetContextResponseID(cr.network.Name, cr.channel, cr.userID, "")
-					usePrevID = false
-					input = messagesToResponseInputItems(messages)
-					continue
-				}
-				cr.sendError(err.Error())
-				cr.logger.Error(err.Error())
-				cr.logAPIIncident(err, messages, iteration, "responses_stream")
-				return messages, true
+			r := cr.runTurnResponsesStream(ctx, params, messages, iteration, emptyRetries, maxEmptyRetries, currentResponseID, usePrevID)
+			messages = r.messages
+			currentResponseID = r.currentResponseID
+			input = r.input
+			emptyRetries = r.emptyRetries
+			usePrevID = r.usePrevID
+			if !r.done {
+				continue
 			}
-
-			if resp == nil {
-				return messages, true
-			}
-			text, reasoning, toolCalls := parseSDKResponseOutput(*resp)
-			// Only save response ID when the response has actual output (text or tool calls).
-			// Empty-output responses (output:[]) cause "Each message must have at least one
-			// content element" errors when chained via previous_response_id, because the API
-			// reconstructs an assistant message with no content server-side.
-			// See isResponseIDError() comment in responses.go for the full two-layer design.
-			if resp.ID != "" && (text != "" || len(toolCalls) > 0) {
-				currentResponseID = resp.ID
-				SetContextResponseID(cr.network.Name, cr.channel, cr.userID, resp.ID)
-			} else if resp.ID != "" {
-				if currentResponseID != "" {
-					currentResponseID = ""
-					SetContextResponseID(cr.network.Name, cr.channel, cr.userID, "")
-				}
-				cr.logger.Warn("response had empty output, clearing previous_response_id", "response_id", resp.ID)
-			}
-
-			assistantMsg := ChatMessage{
-				Role:             RoleAssistant,
-				Content:          text,
-				ReasoningContent: reasoning,
-			}
-
-			if len(toolCalls) == 0 {
-				if retry, newText := cr.checkEmptyRetry(text, reasoning, emptyRetries, maxEmptyRetries); retry {
-					emptyRetries++
-					continue
-				} else if newText != text {
-					text = newText
-					assistantMsg.Content = text
-				}
-				messages = append(messages, assistantMsg)
-				cr.addContext(assistantMsg)
-				cr.logger.Info(FormatOutput(text))
-				cr.storeUsage(sdkResponseUsageToUsage(resp.Usage, string(resp.Status)), "responses_stream", durationMs)
-				if reasoning != "" {
-					cr.logger.Info("reasoning", "content", reasoning)
-				}
-				return messages, true
-			}
-
-			emptyRetries = 0
-			assistantMsg.ToolCalls = toolCalls
-			messages = append(messages, assistantMsg)
-			cr.addContext(assistantMsg)
-			cr.logger.Info("assistant made tool calls", "count", len(toolCalls))
-			cr.storeUsage(sdkResponseUsageToUsage(resp.Usage, string(resp.Status)), "responses_stream", durationMs)
-
-			numToolCalls := len(toolCalls)
-			messages, _ = cr.executeToolCalls(messages, toolCalls)
-
-			if cr.cfg.PreviousResponseID && currentResponseID != "" {
-				toolResultMsgs := messages[len(messages)-numToolCalls:]
-				input = toolResultMsgsToInputItems(toolResultMsgs)
-			} else {
-				input = messagesToResponseInputItems(messages)
-			}
-			continue
+			return messages, true
 		}
 
 		cr.transport.setCaptureBody(true)
@@ -1106,13 +1170,9 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 		resp, err := cr.openaiClient.Responses.New(ctx, params)
 		cr.transport.setCaptureBody(false)
 		if err != nil {
-			if usePrevID && isResponseIDError(err) && iteration == 1 {
-				cr.logAPIIncident(err, messages, iteration, "responses")
-				cr.logger.Warn("previous_response_id invalid, retrying without", "response_id", currentResponseID, "error", err)
-				currentResponseID = ""
-				SetContextResponseID(cr.network.Name, cr.channel, cr.userID, "")
+			if newInput, newResponseID, retry := cr.shouldRetryWithoutResponseID(usePrevID, err, messages, iteration, "responses", currentResponseID); retry {
+				input, currentResponseID = newInput, newResponseID
 				usePrevID = false
-				input = messagesToResponseInputItems(messages)
 				continue
 			}
 			cr.sendError(err.Error())
@@ -1123,19 +1183,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 		durationMs := int(time.Since(apiStart).Milliseconds())
 
 		text, reasoning, toolCalls := parseSDKResponseOutput(*resp)
-		// Only save response ID when the response has actual output (text or tool calls).
-		// See the streaming path above and isResponseIDError() comment in responses.go
-		// for the full two-layer design.
-		if resp.ID != "" && (text != "" || len(toolCalls) > 0) {
-			currentResponseID = resp.ID
-			SetContextResponseID(cr.network.Name, cr.channel, cr.userID, resp.ID)
-		} else if resp.ID != "" {
-			if currentResponseID != "" {
-				currentResponseID = ""
-				SetContextResponseID(cr.network.Name, cr.channel, cr.userID, "")
-			}
-			cr.logger.Warn("response had empty output, clearing previous_response_id", "response_id", resp.ID)
-		}
+		currentResponseID = cr.handleResponseIDSave(resp.ID, text, toolCalls, currentResponseID)
 
 		if len(toolCalls) == 0 {
 			content := text
@@ -1153,49 +1201,20 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 			cr.addContext(assistantMsg)
 			out := FormatOutput(content)
 			cr.logger.Info(out)
-			textFinal := ExtractFinalText(content)
 
 			cr.storeUsage(sdkResponseUsageToUsage(resp.Usage, string(resp.Status)), "responses", durationMs)
 			if reasoning != "" {
 				cr.logger.Info("reasoning", "content", reasoning)
 			}
 
-			if textFinal != "" && textFinal != "..." {
-				rawText := textFinal
-				if cr.cfg.RenderMarkdown {
-					textFinal = markdowntoirc.MarkdownToIRC(textFinal)
-				}
-				if cr.sendWithPastebin(textFinal, rawText) {
-					return messages, true
-				}
-			}
+			cr.sendFinalText(content)
 			return messages, true
 		}
 
 		emptyRetries = 0
-		cr.logger.Info("assistant made tool calls", "count", len(toolCalls))
 		cr.storeUsage(sdkResponseUsageToUsage(resp.Usage, string(resp.Status)), "responses", durationMs)
-		assistantMsg := ChatMessage{
-			Role:             RoleAssistant,
-			Content:          text,
-			ReasoningContent: reasoning,
-			ToolCalls:        toolCalls,
-		}
-		messages = append(messages, assistantMsg)
-		cr.addContext(assistantMsg)
-		if text != "" {
-			t := ExtractFinalText(text)
-			if cr.cfg.RenderMarkdown {
-				t = markdowntoirc.MarkdownToIRC(t)
-			}
-			cr.sendIRC(t)
-		}
-		if reasoning != "" {
-			cr.logger.Info("reasoning", "content", reasoning)
-		}
-
 		numToolCalls := len(toolCalls)
-		messages, _ = cr.executeToolCalls(messages, toolCalls)
+		messages = cr.handleToolCallResponse(messages, text, toolCalls, reasoning)
 
 		if cr.cfg.PreviousResponseID && currentResponseID != "" {
 			toolResultMsgs := messages[len(messages)-numToolCalls:]

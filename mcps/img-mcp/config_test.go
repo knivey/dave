@@ -339,6 +339,56 @@ enhancement = "safe"
 	})
 }
 
+func TestReloadConfigFromFile_NetworkPolicies(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteWorkflow(t, dir)
+
+	enhancementToml := `
+[enhancement.default]
+baseurl = "https://api.example.com/v1/"
+key = "test-key"
+model = "test-model"
+systemprompt = "enhance this"
+`
+	path := writeTestConfigFile(t, dir, baseTestConfigToml("http://localhost:8188")+enhancementToml)
+	original, err := loadConfig(path)
+	require.NoError(t, err)
+	assert.Empty(t, original.NetworkPolicies)
+
+	updated := baseTestConfigToml("http://localhost:8188") + enhancementToml + `
+[network_policy.libera]
+enhancement = "default"
+force = true
+`
+	writeTestConfigFile(t, dir, updated)
+
+	newCfg, warnings, err := reloadConfigFromFile(path, original)
+	require.NoError(t, err)
+	assert.Empty(t, warnings)
+	require.Contains(t, newCfg.NetworkPolicies, "libera")
+	assert.Equal(t, "default", newCfg.NetworkPolicies["libera"].Enhancement)
+	assert.True(t, newCfg.NetworkPolicies["libera"].Force)
+}
+
+func TestReloadConfigFromFile_NetworkPolicyValidationFails(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteWorkflow(t, dir)
+	path := writeTestConfigFile(t, dir, baseTestConfigToml("http://localhost:8188"))
+
+	original, err := loadConfig(path)
+	require.NoError(t, err)
+
+	badConfig := baseTestConfigToml("http://localhost:8188") + `
+[network_policy.libera]
+enhancement = "nonexistent"
+`
+	writeTestConfigFile(t, dir, badConfig)
+
+	_, _, err = reloadConfigFromFile(path, original)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "network_policy.libera")
+}
+
 func TestCompareNonReloadable(t *testing.T) {
 	base := Config{
 		Server:   ServerConfig{Name: "img-mcp", Version: "0.1.0", Addr: ":8080"},

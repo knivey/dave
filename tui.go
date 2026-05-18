@@ -6,7 +6,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -500,49 +499,6 @@ func handleTUICommand(text string) {
 }
 
 func requestShutdown() {
-	if !atomic.CompareAndSwapInt32(&shutdownOnce, 0, 1) {
-		return
-	}
-	go func() {
-		logger.Info("Shutdown requested via TUI")
-
-		if logFlushStop != nil {
-			close(logFlushStop)
-			<-logFlushDone
-		}
-
-		if statusBarStop != nil {
-			close(statusBarStop)
-			<-statusBarDone
-		}
-
-		if apiLogger != nil {
-			apiLogger.CloseAll()
-		}
-		if queueMgr != nil {
-			queueMgr.Stop()
-		}
-		stopJobManager()
-		stopToolJobManager()
-		closeMCPClients()
-
-		for _, bot := range snapshotBots() {
-			bot.Quit()
-		}
-		done := make(chan struct{})
-		go func() { wg.Wait(); close(done) }()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-		}
-		time.Sleep(1 * time.Second) // give IRC connections time to flush the QUIT message
-
-		closeDB(theDB)
-		closeLogFile()
-		if tuiApp != nil {
-			tuiApp.QueueUpdateDraw(func() {
-				tuiApp.Stop()
-			})
-		}
-	}()
+	logger.Info("Shutdown requested via TUI")
+	go shutdown()
 }

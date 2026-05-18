@@ -504,50 +504,11 @@ func main() {
 	signal.Notify(sigs, syscall.SIGINT)
 	go func() {
 		signal := <-sigs
-		if !atomic.CompareAndSwapInt32(&shutdownOnce, 0, 1) {
-			return
-		}
 		logger.Info("Caught signal", "signal", signal.String())
-
-		if logFlushStop != nil {
-			close(logFlushStop)
-			<-logFlushDone
-		}
-
-		if ignoreWatcher != nil {
-			ignoreWatcher.Close()
-		}
-		if apiLogger != nil {
-			apiLogger.CloseAll()
-		}
-		stopLogWriter()
-		if queueMgr != nil {
-			queueMgr.Stop()
-		}
-		stopJobManager()
-		stopToolJobManager()
-		closeMCPClients()
-
-		for _, bot := range snapshotBots() {
-			bot.Quit()
-		}
-		done := make(chan struct{})
-		go func() { wg.Wait(); close(done) }()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-		}
-		time.Sleep(1 * time.Second) // give IRC connections time to flush the QUIT message
-
-		closeDB(theDB)
-		closeLogFile()
-		tuiApp.QueueUpdateDraw(func() {
-			tuiApp.Stop()
-		})
+		shutdown()
 	}()
 
 	if noTUI {
-		// Give MCP clients a moment to log connection attempts, then exit
 		time.Sleep(500 * time.Millisecond)
 		closeMCPClients()
 		logger.Info("Nothing left to do bye :)")
@@ -561,6 +522,50 @@ func main() {
 	restoreStdoutStderr()
 
 	logger.Info("Nothing left to do bye :)")
+}
+
+func shutdown() {
+	if !atomic.CompareAndSwapInt32(&shutdownOnce, 0, 1) {
+		return
+	}
+
+	if logFlushStop != nil {
+		close(logFlushStop)
+		<-logFlushDone
+	}
+
+	if ignoreWatcher != nil {
+		ignoreWatcher.Close()
+	}
+	if apiLogger != nil {
+		apiLogger.CloseAll()
+	}
+	stopLogWriter()
+	if queueMgr != nil {
+		queueMgr.Stop()
+	}
+	stopJobManager()
+	stopToolJobManager()
+	closeMCPClients()
+
+	for _, bot := range snapshotBots() {
+		bot.Quit()
+	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+	}
+	time.Sleep(1 * time.Second)
+
+	closeDB(theDB)
+	closeLogFile()
+	if tuiApp != nil {
+		tuiApp.QueueUpdateDraw(func() {
+			tuiApp.Stop()
+		})
+	}
 }
 
 const maxLineLen = 350

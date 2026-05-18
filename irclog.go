@@ -53,6 +53,8 @@ type LogWriter struct {
 	cfg     LoggingConfig
 	entries chan LogEntry
 	done    chan struct{}
+	stopped chan struct{}
+	closing atomic.Bool
 	dropped atomic.Int64
 	mu      sync.Mutex
 	db      *gorm.DB
@@ -73,6 +75,7 @@ func initLogWriter(cfg LoggingConfig) error {
 		cfg:     cfg,
 		entries: make(chan LogEntry, cfg.BufferSize),
 		done:    make(chan struct{}),
+		stopped: make(chan struct{}),
 	}
 	lw.log = logxi.New("irclog")
 	lw.log.SetLevel(logxi.LevelAll)
@@ -86,12 +89,19 @@ func stopLogWriter() {
 	if logWriter == nil {
 		return
 	}
+	logWriter.log.Info("irclog: stopping writer")
+	logWriter.closing.Store(true)
 	close(logWriter.done)
+	<-logWriter.stopped
+	logWriter.log.Info("irclog: writer stopped")
 	logWriter = nil
 }
 
 func enqueue(entry LogEntry) {
 	if logWriter == nil {
+		return
+	}
+	if logWriter.closing.Load() {
 		return
 	}
 	select {
@@ -315,6 +325,7 @@ func (lw *LogWriter) writeBatch(batch []LogEntry) {
 
 func (lw *LogWriter) run() {
 	defer wg.Done()
+	defer close(lw.stopped)
 
 	flushTicker := time.NewTicker(lw.cfg.FlushInterval)
 	defer flushTicker.Stop()
@@ -352,16 +363,13 @@ func (lw *LogWriter) run() {
 				lw.log.Warn("irc log entries dropped", "count", d)
 			}
 		case <-lw.done:
-			for {
-				select {
-				case entry := <-lw.entries:
-					batch = append(batch, entry)
-				default:
-					flush()
-					lw.closeDB()
-					return
-				}
+			close(lw.entries)
+			for entry := range lw.entries {
+				batch = append(batch, entry)
 			}
+			flush()
+			lw.closeDB()
+			return
 		}
 	}
 }
@@ -370,10 +378,12 @@ func (lw *LogWriter) closeDB() {
 	lw.mu.Lock()
 	defer lw.mu.Unlock()
 	if lw.db != nil {
+		lw.log.Info("irclog: closing database", "current", lw.current)
 		if sqlDB, err := lw.db.DB(); err == nil {
 			sqlDB.Close()
 		}
 		lw.db = nil
 		lw.current = ""
+		lw.log.Info("irclog: database closed")
 	}
 }

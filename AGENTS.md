@@ -8,6 +8,8 @@ Go IRC chatbot for OpenAI-compatible APIs, Stable Diffusion, ComfyUI image gen. 
 
 **NEVER** use `git add -f` to force-add files that are in `.gitignore`. The `.gitignore` exists for a reason (secret keys, environment configs, build artifacts). If `git add` refuses to track a file, respect that — do not override it.
 
+**Shutdown path is single-source.** The only shutdown logic lives in the `shutdown()` function in `main.go`. The SIGINT signal handler and TUI `requestShutdown()` in `tui.go` both call `shutdown()` — they do NOT duplicate cleanup code. Any new cleanup steps (closing connections, flushing buffers, etc.) must be added to `shutdown()` in `main.go` ONLY. Do not create parallel shutdown paths.
+
 ## Design Docs
 - [Queue & Session System](docs/queue-and-sessions.md) — how queue delivery, parallel execution, sessions, and async background tasks are intended to work
 
@@ -111,6 +113,12 @@ No Makefile, no linter config. Use `go fmt` + `go vet`.
 - Struct fields use TOML snake_case tags.
 - Error: `log.Fatalln` at startup only. TUI `/reload` uses error-returning `loadReloadableDir`.
 - **Design comments**: Preserve and maintain block comments that explain non-obvious design decisions (e.g. "DESIGN NOTE", "Rationale", multi-line comments explaining why code is structured a certain way). When you encounter code that could be misunderstood or that implements a multi-layer defense, add a comment explaining the full picture. These comments are critical for maintaining correctness across future edits. See `isResponseIDError()` in `responses.go` for an example.
+
+## Review Process
+- When implementing multi-task plans, perform **both spec compliance review AND code quality review** after every task, no matter how trivial. Never skip either review.
+- Spec review verifies the code matches the task requirements (nothing missing, nothing extra).
+- Quality review verifies the code is well-built (correct patterns, no bugs, no race conditions, clean style).
+- Fix all issues found in reviews before moving to the next task.
 
 ## Testing
 - All new features and changes MUST be covered by tests.

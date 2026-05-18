@@ -74,13 +74,13 @@ func TestSetNoticesDefaults(t *testing.T) {
 	n := NoticesConfig{}
 	setNoticesDefaults(&n)
 
-	assert.Equal(t, "\x0308⏳ Queued (position {position})\x0F", n.Queue.Msg)
+	assert.Equal(t, "\x0307⏳ Queued (position {position})\x0F", n.Queue.Msg)
 	assert.Contains(t, n.Queue.Started, "{nick}")
 	assert.Contains(t, n.Queue.Started, "{wait}")
 	assert.Contains(t, n.Queue.AsyncSubmitted, "{nick}")
 	assert.Equal(t, []string{"hold on you're going to fast"}, n.Rate.Msgs)
 	assert.Equal(t, "\x0304❗ ", n.Format.ErrorPrefix)
-	assert.Equal(t, "\x0308⚠️ ", n.Format.WarnPrefix)
+	assert.Equal(t, "\x0307⚠️ ", n.Format.WarnPrefix)
 	assert.NotEmpty(t, n.Context.NoContext)
 	assert.NotEmpty(t, n.Sessions.Header)
 	assert.NotEmpty(t, n.Sessions.None)
@@ -180,7 +180,7 @@ func TestQueueMsg(t *testing.T) {
 	setNoticesDefaults(&n)
 
 	msg := n.QueueMsg(3, 5*time.Second)
-	assert.Equal(t, "\x0308⏳ Queued (position 3)\x0F", msg)
+	assert.Equal(t, "\x0307⏳ Queued (position 3)\x0F", msg)
 }
 
 func TestQueueMsgCustom(t *testing.T) {
@@ -204,7 +204,7 @@ func TestLoadNoticesFileMissing(t *testing.T) {
 	err = loadNoticesFile(dir, &cfg)
 	require.NoError(t, err)
 
-	assert.Equal(t, "\x0308⏳ Queued (position {position})\x0F", cfg.Notices.Queue.Msg)
+	assert.Equal(t, "\x0307⏳ Queued (position {position})\x0F", cfg.Notices.Queue.Msg)
 	assert.NotEmpty(t, cfg.Notices.Queue.Started)
 }
 
@@ -291,7 +291,7 @@ key = "test"
 	cfg, err := loadConfigDir(dir)
 	require.NoError(t, err)
 
-	assert.Equal(t, "\x0308⏳ Queued (position {position})\x0F", cfg.Notices.Queue.Msg)
+	assert.Equal(t, "\x0307⏳ Queued (position {position})\x0F", cfg.Notices.Queue.Msg)
 	assert.Equal(t, "hold on you're going to fast", cfg.Notices.Ratemsg())
 	assert.Contains(t, cfg.Notices.Support, "patreon")
 	assert.Equal(t, "database not available", cfg.Notices.DB.NotAvailable)
@@ -308,8 +308,8 @@ func TestErrorMsgUsesNotices(t *testing.T) {
 	noticeErrorPrefix.Store("\x0304❗ ")
 	assert.Equal(t, "\x0304❗ test error", errorMsg("test error"))
 
-	noticeWarnPrefix.Store("\x0308⚠️ ")
-	assert.Equal(t, "\x0308⚠️ test warning", warnMsg("test warning"))
+	noticeWarnPrefix.Store("\x0307⚠️ ")
+	assert.Equal(t, "\x0307⚠️ test warning", warnMsg("test warning"))
 }
 
 func TestQueueManagerWithNotices(t *testing.T) {

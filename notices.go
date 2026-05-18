@@ -169,12 +169,12 @@ var (
 
 func init() {
 	noticeErrorPrefix.Store("\x0304❗ ")
-	noticeWarnPrefix.Store("\x0308⚠️ ")
+	noticeWarnPrefix.Store("\x0307⚠️ ")
 }
 
 func setNoticesDefaults(n *NoticesConfig) {
 	if n.Queue.Msg == "" {
-		n.Queue.Msg = "\x0308⏳ Queued (position {position})\x0F"
+		n.Queue.Msg = "\x0307⏳ Queued (position {position})\x0F"
 	}
 	if n.Queue.Started == "" {
 		n.Queue.Started = "\x0306\u25b6 {nick}: Processing your request (waited {wait})...{prompt}\x0f"
@@ -192,10 +192,10 @@ func setNoticesDefaults(n *NoticesConfig) {
 		n.Format.ErrorPrefix = "\x0304❗ "
 	}
 	if n.Format.WarnPrefix == "" {
-		n.Format.WarnPrefix = "\x0308⚠️ "
+		n.Format.WarnPrefix = "\x0307⚠️ "
 	}
 	if n.Context.NoContext == "" {
-		n.Context.NoContext = "you dont have a chat context, start one with one of my many fabulous chat commands. After starting, just reply to my nick to continue the conversation"
+		n.Context.NoContext = "You need to start a chat session first! Use {trigger}help to see available commands. once you start one you can reply to my nick to continue the conversation."
 	}
 	if n.Sessions.Header == "" {
 		n.Sessions.Header = "\x02Session History ({nick} on {network}):\x02"
@@ -303,7 +303,7 @@ func setNoticesDefaults(n *NoticesConfig) {
 		n.Tools.CallMulti = "\x0315🔧 ToolCalls: {tools}\x0F"
 	}
 	if n.Tools.CallLimit == "" {
-		n.Tools.CallLimit = "\x0308⚠️ Tool call limit reached, stopping.\x0F"
+		n.Tools.CallLimit = "\x0307⚠️ Tool call limit reached, stopping.\x0F"
 	}
 	if n.Tools.Failed == "" {
 		n.Tools.Failed = "MCP tool call failed: {error}"
@@ -333,7 +333,7 @@ func setNoticesDefaults(n *NoticesConfig) {
 		n.Jobs.QueueRunning = "  \x0303▶\x0F {desc} ({elapsed} elapsed)"
 	}
 	if n.Jobs.QueuePending == "" {
-		n.Jobs.QueuePending = "  \x0308{position}.\x0F {desc} (waiting {wait})"
+		n.Jobs.QueuePending = "  \x0307{position}.\x0F {desc} (waiting {wait})"
 	}
 	if n.Jobs.BgHeader == "" {
 		n.Jobs.BgHeader = "\x02Background jobs:\x02"

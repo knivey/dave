@@ -59,6 +59,14 @@
 #   api_key            (string)               API key for authentication
 #   pastebin_preview_lines (int, default: 3)  Default preview lines sent before pastebin URL (0 = no preview, must be < max_lines)
 #
+# [logging] options:
+#   enabled            (bool, default: false)    Enable IRC channel log storage
+#   dir                (string, default: "data/logs") Directory for SQLite log files
+#   rotation           (string, default: "monthly") File rotation period: "monthly" (YYYY-MM.db) or "yearly" (YYYY.db)
+#   buffer_size        (int, default: 10000)     Channel buffer size for incoming events
+#   batch_size         (int, default: 500)       Rows per INSERT transaction
+#   flush_interval     (duration, default: "2s") Max time between flushes
+#
 # [networks.<name>] options:
 #   enabled            (bool, default: true)   Enable this network
 #   nick               (string)                Bot nickname
@@ -144,6 +152,14 @@
 # url = "http://localhost:8181"
 # api_key = "dave_YOUR_KEY_HERE"
 # pastebin_preview_lines = 3
+#
+# [logging]
+# enabled = false
+# dir = "data/logs"
+# rotation = "monthly"
+# buffer_size = 10000
+# batch_size = 500
+# flush_interval = "2s"
 #
 # [networks.example]
 # enabled = true

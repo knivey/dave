@@ -99,7 +99,7 @@ description = "General IRC-aware chat"
 renderMarkdown = true
 service = "openai"
 model = "gpt-4o"
-# mcps = ["filesystem", "github"]  # opt-in to MCP tool access
+mcps = ["db-mcp"]
 system = """\
 You are dave, a chatbot on IRC that responds using IRC formatting and plain text.
 IRC formatting:

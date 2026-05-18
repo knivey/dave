@@ -72,3 +72,9 @@
 # headers = { "X-API-Key" = "your-shared-secret" }
 # timeout = "2m"
 # keepalive = "30s"
+
+[db-mcp]
+transport = "stdio"
+command = "mcps/db-mcp/db-mcp"
+args = []
+timeout = "30s"

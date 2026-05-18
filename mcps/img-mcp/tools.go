@@ -255,6 +255,7 @@ func (h *ToolHandlers) handleEnhancePrompt(ctx context.Context, req *mcp.CallToo
 	if enhancementName == "" {
 		enhancementName = "default"
 	}
+	enhancementName, _ = h.applyNetworkPolicy(input.Network, enhancementName, JobTypeEnhanceGenerate)
 
 	result, err := enhancePrompt(ctx, h.getConfig(), enhancementName, input.Prompt)
 	if err != nil {
@@ -272,9 +273,11 @@ func (h *ToolHandlers) handleGenerateImageAsync(ctx context.Context, req *mcp.Ca
 	if err != nil {
 		return nil, GenerateImageAsyncOutput{}, err
 	}
-	job, err := h.queue.Submit(JobTypeGenerate, workflow, JobInput{
+	enhancement, jobType := h.applyNetworkPolicy(input.Network, "", JobTypeGenerate)
+	job, err := h.queue.Submit(jobType, workflow, JobInput{
 		Prompt:         input.Prompt,
 		NegativePrompt: input.NegativePrompt,
+		Enhancement:    enhancement,
 		Seed:           input.Seed,
 		OutputFormat:   input.OutputFormat,
 	})
@@ -290,9 +293,10 @@ func (h *ToolHandlers) handleEnhanceAndGenerateAsync(ctx context.Context, req *m
 	if err != nil {
 		return nil, EnhanceAndGenerateAsyncOutput{}, err
 	}
-	job, err := h.queue.Submit(JobTypeEnhanceGenerate, workflow, JobInput{
+	enhancement, jobType := h.applyNetworkPolicy(input.Network, input.Enhancement, JobTypeEnhanceGenerate)
+	job, err := h.queue.Submit(jobType, workflow, JobInput{
 		Prompt:       input.Prompt,
-		Enhancement:  input.Enhancement,
+		Enhancement:  enhancement,
 		OutputFormat: input.OutputFormat,
 	})
 	if err != nil {
@@ -307,9 +311,11 @@ func (h *ToolHandlers) handleGenerateImage(ctx context.Context, req *mcp.CallToo
 	if err != nil {
 		return nil, GenerateImageOutput{}, err
 	}
-	job, err := h.queue.Submit(JobTypeGenerate, workflow, JobInput{
+	enhancement, jobType := h.applyNetworkPolicy(input.Network, "", JobTypeGenerate)
+	job, err := h.queue.Submit(jobType, workflow, JobInput{
 		Prompt:         input.Prompt,
 		NegativePrompt: input.NegativePrompt,
+		Enhancement:    enhancement,
 		Seed:           input.Seed,
 		OutputFormat:   input.OutputFormat,
 	})
@@ -341,9 +347,10 @@ func (h *ToolHandlers) handleEnhanceAndGenerate(ctx context.Context, req *mcp.Ca
 	if err != nil {
 		return nil, EnhanceAndGenerateOutput{}, err
 	}
-	job, err := h.queue.Submit(JobTypeEnhanceGenerate, workflow, JobInput{
+	enhancement, jobType := h.applyNetworkPolicy(input.Network, input.Enhancement, JobTypeEnhanceGenerate)
+	job, err := h.queue.Submit(jobType, workflow, JobInput{
 		Prompt:       input.Prompt,
-		Enhancement:  input.Enhancement,
+		Enhancement:  enhancement,
 		OutputFormat: input.OutputFormat,
 	})
 	if err != nil {

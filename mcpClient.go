@@ -754,17 +754,10 @@ func getToolInjectFields(toolName string) map[string]string {
 	return nil
 }
 
-func injectScopeArgs(toolArgs map[string]any, toolName string, cr *chatRunner) {
+func injectScopeArgs(toolArgs map[string]any, toolName string, scopeValues map[string]any) {
 	fields := getToolInjectFields(toolName)
 	if fields == nil {
 		return
-	}
-
-	scopeValues := map[string]any{
-		"network": cr.network.Name,
-		"channel": cr.channel,
-		"user_id": cr.userID,
-		"nick":    cr.nick,
 	}
 
 	for injectField, scopeKey := range fields {
@@ -772,8 +765,16 @@ func injectScopeArgs(toolArgs map[string]any, toolName string, cr *chatRunner) {
 			toolArgs[injectField] = val
 		}
 	}
+}
 
-	cr.logger.Debug("injected scope args", "tool", toolName, "fields", fields)
+func injectScopeArgsFromRunner(toolArgs map[string]any, toolName string, cr *chatRunner) {
+	injectScopeArgs(toolArgs, toolName, map[string]any{
+		"network": cr.network.Name,
+		"channel": cr.channel,
+		"user_id": cr.userID,
+		"nick":    cr.nick,
+	})
+	cr.logger.Debug("injected scope args", "tool", toolName)
 }
 
 func mcpToolResultToText(result *mcp.CallToolResult) string {

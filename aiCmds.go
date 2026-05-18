@@ -930,7 +930,7 @@ func (cr *chatRunner) executeToolCalls(messages []ChatMessage, toolCalls []ToolC
 			cr.addContext(toolMsg)
 			continue
 		}
-		injectScopeArgs(toolArgs, tc.Function.Name, cr)
+		injectScopeArgsFromRunner(toolArgs, tc.Function.Name, cr)
 		result, err := callMCPToolWithContext(cr.ctx, tc.Function.Name, toolArgs)
 		if err != nil {
 			toolMsg := toolResultMsg(tc.ID, "error: "+err.Error())

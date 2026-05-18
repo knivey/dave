@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	logxi "github.com/mgutz/logxi/v1"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1010,19 +1009,16 @@ func TestInjectScopeArgs(t *testing.T) {
 	}
 	mcpToolToServer["db_query"] = "db-mcp"
 
-	cr := &chatRunner{
-		network: Network{Name: "Libera"},
-		channel: "#test",
-		nick:    "testuser",
-		userID:  42,
-		logger:  logxi.New("test"),
-	}
-
 	toolArgs := map[string]any{
 		"sql": "SELECT * FROM users",
 	}
 
-	injectScopeArgs(toolArgs, "db_query", cr)
+	injectScopeArgs(toolArgs, "db_query", map[string]any{
+		"network": "Libera",
+		"channel": "#test",
+		"user_id": int64(42),
+		"nick":    "testuser",
+	})
 
 	assert.Equal(t, "SELECT * FROM users", toolArgs["sql"])
 	assert.Equal(t, "Libera", toolArgs["_dave_inject_network"])
@@ -1050,19 +1046,16 @@ func TestInjectScopeArgs_NoInjectFields(t *testing.T) {
 	}
 	mcpToolToServer["db_query"] = "db-mcp"
 
-	cr := &chatRunner{
-		network: Network{Name: "Libera"},
-		channel: "#test",
-		nick:    "testuser",
-		userID:  42,
-		logger:  logxi.New("test"),
-	}
-
 	toolArgs := map[string]any{
 		"sql": "SELECT * FROM users",
 	}
 
-	injectScopeArgs(toolArgs, "db_query", cr)
+	injectScopeArgs(toolArgs, "db_query", map[string]any{
+		"network": "Libera",
+		"channel": "#test",
+		"user_id": int64(42),
+		"nick":    "testuser",
+	})
 
 	assert.Equal(t, "SELECT * FROM users", toolArgs["sql"])
 	assert.Len(t, toolArgs, 1)

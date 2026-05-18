@@ -44,8 +44,23 @@ func mcpCmd(network Network, c *girc.Client, e girc.Event, cfg MCPCommandConfig,
 		prompt = args[0]
 	}
 
+	channel := normalizeIRC(e.Params[0], getCasemapping(network.Name))
+	nick := e.Source.Name
+	resolvedUser, _ := resolveIRCUser(network, c, nick, e.Source)
+	var userID int64
+	if resolvedUser != nil {
+		userID = resolvedUser.ID
+	}
+
+	injectScopeArgs(toolArgs, cfg.Tool, map[string]any{
+		"network": network.Name,
+		"channel": channel,
+		"user_id": userID,
+		"nick":    nick,
+	})
+
 	if !cfg.Sync {
-		mcpCmdAsync(network, c, e, cfg, ctx, output, toolArgs, prompt, log)
+		mcpCmdAsync(network, cfg, ctx, output, toolArgs, prompt, channel, nick, userID, log)
 		return
 	}
 
@@ -67,11 +82,16 @@ func mcpCmd(network Network, c *girc.Client, e girc.Event, cfg MCPCommandConfig,
 	sendImageOrTextResult(text, ctx, output)
 }
 
-func mcpCmdAsync(network Network, c *girc.Client, e girc.Event, cfg MCPCommandConfig, ctx context.Context, output chan<- string, toolArgs map[string]any, prompt string, log logxi.Logger) {
+func mcpCmdAsync(network Network, cfg MCPCommandConfig, ctx context.Context, output chan<- string, toolArgs map[string]any, prompt string, channel string, nick string, userID int64, log logxi.Logger) {
 	n := getNotices()
 	asyncTool := cfg.GetAsyncTool()
-	channel := normalizeIRC(e.Params[0], getCasemapping(network.Name))
-	nick := e.Source.Name
+
+	injectScopeArgs(toolArgs, asyncTool, map[string]any{
+		"network": network.Name,
+		"channel": channel,
+		"user_id": userID,
+		"nick":    nick,
+	})
 
 	log.Debug("calling async MCP tool", "tool", asyncTool, "timeout", cfg.Timeout.String())
 
@@ -99,12 +119,6 @@ func mcpCmdAsync(network Network, c *girc.Client, e girc.Event, cfg MCPCommandCo
 
 	if !sendOrDone(ctx, output, expandNotice(n.Queue.AsyncSubmitted, map[string]string{"nick": nick})) {
 		return
-	}
-
-	resolvedUser, _ := resolveIRCUser(network, c, nick, e.Source)
-	var userID int64
-	if resolvedUser != nil {
-		userID = resolvedUser.ID
 	}
 
 	registerToolAsyncJob(submitResult.JobID, asyncTool, cfg.MCP, network.Name, channel, nick, prompt, userID)

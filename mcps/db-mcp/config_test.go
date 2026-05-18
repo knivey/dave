@@ -69,6 +69,14 @@ max_value_size = 2000
 	assert.Equal(t, 500, cfg.Database.MaxNotesPerUser)
 }
 
+func TestLoadConfigInvalidToml(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.toml")
+	require.NoError(t, os.WriteFile(cfgPath, []byte("this is not valid toml [[[[\n"), 0644))
+	_, err := loadConfig(cfgPath)
+	assert.Error(t, err)
+}
+
 func TestResolvePath(t *testing.T) {
 	assert.Equal(t, "/abs/path.db", resolvePath("/base", "/abs/path.db"))
 	assert.Equal(t, "/base/rel/path.db", resolvePath("/base", "rel/path.db"))

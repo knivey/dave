@@ -375,10 +375,17 @@ func TestBuildResponseParams(t *testing.T) {
 }
 
 func TestBuildResponseParams_IncludeEncryptedReasoning(t *testing.T) {
-	cfg := AIConfig{Model: "test-model"}
+	cfg := AIConfig{Model: "test-model", EncryptedReasoning: true}
 	params := buildResponseParams(cfg, nil, nil, "", "")
 	assert.Contains(t, params.Include, responses.ResponseIncludableReasoningEncryptedContent,
-		"buildResponseParams should include reasoning.encrypted_content")
+		"buildResponseParams should include reasoning.encrypted_content when enabled")
+}
+
+func TestBuildResponseParams_NoIncludeWhenDisabled(t *testing.T) {
+	cfg := AIConfig{Model: "test-model"}
+	params := buildResponseParams(cfg, nil, nil, "", "")
+	assert.Empty(t, params.Include,
+		"buildResponseParams should not include reasoning.encrypted_content when disabled")
 }
 
 func TestMessagesToResponseInputItems_EncryptedReasoning(t *testing.T) {

@@ -34,6 +34,7 @@
 #   toolverbose          (bool, default: true)       Show 🔧 tool call notifications in IRC (cascades from service)
 #   paralleltoolcalls    (bool, default: true)       Enable parallel MCP tool calls (cascades from service)
 #   reasoningeffort      (string)                    For o1/o3 models: "low", "medium", "high"
+#   encrypted_reasoning  (bool, default: false)      Request encrypted reasoning content from the API (requires responses_api)
 #   servicetier          (string)                    Processing tier: "auto", "default", "flex", "priority"
 #   verbosity            (string)                    Output token count for gpt-5: "low", "medium", "high"
 #   chat_template_kwargs (map)                       Provider-specific parameters (nested in request body)
@@ -81,6 +82,7 @@
 # toolverbose = true
 # paralleltoolcalls = true
 # reasoningeffort = "medium"
+# encrypted_reasoning = false
 # servicetier = "auto"
 # verbosity = "medium"
 # chat_template_kwargs = {enable_thinking = false}

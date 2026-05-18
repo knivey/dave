@@ -173,9 +173,11 @@ func buildResponseParams(cfg AIConfig, input []responses.ResponseInputItemUnionP
 		Input: responses.ResponseNewParamsInputUnion{
 			OfInputItemList: input,
 		},
-		Include: []responses.ResponseIncludable{
+	}
+	if cfg.EncryptedReasoning {
+		params.Include = []responses.ResponseIncludable{
 			responses.ResponseIncludableReasoningEncryptedContent,
-		},
+		}
 	}
 	if user != "" {
 		params.User = openai.String(user)

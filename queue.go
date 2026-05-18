@@ -522,7 +522,7 @@ func (qm *QueueManager) runJob(item *QueueItem) {
 	}
 
 	throttle := time.Millisecond * bot.Network.Throttle
-	drainToChannel(bot.Client, item.Channel, throttle, item.outputCh, item.ctx)
+	drainToChannel(bot.Client, item.Channel, throttle, item.outputCh, item.ctx, bot.Network.Name)
 }
 
 func (qm *QueueManager) executionComplete(item *QueueItem) {

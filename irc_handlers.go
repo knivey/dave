@@ -15,6 +15,7 @@ func registerIRCHandlers(bot *Bot, client *girc.Client, network Network, log log
 		if str, ok := event.Pretty(); ok {
 			log.Info(str)
 		}
+		enqueueFromEvent(network.Name, event)
 	})
 
 	client.Handlers.Add(girc.RPL_WELCOME, func(client *girc.Client, event girc.Event) {
@@ -337,7 +338,7 @@ func handleTrigger(network Network, client *girc.Client, event girc.Event, chann
 			defer close(outCh)
 			match.cmd(network, client, event, ctxWithResolvedUser(context.Background(), resolvedUser), outCh, match.args...)
 		}()
-		go drainToChannel(client, channel, time.Millisecond*network.Throttle, outCh, nil)
+		go drainToChannel(client, channel, time.Millisecond*network.Throttle, outCh, nil, network.Name)
 		return
 	}
 
@@ -357,7 +358,7 @@ func handleTrigger(network Network, client *girc.Client, event girc.Event, chann
 			defer close(outCh)
 			match.cmd(network, client, event, ctxWithResolvedUser(context.Background(), resolvedUser), outCh, match.args...)
 		}()
-		go drainToChannel(client, channel, time.Millisecond*network.Throttle, outCh, nil)
+		go drainToChannel(client, channel, time.Millisecond*network.Throttle, outCh, nil, network.Name)
 		return
 	}
 	if chatCmds[match.re] {

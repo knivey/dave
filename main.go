@@ -105,13 +105,14 @@ func replyIfQueued(client *girc.Client, event girc.Event, position int) {
 	}
 }
 
-func drainToChannel(client *girc.Client, channel string, throttle time.Duration, outCh <-chan string, ctx context.Context) {
+func drainToChannel(client *girc.Client, channel string, throttle time.Duration, outCh <-chan string, ctx context.Context, networkName string) {
 	for msg := range outCh {
 		if ctx != nil && ctx.Err() != nil {
 			for range outCh {
 			}
 			break
 		}
+		enqueueBotMessage(networkName, channel, msg)
 		if action, ok := isIRCAction(msg); ok {
 			client.Cmd.Action(channel, action)
 		} else {
@@ -453,6 +454,11 @@ func main() {
 	}
 	sessionMgr = NewSessionManager(theDB)
 
+	if err := initLogWriter(config.Logging); err != nil {
+		logger.Error("Failed to initialize log writer", "error", err)
+		os.Exit(1)
+	}
+
 	LoadContextStore()
 	CleanupContexts()
 	initMCPClients()
@@ -514,6 +520,7 @@ func main() {
 		if apiLogger != nil {
 			apiLogger.CloseAll()
 		}
+		stopLogWriter()
 		if queueMgr != nil {
 			queueMgr.Stop()
 		}

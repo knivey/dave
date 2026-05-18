@@ -52,17 +52,17 @@ func createSyncServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_jobs",
-		Description: "List recent jobs with optional status filter.",
+		Description: "List recent image generation jobs with optional status filter.",
 	}, handlers.handleListJobs)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "queue_status",
-		Description: "Get overview of the job queue: counts of queued, running, completed, failed jobs, plus per-job ETA estimates.",
+		Description: "Overview of the image generation queue: counts of queued, running, completed, failed jobs, plus per-job ETA estimates.",
 	}, handlers.handleQueueStatus)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "server_status",
-		Description: "Check if the server has finished startup recovery. Returns {ready: true} when all jobs have been recovered from the database and the server is fully operational.",
+		Description: "Check if the image generation server has finished startup recovery. Returns {ready: true} when fully operational.",
 	}, handlers.handleServerStatus)
 
 	return server
@@ -70,7 +70,7 @@ func createSyncServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 
 func createAsyncServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 	server := newServer(cfg, cfg.Server.Name+"-async",
-		"MCP server for ComfyUI image generation (async). Use generate_image_async or enhance_and_generate_async to queue jobs and get a job_id immediately.")
+		"MCP server for ComfyUI image generation (async). Use generate_image_async or enhance_and_generate_async to queue image generation jobs and get a job_id immediately.")
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "generate_image_async",
@@ -84,22 +84,22 @@ func createAsyncServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "wait_for_job",
-		Description: "Block until a job completes, fails, or times out. Returns the full result including image URLs or base64 data.",
+		Description: "Block until an image generation job completes, fails, or times out. Returns the full result including image URLs or base64 data.",
 	}, handlers.handleWaitForJob)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "job_status",
-		Description: "Check the status and result of a job by its ID. Includes queue position and ETA when available.",
+		Description: "Check the status and result of an image generation job by its ID. Includes queue position and ETA when available.",
 	}, handlers.handleJobStatus)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_jobs",
-		Description: "List recent jobs with optional status filter.",
+		Description: "List recent image generation jobs with optional status filter.",
 	}, handlers.handleListJobs)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "cancel_job",
-		Description: "Cancel a queued job that has not yet started running.",
+		Description: "Cancel a queued image generation job that has not yet started running.",
 	}, handlers.handleCancelJob)
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -114,12 +114,12 @@ func createAsyncServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "queue_status",
-		Description: "Get overview of the job queue: counts of queued, running, completed, failed jobs, plus per-job ETA estimates.",
+		Description: "Overview of the image generation queue: counts of queued, running, completed, failed jobs, plus per-job ETA estimates.",
 	}, handlers.handleQueueStatus)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "server_status",
-		Description: "Check if the server has finished startup recovery. Returns {ready: true} when all jobs have been recovered from the database and the server is fully operational.",
+		Description: "Check if the image generation server has finished startup recovery. Returns {ready: true} when fully operational.",
 	}, handlers.handleServerStatus)
 
 	return server
@@ -127,7 +127,7 @@ func createAsyncServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 
 func createFullServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 	server := newServer(cfg, cfg.Server.Name,
-		"MCP server for ComfyUI image generation and prompt enhancement. Use generate_image or enhance_and_generate for one-step image generation (blocks until done). Use generate_image_async or enhance_and_generate_async to queue jobs and get a job_id immediately.")
+		"MCP server for ComfyUI image generation and prompt enhancement. Use generate_image or enhance_and_generate for one-step image generation (blocks until done). Use generate_image_async or enhance_and_generate_async to queue image generation jobs and get a job_id immediately.")
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "enhance_prompt",
@@ -156,22 +156,22 @@ func createFullServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "wait_for_job",
-		Description: "Block until a job completes, fails, or times out. Returns the full result including image URLs or base64 data.",
+		Description: "Block until an image generation job completes, fails, or times out. Returns the full result including image URLs or base64 data.",
 	}, handlers.handleWaitForJob)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "job_status",
-		Description: "Check the status and result of a job by its ID. Includes queue position and ETA when available.",
+		Description: "Check the status and result of an image generation job by its ID. Includes queue position and ETA when available.",
 	}, handlers.handleJobStatus)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "list_jobs",
-		Description: "List recent jobs with optional status filter.",
+		Description: "List recent image generation jobs with optional status filter.",
 	}, handlers.handleListJobs)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "cancel_job",
-		Description: "Cancel a queued job that has not yet started running.",
+		Description: "Cancel a queued image generation job that has not yet started running.",
 	}, handlers.handleCancelJob)
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -186,7 +186,7 @@ func createFullServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "queue_status",
-		Description: "Get overview of the job queue: counts of queued, running, completed, failed jobs, plus per-job ETA estimates.",
+		Description: "Overview of the image generation queue: counts of queued, running, completed, failed jobs, plus per-job ETA estimates.",
 	}, handlers.handleQueueStatus)
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -196,7 +196,7 @@ func createFullServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "server_status",
-		Description: "Check if the server has finished startup recovery. Returns {ready: true} when all jobs have been recovered from the database and the server is fully operational.",
+		Description: "Check if the image generation server has finished startup recovery. Returns {ready: true} when fully operational.",
 	}, handlers.handleServerStatus)
 
 	return server

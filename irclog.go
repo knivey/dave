@@ -62,7 +62,7 @@ type LogWriter struct {
 
 var logWriter *LogWriter
 
-func initLogWriter(cfg LoggingConfig, log logxi.Logger) error {
+func initLogWriter(cfg LoggingConfig) error {
 	if !cfg.Enabled {
 		return nil
 	}
@@ -73,8 +73,9 @@ func initLogWriter(cfg LoggingConfig, log logxi.Logger) error {
 		cfg:     cfg,
 		entries: make(chan LogEntry, cfg.BufferSize),
 		done:    make(chan struct{}),
-		log:     log,
 	}
+	lw.log = logxi.New("irclog")
+	lw.log.SetLevel(logxi.LevelAll)
 	logWriter = lw
 	wg.Add(1)
 	go lw.run()
@@ -156,7 +157,9 @@ func enqueueFromEvent(networkName string, event girc.Event) {
 	case girc.KICK:
 		if len(event.Params) >= 1 {
 			entry.Channel = event.Params[0]
-			entry.Target = event.Params[0]
+		}
+		if len(event.Params) >= 2 {
+			entry.Target = event.Params[1]
 		}
 		if len(event.Params) >= 3 {
 			entry.Message = event.Params[2]

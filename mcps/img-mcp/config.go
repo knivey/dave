@@ -10,14 +10,15 @@ import (
 )
 
 type Config struct {
-	Server       ServerConfig                 `toml:"server"`
-	Database     DatabaseConfig               `toml:"database"`
-	Comfy        ComfyServiceConfig           `toml:"comfy"`
-	Upload       UploadConfig                 `toml:"upload"`
-	Queue        QueueConfig                  `toml:"queue"`
-	Auth         AuthConfig                   `toml:"auth"`
-	Enhancements map[string]EnhancementConfig `toml:"enhancement"`
-	Workflows    map[string]WorkflowConfig    `toml:"workflow"`
+	Server          ServerConfig                 `toml:"server"`
+	Database        DatabaseConfig               `toml:"database"`
+	Comfy           ComfyServiceConfig           `toml:"comfy"`
+	Upload          UploadConfig                 `toml:"upload"`
+	Queue           QueueConfig                  `toml:"queue"`
+	Auth            AuthConfig                   `toml:"auth"`
+	Enhancements    map[string]EnhancementConfig `toml:"enhancement"`
+	Workflows       map[string]WorkflowConfig    `toml:"workflow"`
+	NetworkPolicies map[string]NetworkPolicy     `toml:"network_policy"`
 }
 
 type AuthConfig struct {
@@ -60,6 +61,11 @@ type EnhancementConfig struct {
 	SystemPrompt string `toml:"systemprompt"`
 	Timeout      int    `toml:"timeout"`
 	Description  string `toml:"description"`
+}
+
+type NetworkPolicy struct {
+	Enhancement string `toml:"enhancement"`
+	Force       bool   `toml:"force"`
 }
 
 type WorkflowConfig struct {
@@ -160,6 +166,19 @@ func loadConfig(configFile string) (Config, error) {
 			wc.Timeout = cfg.Comfy.Timeout
 		}
 		cfg.Workflows[name] = wc
+	}
+
+	if cfg.NetworkPolicies == nil {
+		cfg.NetworkPolicies = make(map[string]NetworkPolicy)
+	}
+	for name, np := range cfg.NetworkPolicies {
+		if np.Enhancement == "" {
+			return cfg, fmt.Errorf("network_policy.%s enhancement is required", name)
+		}
+		if _, ok := cfg.Enhancements[np.Enhancement]; !ok {
+			return cfg, fmt.Errorf("network_policy.%s enhancement %q is not defined in [enhancement]", name, np.Enhancement)
+		}
+		cfg.NetworkPolicies[name] = np
 	}
 
 	if cfg.Comfy.DefaultWorkflow != "" {

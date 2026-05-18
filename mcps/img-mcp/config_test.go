@@ -272,6 +272,73 @@ api_key = "changed-secret"
 	assert.Contains(t, warnings[0], "auth.api_key")
 }
 
+func TestLoadConfig_NetworkPolicyValidation(t *testing.T) {
+	t.Run("ValidPolicy", func(t *testing.T) {
+		dir := t.TempDir()
+		mustWriteWorkflow(t, dir)
+		content := baseTestConfigToml("http://localhost:8188") + `
+[enhancement.default]
+baseurl = "https://api.example.com/v1/"
+key = "test-key"
+model = "test-model"
+systemprompt = "enhance this"
+
+[network_policy.libera]
+enhancement = "default"
+force = true
+`
+		path := writeTestConfigFile(t, dir, content)
+		cfg, err := loadConfig(path)
+		require.NoError(t, err)
+		require.Contains(t, cfg.NetworkPolicies, "libera")
+		assert.Equal(t, "default", cfg.NetworkPolicies["libera"].Enhancement)
+		assert.True(t, cfg.NetworkPolicies["libera"].Force)
+	})
+
+	t.Run("InvalidEnhancementReference", func(t *testing.T) {
+		dir := t.TempDir()
+		mustWriteWorkflow(t, dir)
+		content := baseTestConfigToml("http://localhost:8188") + `
+[network_policy.libera]
+enhancement = "nonexistent"
+force = true
+`
+		path := writeTestConfigFile(t, dir, content)
+		_, err := loadConfig(path)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "network_policy.libera")
+		assert.Contains(t, err.Error(), "nonexistent")
+	})
+
+	t.Run("EmptyPoliciesAllowed", func(t *testing.T) {
+		dir := t.TempDir()
+		mustWriteWorkflow(t, dir)
+		path := writeTestConfigFile(t, dir, baseTestConfigToml("http://localhost:8188"))
+		cfg, err := loadConfig(path)
+		require.NoError(t, err)
+		assert.Empty(t, cfg.NetworkPolicies)
+	})
+
+	t.Run("ForceDefaultsFalse", func(t *testing.T) {
+		dir := t.TempDir()
+		mustWriteWorkflow(t, dir)
+		content := baseTestConfigToml("http://localhost:8188") + `
+[enhancement.safe]
+baseurl = "https://api.example.com/v1/"
+key = "test-key"
+model = "test-model"
+systemprompt = "safe enhance"
+
+[network_policy.graped]
+enhancement = "safe"
+`
+		path := writeTestConfigFile(t, dir, content)
+		cfg, err := loadConfig(path)
+		require.NoError(t, err)
+		assert.False(t, cfg.NetworkPolicies["graped"].Force)
+	})
+}
+
 func TestCompareNonReloadable(t *testing.T) {
 	base := Config{
 		Server:   ServerConfig{Name: "img-mcp", Version: "0.1.0", Addr: ":8080"},

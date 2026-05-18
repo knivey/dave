@@ -527,6 +527,27 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 			return fmt.Errorf("supersede prior tail copies: %w", err)
 		}
 
+		if err := tx.Model(&Message{}).
+			Where("session_id = ? AND id >= ? AND id <= ? AND encrypted_reasoning IS NOT NULL",
+				inputs.SessionID, firstArchivedID, lastArchivedID).
+			Update("encrypted_reasoning", nil).Error; err != nil {
+			return fmt.Errorf("strip encrypted reasoning from archived: %w", err)
+		}
+		if len(tailRegularIDs) > 0 {
+			if err := tx.Model(&Message{}).
+				Where("id IN ? AND encrypted_reasoning IS NOT NULL", tailRegularIDs).
+				Update("encrypted_reasoning", nil).Error; err != nil {
+				return fmt.Errorf("strip encrypted reasoning from archived tail originals: %w", err)
+			}
+		}
+		if len(supersedeIDs) > 0 {
+			if err := tx.Model(&Message{}).
+				Where("id IN ? AND encrypted_reasoning IS NOT NULL", supersedeIDs).
+				Update("encrypted_reasoning", nil).Error; err != nil {
+				return fmt.Errorf("strip encrypted reasoning from superseded tail ghosts: %w", err)
+			}
+		}
+
 		// 3. Insert fresh system row first so it gets the smallest new id.
 		freshSysRow := Message{
 			SessionID:  inputs.SessionID,
@@ -568,6 +589,7 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 				ToolCalls:          orig.ToolCalls,
 				ToolCallID:         orig.ToolCallID,
 				ReasoningContent:   orig.ReasoningContent,
+				EncryptedReasoning: orig.EncryptedReasoning,
 				MultiContent:       orig.MultiContent,
 				IsAsyncResult:      orig.IsAsyncResult,
 				SettingsID:         orig.SettingsID,

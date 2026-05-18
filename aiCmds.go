@@ -407,13 +407,14 @@ func (cr *chatRunner) sendFinalText(content string) {
 	}
 }
 
-func (cr *chatRunner) handleToolCallResponse(messages []ChatMessage, text string, toolCalls []ToolCall, reasoning string) []ChatMessage {
+func (cr *chatRunner) handleToolCallResponse(messages []ChatMessage, text string, toolCalls []ToolCall, reasoning string, encryptedReasoning string) []ChatMessage {
 	cr.logger.Info("assistant made tool calls", "count", len(toolCalls))
 	assistantMsg := ChatMessage{
-		Role:             RoleAssistant,
-		Content:          text,
-		ReasoningContent: reasoning,
-		ToolCalls:        toolCalls,
+		Role:               RoleAssistant,
+		Content:            text,
+		ReasoningContent:   reasoning,
+		EncryptedReasoning: encryptedReasoning,
+		ToolCalls:          toolCalls,
 	}
 	messages = append(messages, assistantMsg)
 	cr.addContext(assistantMsg)
@@ -496,13 +497,14 @@ func (cr *chatRunner) runTurnResponsesStream(
 	if resp == nil {
 		return responsesStreamResult{messages: messages, done: true, currentResponseID: currentResponseID, usePrevID: usePrevID, emptyRetries: emptyRetries}
 	}
-	text, reasoning, toolCalls := parseSDKResponseOutput(*resp)
+	text, reasoning, encReasoning, toolCalls := parseSDKResponseOutput(*resp)
 	currentResponseID = cr.handleResponseIDSave(resp.ID, text, toolCalls, currentResponseID)
 
 	assistantMsg := ChatMessage{
-		Role:             RoleAssistant,
-		Content:          text,
-		ReasoningContent: reasoning,
+		Role:               RoleAssistant,
+		Content:            text,
+		ReasoningContent:   reasoning,
+		EncryptedReasoning: encReasoning,
 	}
 
 	if len(toolCalls) == 0 {
@@ -854,7 +856,7 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 		emptyRetries = 0
 		cr.storeUsage(usage, "chat_completions", durationMs)
 		logTimings(cr.logger, nonStreamTimings)
-		messages = cr.handleToolCallResponse(messages, content, toolCalls, reasoning)
+		messages = cr.handleToolCallResponse(messages, content, toolCalls, reasoning, "")
 	}
 }
 
@@ -1180,7 +1182,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 		}
 		durationMs := int(time.Since(apiStart).Milliseconds())
 
-		text, reasoning, toolCalls := parseSDKResponseOutput(*resp)
+		text, reasoning, encReasoning, toolCalls := parseSDKResponseOutput(*resp)
 		currentResponseID = cr.handleResponseIDSave(resp.ID, text, toolCalls, currentResponseID)
 
 		if len(toolCalls) == 0 {
@@ -1192,9 +1194,10 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 				content = newContent
 			}
 			assistantMsg := ChatMessage{
-				Role:             RoleAssistant,
-				Content:          content,
-				ReasoningContent: reasoning,
+				Role:               RoleAssistant,
+				Content:            content,
+				ReasoningContent:   reasoning,
+				EncryptedReasoning: encReasoning,
 			}
 			cr.addContext(assistantMsg)
 			out := FormatOutput(content)
@@ -1212,7 +1215,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 		emptyRetries = 0
 		cr.storeUsage(sdkResponseUsageToUsage(resp.Usage, string(resp.Status)), "responses", durationMs)
 		numToolCalls := len(toolCalls)
-		messages = cr.handleToolCallResponse(messages, text, toolCalls, reasoning)
+		messages = cr.handleToolCallResponse(messages, text, toolCalls, reasoning, encReasoning)
 
 		if cr.cfg.PreviousResponseID && currentResponseID != "" {
 			toolResultMsgs := messages[len(messages)-numToolCalls:]

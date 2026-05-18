@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	openai "github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -300,12 +301,40 @@ func TestParseSDKResponseOutput(t *testing.T) {
 	var resp responses.Response
 	require.NoError(t, json.Unmarshal([]byte(responseJSON), &resp), "unmarshal")
 
-	text, reasoning, toolCalls := parseSDKResponseOutput(resp)
+	text, reasoning, encryptedReasoning, toolCalls := parseSDKResponseOutput(resp)
 	assert.Equal(t, "Hello!", text, "text")
 	assert.Equal(t, "I thought about it", reasoning, "reasoning")
+	assert.Equal(t, "", encryptedReasoning, "encryptedReasoning should be empty when not present")
 	require.Len(t, toolCalls, 1, "toolCalls")
 	assert.Equal(t, "call_abc", toolCalls[0].ID, "toolCall.ID")
 	assert.Equal(t, "get_weather", toolCalls[0].Function.Name, "toolCall.Name")
+}
+
+func TestParseSDKResponseOutput_EncryptedReasoning(t *testing.T) {
+	responseJSON := `{
+		"id": "resp_456",
+		"output": [
+			{
+				"type": "reasoning",
+				"summary": [{"type": "summary_text", "text": "thinking"}],
+				"encrypted_content": "enc_blob_xyz"
+			},
+			{
+				"type": "message",
+				"role": "assistant",
+				"content": [{"type": "output_text", "text": "Answer"}]
+			}
+		]
+	}`
+
+	var resp responses.Response
+	require.NoError(t, json.Unmarshal([]byte(responseJSON), &resp))
+
+	text, reasoning, encryptedReasoning, toolCalls := parseSDKResponseOutput(resp)
+	assert.Equal(t, "Answer", text)
+	assert.Equal(t, "thinking", reasoning)
+	assert.Equal(t, "enc_blob_xyz", encryptedReasoning)
+	assert.Empty(t, toolCalls)
 }
 
 func TestSDKResponseUsageToGogpt(t *testing.T) {
@@ -343,6 +372,42 @@ func TestBuildResponseParams(t *testing.T) {
 	params := buildResponseParams(cfg, input, nil, "resp_prev", "testuser")
 	assert.Equal(t, "gpt-4o", params.Model, "Model")
 	assert.Equal(t, openai.String("resp_prev"), params.PreviousResponseID, "PreviousResponseID")
+}
+
+func TestBuildResponseParams_IncludeEncryptedReasoning(t *testing.T) {
+	cfg := AIConfig{Model: "test-model"}
+	params := buildResponseParams(cfg, nil, nil, "", "")
+	assert.Contains(t, params.Include, responses.ResponseIncludableReasoningEncryptedContent,
+		"buildResponseParams should include reasoning.encrypted_content")
+}
+
+func TestMessagesToResponseInputItems_EncryptedReasoning(t *testing.T) {
+	messages := []ChatMessage{
+		{Role: RoleUser, Content: "hello"},
+		{Role: RoleAssistant, Content: "hi", EncryptedReasoning: "enc_blob_123"},
+	}
+	input := messagesToResponseInputItems(messages)
+
+	found := false
+	for _, item := range input {
+		if item.OfReasoning != nil {
+			found = true
+			assert.Equal(t, param.NewOpt("enc_blob_123"), item.OfReasoning.EncryptedContent)
+		}
+	}
+	assert.True(t, found, "expected a reasoning input item for assistant message with encrypted reasoning")
+}
+
+func TestMessagesToResponseInputItems_NoReasoningWhenEmpty(t *testing.T) {
+	messages := []ChatMessage{
+		{Role: RoleUser, Content: "hello"},
+		{Role: RoleAssistant, Content: "hi"},
+	}
+	input := messagesToResponseInputItems(messages)
+
+	for _, item := range input {
+		assert.Nil(t, item.OfReasoning, "should not emit reasoning item when EncryptedReasoning is empty")
+	}
 }
 
 func newAPIError(statusCode int, code string, message string) *openai.Error {

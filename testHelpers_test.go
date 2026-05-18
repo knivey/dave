@@ -91,7 +91,7 @@ func setupNoticesDefaults(t *testing.T) {
 
 func insertTestMessage(t *testing.T, sessionID int64, role, content string) {
 	t.Helper()
-	err := insertDBMessage(sessionID, role, content, nil, nil, nil, nil)
+	err := insertDBMessage(sessionID, role, content, nil, nil, nil, nil, nil)
 	require.NoError(t, err, "insertDBMessage")
 }
 

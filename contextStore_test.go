@@ -375,7 +375,7 @@ func TestDBToolCalls(t *testing.T) {
 	tcJSON := string(tcData)
 	toolCallID := "tc1"
 
-	err := insertDBMessage(sid, "assistant", "", &tcJSON, &toolCallID, nil, nil)
+	err := insertDBMessage(sid, "assistant", "", &tcJSON, &toolCallID, nil, nil, nil)
 	require.NoError(t, err, "insertDBMessage with tool calls failed")
 
 	msgs, err := loadDBSessionMessages(sid)

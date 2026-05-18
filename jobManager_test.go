@@ -964,10 +964,10 @@ func TestSwitchToSession_DBMessagesWithToolCalls(t *testing.T) {
 		{ID: "tc-1", Type: "function", Function: FunctionCall{Name: "test_tool", Arguments: `{"arg":"val"}`}},
 	})
 	toolCallsStr := string(toolCallsJSON)
-	insertDBMessage(sessionA, "system", "sys", nil, nil, nil, nil)
-	insertDBMessage(sessionA, "assistant", "using tool", &toolCallsStr, nil, nil, nil)
+	insertDBMessage(sessionA, "system", "sys", nil, nil, nil, nil, nil)
+	insertDBMessage(sessionA, "assistant", "using tool", &toolCallsStr, nil, nil, nil, nil)
 	toolCallID := "tc-1"
-	insertDBMessage(sessionA, "tool", "tool result", nil, &toolCallID, nil, nil)
+	insertDBMessage(sessionA, "tool", "tool result", nil, &toolCallID, nil, nil, nil)
 
 	_ = createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 

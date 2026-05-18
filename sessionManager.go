@@ -100,6 +100,10 @@ func (sm *SessionManager) AddMessage(sessionID int64, msg ChatMessage) error {
 	if msg.ReasoningContent != "" {
 		reasoningContent = &msg.ReasoningContent
 	}
+	var encryptedReasoning *string
+	if msg.EncryptedReasoning != "" {
+		encryptedReasoning = &msg.EncryptedReasoning
+	}
 	var multiContentJSON *string
 	if len(msg.MultiContent) > 0 {
 		if mcData, err := json.Marshal(msg.MultiContent); err == nil {
@@ -108,7 +112,7 @@ func (sm *SessionManager) AddMessage(sessionID int64, msg ChatMessage) error {
 		}
 	}
 
-	if err := insertDBMessage(sessionID, msg.Role, msg.Content, toolCallsJSON, toolCallID, reasoningContent, multiContentJSON); err != nil {
+	if err := insertDBMessage(sessionID, msg.Role, msg.Content, toolCallsJSON, toolCallID, reasoningContent, encryptedReasoning, multiContentJSON); err != nil {
 		return err
 	}
 
@@ -274,6 +278,9 @@ func messageFromDB(dm Message) ChatMessage {
 	}
 	if dm.ReasoningContent != nil {
 		msg.ReasoningContent = *dm.ReasoningContent
+	}
+	if dm.EncryptedReasoning != nil {
+		msg.EncryptedReasoning = *dm.EncryptedReasoning
 	}
 	if dm.ToolCalls != nil {
 		var toolCalls []ToolCall

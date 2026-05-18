@@ -73,16 +73,17 @@ type SessionSetting struct {
 }
 
 type Message struct {
-	ID               int64   `gorm:"primaryKey;autoIncrement"`
-	SessionID        int64   `gorm:"not null;index:idx_messages_session"`
-	Role             string  `gorm:"not null"`
-	Content          string  `gorm:"not null;type:text"`
-	ToolCalls        *string `gorm:"type:text"`
-	ToolCallID       *string
-	ReasoningContent *string `gorm:"type:text"`
-	MultiContent     *string `gorm:"type:text"`
-	IsAsyncResult    bool    `gorm:"default:false"`
-	SettingsID       *int64  `gorm:"index:idx_messages_settings"`
+	ID                 int64   `gorm:"primaryKey;autoIncrement"`
+	SessionID          int64   `gorm:"not null;index:idx_messages_session"`
+	Role               string  `gorm:"not null"`
+	Content            string  `gorm:"not null;type:text"`
+	ToolCalls          *string `gorm:"type:text"`
+	ToolCallID         *string
+	ReasoningContent   *string `gorm:"type:text"`
+	EncryptedReasoning *string `gorm:"type:text"`
+	MultiContent       *string `gorm:"type:text"`
+	IsAsyncResult      bool    `gorm:"default:false"`
+	SettingsID         *int64  `gorm:"index:idx_messages_settings"`
 	// Archived: when true, this message has been compacted into a summary and is
 	// no longer included in the active history sent to the LLM. Originals are
 	// preserved for the history viewer and future reconstruction. CompactionID
@@ -306,15 +307,16 @@ func updateDBSessionResponseID(sessionID int64, responseID *string) error {
 		Update("response_id", responseID).Error
 }
 
-func insertDBMessage(sessionID int64, role, content string, toolCallsJSON *string, toolCallID *string, reasoningContent *string, multiContentJSON *string) error {
+func insertDBMessage(sessionID int64, role, content string, toolCallsJSON *string, toolCallID *string, reasoningContent *string, encryptedReasoning *string, multiContentJSON *string) error {
 	msg := Message{
-		SessionID:        sessionID,
-		Role:             role,
-		Content:          content,
-		ToolCalls:        toolCallsJSON,
-		ToolCallID:       toolCallID,
-		ReasoningContent: reasoningContent,
-		MultiContent:     multiContentJSON,
+		SessionID:          sessionID,
+		Role:               role,
+		Content:            content,
+		ToolCalls:          toolCallsJSON,
+		ToolCallID:         toolCallID,
+		ReasoningContent:   reasoningContent,
+		EncryptedReasoning: encryptedReasoning,
+		MultiContent:       multiContentJSON,
 	}
 	if err := theDB.Create(&msg).Error; err != nil {
 		return err
@@ -741,6 +743,7 @@ func cloneDBSession(sourceSessionID int64, targetNetwork, targetChannel string, 
 			ToolCalls:          m.ToolCalls,
 			ToolCallID:         m.ToolCallID,
 			ReasoningContent:   m.ReasoningContent,
+			EncryptedReasoning: m.EncryptedReasoning,
 			MultiContent:       m.MultiContent,
 			IsAsyncResult:      m.IsAsyncResult,
 			Archived:           false,

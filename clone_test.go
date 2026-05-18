@@ -652,3 +652,35 @@ func TestIsAllDigits(t *testing.T) {
 	assert.False(t, isAllDigits("12a"))
 	assert.False(t, isAllDigits("nick"))
 }
+
+func TestCloneDBSession_EncryptedReasoning(t *testing.T) {
+	setupTestDB(t)
+
+	srcUserID := ensureTestUser(t, "net", "srcnick")
+	srcSid, err := sessionMgr.CreateSession("net", "#c", srcUserID, "testchat", "svc", "m")
+	require.NoError(t, err)
+
+	require.NoError(t, sessionMgr.AddMessage(srcSid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+	require.NoError(t, sessionMgr.AddMessage(srcSid, ChatMessage{Role: RoleUser, Content: "hi"}))
+	require.NoError(t, sessionMgr.AddMessage(srcSid, ChatMessage{
+		Role:               RoleAssistant,
+		Content:            "hello",
+		ReasoningContent:   "thinking...",
+		EncryptedReasoning: "enc_blob_abc",
+	}))
+
+	tgtUserID := ensureTestUser(t, "net", "tgt")
+	newSid, err := cloneDBSession(srcSid, "net", "#c", tgtUserID)
+	require.NoError(t, err)
+
+	newMsgs, err := loadDBSessionMessages(newSid)
+	require.NoError(t, err)
+
+	found := false
+	for _, m := range newMsgs {
+		if m.Role == RoleAssistant && m.EncryptedReasoning != nil && *m.EncryptedReasoning == "enc_blob_abc" {
+			found = true
+		}
+	}
+	assert.True(t, found, "cloned session should preserve encrypted reasoning")
+}

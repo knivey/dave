@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -657,4 +658,49 @@ func TestRepeatCompaction_DoesNotInflateArchivedCount(t *testing.T) {
 	require.NoError(t, err)
 	assert.Greater(t, len(allRows), len(all),
 		"raw loader should still see superseded rows on disk")
+}
+
+func TestCompactSession_StripsEncryptedReasoningFromArchived(t *testing.T) {
+	setupTestDB(t)
+
+	stub := newSummarizerStubServer(t, "Summary text.")
+	defer stub.Close()
+	prevServices := config.Services
+	config.Services = map[string]Service{
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second, MaxHistory: 100},
+	}
+	defer func() { config.Services = prevServices }()
+
+	sid := createTestSession(t, "net", "#c", "nick", "cmd", "stubsvc", "stubmodel")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+	for i := 0; i < 6; i++ {
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "u"}))
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{
+			Role:               RoleAssistant,
+			Content:            "a",
+			EncryptedReasoning: fmt.Sprintf("enc_%d", i),
+		}))
+	}
+
+	cfg := AIConfig{Service: "stubsvc", Model: "m", Timeout: 5 * time.Second, MaxTokens: 256}
+	_, err := sessionMgr.CompactSession(context.Background(), CompactSessionInputs{
+		SessionID: sid, Network: Network{Name: "net"}, Channel: "#c", UserNick: "nick", Trigger: "manual",
+	}, cfg)
+	require.NoError(t, err)
+
+	var archivedMsgs []Message
+	require.NoError(t, theDB.Where("session_id = ? AND archived = ? AND superseded = ?", sid, true, false).Find(&archivedMsgs).Error)
+	for _, m := range archivedMsgs {
+		assert.Nil(t, m.EncryptedReasoning, "archived message #%d should have encrypted_reasoning stripped", m.ID)
+	}
+
+	liveMsgs, err := loadDBSessionMessages(sid)
+	require.NoError(t, err)
+	found := false
+	for _, m := range liveMsgs {
+		if m.Role == RoleAssistant && m.EncryptedReasoning != nil && *m.EncryptedReasoning != "" {
+			found = true
+		}
+	}
+	assert.True(t, found, "preserved tail should retain encrypted reasoning")
 }

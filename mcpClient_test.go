@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	logxi "github.com/mgutz/logxi/v1"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -814,6 +815,257 @@ func saveAndResetMCPServers(t *testing.T) {
 	})
 	mcpServers = make(map[string]*MCPServer)
 	mcpToolToServer = make(map[string]string)
+}
+
+func TestStripInjectFieldsFromSchema(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  map[string]any
+		expect map[string]any
+	}{
+		{
+			name: "strips inject fields from properties and required",
+			input: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"key":                  map[string]any{"type": "string"},
+					"_dave_inject_network": map[string]any{"type": "string"},
+					"_dave_inject_channel": map[string]any{"type": "string"},
+					"_dave_inject_user_id": map[string]any{"type": "integer"},
+					"_dave_inject_nick":    map[string]any{"type": "string"},
+				},
+				"required": []any{"key", "_dave_inject_network", "_dave_inject_channel", "_dave_inject_user_id", "_dave_inject_nick"},
+			},
+			expect: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"key": map[string]any{"type": "string"},
+				},
+				"required": []any{"key"},
+			},
+		},
+		{
+			name: "no inject fields leaves schema unchanged",
+			input: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"query": map[string]any{"type": "string"},
+					"limit": map[string]any{"type": "integer"},
+				},
+				"required": []any{"query"},
+			},
+			expect: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"query": map[string]any{"type": "string"},
+					"limit": map[string]any{"type": "integer"},
+				},
+				"required": []any{"query"},
+			},
+		},
+		{
+			name:   "empty schema",
+			input:  map[string]any{},
+			expect: map[string]any{},
+		},
+		{
+			name: "missing required array",
+			input: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"_dave_inject_network": map[string]any{"type": "string"},
+				},
+			},
+			expect: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stripInjectFieldsFromSchema(tt.input)
+			assert.Equal(t, tt.expect, tt.input)
+		})
+	}
+}
+
+func TestGetMCPToolsStripInjectFields(t *testing.T) {
+	mcpServers = make(map[string]*MCPServer)
+	mcpToolToServer = make(map[string]string)
+
+	srv := &MCPServer{
+		Config: MCPConfig{Timeout: 10 * time.Second},
+		Tools: []*mcp.Tool{
+			{
+				Name:        "db_query",
+				Description: "Query the database",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"sql":                  map[string]any{"type": "string"},
+						"_dave_inject_network": map[string]any{"type": "string"},
+						"_dave_inject_channel": map[string]any{"type": "string"},
+						"_dave_inject_user_id": map[string]any{"type": "integer"},
+						"_dave_inject_nick":    map[string]any{"type": "string"},
+					},
+					"required": []any{"sql", "_dave_inject_network", "_dave_inject_channel"},
+				},
+			},
+		},
+	}
+	mcpServers["db-mcp"] = srv
+	mcpToolToServer["db_query"] = "db-mcp"
+
+	tools := getMCPTools([]string{"db-mcp"}, nil)
+	require.Len(t, tools, 1)
+
+	params := tools[0].Function.Parameters.(map[string]any)
+	props := params["properties"].(map[string]any)
+
+	assert.Contains(t, props, "sql")
+	assert.NotContains(t, props, "_dave_inject_network")
+	assert.NotContains(t, props, "_dave_inject_channel")
+	assert.NotContains(t, props, "_dave_inject_user_id")
+	assert.NotContains(t, props, "_dave_inject_nick")
+
+	required := params["required"].([]any)
+	assert.Equal(t, []any{"sql"}, required)
+}
+
+func TestGetToolInjectFields(t *testing.T) {
+	saveAndResetMCPServers(t)
+
+	mcpServers["db-mcp"] = &MCPServer{
+		Config: MCPConfig{Timeout: 10 * time.Second},
+		Tools: []*mcp.Tool{
+			{
+				Name: "db_query",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"sql":                  map[string]any{"type": "string"},
+						"_dave_inject_network": map[string]any{"type": "string"},
+						"_dave_inject_channel": map[string]any{"type": "string"},
+						"_dave_inject_user_id": map[string]any{"type": "integer"},
+						"_dave_inject_nick":    map[string]any{"type": "string"},
+					},
+				},
+			},
+			{
+				Name: "db_no_inject",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"sql": map[string]any{"type": "string"},
+					},
+				},
+			},
+		},
+	}
+	mcpToolToServer["db_query"] = "db-mcp"
+	mcpToolToServer["db_no_inject"] = "db-mcp"
+
+	t.Run("returns inject fields for tool with inject fields", func(t *testing.T) {
+		fields := getToolInjectFields("db_query")
+		require.NotNil(t, fields)
+		assert.Equal(t, "network", fields["_dave_inject_network"])
+		assert.Equal(t, "channel", fields["_dave_inject_channel"])
+		assert.Equal(t, "user_id", fields["_dave_inject_user_id"])
+		assert.Equal(t, "nick", fields["_dave_inject_nick"])
+	})
+
+	t.Run("returns nil for tool without inject fields", func(t *testing.T) {
+		fields := getToolInjectFields("db_no_inject")
+		assert.Nil(t, fields)
+	})
+
+	t.Run("returns nil for unknown tool", func(t *testing.T) {
+		fields := getToolInjectFields("nonexistent_tool")
+		assert.Nil(t, fields)
+	})
+}
+
+func TestInjectScopeArgs(t *testing.T) {
+	saveAndResetMCPServers(t)
+
+	mcpServers["db-mcp"] = &MCPServer{
+		Config: MCPConfig{Timeout: 10 * time.Second},
+		Tools: []*mcp.Tool{
+			{
+				Name: "db_query",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"sql":                  map[string]any{"type": "string"},
+						"_dave_inject_network": map[string]any{"type": "string"},
+						"_dave_inject_channel": map[string]any{"type": "string"},
+						"_dave_inject_user_id": map[string]any{"type": "integer"},
+						"_dave_inject_nick":    map[string]any{"type": "string"},
+					},
+				},
+			},
+		},
+	}
+	mcpToolToServer["db_query"] = "db-mcp"
+
+	cr := &chatRunner{
+		network: Network{Name: "Libera"},
+		channel: "#test",
+		nick:    "testuser",
+		userID:  42,
+		logger:  logxi.New("test"),
+	}
+
+	toolArgs := map[string]any{
+		"sql": "SELECT * FROM users",
+	}
+
+	injectScopeArgs(toolArgs, "db_query", cr)
+
+	assert.Equal(t, "SELECT * FROM users", toolArgs["sql"])
+	assert.Equal(t, "Libera", toolArgs["_dave_inject_network"])
+	assert.Equal(t, "#test", toolArgs["_dave_inject_channel"])
+	assert.Equal(t, int64(42), toolArgs["_dave_inject_user_id"])
+	assert.Equal(t, "testuser", toolArgs["_dave_inject_nick"])
+}
+
+func TestInjectScopeArgs_NoInjectFields(t *testing.T) {
+	saveAndResetMCPServers(t)
+
+	mcpServers["db-mcp"] = &MCPServer{
+		Config: MCPConfig{Timeout: 10 * time.Second},
+		Tools: []*mcp.Tool{
+			{
+				Name: "db_query",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"sql": map[string]any{"type": "string"},
+					},
+				},
+			},
+		},
+	}
+	mcpToolToServer["db_query"] = "db-mcp"
+
+	cr := &chatRunner{
+		network: Network{Name: "Libera"},
+		channel: "#test",
+		nick:    "testuser",
+		userID:  42,
+		logger:  logxi.New("test"),
+	}
+
+	toolArgs := map[string]any{
+		"sql": "SELECT * FROM users",
+	}
+
+	injectScopeArgs(toolArgs, "db_query", cr)
+
+	assert.Equal(t, "SELECT * FROM users", toolArgs["sql"])
+	assert.Len(t, toolArgs, 1)
 }
 
 func TestSignalMCPServer_UnknownServer(t *testing.T) {

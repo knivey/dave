@@ -665,6 +665,8 @@ func getMCPTools(serverNames []string, hiddenTools []string) []Tool {
 				params["properties"] = map[string]any{}
 			}
 
+			stripInjectFieldsFromSchema(params)
+
 			tools = append(tools, Tool{
 				Type: "function",
 				Function: &FunctionDefinition{
@@ -677,6 +679,101 @@ func getMCPTools(serverNames []string, hiddenTools []string) []Tool {
 	}
 
 	return tools
+}
+
+const daveInjectPrefix = "_dave_inject_"
+
+func stripInjectFieldsFromSchema(params map[string]any) {
+	props, ok := params["properties"].(map[string]any)
+	if !ok {
+		return
+	}
+
+	required, _ := params["required"].([]any)
+	newRequired := make([]any, 0, len(required))
+
+	for name := range props {
+		if strings.HasPrefix(name, daveInjectPrefix) {
+			delete(props, name)
+			continue
+		}
+	}
+	for _, name := range required {
+		nameStr, ok := name.(string)
+		if !ok || !strings.HasPrefix(nameStr, daveInjectPrefix) {
+			newRequired = append(newRequired, name)
+		}
+	}
+
+	if len(newRequired) < len(required) {
+		params["required"] = newRequired
+	}
+}
+
+func getToolInjectFields(toolName string) map[string]string {
+	serverName := getMCPServerForTool(toolName)
+	if serverName == "" {
+		return nil
+	}
+
+	mcpServersMu.Lock()
+	srv, ok := mcpServers[serverName]
+	mcpServersMu.Unlock()
+	if !ok {
+		return nil
+	}
+
+	for _, tool := range srv.Tools {
+		if tool.Name != toolName {
+			continue
+		}
+
+		schema, ok := tool.InputSchema.(map[string]any)
+		if !ok {
+			return nil
+		}
+
+		props, ok := schema["properties"].(map[string]any)
+		if !ok {
+			return nil
+		}
+
+		fields := make(map[string]string)
+		for name := range props {
+			if strings.HasPrefix(name, daveInjectPrefix) {
+				fields[name] = strings.TrimPrefix(name, daveInjectPrefix)
+			}
+		}
+
+		if len(fields) == 0 {
+			return nil
+		}
+		return fields
+	}
+
+	return nil
+}
+
+func injectScopeArgs(toolArgs map[string]any, toolName string, cr *chatRunner) {
+	fields := getToolInjectFields(toolName)
+	if fields == nil {
+		return
+	}
+
+	scopeValues := map[string]any{
+		"network": cr.network.Name,
+		"channel": cr.channel,
+		"user_id": cr.userID,
+		"nick":    cr.nick,
+	}
+
+	for injectField, scopeKey := range fields {
+		if val, ok := scopeValues[scopeKey]; ok {
+			toolArgs[injectField] = val
+		}
+	}
+
+	cr.logger.Debug("injected scope args", "tool", toolName, "fields", fields)
 }
 
 func mcpToolResultToText(result *mcp.CallToolResult) string {

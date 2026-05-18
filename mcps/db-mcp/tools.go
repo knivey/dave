@@ -93,7 +93,9 @@ func (h *ToolHandlers) handlePutNote(ctx context.Context, req *mcp.CallToolReque
 		return nil, PutNoteOutput{}, fmt.Errorf("failed to insert note: %w", err)
 	}
 
-	dbPruneUserNotes(h.db, input.Network, input.UserID, cfg.Database.MaxNotesPerUser)
+	if _, err := dbPruneUserNotes(h.db, input.Network, input.UserID, cfg.Database.MaxNotesPerUser); err != nil && logger != nil {
+		logger.Warn("auto-prune failed", "error", err)
+	}
 
 	return nil, PutNoteOutput{
 		ID:        note.ID,

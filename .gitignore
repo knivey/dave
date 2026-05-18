@@ -14,6 +14,9 @@ mcps/img-mcp/data/*
 mcps/yt-mcp/yt-mcp
 mcps/yt-mcp/config.toml
 mcps/yt-mcp/proxies.txt
+mcps/db-mcp/db-mcp
+mcps/db-mcp/config.toml
+mcps/db-mcp/data/*
 data/*
 logs/
 tools/backfill-session-meta/backfill-session-meta

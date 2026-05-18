@@ -68,8 +68,9 @@ func TestApplyNetworkPolicy(t *testing.T) {
 		"liberal": {BaseURL: "https://api.example.com", Key: "k", Model: "m", SystemPrompt: "s"},
 	}
 	cfg.NetworkPolicies = map[string]NetworkPolicy{
-		"libera": {Enhancement: "safe", Force: true},
-		"graped": {Enhancement: "liberal", Force: false},
+		"libera":     {Enhancement: "safe", Force: true},
+		"graped":     {Enhancement: "liberal", Force: false},
+		"empty-test": {Enhancement: "", Force: true},
 	}
 
 	queue, cleanup := setupTestQueue(t, Config{})
@@ -137,6 +138,14 @@ func TestApplyNetworkPolicy(t *testing.T) {
 			inputEnhancement:  "",
 			inputJobType:      JobTypeGenerate,
 			expectEnhancement: "",
+			expectJobType:     JobTypeGenerate,
+		},
+		{
+			name:              "policy with empty enhancement passes through",
+			network:           "empty-test",
+			inputEnhancement:  "safe",
+			inputJobType:      JobTypeGenerate,
+			expectEnhancement: "safe",
 			expectJobType:     JobTypeGenerate,
 		},
 	}

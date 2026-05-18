@@ -267,6 +267,8 @@ func (lw *LogWriter) ensureDB(key string) (*gorm.DB, error) {
 		if sqlDB, err := lw.db.DB(); err == nil {
 			sqlDB.Close()
 		}
+		lw.db = nil
+		lw.current = ""
 	}
 	db, err := lw.openDB(key)
 	if err != nil {

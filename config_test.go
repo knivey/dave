@@ -1509,3 +1509,51 @@ func TestRegisterCommandsLocked_InvalidRegex(t *testing.T) {
 		assert.Equal(t, orig, configCmds, "configCmds should not be mutated on error")
 	})
 }
+
+func TestLoadConfigDirLoggingDefaults(t *testing.T) {
+	mainTOML := `
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+	dir := createTestConfigDir(t, mainTOML, nil)
+	defer os.RemoveAll(dir)
+
+	cfg := loadConfigDirOrDie(dir)
+	logging := cfg.Logging
+	assert.False(t, logging.Enabled, "Enabled should default to false")
+	assert.Equal(t, "data/logs", logging.Dir, "Dir should default to data/logs")
+	assert.Equal(t, "monthly", logging.Rotation, "Rotation should default to monthly")
+	assert.Equal(t, 10000, logging.BufferSize, "BufferSize should default to 10000")
+	assert.Equal(t, 500, logging.BatchSize, "BatchSize should default to 500")
+	assert.Equal(t, 2*time.Second, logging.FlushInterval, "FlushInterval should default to 2s")
+}
+
+func TestLoadConfigDirLoggingEnabled(t *testing.T) {
+	mainTOML := `
+[logging]
+enabled = true
+dir = "custom/logs"
+rotation = "yearly"
+buffer_size = 5000
+batch_size = 200
+flush_interval = "5s"
+
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+	dir := createTestConfigDir(t, mainTOML, nil)
+	defer os.RemoveAll(dir)
+
+	cfg := loadConfigDirOrDie(dir)
+	logging := cfg.Logging
+	assert.True(t, logging.Enabled, "Enabled should be true")
+	assert.Equal(t, "custom/logs", logging.Dir, "Dir should be custom/logs")
+	assert.Equal(t, "yearly", logging.Rotation, "Rotation should be yearly")
+	assert.Equal(t, 5000, logging.BufferSize, "BufferSize should be 5000")
+	assert.Equal(t, 200, logging.BatchSize, "BatchSize should be 200")
+	assert.Equal(t, 5*time.Second, logging.FlushInterval, "FlushInterval should be 5s")
+}

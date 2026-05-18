@@ -42,6 +42,20 @@ result_ttl = "1h"
 # Not reloadable — changes require restart.
 api_key = "CHANGE_ME_TO_A_STRONG_RANDOM_SECRET"
 
+# Network policies map IRC network names to enhancement profiles.
+# When dave sends a request from a known network, the policy overrides
+# which enhancement profile is used. If force=true, even raw generate_image
+# calls are run through enhancement first.
+#
+# [network_policy.<network-name>]
+# enhancement = "name"     # Required. Name of an [enhancement.*] profile to use.
+# force = false            # If true, force enhancement on generate_image calls too.
+
+# Example: enforce content policy on Libera
+# [network_policy.libera]
+# enhancement = "default"
+# force = true
+
 [enhancement.default]
 # Prompt enhancement settings (optional)
 description = "General purpose image prompt enhancer"

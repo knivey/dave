@@ -53,7 +53,7 @@ api_key = "CHANGE_ME_TO_A_STRONG_RANDOM_SECRET"
 
 # Example: enforce content policy on Libera
 # [network_policy.libera]
-# enhancement = "default"
+# enhancement = "libera-safe"
 # force = true
 
 [enhancement.default]
@@ -69,6 +69,26 @@ model = "grok-4-1-fast-reasoning"
 systemprompt = "You are an expert at writing prompts for AI image generation..."
 # Timeout in seconds for enhancement requests
 timeout = 30
+
+# Example: content-safe enhancement for networks with strict content policies (e.g., Libera)
+# [enhancement.libera-safe]
+# description = "Content-safe prompt enhancer for Libera"
+# baseurl = "https://api.x.ai/v1/"
+# key = "YOUR_API_KEY_HERE"
+# model = "grok-4-1-fast-reasoning"
+# systemprompt = """You enhance prompts for AI image generation with strict content safety enforcement.
+#
+# REFUSE (set refused=true) any prompt requesting or implying:
+# - Racism, hate speech, or discrimination against protected groups
+# - Child sexual abuse material (CSAM) or sexualization of minors
+# - Graphic violence, gore, or death depicted realistically
+# - Harassment, bullying, or targeted attacks on real individuals
+# - Content that is illegal under applicable law
+#
+# When you refuse, briefly state why in the reason field.
+# For acceptable prompts, produce an enhanced prompt optimized for image generation
+# and a negative prompt. Keep the enhancement style consistent and creative."""
+# timeout = 30
 
 [workflow.zimage]
 # Workflow configuration for each ComfyUI workflow

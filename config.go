@@ -142,20 +142,21 @@ type SASLConfig struct {
 }
 
 type Network struct {
-	Name           string
-	Nick           string
-	User           string `toml:"user"`
-	RealName       string `toml:"real_name"`
-	Servers        []Server
-	nextServer     int
-	Channels       map[string]ChannelConfig
-	Enabled        *bool
-	Throttle       time.Duration
-	ReconnectDelay *time.Duration `toml:"reconnect_delay"`
-	Trigger        string
-	Quitmsg        string
-	SASL           *SASLConfig `toml:"sasl"`
-	Casemapping    string      `toml:"-"`
+	Name             string
+	Nick             string
+	User             string `toml:"user"`
+	RealName         string `toml:"real_name"`
+	Servers          []Server
+	nextServer       int
+	Channels         map[string]ChannelConfig
+	Enabled          *bool
+	Throttle         time.Duration
+	ReconnectDelay   *time.Duration `toml:"reconnect_delay"`
+	Trigger          string
+	Quitmsg          string
+	SASL             *SASLConfig `toml:"sasl"`
+	DisabledCommands []string    `toml:"disabled_commands"`
+	Casemapping      string      `toml:"-"`
 }
 
 func (n *Network) GetChannelConfig(channel string) ChannelConfig {
@@ -448,10 +449,34 @@ func (cfg *AIConfig) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, aux); err != nil {
 		return err
 	}
-	cfg.SystemTmpl = nil
+
 	return nil
 }
 
+func validateNetworkDisabledCommands(config *Config) error {
+	known := make(map[string]bool)
+	for _, name := range builtinCommandNames {
+		known[name] = true
+	}
+	for name := range config.Commands.Completions {
+		known[name] = true
+	}
+	for name := range config.Commands.Chats {
+		known[name] = true
+	}
+	for name := range config.Commands.Tools {
+		known[name] = true
+	}
+
+	for netName, network := range config.Networks {
+		for _, cmd := range network.DisabledCommands {
+			if !known[cmd] {
+				return fmt.Errorf("networks.%s disabled_commands: %q is not a known command", netName, cmd)
+			}
+		}
+	}
+	return nil
+}
 func (n *Network) getNextServer() (Server, error) {
 	if len(n.Servers) == 0 {
 		return Server{}, fmt.Errorf("network %q has no servers configured", n.Name)
@@ -568,6 +593,10 @@ func loadConfigDir(dir string) (Config, error) {
 		config.SessionsDisplayLimit = 10
 	}
 
+	if err := validateNetworkDisabledCommands(&config); err != nil {
+		return config, err
+	}
+
 	return config, nil
 }
 
@@ -678,6 +707,8 @@ func loadTemplateVarsFile(dir string, config *Config) error {
 	return nil
 }
 
+// loadReloadableDir reloads MCPs, services, prompt enhancements, notices, and command definitions.
+// Networks (including disabled_commands) are NOT reloaded — they are startup-only from config.toml.
 func loadReloadableDir(dir string, config *Config) error {
 	var tmpConfig Config
 

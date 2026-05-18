@@ -299,8 +299,15 @@ var builtInCmds = CmdMap{
 	},
 }
 var configCmds CmdMap
+var configCmdNames map[*regexp.Regexp]string
 var rateExemptCmds map[*regexp.Regexp]bool
 var chatCmds map[*regexp.Regexp]bool
+
+var builtinCommandNames = []string{
+	"stop", "help", "sessions", "history",
+	"mystats", "delete", "resume", "jobs",
+	"support", "compact", "clone",
+}
 
 var builtInNames = map[*regexp.Regexp]string{
 	stop_re:     "stop",
@@ -327,6 +334,15 @@ func isBuiltinDisabled(name string) bool {
 	return false
 }
 
+func isNetworkCommandDisabled(network Network, name string) bool {
+	for _, d := range network.DisabledCommands {
+		if d == name {
+			return true
+		}
+	}
+	return false
+}
+
 func registerCommands(cmds Commands) error {
 	commandsMutex.Lock()
 	defer commandsMutex.Unlock()
@@ -335,31 +351,34 @@ func registerCommands(cmds Commands) error {
 
 func registerCommandsLocked(cmds Commands) error {
 	newConfigCmds := CmdMap{}
+	newConfigCmdNames := make(map[*regexp.Regexp]string)
 	newExemptCmds := make(map[*regexp.Regexp]bool)
 	newChatCmds := make(map[*regexp.Regexp]bool)
 
-	for _, c := range cmds.Completions {
+	for name, c := range cmds.Completions {
 		logger.Debug("added Completions command", c)
 		re, err := regexp.Compile("^" + c.Regex + " (.+)$")
 		if err != nil {
 			return fmt.Errorf("invalid regex for completions command %q: %w", c.Regex, err)
 		}
+		newConfigCmdNames[re] = name
 		newConfigCmds[re] = func(network Network, client *girc.Client, e girc.Event, ctx context.Context, output chan<- string, args ...string) {
 			completion(network, client, e, c, ctx, output, args...)
 		}
 	}
-	for _, c := range cmds.Chats {
+	for name, c := range cmds.Chats {
 		logger.Debug("added Chats command", c)
 		re, err := regexp.Compile("^" + c.Regex + " (.+)$")
 		if err != nil {
 			return fmt.Errorf("invalid regex for chats command %q: %w", c.Regex, err)
 		}
+		newConfigCmdNames[re] = name
 		newConfigCmds[re] = func(network Network, client *girc.Client, e girc.Event, ctx context.Context, output chan<- string, args ...string) {
 			chat(network, client, e, c, ctx, output, nil, args...)
 		}
 		newChatCmds[re] = true
 	}
-	for _, c := range cmds.Tools {
+	for name, c := range cmds.Tools {
 		logger.Debug("added Tools command", c)
 		pattern := "^" + c.Regex + "$"
 		if c.Arg != "" {
@@ -369,6 +388,7 @@ func registerCommandsLocked(cmds Commands) error {
 		if err != nil {
 			return fmt.Errorf("invalid regex for tools command %q: %w", c.Regex, err)
 		}
+		newConfigCmdNames[re] = name
 		newConfigCmds[re] = func(network Network, client *girc.Client, e girc.Event, ctx context.Context, output chan<- string, args ...string) {
 			mcpCmd(network, client, e, c, ctx, output, args...)
 		}
@@ -378,6 +398,7 @@ func registerCommandsLocked(cmds Commands) error {
 	}
 
 	configCmds = newConfigCmds
+	configCmdNames = newConfigCmdNames
 	rateExemptCmds = newExemptCmds
 	chatCmds = newChatCmds
 	return nil

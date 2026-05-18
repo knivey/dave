@@ -76,6 +76,7 @@
 #   reconnect_delay    (duration, default: "60s") Delay between reconnection attempts (first reconnect is immediate; "0s" = no delay)
 #   quitmsg            (string, inherits root) Network-specific quit message
 #   trigger            (string, inherits root) Network-specific command trigger
+#   disabled_commands  (list of strings)       Command names to block on this network (e.g. ["qwen", "zimage"])
 #
 # [networks.<name>.sasl] options:
 #   user               (string)                SASL username (enables SASL PLAIN authentication)
@@ -174,6 +175,7 @@
 # reconnect_delay = "60s"
 # quitmsg = "bye"
 # trigger = "."
+# disabled_commands = []
 #
 # [networks.example.sasl]
 # user = "mybot"

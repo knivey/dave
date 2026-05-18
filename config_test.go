@@ -7,6 +7,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/lrstanley/girc"
 	logxi "github.com/mgutz/logxi/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1545,6 +1546,227 @@ func TestRegisterCommandsLocked_InvalidRegex(t *testing.T) {
 		}
 		_ = registerCommandsLocked(cmds)
 		assert.Equal(t, orig, configCmds, "configCmds should not be mutated on error")
+	})
+}
+
+func TestIsNetworkCommandDisabled(t *testing.T) {
+	tests := []struct {
+		name     string
+		disabled []string
+		cmd      string
+		expect   bool
+	}{
+		{"empty list", nil, "qwen", false},
+		{"command in list", []string{"qwen", "zimage"}, "qwen", true},
+		{"command not in list", []string{"qwen", "zimage"}, "grok", false},
+		{"empty command name", []string{"qwen"}, "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			n := Network{DisabledCommands: tt.disabled}
+			assert.Equal(t, tt.expect, isNetworkCommandDisabled(n, tt.cmd))
+		})
+	}
+}
+
+func TestLoadConfigDirNetworkDisabledCommands(t *testing.T) {
+	t.Run("network with disabled_commands using builtin names", func(t *testing.T) {
+		mainTOML := `
+[networks.testnet]
+nick = "bot"
+disabled_commands = ["stop", "help"]
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+		dir := createTestConfigDir(t, mainTOML, nil)
+		defer os.RemoveAll(dir)
+
+		cfg := loadConfigDirOrDie(dir)
+		net := cfg.Networks["testnet"]
+		assert.Equal(t, []string{"stop", "help"}, net.DisabledCommands)
+	})
+
+	t.Run("network without disabled_commands defaults to nil", func(t *testing.T) {
+		mainTOML := `
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+		dir := createTestConfigDir(t, mainTOML, nil)
+		defer os.RemoveAll(dir)
+
+		cfg := loadConfigDirOrDie(dir)
+		net := cfg.Networks["testnet"]
+		assert.Nil(t, net.DisabledCommands)
+	})
+}
+
+func TestRegisterCommandsLocked_PopulatesConfigCmdNames(t *testing.T) {
+	if logger == nil {
+		logger = logxi.New("test")
+		logger.SetLevel(logxi.LevelAll)
+	}
+
+	cmds := Commands{
+		Completions: map[string]AIConfig{
+			"comp1": {Regex: `comp1`},
+		},
+		Chats: map[string]AIConfig{
+			"chat1": {Regex: `chat1`},
+		},
+		Tools: map[string]MCPCommandConfig{
+			"tool1": {Regex: `tool1`, MCP: "mcp", Tool: "test"},
+		},
+	}
+	err := registerCommandsLocked(cmds)
+	require.NoError(t, err)
+
+	commandsMutex.RLock()
+	defer commandsMutex.RUnlock()
+
+	names := make(map[string]bool)
+	for _, name := range configCmdNames {
+		names[name] = true
+	}
+	assert.True(t, names["comp1"], "configCmdNames should contain comp1")
+	assert.True(t, names["chat1"], "configCmdNames should contain chat1")
+	assert.True(t, names["tool1"], "configCmdNames should contain tool1")
+	assert.Len(t, configCmdNames, 3)
+}
+
+func TestHandleTrigger_DisabledCommandReturnsEarly(t *testing.T) {
+	if logger == nil {
+		logger = logxi.New("test")
+		logger.SetLevel(logxi.LevelAll)
+	}
+
+	cmds := Commands{
+		Chats: map[string]AIConfig{
+			"mychat": {Regex: `mychat`, Service: "svc", Model: "m"},
+		},
+	}
+	err := registerCommandsLocked(cmds)
+	require.NoError(t, err)
+
+	network := Network{
+		Name:             "testnet",
+		Trigger:          ".",
+		DisabledCommands: []string{"mychat"},
+	}
+
+	client := girc.New(girc.Config{
+		Server: "localhost",
+		Port:   6667,
+		Nick:   "testbot",
+	})
+
+	event := girc.Event{
+		Source: &girc.Source{Name: "testuser", Ident: "u", Host: "h"},
+		Params: []string{"#test"},
+	}
+
+	stripped := "mychat hello world"
+
+	assert.NotPanics(t, func() {
+		handleTrigger(network, client, event, "#test", ".mychat hello world", stripped)
+	}, "disabled command should return early before reaching DB/client code")
+}
+
+func TestHandleTrigger_DisabledBuiltinCommand(t *testing.T) {
+	if logger == nil {
+		logger = logxi.New("test")
+		logger.SetLevel(logxi.LevelAll)
+	}
+
+	network := Network{
+		Name:             "testnet",
+		Trigger:          ".",
+		DisabledCommands: []string{"stop"},
+	}
+
+	client := girc.New(girc.Config{
+		Server: "localhost",
+		Port:   6667,
+		Nick:   "testbot",
+	})
+
+	event := girc.Event{
+		Source: &girc.Source{Name: "testuser", Ident: "u", Host: "h"},
+		Params: []string{"#test"},
+	}
+
+	stripped := "stop"
+
+	assert.NotPanics(t, func() {
+		handleTrigger(network, client, event, "#test", ".stop", stripped)
+	}, "disabled builtin should return early before reaching DB/client code")
+}
+
+func TestLoadConfigDirDisabledCommandsValidation(t *testing.T) {
+	t.Run("valid disabled_commands loads successfully", func(t *testing.T) {
+		mainTOML := `
+[networks.testnet]
+nick = "bot"
+disabled_commands = ["mychat"]
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+		chatsTOML := `
+[mychat]
+regex = "mychat"
+service = "svc"
+model = "m"
+`
+		servicesTOML := `
+[svc]
+api_base = "http://localhost"
+api_key = "test"
+`
+		dir := createTestConfigDir(t, mainTOML, map[string]string{
+			"chats.toml":    chatsTOML,
+			"services.toml": servicesTOML,
+		})
+		defer os.RemoveAll(dir)
+
+		cfg, err := loadConfigDir(dir)
+		require.NoError(t, err)
+		net := cfg.Networks["testnet"]
+		assert.Equal(t, []string{"mychat"}, net.DisabledCommands)
+	})
+
+	t.Run("unknown command in disabled_commands returns error", func(t *testing.T) {
+		mainTOML := `
+[networks.testnet]
+nick = "bot"
+disabled_commands = ["nonexistent"]
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+		dir := createTestConfigDir(t, mainTOML, nil)
+		defer os.RemoveAll(dir)
+
+		_, err := loadConfigDir(dir)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "disabled_commands")
+		assert.Contains(t, err.Error(), "nonexistent")
+		assert.Contains(t, err.Error(), "not a known command")
+	})
+
+	t.Run("builtin name in disabled_commands is valid", func(t *testing.T) {
+		mainTOML := `
+[networks.testnet]
+nick = "bot"
+disabled_commands = ["stop", "help"]
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+		dir := createTestConfigDir(t, mainTOML, nil)
+		defer os.RemoveAll(dir)
+
+		_, err := loadConfigDir(dir)
+		require.NoError(t, err)
 	})
 }
 

@@ -258,7 +258,7 @@ func handleTrigger(network Network, client *girc.Client, event girc.Event, chann
 		if r.Match([]byte(stripped)) {
 			match = &cmdMatch{
 				cmd: cmd, re: r, args: extractSubmatchArgs(r, stripped),
-				builtin: true, disabled: isBuiltinDisabled(builtInNames[r]),
+				builtin: true, disabled: isBuiltinDisabled(builtInNames[r]) || isNetworkCommandDisabled(network, builtInNames[r]),
 			}
 			break
 		}
@@ -266,7 +266,8 @@ func handleTrigger(network Network, client *girc.Client, event girc.Event, chann
 	if match == nil {
 		for r, cmd := range configCmds {
 			if r.Match([]byte(stripped)) {
-				match = &cmdMatch{cmd: cmd, re: r, args: extractSubmatchArgs(r, stripped)}
+				name := configCmdNames[r]
+				match = &cmdMatch{cmd: cmd, re: r, args: extractSubmatchArgs(r, stripped), disabled: isNetworkCommandDisabled(network, name)}
 				break
 			}
 		}

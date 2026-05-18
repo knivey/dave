@@ -8,6 +8,8 @@ Go IRC chatbot for OpenAI-compatible APIs, Stable Diffusion, ComfyUI image gen. 
 
 **NEVER** use `git add -f` to force-add files that are in `.gitignore`. The `.gitignore` exists for a reason (secret keys, environment configs, build artifacts). If `git add` refuses to track a file, respect that — do not override it.
 
+**NEVER skip code reviews.** Code reviews via the `requesting-code-review` skill are MANDATORY after completing any task — no exceptions. "It's simple", "it's too small", "I already tested it", or "the tests pass" are NOT valid reasons to skip review. Every completed task MUST be reviewed before moving on or declaring work done. If you are tempted to skip a review, stop and do it anyway.
+
 **Shutdown path is single-source.** The only shutdown logic lives in the `shutdown()` function in `main.go`. The SIGINT signal handler and TUI `requestShutdown()` in `tui.go` both call `shutdown()` — they do NOT duplicate cleanup code. Any new cleanup steps (closing connections, flushing buffers, etc.) must be added to `shutdown()` in `main.go` ONLY. Do not create parallel shutdown paths.
 
 ## Design Docs

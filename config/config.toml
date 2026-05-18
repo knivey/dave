@@ -77,6 +77,10 @@
 #   quitmsg            (string, inherits root) Network-specific quit message
 #   trigger            (string, inherits root) Network-specific command trigger
 #
+# [networks.<name>.sasl] options:
+#   user               (string)                SASL username (enables SASL PLAIN authentication)
+#   pass               (string)                SASL password
+#
 # [networks.<name>.channels."<#channel>"] options:
 #   key                (string)                Channel key/password for +k channels
 #   pastebin           (bool, default: false)  Auto-paste long messages
@@ -87,7 +91,7 @@
 #   host               (string)                Server hostname
 #   ssl                (bool, default: false)  Use TLS
 #   port               (int, default: 6697 ssl / 6667 plain)
-#   pass               (string)                SASL or server password
+#   pass               (string)                Server password (for SASL, use [networks.<name>.sasl] instead)
 #   insecure_skip_verify (bool, default: false) Skip TLS certificate verification
 #
 # Duration values: TOML strings like "30s", "2m", "1m30s", "750ms".
@@ -170,6 +174,10 @@
 # reconnect_delay = "60s"
 # quitmsg = "bye"
 # trigger = "."
+#
+# [networks.example.sasl]
+# user = "mybot"
+# pass = "sasl-password"
 #
 # [networks.example.channels."#mychannel"]
 # key = "channelkey"

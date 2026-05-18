@@ -136,6 +136,11 @@ func (c ChannelConfig) GetPastebinPreviewLines(pastebinCfg PastebinConfig) int {
 	return value
 }
 
+type SASLConfig struct {
+	User string `toml:"user"`
+	Pass string `toml:"pass"`
+}
+
 type Network struct {
 	Name           string
 	Nick           string
@@ -149,7 +154,8 @@ type Network struct {
 	ReconnectDelay *time.Duration `toml:"reconnect_delay"`
 	Trigger        string
 	Quitmsg        string
-	Casemapping    string `toml:"-"`
+	SASL           *SASLConfig `toml:"sasl"`
+	Casemapping    string      `toml:"-"`
 }
 
 func (n *Network) GetChannelConfig(channel string) ChannelConfig {

@@ -742,6 +742,14 @@ func ircClient(network Network) {
 		AllowFlood: true,
 	})
 
+	if network.SASL != nil && network.SASL.User != "" {
+		client.Config.SASL = &girc.SASLPlain{
+			User: network.SASL.User,
+			Pass: network.SASL.Pass,
+		}
+		log.Info("SASL PLAIN configured", "user", network.SASL.User)
+	}
+
 	bot := Bot{
 		Client:    client,
 		Reconnect: true,

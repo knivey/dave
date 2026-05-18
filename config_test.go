@@ -728,6 +728,44 @@ host = "irc.example.com"
 	})
 }
 
+func TestLoadConfigDirNetworkSASL(t *testing.T) {
+	t.Run("no sasl config by default", func(t *testing.T) {
+		mainTOML := `
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+		dir := createTestConfigDir(t, mainTOML, nil)
+		defer os.RemoveAll(dir)
+
+		config := loadConfigDirOrDie(dir)
+		net := config.Networks["testnet"]
+		assert.Nil(t, net.SASL)
+	})
+
+	t.Run("sasl config loads correctly", func(t *testing.T) {
+		mainTOML := `
+[networks.testnet]
+nick = "bot"
+
+[networks.testnet.sasl]
+user = "mybot"
+pass = "secret123"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+		dir := createTestConfigDir(t, mainTOML, nil)
+		defer os.RemoveAll(dir)
+
+		config := loadConfigDirOrDie(dir)
+		net := config.Networks["testnet"]
+		require.NotNil(t, net.SASL)
+		assert.Equal(t, "mybot", net.SASL.User)
+		assert.Equal(t, "secret123", net.SASL.Pass)
+	})
+}
+
 func intPtr(i int) *int {
 	return &i
 }

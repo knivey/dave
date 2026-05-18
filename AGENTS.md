@@ -86,7 +86,7 @@ No Makefile, no linter config. Use `go fmt` + `go vet`.
 - TUI captures stdout/stderr via `os.Pipe()` after config loading. Log output (logxi) displayed in tview TextView with ANSI stripping.
 - `tview.TranslateANSI()` is used for log output in TUI, preceded by `tview.Escape()` to prevent IRC text with brackets from being interpreted as tview color tags.
 - Command regex: empty = key name; registered as `^<regex> (.+)$` in main.go.
-- Networks inherit root `trigger`/`quitmsg`; cycle multiple servers on reconnect. TUI commands (`/join`, `/part`, `/nick`) update `bot.Network` in-memory (not persisted); `bot.mu` (sync.Mutex) protects access. RPL_WELCOME and reconnect loop reference `bot.Network` (not captured `network` value) so runtime changes survive reconnect.
+- Networks inherit root `trigger`/`quitmsg`; cycle multiple servers on reconnect. TUI commands (`/join`, `/part`, `/nick`) update `bot.Network` in-memory (not persisted); `bot.mu` (sync.Mutex) protects access. RPL_WELCOME and reconnect loop reference `bot.Network` (not captured `network` value) so runtime changes survive reconnect. SASL PLAIN auth via `[networks.<name>.sasl]` (user+pass); girc handles CAP negotiation automatically.
 - Service `maxhistory` defaults to 8.
 - **Builtin LLM tools**: `register_background_job`, `ban_user`, `check_ban_history` — auto-available when MCP tools exist. Controlled by two config options:
   - `disabled_builtin_tools` (root/services/chats): which tools are **unavailable** to the model. Cascade: `nil` = inherit from service/root, `[]` = none disabled (override). Default: `nil` (all enabled). Tool definition filtering in `getBuiltinToolDefs(disabled)`, dispatch guard in `executeToolCalls` returns error message for disabled tools.

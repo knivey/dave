@@ -72,46 +72,82 @@ func help(network Network, client *girc.Client, event girc.Event, ctx context.Co
 	lines = append(lines, fmt.Sprintf("I'm %s! Use my commands below to chat or generate images.", botnick))
 	lines = append(lines, fmt.Sprintf("Only Chat commands start a persistent context. After starting one, reply with my nick (e.g. \"%s, your message here\") to continue that context without using a command.", botnick))
 	lines = append(lines, "Commands marked with (regex) use pattern matching, the trigger can match more than one name.")
-	lines = append(lines, fmt.Sprintf("  %sstop \u2014 Stop text generation (including this help message)", network.Trigger))
-	lines = append(lines, fmt.Sprintf("  %ssupport \u2014 Support dave's development", network.Trigger))
+	if !isNetworkCommandDisabled(network, "stop") {
+		lines = append(lines, fmt.Sprintf("  %sstop \u2014 Stop text generation (including this help message)", network.Trigger))
+	}
+	if !isNetworkCommandDisabled(network, "support") {
+		lines = append(lines, fmt.Sprintf("  %ssupport \u2014 Support dave's development", network.Trigger))
+	}
 
 	if theDB != nil {
-		lines = append(lines, "\x02History:\x02")
-		lines = append(lines, fmt.Sprintf("  %ssessions [nick|*] \u2014 List sessions (yours, another user's, or all)", network.Trigger))
-		lines = append(lines, fmt.Sprintf("  %shistory <id> \u2014 Show messages from a session", network.Trigger))
-		lines = append(lines, fmt.Sprintf("  %sresume <id> \u2014 Resume a previous session", network.Trigger))
-		lines = append(lines, fmt.Sprintf("  %sdelete <id> \u2014 Delete a session", network.Trigger))
-		lines = append(lines, fmt.Sprintf("  %smystats \u2014 Show your session/message stats", network.Trigger))
-		lines = append(lines, fmt.Sprintf("  %sjobs \u2014 List your chat queue and background jobs", network.Trigger))
-		lines = append(lines, fmt.Sprintf("  %scompact \u2014 Summarize old messages in your active session to free context", network.Trigger))
-		lines = append(lines, fmt.Sprintf("  %sclone <nick|id> \u2014 Clone another user's session (or your own, to fork it)", network.Trigger))
+		var histLines []string
+		histBuiltins := []struct {
+			name string
+			line string
+		}{
+			{"sessions", fmt.Sprintf("  %ssessions [nick|*] \u2014 List sessions (yours, another user's, or all)", network.Trigger)},
+			{"history", fmt.Sprintf("  %shistory <id> \u2014 Show messages from a session", network.Trigger)},
+			{"resume", fmt.Sprintf("  %sresume <id> \u2014 Resume a previous session", network.Trigger)},
+			{"delete", fmt.Sprintf("  %sdelete <id> \u2014 Delete a session", network.Trigger)},
+			{"mystats", fmt.Sprintf("  %smystats \u2014 Show your session/message stats", network.Trigger)},
+			{"jobs", fmt.Sprintf("  %sjobs \u2014 List your chat queue and background jobs", network.Trigger)},
+			{"compact", fmt.Sprintf("  %scompact \u2014 Summarize old messages in your active session to free context", network.Trigger)},
+			{"clone", fmt.Sprintf("  %sclone <nick|id> \u2014 Clone another user's session (or your own, to fork it)", network.Trigger)},
+		}
+		for _, h := range histBuiltins {
+			if !isNetworkCommandDisabled(network, h.name) {
+				histLines = append(histLines, h.line)
+			}
+		}
+		if len(histLines) > 0 {
+			lines = append(lines, "\x02History:\x02")
+			lines = append(lines, histLines...)
+		}
 	}
 
-	if len(completions) > 0 {
+	filteredCompletions := make(map[string]AIConfig)
+	for k, v := range completions {
+		if !isNetworkCommandDisabled(network, k) {
+			filteredCompletions[k] = v
+		}
+	}
+	if len(filteredCompletions) > 0 {
 		lines = append(lines, "\x02Completions:\x02")
-		for _, l := range formatTable(sortedAIConfigEntries(network.Trigger, completions)) {
+		for _, l := range formatTable(sortedAIConfigEntries(network.Trigger, filteredCompletions)) {
 			lines = append(lines, "  "+l)
 		}
 	}
 
-	if len(chats) > 0 {
+	filteredChats := make(map[string]AIConfig)
+	for k, v := range chats {
+		if !isNetworkCommandDisabled(network, k) {
+			filteredChats[k] = v
+		}
+	}
+	if len(filteredChats) > 0 {
 		lines = append(lines, "\x02Chats:\x02")
-		for _, l := range formatTable(sortedAIConfigEntries(network.Trigger, chats)) {
+		for _, l := range formatTable(sortedAIConfigEntries(network.Trigger, filteredChats)) {
 			lines = append(lines, "  "+l)
 		}
 	}
 
-	if len(tools) > 0 {
+	filteredTools := make(map[string]MCPCommandConfig)
+	for k, v := range tools {
+		if !isNetworkCommandDisabled(network, k) {
+			filteredTools[k] = v
+		}
+	}
+	if len(filteredTools) > 0 {
 		var entries []helpEntry
-		toolKeys := make([]string, 0, len(tools))
-		for k := range tools {
+		toolKeys := make([]string, 0, len(filteredTools))
+		for k := range filteredTools {
 			toolKeys = append(toolKeys, k)
 		}
 		sort.Slice(toolKeys, func(i, j int) bool {
 			return toolKeys[i] < toolKeys[j]
 		})
 		for _, k := range toolKeys {
-			c := tools[k]
+			c := filteredTools[k]
 			entries = append(entries, helpEntry{
 				cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
 				info: formatToolInfo(c.MCP, c.Tool),
@@ -252,16 +288,25 @@ func findCommandHelp(network Network, cmdName string) (helpEntry, bool) {
 	})
 	for _, c := range completions {
 		if matchesCommand(cmdName, c.Name, c.Regex) {
+			if isNetworkCommandDisabled(network, c.Name) {
+				return helpEntry{}, false
+			}
 			return buildAIConfigEntry(network.Trigger, c), true
 		}
 	}
 	for _, c := range chats {
 		if matchesCommand(cmdName, c.Name, c.Regex) {
+			if isNetworkCommandDisabled(network, c.Name) {
+				return helpEntry{}, false
+			}
 			return buildAIConfigEntry(network.Trigger, c), true
 		}
 	}
 	for _, c := range tools {
 		if matchesCommand(cmdName, c.Name, c.Regex) {
+			if isNetworkCommandDisabled(network, c.Name) {
+				return helpEntry{}, false
+			}
 			return helpEntry{
 				cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
 				info: formatToolInfo(c.MCP, c.Tool),
@@ -270,6 +315,9 @@ func findCommandHelp(network Network, cmdName string) (helpEntry, bool) {
 		}
 	}
 	if tmpl, ok := builtinHelpEntries[cmdName]; ok {
+		if isNetworkCommandDisabled(network, cmdName) {
+			return helpEntry{}, false
+		}
 		return helpEntry{
 			cmd:  network.Trigger + tmpl.cmdSuffix,
 			desc: tmpl.desc,

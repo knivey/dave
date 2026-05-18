@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/jmoiron/sqlx"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -226,4 +227,34 @@ func TestHandleDeleteNotesByKey(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), out.DeletedCount)
+}
+
+func TestHandlePutNoteEmptyValue(t *testing.T) {
+	h, _ := setupTestEnv(t)
+
+	_, _, err := h.handlePutNote(context.Background(), &mcp.CallToolRequest{}, PutNoteInput{
+		scopeFields: testScope(),
+		Key:         "topic",
+	})
+	assert.Error(t, err)
+}
+
+func TestHandleRecentNotes(t *testing.T) {
+	h, _ := setupTestEnv(t)
+
+	_, _, err := h.handlePutNote(context.Background(), &mcp.CallToolRequest{}, PutNoteInput{
+		scopeFields: testScope(),
+		Key:         "notes",
+		Value:       "recent entry",
+	})
+	require.NoError(t, err)
+
+	_, out, err := h.handleRecentNotes(context.Background(), &mcp.CallToolRequest{}, RecentNotesInput{
+		scopeFields: testScope(),
+		Within:      "1h",
+	})
+	require.NoError(t, err)
+	require.Len(t, out.Notes, 1)
+	assert.Equal(t, "recent entry", out.Notes[0].Value)
+	assert.Equal(t, 1, out.Total)
 }

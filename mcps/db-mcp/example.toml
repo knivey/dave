@@ -1,0 +1,21 @@
+# Example configuration for db-mcp
+# Config file is optional — defaults work for most setups.
+# Copy this file to config.toml and adjust values as needed.
+
+[server]
+# Server identification (shown to MCP clients)
+name = "db-mcp"
+version = "0.1.0"
+
+[database]
+# Path to SQLite database (relative to config file directory).
+# The database and its directory are created automatically on first run.
+path = "data/notes.db"
+
+# Maximum characters per note value.
+# Values exceeding this limit are truncated with [truncated] appended.
+max_value_size = 10000
+
+# Maximum notes per user across all channels.
+# When exceeded, oldest notes are automatically pruned.
+max_notes_per_user = 500

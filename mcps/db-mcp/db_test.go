@@ -223,6 +223,72 @@ func TestDBSearchNotes(t *testing.T) {
 	assert.Equal(t, "the quick brown fox", notes[0].Value)
 }
 
+func TestDBRecentNotes(t *testing.T) {
+	db := setupTestDBDirect(t)
+
+	_, err := dbInsertNote(db, "libera", "#test", 1, "alice", "notes", "note from alice", 10000)
+	require.NoError(t, err)
+	_, err = dbInsertNote(db, "libera", "#test", 2, "bob", "notes", "note from bob", 10000)
+	require.NoError(t, err)
+	_, err = dbInsertNote(db, "libera", "#test", 1, "alice", "idea", "an idea", 10000)
+	require.NoError(t, err)
+
+	notes, err := dbRecentNotes(db, "libera", "#test", "1h", "", "", 0)
+	require.NoError(t, err)
+	assert.Len(t, notes, 3)
+
+	notes, err = dbRecentNotes(db, "libera", "#test", "1h", "notes", "", 0)
+	require.NoError(t, err)
+	assert.Len(t, notes, 2)
+
+	notes, err = dbRecentNotes(db, "libera", "#test", "1h", "", "bob", 0)
+	require.NoError(t, err)
+	require.Len(t, notes, 1)
+	assert.Equal(t, "note from bob", notes[0].Value)
+
+	notes, err = dbRecentNotes(db, "libera", "#test", "1h", "", "", 1)
+	require.NoError(t, err)
+	assert.Len(t, notes, 1)
+}
+
+func TestDBSearchNotesWithFilters(t *testing.T) {
+	db := setupTestDBDirect(t)
+
+	_, err := dbInsertNote(db, "libera", "#test", 1, "alice", "topic", "the quick brown fox", 10000)
+	require.NoError(t, err)
+	_, err = dbInsertNote(db, "libera", "#test", 2, "bob", "topic", "the quick brown cat", 10000)
+	require.NoError(t, err)
+	_, err = dbInsertNote(db, "libera", "#test", 1, "alice", "notes", "a quick observation", 10000)
+	require.NoError(t, err)
+
+	notes, err := dbSearchNotes(db, "libera", "#test", "quick", "topic", "", "", 10)
+	require.NoError(t, err)
+	assert.Len(t, notes, 2)
+
+	notes, err = dbSearchNotes(db, "libera", "#test", "quick", "topic", "bob", "", 10)
+	require.NoError(t, err)
+	require.Len(t, notes, 1)
+	assert.Equal(t, "the quick brown cat", notes[0].Value)
+
+	notes, err = dbSearchNotes(db, "libera", "#test", "quick", "", "", "1h", 10)
+	require.NoError(t, err)
+	assert.Len(t, notes, 3)
+}
+
+func TestDBListKeysFilterNick(t *testing.T) {
+	db := setupTestDBDirect(t)
+
+	_, err := dbInsertNote(db, "libera", "#test", 1, "alice", "topic", "v1", 10000)
+	require.NoError(t, err)
+	_, err = dbInsertNote(db, "libera", "#test", 2, "bob", "idea", "v2", 10000)
+	require.NoError(t, err)
+
+	keys, err := dbListKeys(db, "libera", "#test", "alice", 0)
+	require.NoError(t, err)
+	require.Len(t, keys, 1)
+	assert.Equal(t, "topic", keys[0].Key)
+}
+
 func TestDBChannelIsolation(t *testing.T) {
 	db := setupTestDBDirect(t)
 

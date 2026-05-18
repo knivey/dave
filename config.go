@@ -41,11 +41,39 @@ type Config struct {
 	MCPToolSets          map[string][]string `toml:"-"`
 	Bans                 BanConfig           `toml:"bans"`
 	Compaction           CompactionConfig    `toml:"compaction"`
+	Logging              LoggingConfig       `toml:"logging"`
 }
 
 type BanConfig struct {
 	MaxDuration     string `toml:"max_duration"`
 	DefaultDuration string `toml:"default_duration"`
+}
+
+type LoggingConfig struct {
+	Enabled       bool          `toml:"enabled"`
+	Dir           string        `toml:"dir"`
+	Rotation      string        `toml:"rotation"`
+	BufferSize    int           `toml:"buffer_size"`
+	BatchSize     int           `toml:"batch_size"`
+	FlushInterval time.Duration `toml:"flush_interval"`
+}
+
+func (c *LoggingConfig) SetDefaults() {
+	if c.Dir == "" {
+		c.Dir = "data/logs"
+	}
+	if c.Rotation == "" {
+		c.Rotation = "monthly"
+	}
+	if c.BufferSize <= 0 {
+		c.BufferSize = 10000
+	}
+	if c.BatchSize <= 0 {
+		c.BatchSize = 500
+	}
+	if c.FlushInterval <= 0 {
+		c.FlushInterval = 2 * time.Second
+	}
 }
 
 type PastebinConfig struct {
@@ -471,6 +499,7 @@ func loadConfigDir(dir string) (Config, error) {
 		config.Bans.DefaultDuration = "5m"
 	}
 	config.Compaction.ApplyDefaults()
+	config.Logging.SetDefaults()
 	if config.TUI.ScrollbackLines == 0 {
 		config.TUI.ScrollbackLines = 5000
 	}

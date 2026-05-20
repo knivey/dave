@@ -558,3 +558,111 @@ func TestGetBuiltinToolDefsFiltering(t *testing.T) {
 	filteredAll := getBuiltinToolDefs([]string{"register_background_job", "ban_user", "check_ban_history"})
 	assert.Len(t, filteredAll, 0, "disabling all tools should return empty")
 }
+
+func TestRegisterBackgroundJob_ServerNameAutoDetection(t *testing.T) {
+	setupTestDB(t)
+	setupTestJobManager(t)
+	setupNoticesDefaults(t)
+
+	mcpServersMu.Lock()
+	origToolMap := mcpToolToServer
+	origServers := mcpServers
+	mcpToolToServer = map[string]string{
+		"generate_image_async":       "img-mcp-async",
+		"enhance_and_generate_async": "img-mcp-async",
+	}
+	mcpServers = map[string]*MCPServer{"img-mcp-async": {}}
+	mcpServersMu.Unlock()
+	defer func() {
+		mcpServersMu.Lock()
+		mcpToolToServer = origToolMap
+		mcpServers = origServers
+		mcpServersMu.Unlock()
+	}()
+
+	verbose := false
+	uid := ensureTestUser(t, "testnet", "testuser")
+	cr := &chatRunner{
+		cfg:      AIConfig{ToolVerbose: &verbose},
+		network:  Network{Name: "testnet"},
+		channel:  "#test",
+		nick:     "test",
+		logger:   logxi.New("test"),
+		ctx:      context.Background(),
+		outputCh: make(chan string, 20),
+		userID:   uid,
+	}
+
+	sid, err := sessionMgr.CreateSession("testnet", "#test", uid, "testcmd", "testservice", "testmodel")
+	require.NoError(t, err)
+	cr.sessionID = sid
+
+	t.Run("auto-detect server_name from tool_name", func(t *testing.T) {
+		tc := ToolCall{
+			ID:       "tc-auto",
+			Function: FunctionCall{Name: "register_background_job", Arguments: `{"job_id":"j-auto","tool_name":"enhance_and_generate_async"}`},
+		}
+		msgs := cr.handleRegisterBackgroundJob(nil, tc)
+		require.Len(t, msgs, 1)
+
+		pj := PendingJob{}
+		require.NoError(t, theDB.Where("job_id = ?", "j-auto").First(&pj).Error)
+		assert.Equal(t, "img-mcp-async", pj.MCPServer, "server_name should be auto-detected")
+	})
+
+	t.Run("explicit server_name still works", func(t *testing.T) {
+		tc := ToolCall{
+			ID:       "tc-explicit",
+			Function: FunctionCall{Name: "register_background_job", Arguments: `{"job_id":"j-explicit","tool_name":"enhance_and_generate_async","server_name":"img-mcp-async"}`},
+		}
+		msgs := cr.handleRegisterBackgroundJob(nil, tc)
+		require.Len(t, msgs, 1)
+
+		pj := PendingJob{}
+		require.NoError(t, theDB.Where("job_id = ?", "j-explicit").First(&pj).Error)
+		assert.Equal(t, "img-mcp-async", pj.MCPServer, "server_name should match explicit value")
+	})
+
+	t.Run("unknown tool_name returns error", func(t *testing.T) {
+		tc := ToolCall{
+			ID:       "tc-unknown",
+			Function: FunctionCall{Name: "register_background_job", Arguments: `{"job_id":"j-unknown","tool_name":"nonexistent_tool"}`},
+		}
+		msgs := cr.handleRegisterBackgroundJob(nil, tc)
+		require.Len(t, msgs, 1)
+		assert.Contains(t, msgs[0].Content, "error: could not determine MCP server")
+	})
+
+	t.Run("missing job_id returns error", func(t *testing.T) {
+		tc := ToolCall{
+			ID:       "tc-nojob",
+			Function: FunctionCall{Name: "register_background_job", Arguments: `{"tool_name":"enhance_and_generate_async"}`},
+		}
+		msgs := cr.handleRegisterBackgroundJob(nil, tc)
+		require.Len(t, msgs, 1)
+		assert.Contains(t, msgs[0].Content, "error: job_id and tool_name are required")
+	})
+
+	t.Run("missing tool_name returns error", func(t *testing.T) {
+		tc := ToolCall{
+			ID:       "tc-notool",
+			Function: FunctionCall{Name: "register_background_job", Arguments: `{"job_id":"j1"}`},
+		}
+		msgs := cr.handleRegisterBackgroundJob(nil, tc)
+		require.Len(t, msgs, 1)
+		assert.Contains(t, msgs[0].Content, "error: job_id and tool_name are required")
+	})
+
+	t.Run("empty server_name triggers auto-detect", func(t *testing.T) {
+		tc := ToolCall{
+			ID:       "tc-emptyserver",
+			Function: FunctionCall{Name: "register_background_job", Arguments: `{"job_id":"j-emptyserver","tool_name":"enhance_and_generate_async","server_name":""}`},
+		}
+		msgs := cr.handleRegisterBackgroundJob(nil, tc)
+		require.Len(t, msgs, 1)
+
+		pj := PendingJob{}
+		require.NoError(t, theDB.Where("job_id = ?", "j-emptyserver").First(&pj).Error)
+		assert.Equal(t, "img-mcp-async", pj.MCPServer, "empty server_name should trigger auto-detect")
+	})
+}

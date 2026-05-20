@@ -960,8 +960,18 @@ func (cr *chatRunner) handleRegisterBackgroundJob(messages []ChatMessage, tc Too
 		return messages
 	}
 
-	if args.JobID == "" || args.ToolName == "" || args.ServerName == "" {
-		toolMsg := toolResultMsg(tc.ID, "error: job_id, tool_name, and server_name are required")
+	if args.JobID == "" || args.ToolName == "" {
+		toolMsg := toolResultMsg(tc.ID, "error: job_id and tool_name are required")
+		messages = append(messages, toolMsg)
+		cr.addContext(toolMsg)
+		return messages
+	}
+
+	if args.ServerName == "" {
+		args.ServerName = getMCPServerForTool(args.ToolName)
+	}
+	if args.ServerName == "" {
+		toolMsg := toolResultMsg(tc.ID, "error: could not determine MCP server for tool "+args.ToolName)
 		messages = append(messages, toolMsg)
 		cr.addContext(toolMsg)
 		return messages
@@ -1550,10 +1560,10 @@ var builtinTools = map[string]builtinToolEntry{
 						},
 						"server_name": map[string]any{
 							"type":        "string",
-							"description": "Name of the MCP server running the job",
+							"description": "Name of the MCP server running the job (auto-detected from tool_name if omitted)",
 						},
 					},
-					"required": []string{"job_id", "tool_name", "server_name"},
+					"required": []string{"job_id", "tool_name"},
 				},
 			},
 		},

@@ -495,6 +495,83 @@ func TestRunTurnResponses_DifferentCtxKeysParallel(t *testing.T) {
 	assert.True(t, found["resp-bob"], "missing prevID %q in %v", "resp-bob", ids)
 }
 
+func TestHandleResponseIDSave_SavesToRunnerSessionNotActive(t *testing.T) {
+	setupTestDB(t)
+
+	userID := ensureTestUser(t, "testnet", "shrew")
+	sid1, err := sessionMgr.CreateSession("testnet", "#101", userID, "chat", "openai", "model-a")
+	require.NoError(t, err)
+	require.NoError(t, sessionMgr.UpdateResponseID(sid1, strPtrOrNil("resp-old")))
+
+	sid2, err := sessionMgr.CreateSession("testnet", "#101", userID, "grk", "grok", "model-b")
+	require.NoError(t, err)
+
+	_, err = sessionMgr.SwitchActive("testnet", "#101", userID, sid2)
+	require.NoError(t, err)
+
+	logger := logxi.New("test")
+	logger.SetLevel(logxi.LevelAll)
+
+	transport := newDaveTransport(nil, nil)
+	cr := &chatRunner{
+		sessionID: sid1,
+		network:   Network{Name: "testnet"},
+		channel:   "#101",
+		userID:    userID,
+		logger:    logger,
+		transport: transport,
+	}
+
+	result := cr.handleResponseIDSave("resp-new", "hello", nil, "resp-old")
+	assert.Equal(t, "resp-new", result)
+
+	s1, _ := sessionMgr.GetSession(sid1)
+	require.NotNil(t, s1.ResponseID)
+	assert.Equal(t, "resp-new", *s1.ResponseID, "response ID should be saved to runner's session (sid1)")
+
+	s2, _ := sessionMgr.GetSession(sid2)
+	assert.Nil(t, s2.ResponseID, "response ID should NOT leak to the active session (sid2)")
+}
+
+func TestHandleResponseIDSave_ClearsRunnerSessionNotActive(t *testing.T) {
+	setupTestDB(t)
+
+	userID := ensureTestUser(t, "testnet", "shrew")
+	sid1, err := sessionMgr.CreateSession("testnet", "#101", userID, "chat", "openai", "model-a")
+	require.NoError(t, err)
+	require.NoError(t, sessionMgr.UpdateResponseID(sid1, strPtrOrNil("resp-old")))
+
+	sid2, err := sessionMgr.CreateSession("testnet", "#101", userID, "grk", "grok", "model-b")
+	require.NoError(t, err)
+	require.NoError(t, sessionMgr.UpdateResponseID(sid2, strPtrOrNil("resp-grk")))
+
+	_, err = sessionMgr.SwitchActive("testnet", "#101", userID, sid2)
+	require.NoError(t, err)
+
+	logger := logxi.New("test")
+	logger.SetLevel(logxi.LevelAll)
+
+	transport := newDaveTransport(nil, nil)
+	cr := &chatRunner{
+		sessionID: sid1,
+		network:   Network{Name: "testnet"},
+		channel:   "#101",
+		userID:    userID,
+		logger:    logger,
+		transport: transport,
+	}
+
+	result := cr.handleResponseIDSave("resp-empty", "", nil, "resp-old")
+	assert.Equal(t, "resp-old", result)
+
+	s1, _ := sessionMgr.GetSession(sid1)
+	assert.Nil(t, s1.ResponseID, "runner's session should have response_id cleared")
+
+	s2, _ := sessionMgr.GetSession(sid2)
+	require.NotNil(t, s2.ResponseID)
+	assert.Equal(t, "resp-grk", *s2.ResponseID, "active session's response_id should be untouched")
+}
+
 func TestIsToolDisabled(t *testing.T) {
 	tests := []struct {
 		name     string

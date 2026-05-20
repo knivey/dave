@@ -434,12 +434,16 @@ func (cr *chatRunner) handleToolCallResponse(messages []ChatMessage, text string
 
 func (cr *chatRunner) handleResponseIDSave(respID, text string, toolCalls []ToolCall, currentResponseID string) string {
 	if respID != "" && (text != "" || len(toolCalls) > 0) {
-		SetContextResponseID(cr.network.Name, cr.channel, cr.userID, respID)
+		if err := sessionMgr.UpdateResponseID(cr.sessionID, &respID); err != nil {
+			cr.logger.Error("failed to save response_id", "session", cr.sessionID, "error", err)
+		}
 		return respID
 	}
 	if respID != "" {
 		if currentResponseID != "" {
-			SetContextResponseID(cr.network.Name, cr.channel, cr.userID, "")
+			if err := sessionMgr.UpdateResponseID(cr.sessionID, nil); err != nil {
+				cr.logger.Error("failed to clear response_id", "session", cr.sessionID, "error", err)
+			}
 		}
 		cr.logger.Warn("response had empty output, clearing previous_response_id", "response_id", respID)
 	}
@@ -452,7 +456,9 @@ func (cr *chatRunner) shouldRetryWithoutResponseID(usePrevID bool, err error, me
 	}
 	cr.logAPIIncident(err, messages, iteration, apiPath)
 	cr.logger.Warn("previous_response_id invalid, retrying without", "response_id", currentResponseID, "error", err)
-	SetContextResponseID(cr.network.Name, cr.channel, cr.userID, "")
+	if err := sessionMgr.UpdateResponseID(cr.sessionID, nil); err != nil {
+		cr.logger.Error("failed to clear response_id on retry", "session", cr.sessionID, "error", err)
+	}
 	return messagesToResponseInputItems(messages), "", true
 }
 

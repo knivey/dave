@@ -11,9 +11,8 @@ import (
 )
 
 var (
-	logger      logxi.Logger
-	loggerTools logxi.Logger
-	logFile     *os.File
+	logger  logxi.Logger
+	logFile *os.File
 )
 
 func initLogger(exeDir string) {
@@ -39,9 +38,6 @@ func initLogger(exeDir string) {
 
 	logger = logxi.NewLogger(writer, "brave-mcp")
 	logger.SetLevel(logxi.LevelAll)
-
-	loggerTools = logxi.NewLogger(writer, "tools")
-	loggerTools.SetLevel(logxi.LevelAll)
 }
 
 func closeLogger() {

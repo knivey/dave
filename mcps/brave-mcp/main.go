@@ -51,6 +51,9 @@ func parseEnabledTools(s string) map[string]bool {
 	for _, name := range strings.Split(s, ",") {
 		trimmed := strings.TrimSpace(name)
 		if trimmed != "" {
+			if !strings.HasPrefix(trimmed, "brave_") {
+				trimmed = "brave_" + trimmed
+			}
 			m[trimmed] = true
 		}
 	}

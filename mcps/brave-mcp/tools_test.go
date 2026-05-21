@@ -18,19 +18,29 @@ func TestParseEnabledTools(t *testing.T) {
 			expected: nil,
 		},
 		{
-			name:     "single tool",
+			name:     "short name normalized",
 			input:    "web_search",
-			expected: map[string]bool{"web_search": true},
+			expected: map[string]bool{"brave_web_search": true},
 		},
 		{
-			name:     "multiple tools",
+			name:     "multiple short names",
 			input:    "web_search, news_search, image_search",
-			expected: map[string]bool{"web_search": true, "news_search": true, "image_search": true},
+			expected: map[string]bool{"brave_web_search": true, "brave_news_search": true, "brave_image_search": true},
 		},
 		{
 			name:     "whitespace trimmed",
 			input:    " web_search , news_search ",
-			expected: map[string]bool{"web_search": true, "news_search": true},
+			expected: map[string]bool{"brave_web_search": true, "brave_news_search": true},
+		},
+		{
+			name:     "full name passthrough",
+			input:    "brave_web_search",
+			expected: map[string]bool{"brave_web_search": true},
+		},
+		{
+			name:     "mixed short and full",
+			input:    "web_search, brave_news_search",
+			expected: map[string]bool{"brave_web_search": true, "brave_news_search": true},
 		},
 	}
 
@@ -55,6 +65,12 @@ func TestRegisterToolsWhitelist(t *testing.T) {
 func TestRegisterToolsUnknownName(t *testing.T) {
 	count := countRegisteredTools(map[string]bool{"brave_web_search": true, "nonexistent": true})
 	assert.Equal(t, 1, count)
+}
+
+func TestParseAndRegister(t *testing.T) {
+	enabled := parseEnabledTools("web_search, news_search")
+	count := countRegisteredTools(enabled)
+	assert.Equal(t, 2, count)
 }
 
 func countRegisteredTools(enabled map[string]bool) int {

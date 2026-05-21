@@ -70,13 +70,13 @@ func main() {
 	if *httpMode {
 		serveHTTP(ctx, cfg, handlers)
 	} else {
-		server := createServer(handlers)
+		server := createServer(cfg, handlers)
 		serveStdio(ctx, server)
 	}
 }
 
 func serveHTTP(ctx context.Context, cfg Config, handlers *ToolHandlers) {
-	server := createServer(handlers)
+	server := createServer(cfg, handlers)
 
 	handler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
 		return server
@@ -102,11 +102,11 @@ func serveHTTP(ctx context.Context, cfg Config, handlers *ToolHandlers) {
 	}
 }
 
-func createServer(handlers *ToolHandlers) *mcp.Server {
+func createServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 	server := mcp.NewServer(
 		&mcp.Implementation{
-			Name:    "fetch-mcp",
-			Version: "0.1.0",
+			Name:    cfg.Server.Name,
+			Version: cfg.Server.Version,
 		},
 		&mcp.ServerOptions{
 			Instructions: "MCP server for fetching web pages and converting them to markdown. Use fetch to retrieve a URL and get back clean markdown content suitable for LLM consumption. Supports pagination for large pages.",

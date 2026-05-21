@@ -26,13 +26,32 @@ func TestBraveClientDoRequest(t *testing.T) {
 	defer ts.Close()
 
 	client := newBraveClient("test-key", ts.URL, 5*time.Second, "US", "en")
-	_, err := client.doRequest(context.Background(), "/res/v1/web/search", url.Values{"q": {"golang"}})
+	_, err := client.doSearchRequest(context.Background(), "/res/v1/web/search", url.Values{"q": {"golang"}})
 
 	require.NoError(t, err)
 	assert.Equal(t, "test-key", receivedAuth)
 	assert.Equal(t, "golang", receivedParams.Get("q"))
 	assert.Equal(t, "US", receivedParams.Get("country"))
 	assert.Equal(t, "en", receivedParams.Get("search_lang"))
+}
+
+func TestBraveClientDoRequestNoDefaults(t *testing.T) {
+	var receivedParams url.Values
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedParams = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{}`))
+	}))
+	defer ts.Close()
+
+	client := newBraveClient("key", ts.URL, 5*time.Second, "US", "en")
+	_, err := client.doRequest(context.Background(), "/res/v1/local/pois", url.Values{"ids": {"abc"}})
+
+	require.NoError(t, err)
+	assert.Equal(t, "", receivedParams.Get("country"))
+	assert.Equal(t, "", receivedParams.Get("search_lang"))
+	assert.Equal(t, "abc", receivedParams.Get("ids"))
 }
 
 func TestBraveClientDefaultCountryLang(t *testing.T) {

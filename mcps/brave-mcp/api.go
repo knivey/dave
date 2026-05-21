@@ -37,12 +37,6 @@ func (c *braveClient) doRequest(ctx context.Context, endpoint string, params url
 	if params == nil {
 		params = url.Values{}
 	}
-	if c.country != "" {
-		params.Set("country", c.country)
-	}
-	if c.lang != "" {
-		params.Set("search_lang", c.lang)
-	}
 
 	u := c.baseURL + endpoint + "?" + params.Encode()
 
@@ -70,6 +64,19 @@ func (c *braveClient) doRequest(ctx context.Context, endpoint string, params url
 	}
 
 	return body, nil
+}
+
+func (c *braveClient) doSearchRequest(ctx context.Context, endpoint string, params url.Values) (json.RawMessage, error) {
+	if params == nil {
+		params = url.Values{}
+	}
+	if c.country != "" {
+		params.Set("country", c.country)
+	}
+	if c.lang != "" {
+		params.Set("search_lang", c.lang)
+	}
+	return c.doRequest(ctx, endpoint, params)
 }
 
 func formatWebResults(data json.RawMessage) string {
@@ -116,32 +123,43 @@ func formatWebResults(data json.RawMessage) string {
 	}
 
 	var b strings.Builder
+	hasContent := false
 
 	for i, r := range resp.Web.Results {
-		if i > 0 {
+		if hasContent {
 			b.WriteString("\n")
 		}
 		fmt.Fprintf(&b, "%d. %s\n   %s\n   %s", i+1, r.Title, r.URL, r.Description)
+		hasContent = true
 	}
 
 	if resp.FAQ != nil {
 		for _, f := range resp.FAQ.Results {
-			b.WriteString("\n\n---\n")
+			if hasContent {
+				b.WriteString("\n\n---\n")
+			}
 			fmt.Fprintf(&b, "FAQ: %s\n%s\n%s", f.Question, f.Answer, f.URL)
+			hasContent = true
 		}
 	}
 
 	if resp.News != nil {
 		for _, n := range resp.News.Results {
-			b.WriteString("\n\n---\n")
+			if hasContent {
+				b.WriteString("\n\n---\n")
+			}
 			fmt.Fprintf(&b, "News: %s (%s)\n%s\n   %s", n.Title, n.Age, n.Description, n.URL)
+			hasContent = true
 		}
 	}
 
 	if resp.Videos != nil {
 		for _, v := range resp.Videos.Results {
-			b.WriteString("\n\n---\n")
+			if hasContent {
+				b.WriteString("\n\n---\n")
+			}
 			fmt.Fprintf(&b, "Video: %s [%s] (%s)\n%s\n   %s", v.Title, v.Video.Duration, v.Age, v.Description, v.URL)
+			hasContent = true
 		}
 	}
 

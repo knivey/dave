@@ -42,7 +42,7 @@ func (h *ToolHandlers) handleWebSearch(ctx context.Context, req *mcp.CallToolReq
 		params.Set("freshness", input.Freshness)
 	}
 
-	data, err := h.client.doRequest(ctx, "/res/v1/web/search", params)
+	data, err := h.client.doSearchRequest(ctx, "/res/v1/web/search", params)
 	if err != nil {
 		return nil, nil, fmt.Errorf("web search failed: %w", err)
 	}
@@ -66,7 +66,7 @@ func (h *ToolHandlers) handleImageSearch(ctx context.Context, req *mcp.CallToolR
 		params.Set("safesearch", input.Safesearch)
 	}
 
-	data, err := h.client.doRequest(ctx, "/res/v1/images/search", params)
+	data, err := h.client.doSearchRequest(ctx, "/res/v1/images/search", params)
 	if err != nil {
 		return nil, nil, fmt.Errorf("image search failed: %w", err)
 	}
@@ -98,7 +98,7 @@ func (h *ToolHandlers) handleVideoSearch(ctx context.Context, req *mcp.CallToolR
 		params.Set("freshness", input.Freshness)
 	}
 
-	data, err := h.client.doRequest(ctx, "/res/v1/videos/search", params)
+	data, err := h.client.doSearchRequest(ctx, "/res/v1/videos/search", params)
 	if err != nil {
 		return nil, nil, fmt.Errorf("video search failed: %w", err)
 	}
@@ -130,7 +130,7 @@ func (h *ToolHandlers) handleNewsSearch(ctx context.Context, req *mcp.CallToolRe
 		params.Set("freshness", input.Freshness)
 	}
 
-	data, err := h.client.doRequest(ctx, "/res/v1/news/search", params)
+	data, err := h.client.doSearchRequest(ctx, "/res/v1/news/search", params)
 	if err != nil {
 		return nil, nil, fmt.Errorf("news search failed: %w", err)
 	}
@@ -159,7 +159,7 @@ func (h *ToolHandlers) handleLocalSearch(ctx context.Context, req *mcp.CallToolR
 		params.Set("freshness", input.Freshness)
 	}
 
-	webData, err := h.client.doRequest(ctx, "/res/v1/web/search", params)
+	webData, err := h.client.doSearchRequest(ctx, "/res/v1/web/search", params)
 	if err != nil {
 		return nil, nil, fmt.Errorf("local search failed: %w", err)
 	}
@@ -240,14 +240,14 @@ func (h *ToolHandlers) handleSummarizer(ctx context.Context, req *mcp.CallToolRe
 	var result json.RawMessage
 	var lastErr error
 
-	for attempt := 0; attempt < 20; attempt++ {
+	for attempt := 0; attempt < 30; attempt++ {
 		data, err := h.client.doRequest(ctx, "/res/v1/summarizer/search", params)
 		if err != nil {
 			lastErr = err
 			select {
 			case <-ctx.Done():
 				return nil, nil, ctx.Err()
-			case <-time.After(50 * time.Millisecond):
+			case <-time.After(300 * time.Millisecond):
 				continue
 			}
 		}
@@ -267,7 +267,7 @@ func (h *ToolHandlers) handleSummarizer(ctx context.Context, req *mcp.CallToolRe
 		select {
 		case <-ctx.Done():
 			return nil, nil, ctx.Err()
-		case <-time.After(50 * time.Millisecond):
+		case <-time.After(300 * time.Millisecond):
 		}
 	}
 
@@ -297,7 +297,7 @@ func (h *ToolHandlers) handleLLMContext(ctx context.Context, req *mcp.CallToolRe
 		params.Set("freshness", input.Freshness)
 	}
 
-	data, err := h.client.doRequest(ctx, "/res/v1/llm/context", params)
+	data, err := h.client.doSearchRequest(ctx, "/res/v1/llm/context", params)
 	if err != nil {
 		return nil, nil, fmt.Errorf("LLM context search failed: %w", err)
 	}
@@ -306,13 +306,13 @@ func (h *ToolHandlers) handleLLMContext(ctx context.Context, req *mcp.CallToolRe
 }
 
 type PlaceSearchInput struct {
-	Query      string  `json:"query,omitempty" jsonschema:"description=Search query"`
-	Latitude   float64 `json:"latitude,omitempty" jsonschema:"description=Latitude (-90 to 90)"`
-	Longitude  float64 `json:"longitude,omitempty" jsonschema:"description=Longitude (-180 to 180)"`
-	Location   string  `json:"location,omitempty" jsonschema:"description=Location string (e.g. 'san francisco ca united states')"`
-	Radius     float64 `json:"radius,omitempty" jsonschema:"description=Search radius bias in meters"`
-	Count      int     `json:"count,omitempty" jsonschema:"description=Number of results (1-50, default 20)"`
-	Safesearch string  `json:"safesearch,omitempty" jsonschema:"description=Filter: off, moderate, or strict"`
+	Query      string   `json:"query,omitempty" jsonschema:"description=Search query"`
+	Latitude   *float64 `json:"latitude,omitempty" jsonschema:"description=Latitude (-90 to 90)"`
+	Longitude  *float64 `json:"longitude,omitempty" jsonschema:"description=Longitude (-180 to 180)"`
+	Location   string   `json:"location,omitempty" jsonschema:"description=Location string (e.g. 'san francisco ca united states')"`
+	Radius     *float64 `json:"radius,omitempty" jsonschema:"description=Search radius bias in meters"`
+	Count      int      `json:"count,omitempty" jsonschema:"description=Number of results (1-50, default 20)"`
+	Safesearch string   `json:"safesearch,omitempty" jsonschema:"description=Filter: off, moderate, or strict"`
 }
 
 func (h *ToolHandlers) handlePlaceSearch(ctx context.Context, req *mcp.CallToolRequest, input PlaceSearchInput) (*mcp.CallToolResult, any, error) {
@@ -320,17 +320,17 @@ func (h *ToolHandlers) handlePlaceSearch(ctx context.Context, req *mcp.CallToolR
 	if input.Query != "" {
 		params.Set("q", input.Query)
 	}
-	if input.Latitude != 0 {
-		params.Set("latitude", fmt.Sprintf("%f", input.Latitude))
+	if input.Latitude != nil {
+		params.Set("latitude", fmt.Sprintf("%f", *input.Latitude))
 	}
-	if input.Longitude != 0 {
-		params.Set("longitude", fmt.Sprintf("%f", input.Longitude))
+	if input.Longitude != nil {
+		params.Set("longitude", fmt.Sprintf("%f", *input.Longitude))
 	}
 	if input.Location != "" {
 		params.Set("location", input.Location)
 	}
-	if input.Radius > 0 {
-		params.Set("radius", fmt.Sprintf("%f", input.Radius))
+	if input.Radius != nil && *input.Radius > 0 {
+		params.Set("radius", fmt.Sprintf("%f", *input.Radius))
 	}
 	if input.Count > 0 {
 		params.Set("count", fmt.Sprintf("%d", input.Count))
@@ -339,7 +339,7 @@ func (h *ToolHandlers) handlePlaceSearch(ctx context.Context, req *mcp.CallToolR
 		params.Set("safesearch", input.Safesearch)
 	}
 
-	data, err := h.client.doRequest(ctx, "/res/v1/local/place_search", params)
+	data, err := h.client.doSearchRequest(ctx, "/res/v1/local/place_search", params)
 	if err != nil {
 		return nil, nil, fmt.Errorf("place search failed: %w", err)
 	}

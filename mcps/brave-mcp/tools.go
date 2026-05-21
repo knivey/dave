@@ -166,7 +166,19 @@ func (h *ToolHandlers) handleLocalSearch(ctx context.Context, req *mcp.CallToolR
 	var webResp struct {
 		Locations *struct {
 			Results []struct {
-				ID string `json:"id"`
+				ID         string `json:"id"`
+				Title      string `json:"title"`
+				PriceRange string `json:"price_range"`
+				Contact    struct {
+					Telephone string `json:"telephone"`
+				} `json:"contact"`
+				Rating struct {
+					RatingValue float64 `json:"ratingValue"`
+					ReviewCount int     `json:"reviewCount"`
+				} `json:"rating"`
+				PostalAddress struct {
+					DisplayAddress string `json:"displayAddress"`
+				} `json:"postal_address"`
 			} `json:"results"`
 		} `json:"locations"`
 		Web *struct {

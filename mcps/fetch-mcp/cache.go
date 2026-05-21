@@ -26,13 +26,14 @@ func NewMarkdownCache(ttl time.Duration) *MarkdownCache {
 }
 
 func (c *MarkdownCache) Get(url string) *CachedMarkdown {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	item, ok := c.items[url]
 	if !ok {
 		return nil
 	}
 	if time.Since(item.CachedAt) > c.ttl {
+		delete(c.items, url)
 		return nil
 	}
 	return item

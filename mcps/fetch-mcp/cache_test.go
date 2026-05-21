@@ -31,6 +31,7 @@ func TestMarkdownCacheExpired(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 	item := cache.Get("https://example.com")
 	assert.Nil(t, item)
+	assert.Equal(t, 0, cache.Len())
 }
 
 func TestMarkdownCacheMiss(t *testing.T) {

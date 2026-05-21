@@ -17,6 +17,8 @@ import (
 	_ "github.com/bartventer/httpcache/store/memcache"
 )
 
+const maxBodySize = 10 * 1024 * 1024
+
 type FetchResult struct {
 	Markdown          string
 	Title             string
@@ -98,6 +100,14 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string, startIndex int, maxL
 		}, nil
 	}
 
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("parsing URL: %w", err)
+	}
+	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
+		return nil, fmt.Errorf("unsupported URL scheme %q (only http and https are allowed)", parsedURL.Scheme)
+	}
+
 	req, err := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
@@ -117,7 +127,7 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string, startIndex int, maxL
 
 	cacheStatus := resp.Header.Get("X-Httpcache-Status")
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
 	if err != nil {
 		return nil, fmt.Errorf("reading response body: %w", err)
 	}
@@ -217,7 +227,7 @@ func extractTitle(body []byte) string {
 	if end == -1 {
 		return ""
 	}
-	return lower[start+7 : start+7+end]
+	return string(body[start+7 : start+7+end])
 }
 
 func paginate(content string, startIndex, maxLength int) (string, bool) {

@@ -87,8 +87,8 @@ func TestIsHTML(t *testing.T) {
 }
 
 func TestExtractTitle(t *testing.T) {
-	assert.Equal(t, "my page", extractTitle([]byte("<html><head><title>My Page</title></head></html>")))
-	assert.Equal(t, "my page", extractTitle([]byte("<html><head><TITLE>My Page</TITLE></head></html>")))
+	assert.Equal(t, "My Page", extractTitle([]byte("<html><head><title>My Page</title></head></html>")))
+	assert.Equal(t, "My Page", extractTitle([]byte("<html><head><TITLE>My Page</TITLE></head></html>")))
 	assert.Equal(t, "", extractTitle([]byte("<html><body>no title</body></html>")))
 	assert.Equal(t, "", extractTitle([]byte("")))
 }
@@ -202,5 +202,15 @@ func TestFetcherIntegration(t *testing.T) {
 		assert.Equal(t, 5, len(result.Markdown))
 		assert.Greater(t, result.NextIndex, 0)
 		assert.Equal(t, 0, result.StartIndex)
+	})
+
+	t.Run("Rejects non-http(s) schemes", func(t *testing.T) {
+		_, err := fetcher.Fetch(ctx, "file:///etc/passwd", 0, 20000)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "unsupported URL scheme")
+
+		_, err = fetcher.Fetch(ctx, "ftp://example.com/file", 0, 20000)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "unsupported URL scheme")
 	})
 }

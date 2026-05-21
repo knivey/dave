@@ -22,3 +22,4 @@ logs/
 tools/backfill-session-meta/backfill-session-meta
 tools/migrate-sqlite-to-pgsql/migrate-sqlite-to-pgsql
 todo.md
+mcps/brave-mcp/brave-mcp

@@ -79,6 +79,15 @@ command = "mcps/db-mcp/db-mcp"
 args = []
 timeout = "30s"
 
+# [fetch-mcp]
+# transport = "stdio"
+# command = "mcps/fetch-mcp/fetch-mcp"
+# env = [
+#   "FETCH_USER_AGENT=Mozilla/5.0 (X11; Linux x86_64; rv:144.0) Gecko/20100101 Firefox/144.0",
+#   "FETCH_TIMEOUT=60s",
+# ]
+# timeout = "60s"
+
 # [brave]
 # transport = "stdio"
 # command = "mcps/brave-mcp/brave-mcp"

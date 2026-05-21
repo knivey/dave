@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -64,6 +65,41 @@ func (c *braveClient) doRequest(ctx context.Context, endpoint string, params url
 	}
 
 	return body, nil
+}
+
+func (c *braveClient) doPostRequest(ctx context.Context, endpoint string, body interface{}) (json.RawMessage, error) {
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling request body: %w", err)
+	}
+
+	u := c.baseURL + endpoint
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-Subscription-Token", c.apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("API returned %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return respBody, nil
 }
 
 func (c *braveClient) doSearchRequest(ctx context.Context, endpoint string, params url.Values) (json.RawMessage, error) {
@@ -331,36 +367,24 @@ func formatLocalResults(poisData json.RawMessage, descData json.RawMessage) stri
 	return b.String()
 }
 
-func formatSummarizerResults(data json.RawMessage) string {
+func formatAnswersResults(data json.RawMessage) string {
 	var resp struct {
-		Status  string `json:"status"`
-		Summary []struct {
-			Type string          `json:"type"`
-			Data json.RawMessage `json:"data"`
-		} `json:"summary"`
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
 	}
 
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return string(data)
 	}
 
-	var b strings.Builder
-	for _, part := range resp.Summary {
-		if part.Type == "token" {
-			var s string
-			if err := json.Unmarshal(part.Data, &s); err == nil {
-				b.WriteString(s)
-			}
-		} else if part.Type == "inline_reference" {
-			var ref struct {
-				URL string `json:"url"`
-			}
-			if err := json.Unmarshal(part.Data, &ref); err == nil && ref.URL != "" {
-				fmt.Fprintf(&b, " (%s)", ref.URL)
-			}
-		}
+	if len(resp.Choices) == 0 {
+		return string(data)
 	}
-	return b.String()
+
+	return resp.Choices[0].Message.Content
 }
 
 func formatLLMContextResults(data json.RawMessage) string {

@@ -102,7 +102,7 @@ func main() {
 			Version: "0.1.0",
 		},
 		&mcp.ServerOptions{
-			Instructions: "MCP server for Brave Search. Provides web, image, video, news, local, summarizer, LLM context, and place search tools.",
+			Instructions: "MCP server for Brave Search. Provides web, image, video, news, local, answers, LLM context, and place search tools.",
 		},
 	)
 

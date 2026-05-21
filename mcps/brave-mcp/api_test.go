@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -148,18 +149,74 @@ func TestFormatVideoResults(t *testing.T) {
 	assert.Contains(t, result, "Tutorial [10:30] by Gopher (3d)")
 }
 
-func TestFormatSummarizerResults(t *testing.T) {
+func TestBraveClientDoPostRequest(t *testing.T) {
+	var receivedBody string
+	var receivedContentType string
+	var receivedAuth string
+	var receivedMethod string
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedMethod = r.Method
+		receivedContentType = r.Header.Get("Content-Type")
+		receivedAuth = r.Header.Get("X-Subscription-Token")
+		bodyBytes, _ := io.ReadAll(r.Body)
+		receivedBody = string(bodyBytes)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer ts.Close()
+
+	client := newBraveClient("test-key", ts.URL, 5*time.Second, "US", "en")
+	_, err := client.doPostRequest(context.Background(), "/res/v1/chat/completions", map[string]string{"query": "hello"})
+
+	require.NoError(t, err)
+	assert.Equal(t, "POST", receivedMethod)
+	assert.Equal(t, "application/json", receivedContentType)
+	assert.Equal(t, "test-key", receivedAuth)
+	assert.Contains(t, receivedBody, "hello")
+}
+
+func TestBraveClientDoPostRequestError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"internal"}`))
+	}))
+	defer ts.Close()
+
+	client := newBraveClient("key", ts.URL, 5*time.Second, "US", "en")
+	_, err := client.doPostRequest(context.Background(), "/res/v1/chat/completions", map[string]string{})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "API returned 500")
+}
+
+func TestFormatAnswersResults(t *testing.T) {
 	input := `{
-		"status": "complete",
-		"summary": [
-			{"type": "token", "data": "Go is a "},
-			{"type": "token", "data": "programming language"},
-			{"type": "inline_reference", "data": {"type": "link", "url": "https://go.dev", "start_index": 0, "end_index": 5}}
-		]
+		"model": "brave",
+		"choices": [{
+			"message": {
+				"role": "assistant",
+				"content": "Go is a statically typed programming language [1]. It was designed at Google."
+			}
+		}],
+		"id": "chat-123",
+		"created": 1700000000,
+		"object": "chat.completion.chunk"
 	}`
-	result := formatSummarizerResults(json.RawMessage(input))
-	assert.Contains(t, result, "Go is a programming language")
-	assert.Contains(t, result, "(https://go.dev)")
+	result := formatAnswersResults(json.RawMessage(input))
+	assert.Equal(t, "Go is a statically typed programming language [1]. It was designed at Google.", result)
+}
+
+func TestFormatAnswersResultsEmpty(t *testing.T) {
+	input := `{"model":"brave","choices":[],"id":"chat-123"}`
+	result := formatAnswersResults(json.RawMessage(input))
+	assert.Equal(t, input, result)
+}
+
+func TestFormatAnswersResultsInvalid(t *testing.T) {
+	input := `not json`
+	result := formatAnswersResults(json.RawMessage(input))
+	assert.Equal(t, "not json", result)
 }
 
 func TestFormatLocalResults(t *testing.T) {

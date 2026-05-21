@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -198,87 +197,53 @@ func (h *ToolHandlers) handleLocalSearch(ctx context.Context, req *mcp.CallToolR
 		locationIDs = append(locationIDs, loc.ID)
 	}
 
-	poiParams := url.Values{}
-	for _, id := range locationIDs {
-		poiParams.Add("ids", id)
-	}
-
-	poisData, err := h.client.doRequest(ctx, "/res/v1/local/pois", poiParams)
+	locationsJSON, err := json.Marshal(webResp.Locations.Results)
 	if err != nil {
-		return nil, nil, fmt.Errorf("fetching POI data: %w", err)
+		return nil, nil, fmt.Errorf("marshaling locations: %w", err)
 	}
 
+	var descData json.RawMessage
 	descParams := url.Values{}
 	for _, id := range locationIDs {
 		descParams.Add("ids", id)
 	}
-
-	descData, err := h.client.doRequest(ctx, "/res/v1/local/descriptions", descParams)
+	descData, err = h.client.doRequest(ctx, "/res/v1/local/descriptions", descParams)
 	if err != nil {
 		descData = nil
 	}
 
-	return nil, formatLocalResults(poisData, descData), nil
+	return nil, formatLocalResults(json.RawMessage(locationsJSON), descData), nil
 }
 
-type SummarizerInput struct {
-	Key              string `json:"key" jsonschema:"required,description=Summarizer key from a prior web search"`
-	EntityInfo       *bool  `json:"entity_info,omitempty" jsonschema:"description=Include entity information"`
-	InlineReferences *bool  `json:"inline_references,omitempty" jsonschema:"description=Include inline source references"`
+type AnswersInput struct {
+	Query      string `json:"query" jsonschema:"required,description=Question to get an AI-generated answer for"`
+	Safesearch string `json:"safesearch,omitempty" jsonschema:"description=Filter: off, moderate, or strict"`
 }
 
-func (h *ToolHandlers) handleSummarizer(ctx context.Context, req *mcp.CallToolRequest, input SummarizerInput) (*mcp.CallToolResult, any, error) {
-	params := url.Values{}
-	params.Set("key", input.Key)
-	if input.EntityInfo != nil && *input.EntityInfo {
-		params.Set("entity_info", "true")
+func (h *ToolHandlers) handleAnswers(ctx context.Context, req *mcp.CallToolRequest, input AnswersInput) (*mcp.CallToolResult, any, error) {
+	body := map[string]interface{}{
+		"messages":         []map[string]string{{"role": "user", "content": input.Query}},
+		"model":            "brave",
+		"stream":           false,
+		"enable_citations": true,
+		"enable_entities":  true,
 	}
-	if input.InlineReferences != nil && *input.InlineReferences {
-		params.Set("inline_references", "true")
+	if h.client.country != "" {
+		body["country"] = h.client.country
 	}
-
-	var result json.RawMessage
-	var lastErr error
-
-	for attempt := 0; attempt < 30; attempt++ {
-		data, err := h.client.doRequest(ctx, "/res/v1/summarizer/search", params)
-		if err != nil {
-			lastErr = err
-			select {
-			case <-ctx.Done():
-				return nil, nil, ctx.Err()
-			case <-time.After(300 * time.Millisecond):
-				continue
-			}
-		}
-
-		var status struct {
-			Status string `json:"status"`
-		}
-		if err := json.Unmarshal(data, &status); err != nil {
-			return nil, nil, fmt.Errorf("parsing summarizer response: %w", err)
-		}
-
-		if status.Status == "complete" {
-			result = data
-			break
-		}
-
-		select {
-		case <-ctx.Done():
-			return nil, nil, ctx.Err()
-		case <-time.After(300 * time.Millisecond):
-		}
+	if h.client.lang != "" {
+		body["language"] = h.client.lang
+	}
+	if input.Safesearch != "" {
+		body["safesearch"] = input.Safesearch
 	}
 
-	if result == nil {
-		if lastErr != nil {
-			return nil, nil, fmt.Errorf("summarizer did not complete: %w", lastErr)
-		}
-		return nil, nil, fmt.Errorf("summarizer did not complete after 30 attempts")
+	data, err := h.client.doPostRequest(ctx, "/res/v1/chat/completions", body)
+	if err != nil {
+		return nil, nil, fmt.Errorf("answers search failed: %w", err)
 	}
 
-	return nil, formatSummarizerResults(result), nil
+	return nil, formatAnswersResults(data), nil
 }
 
 type LLMContextInput struct {
@@ -353,7 +318,7 @@ var allToolNames = []string{
 	"brave_video_search",
 	"brave_news_search",
 	"brave_local_search",
-	"brave_summarizer",
+	"brave_answers",
 	"brave_llm_context",
 	"brave_place_search",
 }
@@ -389,11 +354,11 @@ func registerTools(server *mcp.Server, handlers *ToolHandlers, enabled map[strin
 			Description: "Search for local businesses and places. Falls back to web results if no locations found.",
 		}, handlers.handleLocalSearch)
 	}
-	if enabled == nil || enabled["brave_summarizer"] {
+	if enabled == nil || enabled["brave_answers"] {
 		mcp.AddTool(server, &mcp.Tool{
-			Name:        "brave_summarizer",
-			Description: "Get an AI-generated summary of web search results. Requires a key from a prior web search.",
-		}, handlers.handleSummarizer)
+			Name:        "brave_answers",
+			Description: "Get an AI-generated answer to a question using Brave's chat completions API. Returns a direct answer with citations.",
+		}, handlers.handleAnswers)
 	}
 	if enabled == nil || enabled["brave_llm_context"] {
 		mcp.AddTool(server, &mcp.Tool{

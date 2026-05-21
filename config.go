@@ -733,6 +733,12 @@ func loadReloadableDir(dir string, config *Config) error {
 	if err != nil {
 		return err
 	}
+	tmpConfig.Commands = commands
+
+	tmpConfig.Networks = config.Networks
+	if err := validateNetworkDisabledCommands(&tmpConfig); err != nil {
+		return err
+	}
 
 	if err := loadNoticesFile(dir, &tmpConfig); err != nil {
 		return err

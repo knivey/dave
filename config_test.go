@@ -1770,6 +1770,88 @@ host = "irc.example.com"
 	})
 }
 
+func TestLoadReloadableDirDisabledCommands(t *testing.T) {
+	t.Run("reload validates disabled_commands against new commands", func(t *testing.T) {
+		mainTOML := `
+[networks.testnet]
+nick = "bot"
+disabled_commands = ["mychat", "removed"]
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+		servicesTOML := `
+[svc]
+api_base = "http://localhost"
+api_key = "test"
+`
+		chatsWithBothTOML := `
+[mychat]
+regex = "mychat"
+service = "svc"
+model = "m"
+
+[removed]
+regex = "removed"
+service = "svc"
+model = "m"
+`
+		chatsWithoutRemovedTOML := `
+[mychat]
+regex = "mychat"
+service = "svc"
+model = "m"
+`
+		dir := createTestConfigDir(t, mainTOML, map[string]string{
+			"chats.toml":    chatsWithBothTOML,
+			"services.toml": servicesTOML,
+		})
+		defer os.RemoveAll(dir)
+
+		cfg, err := loadConfigDir(dir)
+		require.NoError(t, err)
+
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "chats.toml"), []byte(chatsWithoutRemovedTOML), 0644))
+
+		err = loadReloadableDir(dir, &cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "disabled_commands")
+		assert.Contains(t, err.Error(), "removed")
+		assert.Contains(t, err.Error(), "not a known command")
+	})
+
+	t.Run("reload succeeds when disabled_commands all valid", func(t *testing.T) {
+		mainTOML := `
+[networks.testnet]
+nick = "bot"
+disabled_commands = ["mychat"]
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+		servicesTOML := `
+[svc]
+api_base = "http://localhost"
+api_key = "test"
+`
+		chatsTOML := `
+[mychat]
+regex = "mychat"
+service = "svc"
+model = "m"
+`
+		dir := createTestConfigDir(t, mainTOML, map[string]string{
+			"chats.toml":    chatsTOML,
+			"services.toml": servicesTOML,
+		})
+		defer os.RemoveAll(dir)
+
+		cfg, err := loadConfigDir(dir)
+		require.NoError(t, err)
+
+		err = loadReloadableDir(dir, &cfg)
+		require.NoError(t, err)
+	})
+}
+
 func TestLoadConfigDirLoggingDefaults(t *testing.T) {
 	mainTOML := `
 [networks.testnet]

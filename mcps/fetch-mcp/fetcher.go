@@ -35,12 +35,15 @@ type Fetcher struct {
 	mdCache *MarkdownCache
 }
 
-func NewFetcher(cfg Config, mdCache *MarkdownCache) *Fetcher {
+func NewFetcher(cfg Config, mdCache *MarkdownCache) (*Fetcher, error) {
 	baseTransport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 	}
 	if cfg.Fetch.ProxyURL != "" {
-		proxyURL, _ := url.Parse(cfg.Fetch.ProxyURL)
+		proxyURL, err := url.Parse(cfg.Fetch.ProxyURL)
+		if err != nil {
+			return nil, fmt.Errorf("parsing proxy URL %q: %w", cfg.Fetch.ProxyURL, err)
+		}
 		baseTransport.Proxy = http.ProxyURL(proxyURL)
 	}
 
@@ -73,7 +76,7 @@ func NewFetcher(cfg Config, mdCache *MarkdownCache) *Fetcher {
 		mdConv:  mdConv,
 		cfg:     cfg,
 		mdCache: mdCache,
-	}
+	}, nil
 }
 
 func (f *Fetcher) Fetch(ctx context.Context, rawURL string, startIndex int, maxLength int) (*FetchResult, error) {
@@ -129,6 +132,7 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string, startIndex int, maxL
 			IsRawContent: true,
 			Truncated:    truncated,
 			StartIndex:   startIndex,
+			NextIndex:    nextIndex(startIndex, maxLength, len(bodyBytes)),
 		}, nil
 	}
 
@@ -213,7 +217,7 @@ func extractTitle(body []byte) string {
 	if end == -1 {
 		return ""
 	}
-	return string(body[start+7 : start+7+end])
+	return lower[start+7 : start+7+end]
 }
 
 func paginate(content string, startIndex, maxLength int) (string, bool) {

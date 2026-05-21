@@ -28,12 +28,10 @@ func NewToolHandlers(cfg Config) (*ToolHandlers, error) {
 	}, nil
 }
 
-func (h *ToolHandlers) getConfig() Config {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.cfg
-}
-
+// setConfig swaps the stored config but does NOT propagate changes to the
+// Fetcher (which captures its own Config copy at construction time) or the
+// MarkdownCache. A full teardown + NewToolHandlers is required for those to
+// pick up new settings.
 func (h *ToolHandlers) setConfig(cfg Config) error {
 	h.mu.Lock()
 	h.cfg = cfg
@@ -45,7 +43,6 @@ type FetchInput struct {
 	URL        string `json:"url" jsonschema:"The URL to fetch and convert to markdown"`
 	MaxLength  int    `json:"max_length,omitempty" jsonschema:"Maximum number of characters to return. Default 20000."`
 	StartIndex int    `json:"start_index,omitempty" jsonschema:"On return output documenting where to start the next page. Start from 0 on the first call."`
-	Raw        bool   `json:"raw,omitempty" jsonschema:"If true, skip markdown conversion and return raw content"`
 }
 
 type FetchOutput struct {
@@ -62,6 +59,10 @@ type FetchOutput struct {
 const maxAllowedLength = 100000
 
 func (h *ToolHandlers) handleFetch(ctx context.Context, req *mcp.CallToolRequest, input FetchInput) (*mcp.CallToolResult, FetchOutput, error) {
+	if input.URL == "" {
+		return nil, FetchOutput{}, fmt.Errorf("url is required")
+	}
+
 	maxLength := input.MaxLength
 	if maxLength <= 0 {
 		maxLength = 20000

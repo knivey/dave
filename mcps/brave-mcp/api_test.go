@@ -195,3 +195,52 @@ func TestFormatLocalResultsNoDescriptions(t *testing.T) {
 	result := formatLocalResults(json.RawMessage(pois), nil)
 	assert.Contains(t, result, "Place")
 }
+
+func TestFormatLLMContextResults(t *testing.T) {
+	input := `{
+		"results": [
+			{"url": "https://go.dev", "title": "The Go Programming Language", "extract": "Go is an open source programming language."},
+			{"url": "https://golang.org", "title": "Go Docs", "extract": "Documentation for Go."}
+		]
+	}`
+	result := formatLLMContextResults(json.RawMessage(input))
+	assert.Contains(t, result, "The Go Programming Language")
+	assert.Contains(t, result, "https://go.dev")
+	assert.Contains(t, result, "Go is an open source programming language")
+	assert.Contains(t, result, "---")
+}
+
+func TestFormatLLMContextResultsEmpty(t *testing.T) {
+	input := `{"results":[]}`
+	result := formatLLMContextResults(json.RawMessage(input))
+	assert.NotContains(t, result, "##")
+}
+
+func TestFormatPlaceResults(t *testing.T) {
+	input := `{
+		"results": [
+			{
+				"name": "Central Park",
+				"rating": {"ratingValue": 4.8, "reviewCount": 5000},
+				"displayAddress": "New York, NY",
+				"category": "Park",
+				"distance": 500
+			}
+		],
+		"cities": [
+			{"name": "New York"}
+		]
+	}`
+	result := formatPlaceResults(json.RawMessage(input))
+	assert.Contains(t, result, "Central Park")
+	assert.Contains(t, result, "4.8/5")
+	assert.Contains(t, result, "Park")
+	assert.Contains(t, result, "New York, NY")
+	assert.Contains(t, result, "City: New York")
+}
+
+func TestFormatPlaceResultsEmpty(t *testing.T) {
+	input := `{}`
+	result := formatPlaceResults(json.RawMessage(input))
+	assert.NotContains(t, result, "1.")
+}

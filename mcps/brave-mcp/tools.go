@@ -275,7 +275,7 @@ func (h *ToolHandlers) handleSummarizer(ctx context.Context, req *mcp.CallToolRe
 		if lastErr != nil {
 			return nil, nil, fmt.Errorf("summarizer did not complete: %w", lastErr)
 		}
-		return nil, nil, fmt.Errorf("summarizer did not complete after 20 attempts")
+		return nil, nil, fmt.Errorf("summarizer did not complete after 30 attempts")
 	}
 
 	return nil, formatSummarizerResults(result), nil
@@ -302,7 +302,7 @@ func (h *ToolHandlers) handleLLMContext(ctx context.Context, req *mcp.CallToolRe
 		return nil, nil, fmt.Errorf("LLM context search failed: %w", err)
 	}
 
-	return nil, string(data), nil
+	return nil, formatLLMContextResults(data), nil
 }
 
 type PlaceSearchInput struct {
@@ -344,7 +344,7 @@ func (h *ToolHandlers) handlePlaceSearch(ctx context.Context, req *mcp.CallToolR
 		return nil, nil, fmt.Errorf("place search failed: %w", err)
 	}
 
-	return nil, string(data), nil
+	return nil, formatPlaceResults(data), nil
 }
 
 var allToolNames = []string{

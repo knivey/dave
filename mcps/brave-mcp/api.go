@@ -341,3 +341,103 @@ func formatSummarizerResults(data json.RawMessage) string {
 	}
 	return b.String()
 }
+
+func formatLLMContextResults(data json.RawMessage) string {
+	var resp struct {
+		Results []struct {
+			URL     string `json:"url"`
+			Title   string `json:"title"`
+			Extract string `json:"extract"`
+		} `json:"results"`
+	}
+
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return string(data)
+	}
+
+	var b strings.Builder
+	for i, r := range resp.Results {
+		if i > 0 {
+			b.WriteString("\n\n---\n")
+		}
+		fmt.Fprintf(&b, "## %s\n%s\n\n%s", r.Title, r.URL, r.Extract)
+	}
+
+	if b.Len() == 0 {
+		return string(data)
+	}
+	return b.String()
+}
+
+func formatPlaceResults(data json.RawMessage) string {
+	var resp struct {
+		Results []struct {
+			Name   string `json:"name"`
+			Phone  string `json:"phone"`
+			Rating struct {
+				RatingValue float64 `json:"ratingValue"`
+				ReviewCount int     `json:"reviewCount"`
+			} `json:"rating"`
+			Address  string  `json:"displayAddress"`
+			Distance float64 `json:"distance"`
+			Category string  `json:"category"`
+		} `json:"results"`
+		Cities []struct {
+			Name string `json:"name"`
+		} `json:"cities"`
+		Addresses []struct {
+			StreetAddress string `json:"streetAddress"`
+		} `json:"addresses"`
+	}
+
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return string(data)
+	}
+
+	var b strings.Builder
+	hasContent := false
+
+	for i, r := range resp.Results {
+		if hasContent {
+			b.WriteString("\n\n")
+		}
+		fmt.Fprintf(&b, "%d. %s", i+1, r.Name)
+		if r.Rating.RatingValue > 0 {
+			fmt.Fprintf(&b, " (%.1f/5, %d reviews)", r.Rating.RatingValue, r.Rating.ReviewCount)
+		}
+		if r.Category != "" {
+			fmt.Fprintf(&b, " [%s]", r.Category)
+		}
+		if r.Distance > 0 {
+			fmt.Fprintf(&b, " (%.0fm away)", r.Distance)
+		}
+		if r.Address != "" {
+			fmt.Fprintf(&b, "\n   %s", r.Address)
+		}
+		if r.Phone != "" {
+			fmt.Fprintf(&b, "\n   Phone: %s", r.Phone)
+		}
+		hasContent = true
+	}
+
+	for _, c := range resp.Cities {
+		if hasContent {
+			b.WriteString("\n\n")
+		}
+		fmt.Fprintf(&b, "City: %s", c.Name)
+		hasContent = true
+	}
+
+	for _, a := range resp.Addresses {
+		if hasContent {
+			b.WriteString("\n\n")
+		}
+		fmt.Fprintf(&b, "Address: %s", a.StreetAddress)
+		hasContent = true
+	}
+
+	if !hasContent {
+		return string(data)
+	}
+	return b.String()
+}

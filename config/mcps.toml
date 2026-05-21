@@ -78,3 +78,9 @@ transport = "stdio"
 command = "mcps/db-mcp/db-mcp"
 args = []
 timeout = "30s"
+
+# [brave]
+# transport = "stdio"
+# command = "mcps/brave-mcp/brave-mcp"
+# env = ["BRAVE_API_KEY=your-api-key"]
+# timeout = "30s"

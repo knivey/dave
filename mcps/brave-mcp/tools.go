@@ -18,11 +18,11 @@ func NewToolHandlers(client *braveClient) *ToolHandlers {
 }
 
 type WebSearchInput struct {
-	Query      string `json:"query" jsonschema:"required,description=Search query"`
-	Count      int    `json:"count,omitempty" jsonschema:"description=Number of results (1-20, default 10)"`
-	Offset     int    `json:"offset,omitempty" jsonschema:"description=Pagination offset (0-9)"`
-	Safesearch string `json:"safesearch,omitempty" jsonschema:"description=Filter: off, moderate, or strict"`
-	Freshness  string `json:"freshness,omitempty" jsonschema:"description=Age filter: pd, pw, pm, py, or YYYY-MM-DDtoYYYY-MM-DD"`
+	Query      string `json:"query" jsonschema:"Search query"`
+	Count      int    `json:"count,omitempty" jsonschema:"Number of results (1-20, default 10)"`
+	Offset     int    `json:"offset,omitempty" jsonschema:"Pagination offset (0-9)"`
+	Safesearch string `json:"safesearch,omitempty" jsonschema:"Filter: off, moderate, or strict"`
+	Freshness  string `json:"freshness,omitempty" jsonschema:"Age filter: pd, pw, pm, py, or YYYY-MM-DDtoYYYY-MM-DD"`
 }
 
 func (h *ToolHandlers) handleWebSearch(ctx context.Context, req *mcp.CallToolRequest, input WebSearchInput) (*mcp.CallToolResult, any, error) {
@@ -50,9 +50,9 @@ func (h *ToolHandlers) handleWebSearch(ctx context.Context, req *mcp.CallToolReq
 }
 
 type ImageSearchInput struct {
-	Query      string `json:"query" jsonschema:"required,description=Search query"`
-	Count      int    `json:"count,omitempty" jsonschema:"description=Number of results (1-200, default 20)"`
-	Safesearch string `json:"safesearch,omitempty" jsonschema:"description=Filter: off or strict"`
+	Query      string `json:"query" jsonschema:"Search query"`
+	Count      int    `json:"count,omitempty" jsonschema:"Number of results (1-200, default 20)"`
+	Safesearch string `json:"safesearch,omitempty" jsonschema:"Filter: off or strict"`
 }
 
 func (h *ToolHandlers) handleImageSearch(ctx context.Context, req *mcp.CallToolRequest, input ImageSearchInput) (*mcp.CallToolResult, any, error) {
@@ -74,11 +74,11 @@ func (h *ToolHandlers) handleImageSearch(ctx context.Context, req *mcp.CallToolR
 }
 
 type VideoSearchInput struct {
-	Query      string `json:"query" jsonschema:"required,description=Search query"`
-	Count      int    `json:"count,omitempty" jsonschema:"description=Number of results (1-50, default 20)"`
-	Offset     int    `json:"offset,omitempty" jsonschema:"description=Pagination offset (0-9)"`
-	Safesearch string `json:"safesearch,omitempty" jsonschema:"description=Filter: off, moderate, or strict"`
-	Freshness  string `json:"freshness,omitempty" jsonschema:"description=Age filter: pd, pw, pm, py"`
+	Query      string `json:"query" jsonschema:"Search query"`
+	Count      int    `json:"count,omitempty" jsonschema:"Number of results (1-50, default 20)"`
+	Offset     int    `json:"offset,omitempty" jsonschema:"Pagination offset (0-9)"`
+	Safesearch string `json:"safesearch,omitempty" jsonschema:"Filter: off, moderate, or strict"`
+	Freshness  string `json:"freshness,omitempty" jsonschema:"Age filter: pd, pw, pm, py"`
 }
 
 func (h *ToolHandlers) handleVideoSearch(ctx context.Context, req *mcp.CallToolRequest, input VideoSearchInput) (*mcp.CallToolResult, any, error) {
@@ -106,11 +106,11 @@ func (h *ToolHandlers) handleVideoSearch(ctx context.Context, req *mcp.CallToolR
 }
 
 type NewsSearchInput struct {
-	Query      string `json:"query" jsonschema:"required,description=Search query"`
-	Count      int    `json:"count,omitempty" jsonschema:"description=Number of results (1-50, default 20)"`
-	Offset     int    `json:"offset,omitempty" jsonschema:"description=Pagination offset (0-9)"`
-	Safesearch string `json:"safesearch,omitempty" jsonschema:"description=Filter: off, moderate, or strict"`
-	Freshness  string `json:"freshness,omitempty" jsonschema:"description=Age filter: pd, pw, pm, py"`
+	Query      string `json:"query" jsonschema:"Search query"`
+	Count      int    `json:"count,omitempty" jsonschema:"Number of results (1-50, default 20)"`
+	Offset     int    `json:"offset,omitempty" jsonschema:"Pagination offset (0-9)"`
+	Safesearch string `json:"safesearch,omitempty" jsonschema:"Filter: off, moderate, or strict"`
+	Freshness  string `json:"freshness,omitempty" jsonschema:"Age filter: pd, pw, pm, py"`
 }
 
 func (h *ToolHandlers) handleNewsSearch(ctx context.Context, req *mcp.CallToolRequest, input NewsSearchInput) (*mcp.CallToolResult, any, error) {
@@ -138,10 +138,10 @@ func (h *ToolHandlers) handleNewsSearch(ctx context.Context, req *mcp.CallToolRe
 }
 
 type LocalSearchInput struct {
-	Query      string `json:"query" jsonschema:"required,description=Search query"`
-	Count      int    `json:"count,omitempty" jsonschema:"description=Number of results"`
-	Safesearch string `json:"safesearch,omitempty" jsonschema:"description=Filter: off, moderate, or strict"`
-	Freshness  string `json:"freshness,omitempty" jsonschema:"description=Age filter: pd, pw, pm, py"`
+	Query      string `json:"query" jsonschema:"Search query"`
+	Count      int    `json:"count,omitempty" jsonschema:"Number of results"`
+	Safesearch string `json:"safesearch,omitempty" jsonschema:"Filter: off, moderate, or strict"`
+	Freshness  string `json:"freshness,omitempty" jsonschema:"Age filter: pd, pw, pm, py"`
 }
 
 func (h *ToolHandlers) handleLocalSearch(ctx context.Context, req *mcp.CallToolRequest, input LocalSearchInput) (*mcp.CallToolResult, any, error) {
@@ -228,8 +228,8 @@ func (h *ToolHandlers) handleLocalSearch(ctx context.Context, req *mcp.CallToolR
 }
 
 type AnswersInput struct {
-	Query      string `json:"query" jsonschema:"required,description=Question to get an AI-generated answer for"`
-	Safesearch string `json:"safesearch,omitempty" jsonschema:"description=Filter: off, moderate, or strict"`
+	Query      string `json:"query" jsonschema:"Question to get an AI-generated answer for"`
+	Safesearch string `json:"safesearch,omitempty" jsonschema:"Filter: off, moderate, or strict"`
 }
 
 func (h *ToolHandlers) handleAnswers(ctx context.Context, req *mcp.CallToolRequest, input AnswersInput) (*mcp.CallToolResult, any, error) {
@@ -259,9 +259,9 @@ func (h *ToolHandlers) handleAnswers(ctx context.Context, req *mcp.CallToolReque
 }
 
 type LLMContextInput struct {
-	Query     string `json:"query" jsonschema:"required,description=Search query"`
-	Count     int    `json:"count,omitempty" jsonschema:"description=Number of results (1-50)"`
-	Freshness string `json:"freshness,omitempty" jsonschema:"description=Age filter: pd, pw, pm, py"`
+	Query     string `json:"query" jsonschema:"Search query"`
+	Count     int    `json:"count,omitempty" jsonschema:"Number of results (1-50)"`
+	Freshness string `json:"freshness,omitempty" jsonschema:"Age filter: pd, pw, pm, py"`
 }
 
 func (h *ToolHandlers) handleLLMContext(ctx context.Context, req *mcp.CallToolRequest, input LLMContextInput) (*mcp.CallToolResult, any, error) {
@@ -283,13 +283,13 @@ func (h *ToolHandlers) handleLLMContext(ctx context.Context, req *mcp.CallToolRe
 }
 
 type PlaceSearchInput struct {
-	Query      string   `json:"query,omitempty" jsonschema:"description=Search query"`
-	Latitude   *float64 `json:"latitude,omitempty" jsonschema:"description=Latitude (-90 to 90)"`
-	Longitude  *float64 `json:"longitude,omitempty" jsonschema:"description=Longitude (-180 to 180)"`
-	Location   string   `json:"location,omitempty" jsonschema:"description=Location string (e.g. 'san francisco ca united states')"`
-	Radius     *float64 `json:"radius,omitempty" jsonschema:"description=Search radius bias in meters"`
-	Count      int      `json:"count,omitempty" jsonschema:"description=Number of results (1-50, default 20)"`
-	Safesearch string   `json:"safesearch,omitempty" jsonschema:"description=Filter: off, moderate, or strict"`
+	Query      string   `json:"query,omitempty" jsonschema:"Search query"`
+	Latitude   *float64 `json:"latitude,omitempty" jsonschema:"Latitude (-90 to 90)"`
+	Longitude  *float64 `json:"longitude,omitempty" jsonschema:"Longitude (-180 to 180)"`
+	Location   string   `json:"location,omitempty" jsonschema:"Location string (e.g. 'san francisco ca united states')"`
+	Radius     *float64 `json:"radius,omitempty" jsonschema:"Search radius bias in meters"`
+	Count      int      `json:"count,omitempty" jsonschema:"Number of results (1-50, default 20)"`
+	Safesearch string   `json:"safesearch,omitempty" jsonschema:"Filter: off, moderate, or strict"`
 }
 
 func (h *ToolHandlers) handlePlaceSearch(ctx context.Context, req *mcp.CallToolRequest, input PlaceSearchInput) (*mcp.CallToolResult, any, error) {

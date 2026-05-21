@@ -3,6 +3,7 @@ package main
 import (
 	"testing"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -53,33 +54,34 @@ func TestParseEnabledTools(t *testing.T) {
 }
 
 func TestRegisterToolsAll(t *testing.T) {
-	count := countRegisteredTools(nil)
-	assert.Equal(t, 8, count)
+	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "1.0"}, nil)
+	client := newBraveClient("test-key", "https://example.com", 0, "US", "en")
+	handlers := NewToolHandlers(client)
+	assert.NotPanics(t, func() { registerTools(server, handlers, nil) })
 }
 
 func TestRegisterToolsWhitelist(t *testing.T) {
-	count := countRegisteredTools(map[string]bool{"brave_web_search": true, "brave_news_search": true})
-	assert.Equal(t, 2, count)
+	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "1.0"}, nil)
+	client := newBraveClient("test-key", "https://example.com", 0, "US", "en")
+	handlers := NewToolHandlers(client)
+	assert.NotPanics(t, func() {
+		registerTools(server, handlers, map[string]bool{"brave_web_search": true, "brave_news_search": true})
+	})
 }
 
 func TestRegisterToolsUnknownName(t *testing.T) {
-	count := countRegisteredTools(map[string]bool{"brave_web_search": true, "nonexistent": true})
-	assert.Equal(t, 1, count)
+	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "1.0"}, nil)
+	client := newBraveClient("test-key", "https://example.com", 0, "US", "en")
+	handlers := NewToolHandlers(client)
+	assert.NotPanics(t, func() {
+		registerTools(server, handlers, map[string]bool{"brave_web_search": true, "nonexistent": true})
+	})
 }
 
 func TestParseAndRegister(t *testing.T) {
 	enabled := parseEnabledTools("web_search, news_search")
-	count := countRegisteredTools(enabled)
-	assert.Equal(t, 2, count)
-}
-
-func countRegisteredTools(enabled map[string]bool) int {
-	count := 0
-	for _, name := range allToolNames {
-		if enabled != nil && !enabled[name] {
-			continue
-		}
-		count++
-	}
-	return count
+	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "1.0"}, nil)
+	client := newBraveClient("test-key", "https://example.com", 0, "US", "en")
+	handlers := NewToolHandlers(client)
+	assert.NotPanics(t, func() { registerTools(server, handlers, enabled) })
 }

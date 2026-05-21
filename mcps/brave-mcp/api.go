@@ -169,10 +169,12 @@ func formatWebResults(data json.RawMessage) string {
 func formatImageResults(data json.RawMessage) string {
 	var resp struct {
 		Results []struct {
-			URL         string `json:"url"`
-			Title       string `json:"title"`
-			Description string `json:"description"`
-			Source      string `json:"source"`
+			URL       string `json:"url"`
+			Title     string `json:"title"`
+			Source    string `json:"source"`
+			Thumbnail struct {
+				Src string `json:"src"`
+			} `json:"thumbnail"`
 		} `json:"results"`
 	}
 
@@ -186,8 +188,8 @@ func formatImageResults(data json.RawMessage) string {
 			b.WriteString("\n")
 		}
 		fmt.Fprintf(&b, "%d. %s\n   %s\n   Source: %s", i+1, r.Title, r.URL, r.Source)
-		if r.Description != "" {
-			fmt.Fprintf(&b, "\n   %s", r.Description)
+		if r.Thumbnail.Src != "" {
+			fmt.Fprintf(&b, "\n   Thumbnail: %s", r.Thumbnail.Src)
 		}
 	}
 	return b.String()
@@ -239,7 +241,9 @@ func formatNewsResults(data json.RawMessage) string {
 			Title       string `json:"title"`
 			Description string `json:"description"`
 			Age         string `json:"age"`
-			Source      string `json:"source"`
+			MetaURL     struct {
+				Hostname string `json:"hostname"`
+			} `json:"meta_url"`
 		} `json:"results"`
 	}
 
@@ -252,7 +256,14 @@ func formatNewsResults(data json.RawMessage) string {
 		if i > 0 {
 			b.WriteString("\n")
 		}
-		fmt.Fprintf(&b, "%d. %s (%s, %s)\n   %s\n   %s", i+1, r.Title, r.Source, r.Age, r.Description, r.URL)
+		source := r.MetaURL.Hostname
+		if source != "" && r.Age != "" {
+			fmt.Fprintf(&b, "%d. %s (%s, %s)\n   %s\n   %s", i+1, r.Title, source, r.Age, r.Description, r.URL)
+		} else if r.Age != "" {
+			fmt.Fprintf(&b, "%d. %s (%s)\n   %s\n   %s", i+1, r.Title, r.Age, r.Description, r.URL)
+		} else {
+			fmt.Fprintf(&b, "%d. %s\n   %s\n   %s", i+1, r.Title, r.Description, r.URL)
+		}
 	}
 	return b.String()
 }
@@ -263,8 +274,10 @@ func formatLocalResults(poisData json.RawMessage, descData json.RawMessage) stri
 			ID         string `json:"id"`
 			Title      string `json:"title"`
 			PriceRange string `json:"price_range"`
-			Phone      string `json:"phone"`
-			Rating     struct {
+			Contact    struct {
+				Telephone string `json:"telephone"`
+			} `json:"contact"`
+			Rating struct {
 				RatingValue float64 `json:"ratingValue"`
 				ReviewCount int     `json:"reviewCount"`
 			} `json:"rating"`
@@ -308,8 +321,8 @@ func formatLocalResults(poisData json.RawMessage, descData json.RawMessage) stri
 		if p.PostalAddress.DisplayAddress != "" {
 			fmt.Fprintf(&b, "\n   %s", p.PostalAddress.DisplayAddress)
 		}
-		if p.Phone != "" {
-			fmt.Fprintf(&b, "\n   Phone: %s", p.Phone)
+		if p.Contact.Telephone != "" {
+			fmt.Fprintf(&b, "\n   Phone: %s", p.Contact.Telephone)
 		}
 		if d, ok := descriptions[p.ID]; ok && d != "" {
 			fmt.Fprintf(&b, "\n   %s", d)
@@ -322,8 +335,8 @@ func formatSummarizerResults(data json.RawMessage) string {
 	var resp struct {
 		Status  string `json:"status"`
 		Summary []struct {
-			Type string `json:"type"`
-			Data string `json:"data"`
+			Type string          `json:"type"`
+			Data json.RawMessage `json:"data"`
 		} `json:"summary"`
 	}
 
@@ -334,9 +347,17 @@ func formatSummarizerResults(data json.RawMessage) string {
 	var b strings.Builder
 	for _, part := range resp.Summary {
 		if part.Type == "token" {
-			b.WriteString(part.Data)
+			var s string
+			if err := json.Unmarshal(part.Data, &s); err == nil {
+				b.WriteString(s)
+			}
 		} else if part.Type == "inline_reference" {
-			fmt.Fprintf(&b, " (%s)", part.Data)
+			var ref struct {
+				URL string `json:"url"`
+			}
+			if err := json.Unmarshal(part.Data, &ref); err == nil && ref.URL != "" {
+				fmt.Fprintf(&b, " (%s)", ref.URL)
+			}
 		}
 	}
 	return b.String()
@@ -344,11 +365,13 @@ func formatSummarizerResults(data json.RawMessage) string {
 
 func formatLLMContextResults(data json.RawMessage) string {
 	var resp struct {
-		Results []struct {
-			URL     string `json:"url"`
-			Title   string `json:"title"`
-			Extract string `json:"extract"`
-		} `json:"results"`
+		Grounding struct {
+			Generic []struct {
+				URL      string   `json:"url"`
+				Title    string   `json:"title"`
+				Snippets []string `json:"snippets"`
+			} `json:"generic"`
+		} `json:"grounding"`
 	}
 
 	if err := json.Unmarshal(data, &resp); err != nil {
@@ -356,14 +379,19 @@ func formatLLMContextResults(data json.RawMessage) string {
 	}
 
 	var b strings.Builder
-	for i, r := range resp.Results {
-		if i > 0 {
+	hasContent := false
+	for _, r := range resp.Grounding.Generic {
+		if hasContent {
 			b.WriteString("\n\n---\n")
 		}
-		fmt.Fprintf(&b, "## %s\n%s\n\n%s", r.Title, r.URL, r.Extract)
+		fmt.Fprintf(&b, "## %s\n%s", r.Title, r.URL)
+		for _, s := range r.Snippets {
+			fmt.Fprintf(&b, "\n\n%s", s)
+		}
+		hasContent = true
 	}
 
-	if b.Len() == 0 {
+	if !hasContent {
 		return string(data)
 	}
 	return b.String()
@@ -372,21 +400,28 @@ func formatLLMContextResults(data json.RawMessage) string {
 func formatPlaceResults(data json.RawMessage) string {
 	var resp struct {
 		Results []struct {
-			Name   string `json:"name"`
-			Phone  string `json:"phone"`
+			Name    string `json:"title"`
+			Contact struct {
+				Telephone string `json:"telephone"`
+			} `json:"contact"`
 			Rating struct {
 				RatingValue float64 `json:"ratingValue"`
 				ReviewCount int     `json:"reviewCount"`
 			} `json:"rating"`
-			Address  string  `json:"displayAddress"`
-			Distance float64 `json:"distance"`
-			Category string  `json:"category"`
+			PostalAddress struct {
+				DisplayAddress string `json:"displayAddress"`
+			} `json:"postal_address"`
+			Distance struct {
+				Value float64 `json:"value"`
+			} `json:"distance"`
+			IconCategory string   `json:"icon_category"`
+			Categories   []string `json:"categories"`
 		} `json:"results"`
 		Cities []struct {
 			Name string `json:"name"`
 		} `json:"cities"`
 		Addresses []struct {
-			StreetAddress string `json:"streetAddress"`
+			Name string `json:"name"`
 		} `json:"addresses"`
 	}
 
@@ -405,17 +440,19 @@ func formatPlaceResults(data json.RawMessage) string {
 		if r.Rating.RatingValue > 0 {
 			fmt.Fprintf(&b, " (%.1f/5, %d reviews)", r.Rating.RatingValue, r.Rating.ReviewCount)
 		}
-		if r.Category != "" {
-			fmt.Fprintf(&b, " [%s]", r.Category)
+		if r.IconCategory != "" {
+			fmt.Fprintf(&b, " [%s]", r.IconCategory)
+		} else if len(r.Categories) > 0 {
+			fmt.Fprintf(&b, " [%s]", r.Categories[0])
 		}
-		if r.Distance > 0 {
-			fmt.Fprintf(&b, " (%.0fm away)", r.Distance)
+		if r.Distance.Value > 0 {
+			fmt.Fprintf(&b, " (%.0fm away)", r.Distance.Value)
 		}
-		if r.Address != "" {
-			fmt.Fprintf(&b, "\n   %s", r.Address)
+		if r.PostalAddress.DisplayAddress != "" {
+			fmt.Fprintf(&b, "\n   %s", r.PostalAddress.DisplayAddress)
 		}
-		if r.Phone != "" {
-			fmt.Fprintf(&b, "\n   Phone: %s", r.Phone)
+		if r.Contact.Telephone != "" {
+			fmt.Fprintf(&b, "\n   Phone: %s", r.Contact.Telephone)
 		}
 		hasContent = true
 	}
@@ -432,7 +469,7 @@ func formatPlaceResults(data json.RawMessage) string {
 		if hasContent {
 			b.WriteString("\n\n")
 		}
-		fmt.Fprintf(&b, "Address: %s", a.StreetAddress)
+		fmt.Fprintf(&b, "Address: %s", a.Name)
 		hasContent = true
 	}
 

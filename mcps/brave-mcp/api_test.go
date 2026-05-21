@@ -131,11 +131,11 @@ func TestFormatImageResults(t *testing.T) {
 func TestFormatNewsResults(t *testing.T) {
 	input := `{
 		"results": [
-			{"url": "https://news.com/1", "title": "Breaking", "description": "Big news", "age": "1h", "source": "BBC"}
+			{"url": "https://news.com/1", "title": "Breaking", "description": "Big news", "age": "1h", "meta_url": {"hostname": "bbc.com"}}
 		]
 	}`
 	result := formatNewsResults(json.RawMessage(input))
-	assert.Contains(t, result, "Breaking (BBC, 1h)")
+	assert.Contains(t, result, "Breaking (bbc.com, 1h)")
 }
 
 func TestFormatVideoResults(t *testing.T) {
@@ -154,7 +154,7 @@ func TestFormatSummarizerResults(t *testing.T) {
 		"summary": [
 			{"type": "token", "data": "Go is a "},
 			{"type": "token", "data": "programming language"},
-			{"type": "inline_reference", "data": "https://go.dev"}
+			{"type": "inline_reference", "data": {"type": "link", "url": "https://go.dev", "start_index": 0, "end_index": 5}}
 		]
 	}`
 	result := formatSummarizerResults(json.RawMessage(input))
@@ -170,7 +170,7 @@ func TestFormatLocalResults(t *testing.T) {
 				"title": "Joe's Pizza",
 				"rating": {"ratingValue": 4.5, "reviewCount": 120},
 				"postal_address": {"displayAddress": "123 Main St"},
-				"phone": "555-1234"
+				"contact": {"telephone": "555-1234"}
 			}
 		]
 	}`
@@ -184,12 +184,13 @@ func TestFormatLocalResults(t *testing.T) {
 	assert.Contains(t, result, "Joe's Pizza")
 	assert.Contains(t, result, "4.5/5")
 	assert.Contains(t, result, "Best pizza in town")
+	assert.Contains(t, result, "555-1234")
 }
 
 func TestFormatLocalResultsNoDescriptions(t *testing.T) {
 	pois := `{
 		"results": [
-			{"id": "x", "title": "Place", "rating": {}, "postal_address": {}}
+			{"id": "x", "title": "Place", "rating": {}, "postal_address": {}, "contact": {}}
 		]
 	}`
 	result := formatLocalResults(json.RawMessage(pois), nil)
@@ -198,10 +199,12 @@ func TestFormatLocalResultsNoDescriptions(t *testing.T) {
 
 func TestFormatLLMContextResults(t *testing.T) {
 	input := `{
-		"results": [
-			{"url": "https://go.dev", "title": "The Go Programming Language", "extract": "Go is an open source programming language."},
-			{"url": "https://golang.org", "title": "Go Docs", "extract": "Documentation for Go."}
-		]
+		"grounding": {
+			"generic": [
+				{"url": "https://go.dev", "title": "The Go Programming Language", "snippets": ["Go is an open source programming language.", "It is fast and concurrent."]},
+				{"url": "https://golang.org", "title": "Go Docs", "snippets": ["Documentation for Go."]}
+			]
+		}
 	}`
 	result := formatLLMContextResults(json.RawMessage(input))
 	assert.Contains(t, result, "The Go Programming Language")
@@ -211,7 +214,7 @@ func TestFormatLLMContextResults(t *testing.T) {
 }
 
 func TestFormatLLMContextResultsEmpty(t *testing.T) {
-	input := `{"results":[]}`
+	input := `{"grounding":{"generic":[]}}`
 	result := formatLLMContextResults(json.RawMessage(input))
 	assert.NotContains(t, result, "##")
 }
@@ -220,11 +223,12 @@ func TestFormatPlaceResults(t *testing.T) {
 	input := `{
 		"results": [
 			{
-				"name": "Central Park",
+				"title": "Central Park",
 				"rating": {"ratingValue": 4.8, "reviewCount": 5000},
-				"displayAddress": "New York, NY",
-				"category": "Park",
-				"distance": 500
+				"postal_address": {"displayAddress": "New York, NY"},
+				"icon_category": "park",
+				"distance": {"value": 500},
+				"contact": {"telephone": "212-555-1234"}
 			}
 		],
 		"cities": [
@@ -234,8 +238,10 @@ func TestFormatPlaceResults(t *testing.T) {
 	result := formatPlaceResults(json.RawMessage(input))
 	assert.Contains(t, result, "Central Park")
 	assert.Contains(t, result, "4.8/5")
-	assert.Contains(t, result, "Park")
+	assert.Contains(t, result, "park")
 	assert.Contains(t, result, "New York, NY")
+	assert.Contains(t, result, "212-555-1234")
+	assert.Contains(t, result, "500m away")
 	assert.Contains(t, result, "City: New York")
 }
 

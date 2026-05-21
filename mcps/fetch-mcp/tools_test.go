@@ -34,6 +34,7 @@ func newTestToolHandlers(t *testing.T) *ToolHandlers {
 		Fetch: FetchConfig{
 			Timeout:      10 * time.Second,
 			MaxRedirects: 10,
+			MaxBodySize:  20 * 1024 * 1024,
 			UserAgent:    "test-handler",
 		},
 		Cache:       CacheConfig{DSN: "memcache://"},
@@ -139,8 +140,8 @@ func TestHandleFetch_TruncationMessage(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.True(t, out.Truncated)
-	assert.Contains(t, out.Content, "<error>Content truncated. Call again with start_index=")
-	assert.Contains(t, out.Content, "</error>")
+	assert.Contains(t, out.Content, "<pagination>Content truncated. Call again with start_index=")
+	assert.Contains(t, out.Content, "</pagination>")
 	assert.Equal(t, 100, out.StartIndex+out.NextIndex)
 }
 

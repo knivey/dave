@@ -51,6 +51,7 @@ All configuration is via environment variables. No config file is loaded.
 | `FETCH_USER_AGENT` | `fetch-mcp/0.1.0` | User-Agent header for HTTP requests |
 | `FETCH_TIMEOUT` | `30s` | HTTP request timeout (Go duration) |
 | `FETCH_MAX_REDIRECTS` | `10` | Maximum HTTP redirects to follow |
+| `FETCH_MAX_BODY_SIZE` | `20971520` | Maximum response body size in bytes (default 20MB) |
 | `FETCH_PROXY_URL` | (empty) | Explicit proxy URL (e.g. `socks5://127.0.0.1:1080`). If empty, uses `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` env vars. |
 | `FETCH_CACHE_DSN` | `memcache://` | HTTP cache backend DSN. Use `fscache://?appname=fetch-mcp` for persistent disk cache. |
 | `FETCH_CACHE_MARKDOWN_TTL` | `15m` | How long converted markdown stays in memory (Go duration) |
@@ -97,4 +98,3 @@ Daily log files written to `mcps/fetch-mcp/logs/` (same pattern as yt-mcp).
 ## Signal Handling
 
 - `SIGINT`/`SIGTERM` — graceful shutdown
-- `SIGHUP` — reloads env vars (note: HTTP client settings like timeout and proxy are set at startup and require restart to change)

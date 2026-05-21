@@ -3,16 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
-	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 type ToolHandlers struct {
-	mu      sync.RWMutex
-	cfg     Config
 	fetcher *Fetcher
-	mdCache *MarkdownCache
 }
 
 func NewToolHandlers(cfg Config) (*ToolHandlers, error) {
@@ -22,21 +18,8 @@ func NewToolHandlers(cfg Config) (*ToolHandlers, error) {
 		return nil, fmt.Errorf("creating fetcher: %w", err)
 	}
 	return &ToolHandlers{
-		cfg:     cfg,
 		fetcher: fetcher,
-		mdCache: mdCache,
 	}, nil
-}
-
-// setConfig swaps the stored config but does NOT propagate changes to the
-// Fetcher (which captures its own Config copy at construction time) or the
-// MarkdownCache. A full teardown + NewToolHandlers is required for those to
-// pick up new settings.
-func (h *ToolHandlers) setConfig(cfg Config) error {
-	h.mu.Lock()
-	h.cfg = cfg
-	h.mu.Unlock()
-	return nil
 }
 
 type FetchInput struct {
@@ -78,7 +61,7 @@ func (h *ToolHandlers) handleFetch(ctx context.Context, req *mcp.CallToolRequest
 
 	content := result.Markdown
 	if result.Truncated && result.NextIndex > 0 {
-		content += fmt.Sprintf("\n\n<error>Content truncated. Call again with start_index=%d to get more content.</error>", result.NextIndex)
+		content += fmt.Sprintf("\n\n<pagination>Content truncated. Call again with start_index=%d to get more content.</pagination>", result.NextIndex)
 	}
 
 	contentType := "markdown"

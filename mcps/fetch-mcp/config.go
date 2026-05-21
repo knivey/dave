@@ -25,6 +25,7 @@ type FetchConfig struct {
 	UserAgent    string
 	Timeout      time.Duration
 	MaxRedirects int
+	MaxBodySize  int64
 	ProxyURL     string
 }
 
@@ -47,6 +48,7 @@ func loadConfig() (Config, error) {
 	cfg.Fetch.UserAgent = envOr("FETCH_USER_AGENT", "fetch-mcp/0.1.0")
 	cfg.Fetch.Timeout = envDuration("FETCH_TIMEOUT", 30*time.Second)
 	cfg.Fetch.MaxRedirects = envInt("FETCH_MAX_REDIRECTS", 10)
+	cfg.Fetch.MaxBodySize = int64(envInt("FETCH_MAX_BODY_SIZE", 20*1024*1024))
 	cfg.Fetch.ProxyURL = os.Getenv("FETCH_PROXY_URL")
 
 	if cfg.Fetch.ProxyURL != "" {

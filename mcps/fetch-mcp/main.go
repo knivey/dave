@@ -43,28 +43,11 @@ func main() {
 	defer cancel()
 
 	shutdownCh := make(chan os.Signal, 1)
-	reloadCh := make(chan os.Signal, 1)
 	signal.Notify(shutdownCh, syscall.SIGINT, syscall.SIGTERM)
-	signal.Notify(reloadCh, syscall.SIGHUP)
 
 	go func() {
 		<-shutdownCh
 		cancel()
-	}()
-
-	go func() {
-		for range reloadCh {
-			newCfg, err := loadConfig()
-			if err != nil {
-				logger.Error("config reload failed", "error", err)
-				continue
-			}
-			if err := handlers.setConfig(newCfg); err != nil {
-				logger.Error("config reload failed", "error", err)
-				continue
-			}
-			logger.Info("config reloaded")
-		}
 	}()
 
 	if *httpMode {

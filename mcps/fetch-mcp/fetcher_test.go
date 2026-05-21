@@ -99,6 +99,7 @@ func TestNewFetcherBadProxy(t *testing.T) {
 			ProxyURL:     "://bad-url",
 			Timeout:      30 * time.Second,
 			MaxRedirects: 10,
+			MaxBodySize:  20 * 1024 * 1024,
 			UserAgent:    "test",
 		},
 		Cache:       CacheConfig{DSN: "memcache://"},
@@ -141,6 +142,7 @@ func TestFetcherIntegration(t *testing.T) {
 		Fetch: FetchConfig{
 			Timeout:      10 * time.Second,
 			MaxRedirects: 10,
+			MaxBodySize:  20 * 1024 * 1024,
 			UserAgent:    "test-fetcher",
 		},
 		Cache:       CacheConfig{DSN: "memcache://"},

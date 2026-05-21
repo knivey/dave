@@ -17,7 +17,7 @@ import (
 	_ "github.com/bartventer/httpcache/store/memcache"
 )
 
-const maxBodySize = 10 * 1024 * 1024
+const defaultMaxBodySize = 20 * 1024 * 1024
 
 type FetchResult struct {
 	Markdown          string
@@ -127,6 +127,10 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string, startIndex int, maxL
 
 	cacheStatus := resp.Header.Get("X-Httpcache-Status")
 
+	maxBodySize := f.cfg.Fetch.MaxBodySize
+	if maxBodySize <= 0 {
+		maxBodySize = defaultMaxBodySize
+	}
 	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize))
 	if err != nil {
 		return nil, fmt.Errorf("reading response body: %w", err)
@@ -218,16 +222,19 @@ func isHTML(contentType string, body []byte) bool {
 }
 
 func extractTitle(body []byte) string {
-	lower := strings.ToLower(string(body))
-	start := strings.Index(lower, "<title>")
+	openTag := []byte("<title>")
+	closeTag := []byte("</title>")
+	lower := bytes.ToLower(body)
+	start := bytes.Index(lower, openTag)
 	if start == -1 {
 		return ""
 	}
-	end := strings.Index(lower[start+7:], "</title>")
+	afterOpen := start + len(openTag)
+	end := bytes.Index(lower[afterOpen:], closeTag)
 	if end == -1 {
 		return ""
 	}
-	return string(body[start+7 : start+7+end])
+	return string(body[afterOpen : afterOpen+end])
 }
 
 func paginate(content string, startIndex, maxLength int) (string, bool) {

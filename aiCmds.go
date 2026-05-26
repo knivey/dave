@@ -355,12 +355,15 @@ func (cr *chatRunner) checkIterationLimit(iteration int) bool {
 }
 
 func (cr *chatRunner) checkEmptyRetry(content, reasoning string, emptyRetries, maxEmptyRetries int) (bool, string) {
-	if content != "" || reasoning != "" {
+	if content != "" {
 		return false, content
 	}
 	if emptyRetries < maxEmptyRetries {
 		cr.logger.Warn("empty response from API, retrying", "attempt", emptyRetries+1, "max", maxEmptyRetries)
 		return true, ""
+	}
+	if reasoning != "" {
+		cr.logger.Warn("empty response from API, max retries reached, reasoning was present but no text output")
 	}
 	return false, "..."
 }

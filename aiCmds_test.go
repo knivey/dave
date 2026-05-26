@@ -743,3 +743,90 @@ func TestRegisterBackgroundJob_ServerNameAutoDetection(t *testing.T) {
 		assert.Equal(t, "img-mcp-async", pj.MCPServer, "empty server_name should trigger auto-detect")
 	})
 }
+
+func TestCheckEmptyRetry(t *testing.T) {
+	cr := &chatRunner{
+		logger: logxi.New("test"),
+	}
+	cr.logger.SetLevel(logxi.LevelAll)
+
+	tests := []struct {
+		name            string
+		content         string
+		reasoning       string
+		emptyRetries    int
+		maxEmptyRetries int
+		wantRetry       bool
+		wantContent     string
+	}{
+		{
+			name:            "content present, no retry",
+			content:         "hello",
+			reasoning:       "",
+			maxEmptyRetries: 3,
+			wantRetry:       false,
+			wantContent:     "hello",
+		},
+		{
+			name:            "both empty, retries remaining",
+			content:         "",
+			reasoning:       "",
+			emptyRetries:    0,
+			maxEmptyRetries: 3,
+			wantRetry:       true,
+			wantContent:     "",
+		},
+		{
+			name:            "both empty, max retries reached",
+			content:         "",
+			reasoning:       "",
+			emptyRetries:    3,
+			maxEmptyRetries: 3,
+			wantRetry:       false,
+			wantContent:     "...",
+		},
+		{
+			name:            "reasoning only, retries remaining",
+			content:         "",
+			reasoning:       "let me think about this",
+			emptyRetries:    0,
+			maxEmptyRetries: 3,
+			wantRetry:       true,
+			wantContent:     "",
+		},
+		{
+			name:            "reasoning only, max retries reached",
+			content:         "",
+			reasoning:       "let me think about this",
+			emptyRetries:    3,
+			maxEmptyRetries: 3,
+			wantRetry:       false,
+			wantContent:     "...",
+		},
+		{
+			name:            "reasoning only, zero max retries",
+			content:         "",
+			reasoning:       "thinking...",
+			emptyRetries:    0,
+			maxEmptyRetries: 0,
+			wantRetry:       false,
+			wantContent:     "...",
+		},
+		{
+			name:            "content present with reasoning, no retry",
+			content:         "here is my answer",
+			reasoning:       "let me think",
+			maxEmptyRetries: 3,
+			wantRetry:       false,
+			wantContent:     "here is my answer",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			retry, content := cr.checkEmptyRetry(tt.content, tt.reasoning, tt.emptyRetries, tt.maxEmptyRetries)
+			assert.Equal(t, tt.wantRetry, retry)
+			assert.Equal(t, tt.wantContent, content)
+		})
+	}
+}

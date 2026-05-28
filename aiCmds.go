@@ -256,6 +256,9 @@ func (cr *chatRunner) sendError(msg string) {
 	}
 }
 
+// addContext persists a message to the DB. Use ONLY for pre-turn setup (system
+// prompt, user message) and non-turn paths (async injection, compaction).
+// During a turn, use turnContext.Add() instead.
 func (cr *chatRunner) addContext(msg ChatMessage) {
 	if cr.sessionID == 0 {
 		cr.logger.Error("addContext called with sessionID=0")

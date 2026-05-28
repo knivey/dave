@@ -41,6 +41,7 @@ var migrations = []migration{
 	{ID: 5, Name: "add_users_flagged_columns", Up: addUsersFlaggedColumns},
 	{ID: 6, Name: "add_users_last_nick", Up: addUsersLastNick},
 	{ID: 7, Name: "convert_sentinels_to_released_column", Up: convertSentinelsToReleasedColumn},
+	{ID: 8, Name: "add_sessions_cloned_from", Up: addSessionsClonedFrom},
 }
 
 func runMigrations(db *gorm.DB, dbPath string) error {
@@ -622,6 +623,52 @@ func convertSentinelsToReleasedColumn(db *gorm.DB) error {
 			}
 		default:
 			return fmt.Errorf("unsupported dialect %s for convert_sentinels_to_released_column", db.Dialector.Name())
+		}
+	}
+
+	return nil
+}
+
+func addSessionsClonedFrom(db *gorm.DB) error {
+	migrator := db.Migrator()
+
+	if !migrator.HasColumn(&Session{}, "cloned_from_id") {
+		var ddl string
+		switch db.Dialector.Name() {
+		case "sqlite":
+			ddl = "ALTER TABLE sessions ADD COLUMN cloned_from_id INTEGER REFERENCES sessions(id)"
+		case "postgres":
+			ddl = "ALTER TABLE sessions ADD COLUMN cloned_from_id INTEGER REFERENCES sessions(id)"
+		default:
+			if err := migrator.AddColumn(&Session{}, "ClonedFromID"); err != nil {
+				return fmt.Errorf("adding cloned_from_id column: %w", err)
+			}
+			ddl = ""
+		}
+		if ddl != "" {
+			if err := db.Exec(ddl).Error; err != nil {
+				return fmt.Errorf("adding cloned_from_id column: %w", err)
+			}
+		}
+	}
+
+	if !migrator.HasColumn(&Session{}, "cloned_from_nick") {
+		var ddl string
+		switch db.Dialector.Name() {
+		case "sqlite":
+			ddl = "ALTER TABLE sessions ADD COLUMN cloned_from_nick TEXT NOT NULL DEFAULT ''"
+		case "postgres":
+			ddl = "ALTER TABLE sessions ADD COLUMN cloned_from_nick TEXT NOT NULL DEFAULT ''"
+		default:
+			if err := migrator.AddColumn(&Session{}, "ClonedFromNick"); err != nil {
+				return fmt.Errorf("adding cloned_from_nick column: %w", err)
+			}
+			ddl = ""
+		}
+		if ddl != "" {
+			if err := db.Exec(ddl).Error; err != nil {
+				return fmt.Errorf("adding cloned_from_nick column: %w", err)
+			}
 		}
 	}
 

@@ -44,21 +44,23 @@ func (c *DatabaseConfig) SetDefaults() {
 }
 
 type Session struct {
-	ID           int64   `gorm:"primaryKey;autoIncrement"`
-	Network      string  `gorm:"not null;index:idx_sessions_user"`
-	Channel      string  `gorm:"not null;index:idx_sessions_user"`
-	ChatCommand  string  `gorm:"column:chat_command;not null"`
-	FirstMessage string  `gorm:"column:first_message;not null;default:''"`
-	ConvID       *string `gorm:"column:conv_id;index:idx_sessions_conv_id"`
-	ResponseID   *string `gorm:"column:response_id;index:idx_sessions_response_id"`
-	Service      string  `gorm:"not null;default:''"`
-	Model        string  `gorm:"not null;default:''"`
-	Status       string  `gorm:"not null;default:'active';index:idx_sessions_status"`
-	CreatedAt    time.Time
-	LastActive   time.Time      `gorm:"column:last_active;index:idx_sessions_last_active"`
-	DeletedAt    gorm.DeletedAt `gorm:"index"`
-	SettingsID   *int64         `gorm:"index:idx_sessions_settings"`
-	UserID       *int64         `gorm:"index:idx_sessions_user"`
+	ID             int64   `gorm:"primaryKey;autoIncrement"`
+	Network        string  `gorm:"not null;index:idx_sessions_user"`
+	Channel        string  `gorm:"not null;index:idx_sessions_user"`
+	ChatCommand    string  `gorm:"column:chat_command;not null"`
+	FirstMessage   string  `gorm:"column:first_message;not null;default:''"`
+	ConvID         *string `gorm:"column:conv_id;index:idx_sessions_conv_id"`
+	ResponseID     *string `gorm:"column:response_id;index:idx_sessions_response_id"`
+	Service        string  `gorm:"not null;default:''"`
+	Model          string  `gorm:"not null;default:''"`
+	Status         string  `gorm:"not null;default:'active';index:idx_sessions_status"`
+	CreatedAt      time.Time
+	LastActive     time.Time      `gorm:"column:last_active;index:idx_sessions_last_active"`
+	DeletedAt      gorm.DeletedAt `gorm:"index"`
+	SettingsID     *int64         `gorm:"index:idx_sessions_settings"`
+	UserID         *int64         `gorm:"index:idx_sessions_user"`
+	ClonedFromID   *int64         `gorm:"column:cloned_from_id"`
+	ClonedFromNick string         `gorm:"column:cloned_from_nick;not null;default:''"`
 }
 
 type SessionSetting struct {

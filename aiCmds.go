@@ -1486,7 +1486,8 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 	}
 	runner.logger.Debug("running completion", "summary", summarizeMessages(messages))
 
-	messages, _ = runner.runTurn(messages)
+	turn := newTurnContext(runner.sessionID, messages)
+	runner.runTurn(turn)
 	runner.logger.Debug("completion finished", "api_log", apiLogger.GetSessionFilePath(runner.sessionID))
 
 	if theDB != nil && sessionMgr.IsSessionActive(runner.sessionID) {
@@ -1509,7 +1510,8 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 				runner.logger.Error("failed to reload messages after job delivery", "error", err)
 				break
 			}
-			messages, _ = runner.runTurn(messages)
+			turn = newTurnContext(runner.sessionID, messages)
+			runner.runTurn(turn)
 		}
 	}
 

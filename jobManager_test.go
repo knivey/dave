@@ -20,7 +20,7 @@ type mockChatRunner struct {
 	setChannelCh     string
 	setChannelNick   string
 	runTurnCalled    int
-	runTurnFn        func(messages []ChatMessage) ([]ChatMessage, bool)
+	runTurnFn        func(turn *turnContext) bool
 }
 
 func (m *mockChatRunner) setChannel(channel, nick string, userID int64) {
@@ -32,12 +32,12 @@ func (m *mockChatRunner) setChannel(channel, nick string, userID int64) {
 func (m *mockChatRunner) setSessionInfo(sessionID int64, convID string) {
 }
 
-func (m *mockChatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
+func (m *mockChatRunner) runTurn(turn *turnContext) bool {
 	m.runTurnCalled++
 	if m.runTurnFn != nil {
-		return m.runTurnFn(messages)
+		return m.runTurnFn(turn)
 	}
-	return messages, true
+	return true
 }
 
 type mockBot struct {
@@ -87,8 +87,8 @@ func setupMockDeps(t *testing.T) *mockBot {
 
 	mockNewRunner := func(network Network, client *girc.Client, cfg AIConfig, _ context.Context, _ chan<- string) chatRunnerInterface {
 		return &mockChatRunner{
-			runTurnFn: func(messages []ChatMessage) ([]ChatMessage, bool) {
-				return messages, true
+			runTurnFn: func(turn *turnContext) bool {
+				return true
 			},
 		}
 	}
@@ -469,8 +469,8 @@ func TestDeliverAsyncResult_UsesMockRunner(t *testing.T) {
 	origNewRunner := asyncJobMgr.newChatRunner
 	asyncJobMgr.newChatRunner = func(network Network, client *girc.Client, c AIConfig, _ context.Context, _ chan<- string) chatRunnerInterface {
 		runner = &mockChatRunner{
-			runTurnFn: func(messages []ChatMessage) ([]ChatMessage, bool) {
-				return messages, true
+			runTurnFn: func(turn *turnContext) bool {
+				return true
 			},
 		}
 		return runner
@@ -508,9 +508,9 @@ func TestDeliverAsyncResult_RunnerSeesInjectedResult(t *testing.T) {
 	origNewRunner := asyncJobMgr.newChatRunner
 	asyncJobMgr.newChatRunner = func(network Network, client *girc.Client, c AIConfig, _ context.Context, _ chan<- string) chatRunnerInterface {
 		return &mockChatRunner{
-			runTurnFn: func(messages []ChatMessage) ([]ChatMessage, bool) {
-				receivedMessages = messages
-				return messages, true
+			runTurnFn: func(turn *turnContext) bool {
+				receivedMessages = turn.Messages()
+				return true
 			},
 		}
 	}
@@ -554,9 +554,9 @@ func TestDeliverAsyncResult_MultipleCompletedJobs(t *testing.T) {
 	origNewRunner := asyncJobMgr.newChatRunner
 	asyncJobMgr.newChatRunner = func(network Network, client *girc.Client, c AIConfig, _ context.Context, _ chan<- string) chatRunnerInterface {
 		return &mockChatRunner{
-			runTurnFn: func(messages []ChatMessage) ([]ChatMessage, bool) {
+			runTurnFn: func(turn *turnContext) bool {
 				turnCount++
-				return messages, true
+				return true
 			},
 		}
 	}
@@ -1042,10 +1042,10 @@ func TestDeliverAsyncResult_RunningDuringTurn(t *testing.T) {
 	origNewRunner := asyncJobMgr.newChatRunner
 	asyncJobMgr.newChatRunner = func(network Network, client *girc.Client, c AIConfig, _ context.Context, _ chan<- string) chatRunnerInterface {
 		return &mockChatRunner{
-			runTurnFn: func(messages []ChatMessage) ([]ChatMessage, bool) {
+			runTurnFn: func(turn *turnContext) bool {
 				runningDuringTurn = queueMgr.IsRunning("testnet", "#test", ensureTestUser(t, "testnet", "testuser"))
 				wg.Done()
-				return messages, true
+				return true
 			},
 		}
 	}

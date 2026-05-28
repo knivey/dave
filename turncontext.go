@@ -16,8 +16,10 @@ func newTurnContext(sessionID int64, initial []ChatMessage) *turnContext {
 
 func (tc *turnContext) Add(msg ChatMessage) {
 	tc.messages = append(tc.messages, msg)
-	if err := sessionMgr.AddMessage(tc.sessionID, msg); err != nil {
-		loggerTC.Error("Failed to add message", "session", tc.sessionID, "error", err)
+	if sessionMgr != nil {
+		if err := sessionMgr.AddMessage(tc.sessionID, msg); err != nil {
+			loggerTC.Error("Failed to add message", "session", tc.sessionID, "error", err)
+		}
 	}
 }
 

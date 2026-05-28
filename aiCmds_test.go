@@ -64,7 +64,7 @@ func TestExecuteToolCalls_SingleToolSendsCallNotice(t *testing.T) {
 		{ID: "tc1", Function: FunctionCall{Name: "tool_a", Arguments: "{}"}},
 	}
 
-	go cr.executeToolCalls(nil, toolCalls)
+	go cr.executeToolCalls(newTurnContext(0, nil), toolCalls)
 
 	var msgs []string
 	timeout := time.After(2 * time.Second)
@@ -117,7 +117,7 @@ func TestExecuteToolCalls_MultipleToolsSendsCallMultiNotice(t *testing.T) {
 		{ID: "tc2", Function: FunctionCall{Name: "tool_b", Arguments: "{}"}},
 	}
 
-	go cr.executeToolCalls(nil, toolCalls)
+	go cr.executeToolCalls(newTurnContext(0, nil), toolCalls)
 
 	var msgs []string
 	timeout := time.After(2 * time.Second)
@@ -174,7 +174,7 @@ func TestExecuteToolCalls_MultipleWithBuiltinOnlySendsMCP(t *testing.T) {
 		{ID: "tc2", Function: FunctionCall{Name: "tool_a", Arguments: "{}"}},
 	}
 
-	go cr.executeToolCalls(nil, toolCalls)
+	go cr.executeToolCalls(newTurnContext(0, nil), toolCalls)
 
 	var msgs []string
 	timeout := time.After(2 * time.Second)
@@ -363,7 +363,7 @@ func TestRunTurnResponses_ConcurrentSerialization(t *testing.T) {
 		sessionMgr.AddMessage(session.ID, ChatMessage{Role: RoleUser, Content: "msg 1"})
 		messages, _ := sessionMgr.GetMessages(session.ID, cfg.MaxHistory)
 		runner := makeRunner()
-		runner.runTurn(messages)
+		runner.runTurn(newTurnContext(runner.sessionID, messages))
 	}()
 
 	go func() {
@@ -372,7 +372,7 @@ func TestRunTurnResponses_ConcurrentSerialization(t *testing.T) {
 		sessionMgr.AddMessage(session.ID, ChatMessage{Role: RoleSystem, Content: "bg job result"})
 		messages, _ := sessionMgr.GetMessages(session.ID, cfg.MaxHistory)
 		runner := makeRunner()
-		runner.runTurn(messages)
+		runner.runTurn(newTurnContext(runner.sessionID, messages))
 	}()
 
 	<-firstRequestReceived
@@ -467,7 +467,7 @@ func TestRunTurnResponses_DifferentCtxKeysParallel(t *testing.T) {
 		sessionMgr.AddMessage(sid1, ChatMessage{Role: RoleUser, Content: "msg"})
 		messages, _ := sessionMgr.GetMessages(sid1, cfg.MaxHistory)
 		runner := makeRunner(sid1, "alice", ensureTestUser(t, "testnet", "alice"))
-		runner.runTurn(messages)
+		runner.runTurn(newTurnContext(sid1, messages))
 	}()
 
 	go func() {
@@ -475,7 +475,7 @@ func TestRunTurnResponses_DifferentCtxKeysParallel(t *testing.T) {
 		sessionMgr.AddMessage(sid2, ChatMessage{Role: RoleUser, Content: "msg"})
 		messages, _ := sessionMgr.GetMessages(sid2, cfg.MaxHistory)
 		runner := makeRunner(sid2, "bob", ensureTestUser(t, "testnet", "bob"))
-		runner.runTurn(messages)
+		runner.runTurn(newTurnContext(sid2, messages))
 	}()
 
 	wg.Wait()

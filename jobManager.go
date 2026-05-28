@@ -357,8 +357,8 @@ func deliverAsyncResult(entry *jobEntry[asyncJobPayload], ctx context.Context, o
 			markPendingJobDelivered(cj.JobID)
 		}
 		messages, _ := sessionMgr.GetMessages(entry.payload.sessionID, currentCfg.MaxHistory)
-		var done bool
-		messages, done = runner.runTurn(messages)
+		turn := newTurnContext(entry.payload.sessionID, messages)
+		done := runner.runTurn(turn)
 		if done {
 			break
 		}

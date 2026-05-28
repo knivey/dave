@@ -17,6 +17,57 @@ func getNotices() NoticesConfig {
 	return n
 }
 
+func extractSessionsFromSWU(swu []SessionWithUser) []Session {
+	sessions := make([]Session, len(swu))
+	for i, s := range swu {
+		sessions[i] = s.Session
+	}
+	return sessions
+}
+
+func resolveClonedFromNicks(sessions []Session) map[int64]string {
+	var ids []int64
+	for _, s := range sessions {
+		if s.ClonedFromID != nil {
+			ids = append(ids, *s.ClonedFromID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	type sourceInfo struct {
+		ID   int64
+		Nick string
+	}
+	var results []sourceInfo
+	theDB.Model(&Session{}).
+		Select("sessions.id, users.current_nick as nick").
+		Joins("JOIN users ON users.id = sessions.user_id").
+		Where("sessions.id IN ?", ids).
+		Find(&results)
+
+	m := make(map[int64]string, len(results))
+	for _, r := range results {
+		m[r.ID] = r.Nick
+	}
+	return m
+}
+
+func formatClonedFrom(s Session, sourceNicks map[int64]string) string {
+	if s.ClonedFromID == nil {
+		return ""
+	}
+	id := *s.ClonedFromID
+	if nick, ok := sourceNicks[id]; ok {
+		return fmt.Sprintf(" \x0314[cloned from #%d by %s]\x0F", id, nick)
+	}
+	if s.ClonedFromNick != "" {
+		return fmt.Sprintf(" \x0314[cloned from #%d by %s]\x0F", id, s.ClonedFromNick)
+	}
+	return fmt.Sprintf(" \x0314[cloned from #%d (deleted session)]\x0F", id)
+}
+
 func verifySessionOwnership(session *Session, network Network, c *girc.Client, e girc.Event) (bool, string) {
 	n := getNotices()
 	if session.Network != network.Name || session.Channel != normalizeIRC(e.Params[0], getCasemapping(network.Name)) {
@@ -161,14 +212,17 @@ func sendSessionsLinesWithNick(output chan<- string, ctx context.Context, sessio
 
 func sendSessionsLines(output chan<- string, ctx context.Context, sessions []SessionWithUser, trigger string, showNick bool) {
 	type sessionLine struct {
-		icon    string
-		nickStr string
-		idStr   string
-		msgStr  string
-		timeStr string
-		cmd     string
-		preview string
+		icon       string
+		nickStr    string
+		idStr      string
+		msgStr     string
+		timeStr    string
+		cmd        string
+		preview    string
+		clonedFrom string
 	}
+
+	sourceNicks := resolveClonedFromNicks(extractSessionsFromSWU(sessions))
 
 	lines := make([]sessionLine, len(sessions))
 	maxID := 0
@@ -204,7 +258,12 @@ func sendSessionsLines(output chan<- string, ctx context.Context, sessions []Ses
 			preview = preview[:77] + "..."
 		}
 
-		lines[i] = sessionLine{icon, nickStr, idStr, msgStr, timeStr, s.ChatCommand, preview}
+		var clonedSuffix string
+		if s.ClonedFromID != nil {
+			clonedSuffix = formatClonedFrom(s.Session, sourceNicks)
+		}
+
+		lines[i] = sessionLine{icon, nickStr, idStr, msgStr, timeStr, s.ChatCommand, preview, clonedSuffix}
 
 		if l := utf8.RuneCountInString(idStr); l > maxID {
 			maxID = l
@@ -246,6 +305,9 @@ func sendSessionsLines(output chan<- string, ctx context.Context, sessions []Ses
 		}
 		if l.preview != "" {
 			line += " " + l.preview
+		}
+		if l.clonedFrom != "" {
+			line += l.clonedFrom
 		}
 
 		for _, wrapped := range wrapLine(line) {
@@ -300,6 +362,12 @@ func historyShow(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 		archivedSuffix = fmt.Sprintf(" (%d archived)", archivedCount)
 	}
 
+	var clonedFromStr string
+	if session.ClonedFromID != nil {
+		sourceNicks := resolveClonedFromNicks([]Session{*session})
+		clonedFromStr = formatClonedFrom(*session, sourceNicks)
+	}
+
 	if !sendOrDone(ctx, output, expandNotice(n.Sessions.DetailHeader, map[string]string{
 		"id":              fmt.Sprintf("%d", session.ID),
 		"command":         session.ChatCommand,
@@ -308,6 +376,7 @@ func historyShow(network Network, c *girc.Client, e girc.Event, ctx context.Cont
 		"archived":        fmt.Sprintf("%d", archivedCount),
 		"archived_suffix": archivedSuffix,
 		"total":           fmt.Sprintf("%d", len(visible)),
+		"cloned_from":     clonedFromStr,
 	})) {
 		return
 	}

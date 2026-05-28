@@ -842,3 +842,62 @@ func TestHandleCheckBanHistory_PersistsToolResult(t *testing.T) {
 	}
 	assert.True(t, found, "check_ban_history tool result should be persisted in DB")
 }
+
+func TestFormatClonedFrom_NotCloned(t *testing.T) {
+	s := Session{}
+	assert.Equal(t, "", formatClonedFrom(s, nil))
+}
+
+func TestFormatClonedFrom_SourceExists(t *testing.T) {
+	id := int64(42)
+	s := Session{ClonedFromID: &id}
+	sourceNicks := map[int64]string{42: "alice"}
+	result := formatClonedFrom(s, sourceNicks)
+	assert.Contains(t, result, "#42")
+	assert.Contains(t, result, "alice")
+	assert.Contains(t, result, "cloned from")
+}
+
+func TestFormatClonedFrom_SourceDeletedNickSnapshot(t *testing.T) {
+	id := int64(42)
+	s := Session{ClonedFromID: &id, ClonedFromNick: "bob"}
+	sourceNicks := map[int64]string{}
+	result := formatClonedFrom(s, sourceNicks)
+	assert.Contains(t, result, "#42")
+	assert.Contains(t, result, "bob")
+}
+
+func TestFormatClonedFrom_SourceDeletedNoSnapshot(t *testing.T) {
+	id := int64(42)
+	s := Session{ClonedFromID: &id, ClonedFromNick: ""}
+	sourceNicks := map[int64]string{}
+	result := formatClonedFrom(s, sourceNicks)
+	assert.Contains(t, result, "#42")
+	assert.Contains(t, result, "deleted session")
+}
+
+func TestResolveClonedFromNicks(t *testing.T) {
+	setupTestDB(t)
+
+	srcUserID := ensureTestUser(t, "net", "alice")
+	srcSid, err := sessionMgr.CreateSession("net", "#c", srcUserID, "chat", "svc", "m")
+	require.NoError(t, err)
+	require.NoError(t, sessionMgr.AddMessage(srcSid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+
+	tgtUserID := ensureTestUser(t, "net", "tgt")
+	newSid, err := cloneDBSession(srcSid, "net", "#c", tgtUserID, "sys", "alice")
+	require.NoError(t, err)
+
+	newSession, err := sessionMgr.GetSession(newSid)
+	require.NoError(t, err)
+
+	sessions := []Session{*newSession}
+	nicks := resolveClonedFromNicks(sessions)
+	assert.Equal(t, "alice", nicks[srcSid])
+}
+
+func TestResolveClonedFromNicks_NoClonedSessions(t *testing.T) {
+	sessions := []Session{{}}
+	nicks := resolveClonedFromNicks(sessions)
+	assert.Nil(t, nicks)
+}

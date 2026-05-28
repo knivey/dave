@@ -204,7 +204,7 @@ func setNoticesDefaults(n *NoticesConfig) {
 		n.Sessions.None = "No session history found."
 	}
 	if n.Sessions.DetailHeader == "" {
-		n.Sessions.DetailHeader = "\x02Session #{id} ({command}) — {count} messages{archived_suffix}:\x02"
+		n.Sessions.DetailHeader = "\x02Session #{id} ({command}) — {count} messages{archived_suffix}:\x02{cloned_from}"
 	}
 	if n.Sessions.Truncated == "" {
 		n.Sessions.Truncated = "  \x0314... ({count} more) ...\x0F"

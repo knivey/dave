@@ -21,7 +21,7 @@
 # [sessions] options:
 #   header           (string)    Session list header. Placeholders: {nick}, {network}
 #   none             (string)    No sessions found
-#   detail_header    (string)    Session detail header. Placeholders: {id}, {command}, {count}, {active}, {archived}, {archived_suffix}, {total}
+#   detail_header    (string)    Session detail header. Placeholders: {id}, {command}, {count}, {active}, {archived}, {archived_suffix}, {total}, {cloned_from}
 #   truncated        (string)    Truncated messages indicator. Placeholders: {count}
 #   not_found        (string)    Session not found
 #   not_owned        (string)    Session belongs to another user
@@ -134,7 +134,7 @@
 # [sessions]
 # header = "\x02Session History ({nick} on {network}):\x02"
 # none = "No session history found."
-# detail_header = "\x02Session #{id} ({command}) — {count} messages{archived_suffix}:\x02"
+# detail_header = "\x02Session #{id} ({command}) — {count} messages{archived_suffix}:\x02{cloned_from}"
 # truncated = "  \x0314... ({count} more) ...\x0F"
 # not_found = "session not found"
 # not_owned = "that session doesn't belong to you"

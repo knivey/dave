@@ -32,6 +32,20 @@ var tuiCommands = map[string]func(parts []string, text string){
 	"/compact":     tuiCmdCompact,
 }
 
+func formatClonedFromTUI(s Session, sourceNicks map[int64]string) string {
+	if s.ClonedFromID == nil {
+		return ""
+	}
+	id := *s.ClonedFromID
+	if nick, ok := sourceNicks[id]; ok {
+		return fmt.Sprintf(" [yellow][cloned from #%d by %s][white]", id, tview.Escape(nick))
+	}
+	if s.ClonedFromNick != "" {
+		return fmt.Sprintf(" [yellow][cloned from #%d by %s][white]", id, tview.Escape(s.ClonedFromNick))
+	}
+	return fmt.Sprintf(" [yellow][cloned from #%d (deleted session)][white]", id)
+}
+
 func tuiCmdHelp(_ []string, _ string) {
 	fmt.Fprintf(logView, "[white]Commands:\n")
 	fmt.Fprintf(logView, "  /help                        - Show this help\n")
@@ -584,14 +598,16 @@ func tuiCmdSessions(parts []string, _ string) {
 		trigger = "!"
 	}
 	type sessionLine struct {
-		icon    string
-		idStr   string
-		channel string
-		msgStr  string
-		timeStr string
-		cmd     string
-		preview string
+		icon       string
+		idStr      string
+		channel    string
+		msgStr     string
+		timeStr    string
+		cmd        string
+		preview    string
+		clonedFrom string
 	}
+	sourceNicks := resolveClonedFromNicks(sessions)
 	lines := make([]sessionLine, len(sessions))
 	maxID := 0
 	maxChan := 0
@@ -617,7 +633,11 @@ func tuiCmdSessions(parts []string, _ string) {
 		if len(preview) > 80 {
 			preview = preview[:77] + "..."
 		}
-		lines[i] = sessionLine{icon, idStr, tview.Escape(s.Channel), msgStr, timeStr, tview.Escape(s.ChatCommand), tview.Escape(preview)}
+		var clonedSuffix string
+		if s.ClonedFromID != nil {
+			clonedSuffix = formatClonedFromTUI(s, sourceNicks)
+		}
+		lines[i] = sessionLine{icon, idStr, tview.Escape(s.Channel), msgStr, timeStr, tview.Escape(s.ChatCommand), tview.Escape(preview), clonedSuffix}
 		if l := utf8.RuneCountInString(idStr); l > maxID {
 			maxID = l
 		}
@@ -657,6 +677,9 @@ func tuiCmdSessions(parts []string, _ string) {
 		}
 		if l.preview != "" {
 			line += " " + l.preview
+		}
+		if l.clonedFrom != "" {
+			line += l.clonedFrom
 		}
 		fmt.Fprintln(logView, line)
 	}

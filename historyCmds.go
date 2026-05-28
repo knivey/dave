@@ -11,6 +11,8 @@ import (
 	"github.com/lrstanley/girc"
 )
 
+var loggerHistory = newLogger("history")
+
 func getNotices() NoticesConfig {
 	var n NoticesConfig
 	readConfig(func() { n = config.Notices })
@@ -41,11 +43,14 @@ func resolveClonedFromNicks(sessions []Session) map[int64]string {
 		Nick string
 	}
 	var results []sourceInfo
-	theDB.Model(&Session{}).
+	theDB.Unscoped().Model(&Session{}).
 		Select("sessions.id, users.current_nick as nick").
 		Joins("JOIN users ON users.id = sessions.user_id").
 		Where("sessions.id IN ?", ids).
 		Find(&results)
+	if err := theDB.Error; err != nil {
+		loggerHistory.Warn("resolveClonedFromNicks query failed", "error", err)
+	}
 
 	m := make(map[int64]string, len(results))
 	for _, r := range results {

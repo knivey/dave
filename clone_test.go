@@ -901,3 +901,25 @@ func TestResolveClonedFromNicks_NoClonedSessions(t *testing.T) {
 	nicks := resolveClonedFromNicks(sessions)
 	assert.Nil(t, nicks)
 }
+
+func TestResolveClonedFromNicks_SoftDeletedSource(t *testing.T) {
+	setupTestDB(t)
+
+	srcUserID := ensureTestUser(t, "net", "alice")
+	srcSid, err := sessionMgr.CreateSession("net", "#c", srcUserID, "chat", "svc", "m")
+	require.NoError(t, err)
+	require.NoError(t, sessionMgr.AddMessage(srcSid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+
+	tgtUserID := ensureTestUser(t, "net", "tgt")
+	newSid, err := cloneDBSession(srcSid, "net", "#c", tgtUserID, "sys", "alice")
+	require.NoError(t, err)
+
+	require.NoError(t, theDB.Where("id = ?", srcSid).Delete(&Session{}).Error)
+
+	newSession, err := sessionMgr.GetSession(newSid)
+	require.NoError(t, err)
+
+	sessions := []Session{*newSession}
+	nicks := resolveClonedFromNicks(sessions)
+	assert.Equal(t, "alice", nicks[srcSid], "should resolve nick even when source session is soft-deleted")
+}

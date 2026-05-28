@@ -711,3 +711,94 @@ func TestCloneDBSession_EncryptedReasoning(t *testing.T) {
 	}
 	assert.True(t, found, "cloned session should preserve encrypted reasoning")
 }
+
+func TestHandleBanUser_PersistsToolResult(t *testing.T) {
+	setupTestDB(t)
+
+	uid := ensureTestUser(t, "testnet", "baduser")
+	sid, err := sessionMgr.CreateSession("testnet", "#test", uid, "testcmd", "testservice", "testmodel")
+	require.NoError(t, err)
+
+	configMu.Lock()
+	config.Bans.MaxDuration = "6h"
+	config.Bans.DefaultDuration = "5m"
+	configMu.Unlock()
+
+	verbose := false
+	cr := &chatRunner{
+		cfg:       AIConfig{ToolVerbose: &verbose},
+		network:   Network{Name: "testnet", Nick: "testbot"},
+		channel:   "#test",
+		nick:      "test",
+		logger:    newLogger("test"),
+		ctx:       context.Background(),
+		outputCh:  make(chan string, 20),
+		userID:    uid,
+		sessionID: sid,
+	}
+
+	tc := ToolCall{
+		ID:       "tc-ban-1",
+		Function: FunctionCall{Name: "ban_user", Arguments: `{"reason":"spamming","duration":"5m"}`},
+	}
+
+	turn := newTurnContext(sid, nil)
+	cr.handleBanUser(turn, tc)
+	require.Len(t, turn.Messages(), 1)
+	assert.Equal(t, "tool", turn.Messages()[0].Role)
+	assert.Equal(t, "tc-ban-1", turn.Messages()[0].ToolCallID)
+
+	dbMsgs, err := loadDBSessionMessages(sid)
+	require.NoError(t, err)
+	found := false
+	for _, m := range dbMsgs {
+		if m.Role == "tool" && m.ToolCallID != nil && *m.ToolCallID == "tc-ban-1" {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "ban_user tool result should be persisted in DB")
+}
+
+func TestHandleCheckBanHistory_PersistsToolResult(t *testing.T) {
+	setupTestDB(t)
+
+	uid := ensureTestUser(t, "testnet", "checkuser")
+	sid, err := sessionMgr.CreateSession("testnet", "#test", uid, "testcmd", "testservice", "testmodel")
+	require.NoError(t, err)
+
+	verbose := false
+	cr := &chatRunner{
+		cfg:       AIConfig{ToolVerbose: &verbose},
+		network:   Network{Name: "testnet", Nick: "testbot"},
+		channel:   "#test",
+		nick:      "test",
+		logger:    newLogger("test"),
+		ctx:       context.Background(),
+		outputCh:  make(chan string, 20),
+		userID:    uid,
+		sessionID: sid,
+	}
+
+	tc := ToolCall{
+		ID:       "tc-check-1",
+		Function: FunctionCall{Name: "check_ban_history", Arguments: `{}`},
+	}
+
+	turn := newTurnContext(sid, nil)
+	cr.handleCheckBanHistory(turn, tc)
+	require.Len(t, turn.Messages(), 1)
+	assert.Equal(t, "tool", turn.Messages()[0].Role)
+	assert.Equal(t, "tc-check-1", turn.Messages()[0].ToolCallID)
+
+	dbMsgs, err := loadDBSessionMessages(sid)
+	require.NoError(t, err)
+	found := false
+	for _, m := range dbMsgs {
+		if m.Role == "tool" && m.ToolCallID != nil && *m.ToolCallID == "tc-check-1" {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "check_ban_history tool result should be persisted in DB")
+}

@@ -410,7 +410,7 @@ func (cr *chatRunner) sendFinalText(content string) {
 	}
 }
 
-func (cr *chatRunner) handleToolCallResponse(messages []ChatMessage, text string, toolCalls []ToolCall, reasoning string, encryptedReasoning string) []ChatMessage {
+func (cr *chatRunner) handleToolCallResponse(turn *turnContext, text string, toolCalls []ToolCall, reasoning string, encryptedReasoning string) {
 	cr.logger.Info("assistant made tool calls", "count", len(toolCalls))
 	assistantMsg := ChatMessage{
 		Role:               RoleAssistant,
@@ -419,8 +419,7 @@ func (cr *chatRunner) handleToolCallResponse(messages []ChatMessage, text string
 		EncryptedReasoning: encryptedReasoning,
 		ToolCalls:          toolCalls,
 	}
-	messages = append(messages, assistantMsg)
-	cr.addContext(assistantMsg)
+	turn.Add(assistantMsg)
 	if text != "" {
 		t := ExtractFinalText(text)
 		if cr.cfg.RenderMarkdown {
@@ -431,8 +430,7 @@ func (cr *chatRunner) handleToolCallResponse(messages []ChatMessage, text string
 	if reasoning != "" {
 		cr.logger.Info("reasoning", "content", reasoning)
 	}
-	messages, _ = cr.executeToolCalls(messages, toolCalls)
-	return messages
+	cr.executeToolCalls(turn, toolCalls)
 }
 
 func (cr *chatRunner) handleResponseIDSave(respID, text string, toolCalls []ToolCall, currentResponseID string) string {
@@ -869,7 +867,7 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 	}
 }
 
-func (cr *chatRunner) executeToolCalls(messages []ChatMessage, toolCalls []ToolCall) ([]ChatMessage, bool) {
+func (cr *chatRunner) executeToolCalls(turn *turnContext, toolCalls []ToolCall) bool {
 	registeredJob := false
 
 	var hiddenTools []string
@@ -907,17 +905,14 @@ func (cr *chatRunner) executeToolCalls(messages []ChatMessage, toolCalls []ToolC
 		if entry, ok := builtinTools[tc.Function.Name]; ok {
 			if isToolDisabled(tc.Function.Name, cr.cfg.DisabledBuiltinTools) {
 				toolMsg := toolResultMsg(tc.ID, fmt.Sprintf("error: tool %q is disabled for this command", tc.Function.Name))
-				messages = append(messages, toolMsg)
-				cr.addContext(toolMsg)
+				turn.Add(toolMsg)
 				continue
 			}
 			if verbose && !isToolHidden(tc.Function.Name, hiddenTools) && len(visibleTools) <= 1 {
 				cr.sendIRC(expandNotice(getNotices().Tools.Call, map[string]string{"server": "builtin", "tool": tc.Function.Name}))
 			}
 			cr.logger.Info("builtin tool call", "tool", tc.Function.Name)
-			var registered bool
-			messages, registered = entry.handler(cr, messages, tc)
-			if registered {
+			if entry.handler(cr, turn, tc) {
 				registeredJob = true
 			}
 			continue
@@ -925,8 +920,7 @@ func (cr *chatRunner) executeToolCalls(messages []ChatMessage, toolCalls []ToolC
 		serverName := getMCPServerForTool(tc.Function.Name)
 		if isMCPToolHidden(tc.Function.Name, serverName, hiddenMCPTools) {
 			toolMsg := toolResultMsg(tc.ID, fmt.Sprintf("error: tool %q is hidden for this command", tc.Function.Name))
-			messages = append(messages, toolMsg)
-			cr.addContext(toolMsg)
+			turn.Add(toolMsg)
 			continue
 		}
 		if verbose && !isToolHidden(tc.Function.Name, hiddenTools) && len(visibleTools) <= 1 {
@@ -935,123 +929,118 @@ func (cr *chatRunner) executeToolCalls(messages []ChatMessage, toolCalls []ToolC
 		var toolArgs map[string]any
 		if err := json.Unmarshal([]byte(tc.Function.Arguments), &toolArgs); err != nil {
 			toolMsg := toolResultMsg(tc.ID, "error: failed to parse tool arguments: "+err.Error())
-			messages = append(messages, toolMsg)
-			cr.addContext(toolMsg)
+			turn.Add(toolMsg)
 			continue
 		}
 		injectScopeArgsFromRunner(toolArgs, tc.Function.Name, cr)
 		result, err := callMCPToolWithContext(cr.ctx, tc.Function.Name, toolArgs)
 		if err != nil {
 			toolMsg := toolResultMsg(tc.ID, "error: "+err.Error())
-			messages = append(messages, toolMsg)
-			cr.addContext(toolMsg)
+			turn.Add(toolMsg)
 			continue
 		}
 		toolText := mcpToolResultToText(result)
 		cr.logger.Info("MCP tool result", "tool", tc.Function.Name, "result", toolText)
 		toolMsg := toolResultMsg(tc.ID, toolText)
-		messages = append(messages, toolMsg)
-		cr.addContext(toolMsg)
+		turn.Add(toolMsg)
 	}
-	return messages, registeredJob
+	return registeredJob
 }
 
-func (cr *chatRunner) handleRegisterBackgroundJob(messages []ChatMessage, tc ToolCall) []ChatMessage {
+func (cr *chatRunner) handleRegisterBackgroundJob(turn *turnContext, call ToolCall) {
 	var args struct {
 		JobID      string `json:"job_id"`
 		ToolName   string `json:"tool_name"`
 		ServerName string `json:"server_name"`
 	}
-	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-		toolMsg := toolResultMsg(tc.ID, "error: failed to parse arguments: "+err.Error())
-		messages = append(messages, toolMsg)
-		cr.addContext(toolMsg)
-		return messages
+	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+		toolMsg := toolResultMsg(call.ID, "error: failed to parse arguments: "+err.Error())
+		turn.Add(toolMsg)
+		return
 	}
 
 	if args.JobID == "" || args.ToolName == "" {
-		toolMsg := toolResultMsg(tc.ID, "error: job_id and tool_name are required")
-		messages = append(messages, toolMsg)
-		cr.addContext(toolMsg)
-		return messages
+		toolMsg := toolResultMsg(call.ID, "error: job_id and tool_name are required")
+		turn.Add(toolMsg)
+		return
 	}
 
 	if args.ServerName == "" {
 		args.ServerName = getMCPServerForTool(args.ToolName)
 	}
 	if args.ServerName == "" {
-		toolMsg := toolResultMsg(tc.ID, "error: could not determine MCP server for tool "+args.ToolName)
-		messages = append(messages, toolMsg)
-		cr.addContext(toolMsg)
-		return messages
+		toolMsg := toolResultMsg(call.ID, "error: could not determine MCP server for tool "+args.ToolName)
+		turn.Add(toolMsg)
+		return
 	}
 
 	if asyncJobMgr.contains(args.JobID) {
-		toolMsg := toolResultMsg(tc.ID, "Job already registered and being monitored.")
-		messages = append(messages, toolMsg)
-		cr.addContext(toolMsg)
-		return messages
+		toolMsg := toolResultMsg(call.ID, "Job already registered and being monitored.")
+		turn.Add(toolMsg)
+		return
 	}
 
 	cr.logger.Info("registering background job", "job_id", args.JobID, "tool", args.ToolName, "server", args.ServerName)
 
 	if cr.sessionID == 0 {
-		toolMsg := toolResultMsg(tc.ID, "error: no active session to register job against")
-		messages = append(messages, toolMsg)
-		cr.addContext(toolMsg)
-		return messages
+		toolMsg := toolResultMsg(call.ID, "error: no active session to register job against")
+		turn.Add(toolMsg)
+		return
 	}
 
 	if err := createPendingJob(cr.sessionID, args.JobID, args.ToolName, args.ServerName); err != nil {
 		cr.logger.Error("failed to create pending job", "error", err)
-		toolMsg := toolResultMsg(tc.ID, "error: failed to register job: "+err.Error())
-		messages = append(messages, toolMsg)
-		cr.addContext(toolMsg)
-		return messages
+		toolMsg := toolResultMsg(call.ID, "error: failed to register job: "+err.Error())
+		turn.Add(toolMsg)
+		return
 	}
 
 	job := registerAsyncJob(args.JobID, cr.sessionID, args.ToolName, args.ServerName, cr.network.Name, cr.channel, cr.nick, cr.userID)
 	if job != nil {
 		select {
 		case resultText := <-job.payload.inlineResultCh:
-			toolMsg := toolResultMsg(tc.ID, resultText)
-			messages = append(messages, toolMsg)
-			cr.addContext(toolMsg)
-			return messages
+			toolMsg := toolResultMsg(call.ID, resultText)
+			turn.Add(toolMsg)
+			return
 		case <-time.After(500 * time.Millisecond):
 		case <-cr.ctx.Done():
-			toolMsg := toolResultMsg(tc.ID, "error: context cancelled while waiting for job result")
-			messages = append(messages, toolMsg)
-			cr.addContext(toolMsg)
-			return messages
+			toolMsg := toolResultMsg(call.ID, "error: context cancelled while waiting for job result")
+			turn.Add(toolMsg)
+			return
 		}
 	}
 
-	toolMsg := toolResultMsg(tc.ID, "Job registered. You will receive the result when it completes.")
-	messages = append(messages, toolMsg)
-	cr.addContext(toolMsg)
-	return messages
+	toolMsg := toolResultMsg(call.ID, "Job registered. You will receive the result when it completes.")
+	turn.Add(toolMsg)
 }
 
-func (cr *chatRunner) handleBanUser(messages []ChatMessage, tc ToolCall) []ChatMessage {
+func (cr *chatRunner) handleBanUser(turn *turnContext, call ToolCall) {
 	var args struct {
 		Reason   string `json:"reason"`
 		Duration string `json:"duration"`
 	}
-	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-		return append(messages, toolResultMsg(tc.ID, fmt.Sprintf("error: failed to parse arguments: %s", err)))
+	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+		toolMsg := toolResultMsg(call.ID, fmt.Sprintf("error: failed to parse arguments: %s", err))
+		turn.Add(toolMsg)
+		return
 	}
 
 	if cr.userID == 0 {
-		return append(messages, toolResultMsg(tc.ID, "Cannot ban: no user associated with this conversation."))
+		toolMsg := toolResultMsg(call.ID, "Cannot ban: no user associated with this conversation.")
+		turn.Add(toolMsg)
+		return
 	}
 
 	user, err := getUserByID(cr.userID)
 	if err != nil {
-		return append(messages, toolResultMsg(tc.ID, fmt.Sprintf("Error looking up user: %s", err)))
+		toolMsg := toolResultMsg(call.ID, fmt.Sprintf("Error looking up user: %s", err))
+		turn.Add(toolMsg)
+		return
 	}
 	if user == nil {
-		return append(messages, toolResultMsg(tc.ID, "Cannot ban: user not found."))
+		toolMsg := toolResultMsg(call.ID, "Cannot ban: user not found.")
+		turn.Add(toolMsg)
+		return
 	}
 
 	var maxDur, defaultDur time.Duration
@@ -1071,7 +1060,9 @@ func (cr *chatRunner) handleBanUser(messages []ChatMessage, tc ToolCall) []ChatM
 	if args.Duration != "" {
 		parsed, err := parseBanDuration(args.Duration)
 		if err != nil {
-			return append(messages, toolResultMsg(tc.ID, fmt.Sprintf("Invalid duration format: %s. Use formats like '5m', '30m', '1h', '6h'.", args.Duration)))
+			toolMsg := toolResultMsg(call.ID, fmt.Sprintf("Invalid duration format: %s. Use formats like '5m', '30m', '1h', '6h'.", args.Duration))
+			turn.Add(toolMsg)
+			return
 		}
 		duration = parsed
 	}
@@ -1084,7 +1075,9 @@ func (cr *chatRunner) handleBanUser(messages []ChatMessage, tc ToolCall) []ChatM
 
 	_, err = createBan(theDB, user.ID, cr.network.Name, cr.channel, "", args.Reason, duration, bannerUserID, cr.network.Nick+":"+cr.cfg.Name)
 	if err != nil {
-		return append(messages, toolResultMsg(tc.ID, fmt.Sprintf("Failed to create ban: %s", err)))
+		toolMsg := toolResultMsg(call.ID, fmt.Sprintf("Failed to create ban: %s", err))
+		turn.Add(toolMsg)
+		return
 	}
 
 	accountInfo := ""
@@ -1092,29 +1085,40 @@ func (cr *chatRunner) handleBanUser(messages []ChatMessage, tc ToolCall) []ChatM
 		accountInfo = " (has account, strong ban)"
 	}
 
-	return append(messages, toolResultMsg(tc.ID, fmt.Sprintf("User %s (id: %d) banned for %s: %s%s", displayNick(user), user.ID, formatDuration(duration), args.Reason, accountInfo)))
+	toolMsg := toolResultMsg(call.ID, fmt.Sprintf("User %s (id: %d) banned for %s: %s%s", displayNick(user), user.ID, formatDuration(duration), args.Reason, accountInfo))
+	turn.Add(toolMsg)
 }
 
-func (cr *chatRunner) handleCheckBanHistory(messages []ChatMessage, tc ToolCall) []ChatMessage {
+func (cr *chatRunner) handleCheckBanHistory(turn *turnContext, call ToolCall) {
 	if cr.userID == 0 {
-		return append(messages, toolResultMsg(tc.ID, "Cannot look up ban history: no user associated with this conversation."))
+		toolMsg := toolResultMsg(call.ID, "Cannot look up ban history: no user associated with this conversation.")
+		turn.Add(toolMsg)
+		return
 	}
 
 	user, err := getUserByID(cr.userID)
 	if err != nil {
-		return append(messages, toolResultMsg(tc.ID, fmt.Sprintf("Error looking up user: %s", err)))
+		toolMsg := toolResultMsg(call.ID, fmt.Sprintf("Error looking up user: %s", err))
+		turn.Add(toolMsg)
+		return
 	}
 	if user == nil {
-		return append(messages, toolResultMsg(tc.ID, "Cannot look up ban history: user not found."))
+		toolMsg := toolResultMsg(call.ID, "Cannot look up ban history: user not found.")
+		turn.Add(toolMsg)
+		return
 	}
 
 	bans, err := getBanHistory(theDB, user.ID)
 	if err != nil {
-		return append(messages, toolResultMsg(tc.ID, fmt.Sprintf("Error fetching ban history: %s", err)))
+		toolMsg := toolResultMsg(call.ID, fmt.Sprintf("Error fetching ban history: %s", err))
+		turn.Add(toolMsg)
+		return
 	}
 
 	if len(bans) == 0 {
-		return append(messages, toolResultMsg(tc.ID, fmt.Sprintf("User %s has no ban history.", displayNick(user))))
+		toolMsg := toolResultMsg(call.ID, fmt.Sprintf("User %s has no ban history.", displayNick(user)))
+		turn.Add(toolMsg)
+		return
 	}
 
 	var lines []string
@@ -1127,7 +1131,8 @@ func (cr *chatRunner) handleCheckBanHistory(messages []ChatMessage, tc ToolCall)
 		lines = append(lines, fmt.Sprintf("#%d [%s] %s (%s) by %s, %s ago", b.ID, status, b.Reason, formatDuration(b.Duration), b.BannerNick, ago))
 	}
 
-	return append(messages, toolResultMsg(tc.ID, fmt.Sprintf("Ban history for %s:\n%s", displayNick(user), strings.Join(lines, "\n"))))
+	toolMsg := toolResultMsg(call.ID, fmt.Sprintf("Ban history for %s:\n%s", displayNick(user), strings.Join(lines, "\n")))
+	turn.Add(toolMsg)
 }
 
 func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, bool) {
@@ -1539,7 +1544,7 @@ func ExtractFinalText(text string) string {
 
 const backgroundJobToolName = "register_background_job"
 
-type builtinToolHandler func(cr *chatRunner, messages []ChatMessage, tc ToolCall) ([]ChatMessage, bool)
+type builtinToolHandler func(cr *chatRunner, turn *turnContext, call ToolCall) bool
 
 type builtinToolEntry struct {
 	handler builtinToolHandler
@@ -1548,8 +1553,9 @@ type builtinToolEntry struct {
 
 var builtinTools = map[string]builtinToolEntry{
 	backgroundJobToolName: {
-		handler: func(cr *chatRunner, messages []ChatMessage, tc ToolCall) ([]ChatMessage, bool) {
-			return cr.handleRegisterBackgroundJob(messages, tc), true
+		handler: func(cr *chatRunner, turn *turnContext, call ToolCall) bool {
+			cr.handleRegisterBackgroundJob(turn, call)
+			return true
 		},
 		def: Tool{
 			Type: "function",
@@ -1578,8 +1584,9 @@ var builtinTools = map[string]builtinToolEntry{
 		},
 	},
 	"ban_user": {
-		handler: func(cr *chatRunner, messages []ChatMessage, tc ToolCall) ([]ChatMessage, bool) {
-			return cr.handleBanUser(messages, tc), false
+		handler: func(cr *chatRunner, turn *turnContext, call ToolCall) bool {
+			cr.handleBanUser(turn, call)
+			return false
 		},
 		def: Tool{
 			Type: "function",
@@ -1604,8 +1611,9 @@ var builtinTools = map[string]builtinToolEntry{
 		},
 	},
 	"check_ban_history": {
-		handler: func(cr *chatRunner, messages []ChatMessage, tc ToolCall) ([]ChatMessage, bool) {
-			return cr.handleCheckBanHistory(messages, tc), false
+		handler: func(cr *chatRunner, turn *turnContext, call ToolCall) bool {
+			cr.handleCheckBanHistory(turn, call)
+			return false
 		},
 		def: Tool{
 			Type: "function",

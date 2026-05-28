@@ -679,8 +679,9 @@ func TestRegisterBackgroundJob_ServerNameAutoDetection(t *testing.T) {
 			ID:       "tc-auto",
 			Function: FunctionCall{Name: "register_background_job", Arguments: `{"job_id":"j-auto","tool_name":"enhance_and_generate_async"}`},
 		}
-		msgs := cr.handleRegisterBackgroundJob(nil, tc)
-		require.Len(t, msgs, 1)
+		turn := newTurnContext(sid, nil)
+		cr.handleRegisterBackgroundJob(turn, tc)
+		require.Len(t, turn.Messages(), 1)
 
 		pj := PendingJob{}
 		require.NoError(t, theDB.Where("job_id = ?", "j-auto").First(&pj).Error)
@@ -692,8 +693,9 @@ func TestRegisterBackgroundJob_ServerNameAutoDetection(t *testing.T) {
 			ID:       "tc-explicit",
 			Function: FunctionCall{Name: "register_background_job", Arguments: `{"job_id":"j-explicit","tool_name":"enhance_and_generate_async","server_name":"img-mcp-async"}`},
 		}
-		msgs := cr.handleRegisterBackgroundJob(nil, tc)
-		require.Len(t, msgs, 1)
+		turn := newTurnContext(sid, nil)
+		cr.handleRegisterBackgroundJob(turn, tc)
+		require.Len(t, turn.Messages(), 1)
 
 		pj := PendingJob{}
 		require.NoError(t, theDB.Where("job_id = ?", "j-explicit").First(&pj).Error)
@@ -705,9 +707,10 @@ func TestRegisterBackgroundJob_ServerNameAutoDetection(t *testing.T) {
 			ID:       "tc-unknown",
 			Function: FunctionCall{Name: "register_background_job", Arguments: `{"job_id":"j-unknown","tool_name":"nonexistent_tool"}`},
 		}
-		msgs := cr.handleRegisterBackgroundJob(nil, tc)
-		require.Len(t, msgs, 1)
-		assert.Contains(t, msgs[0].Content, "error: could not determine MCP server")
+		turn := newTurnContext(sid, nil)
+		cr.handleRegisterBackgroundJob(turn, tc)
+		require.Len(t, turn.Messages(), 1)
+		assert.Contains(t, turn.Messages()[0].Content, "error: could not determine MCP server")
 	})
 
 	t.Run("missing job_id returns error", func(t *testing.T) {
@@ -715,9 +718,10 @@ func TestRegisterBackgroundJob_ServerNameAutoDetection(t *testing.T) {
 			ID:       "tc-nojob",
 			Function: FunctionCall{Name: "register_background_job", Arguments: `{"tool_name":"enhance_and_generate_async"}`},
 		}
-		msgs := cr.handleRegisterBackgroundJob(nil, tc)
-		require.Len(t, msgs, 1)
-		assert.Contains(t, msgs[0].Content, "error: job_id and tool_name are required")
+		turn := newTurnContext(sid, nil)
+		cr.handleRegisterBackgroundJob(turn, tc)
+		require.Len(t, turn.Messages(), 1)
+		assert.Contains(t, turn.Messages()[0].Content, "error: job_id and tool_name are required")
 	})
 
 	t.Run("missing tool_name returns error", func(t *testing.T) {
@@ -725,9 +729,10 @@ func TestRegisterBackgroundJob_ServerNameAutoDetection(t *testing.T) {
 			ID:       "tc-notool",
 			Function: FunctionCall{Name: "register_background_job", Arguments: `{"job_id":"j1"}`},
 		}
-		msgs := cr.handleRegisterBackgroundJob(nil, tc)
-		require.Len(t, msgs, 1)
-		assert.Contains(t, msgs[0].Content, "error: job_id and tool_name are required")
+		turn := newTurnContext(sid, nil)
+		cr.handleRegisterBackgroundJob(turn, tc)
+		require.Len(t, turn.Messages(), 1)
+		assert.Contains(t, turn.Messages()[0].Content, "error: job_id and tool_name are required")
 	})
 
 	t.Run("empty server_name triggers auto-detect", func(t *testing.T) {
@@ -735,8 +740,9 @@ func TestRegisterBackgroundJob_ServerNameAutoDetection(t *testing.T) {
 			ID:       "tc-emptyserver",
 			Function: FunctionCall{Name: "register_background_job", Arguments: `{"job_id":"j-emptyserver","tool_name":"enhance_and_generate_async","server_name":""}`},
 		}
-		msgs := cr.handleRegisterBackgroundJob(nil, tc)
-		require.Len(t, msgs, 1)
+		turn := newTurnContext(sid, nil)
+		cr.handleRegisterBackgroundJob(turn, tc)
+		require.Len(t, turn.Messages(), 1)
 
 		pj := PendingJob{}
 		require.NoError(t, theDB.Where("job_id = ?", "j-emptyserver").First(&pj).Error)

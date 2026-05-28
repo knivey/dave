@@ -667,7 +667,7 @@ func sessionHasIncompleteToolCalls(sessionID int64) (bool, error) {
 	return false, nil
 }
 
-func cloneDBSession(sourceSessionID int64, targetNetwork, targetChannel string, targetUserID int64, systemPrompt string) (int64, error) {
+func cloneDBSession(sourceSessionID int64, targetNetwork, targetChannel string, targetUserID int64, systemPrompt string, sourceNick string) (int64, error) {
 	tx := theDB.Begin()
 	if tx.Error != nil {
 		return 0, tx.Error
@@ -707,16 +707,18 @@ func cloneDBSession(sourceSessionID int64, targetNetwork, targetChannel string, 
 
 	convID := generateConvID()
 	newSession := Session{
-		Network:     targetNetwork,
-		Channel:     targetChannel,
-		UserID:      &targetUserID,
-		ChatCommand: source.ChatCommand,
-		ConvID:      &convID,
-		ResponseID:  nil,
-		Service:     source.Service,
-		Model:       source.Model,
-		Status:      StatusActive,
-		SettingsID:  newSettingsID,
+		Network:        targetNetwork,
+		Channel:        targetChannel,
+		UserID:         &targetUserID,
+		ChatCommand:    source.ChatCommand,
+		ConvID:         &convID,
+		ResponseID:     nil,
+		Service:        source.Service,
+		Model:          source.Model,
+		Status:         StatusActive,
+		SettingsID:     newSettingsID,
+		ClonedFromID:   &source.ID,
+		ClonedFromNick: sourceNick,
 	}
 	if err := tx.Create(&newSession).Error; err != nil {
 		return 0, fmt.Errorf("create new session: %w", err)

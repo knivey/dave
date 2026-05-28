@@ -136,7 +136,7 @@ func TestCloneDBSession_BasicClone(t *testing.T) {
 	require.NoError(t, sessionMgr.AddMessage(srcSid, ChatMessage{Role: RoleAssistant, Content: "answer two"}))
 
 	tgtUserID := ensureTestUser(t, "net", "tgtnick")
-	newSid, err := cloneDBSession(srcSid, "net", "#c", tgtUserID, "new sys")
+	newSid, err := cloneDBSession(srcSid, "net", "#c", tgtUserID, "new sys", "")
 	require.NoError(t, err)
 	require.NotEqual(t, srcSid, newSid, "cloned session should have different ID")
 
@@ -163,6 +163,46 @@ func TestCloneDBSession_BasicClone(t *testing.T) {
 	assert.Contains(t, newSession.FirstMessage, "hello from source")
 }
 
+func TestCloneDBSession_LineageFieldsSet(t *testing.T) {
+	setupTestDB(t)
+
+	srcUserID := ensureTestUser(t, "net", "srcnick")
+	srcSid, err := sessionMgr.CreateSession("net", "#c", srcUserID, "chat", "svc", "m")
+	require.NoError(t, err)
+	require.NoError(t, sessionMgr.AddMessage(srcSid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+	require.NoError(t, sessionMgr.AddMessage(srcSid, ChatMessage{Role: RoleUser, Content: "hi"}))
+
+	tgtUserID := ensureTestUser(t, "net", "tgt")
+	newSid, err := cloneDBSession(srcSid, "net", "#c", tgtUserID, "new sys", "srcnick")
+	require.NoError(t, err)
+
+	newSession, err := sessionMgr.GetSession(newSid)
+	require.NoError(t, err)
+
+	require.NotNil(t, newSession.ClonedFromID, "cloned session should have cloned_from_id set")
+	assert.Equal(t, srcSid, *newSession.ClonedFromID, "cloned_from_id should point to source session")
+	assert.Equal(t, "srcnick", newSession.ClonedFromNick, "cloned_from_nick should match source nick")
+}
+
+func TestCloneDBSession_LineageFieldsEmptyNick(t *testing.T) {
+	setupTestDB(t)
+
+	srcUserID := ensureTestUser(t, "net", "srcnick")
+	srcSid, err := sessionMgr.CreateSession("net", "#c", srcUserID, "chat", "svc", "m")
+	require.NoError(t, err)
+	require.NoError(t, sessionMgr.AddMessage(srcSid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+
+	tgtUserID := ensureTestUser(t, "net", "tgt")
+	newSid, err := cloneDBSession(srcSid, "net", "#c", tgtUserID, "new sys", "")
+	require.NoError(t, err)
+
+	newSession, err := sessionMgr.GetSession(newSid)
+	require.NoError(t, err)
+
+	require.NotNil(t, newSession.ClonedFromID)
+	assert.Equal(t, "", newSession.ClonedFromNick, "cloned_from_nick should be empty when sourceNick is empty")
+}
+
 func TestCloneDBSession_CloneCompletesExistingActiveSession(t *testing.T) {
 	setupTestDB(t)
 
@@ -177,7 +217,7 @@ func TestCloneDBSession_CloneCompletesExistingActiveSession(t *testing.T) {
 	require.NoError(t, sessionMgr.AddMessage(srcSid, ChatMessage{Role: RoleSystem, Content: "sys"}))
 	require.NoError(t, sessionMgr.AddMessage(srcSid, ChatMessage{Role: RoleUser, Content: "src msg"}))
 
-	newSid, err := cloneDBSession(srcSid, "net", "#c", tgtUserID, "new sys")
+	newSid, err := cloneDBSession(srcSid, "net", "#c", tgtUserID, "new sys", "")
 	require.NoError(t, err)
 	_ = newSid
 
@@ -202,7 +242,7 @@ func TestCloneDBSession_OnlyLiveMessagesCloned(t *testing.T) {
 	require.NoError(t, theDB.Model(&archivedMsg).Update("archived", true).Error)
 
 	tgtUserID := ensureTestUser(t, "net", "tgt")
-	newSid, err := cloneDBSession(srcSid, "net", "#c", tgtUserID, "new sys")
+	newSid, err := cloneDBSession(srcSid, "net", "#c", tgtUserID, "new sys", "")
 	require.NoError(t, err)
 
 	newMsgs, err := loadDBSessionMessages(newSid)
@@ -227,7 +267,7 @@ func TestCloneDBSession_SourceUntouched(t *testing.T) {
 	require.NoError(t, err)
 
 	tgtUserID := ensureTestUser(t, "net", "tgt")
-	_, err = cloneDBSession(srcSid, "net", "#c", tgtUserID, "new sys")
+	_, err = cloneDBSession(srcSid, "net", "#c", tgtUserID, "new sys", "")
 	require.NoError(t, err)
 
 	srcMsgsAfter, err := loadDBSessionMessages(srcSid)
@@ -257,7 +297,7 @@ func TestCloneDBSession_SettingsCopied(t *testing.T) {
 	require.NoError(t, sessionMgr.AddMessage(srcSid, ChatMessage{Role: RoleUser, Content: "hi"}))
 
 	tgtUserID := ensureTestUser(t, "net", "tgt")
-	newSid, err := cloneDBSession(srcSid, "net", "#c", tgtUserID, "new sys")
+	newSid, err := cloneDBSession(srcSid, "net", "#c", tgtUserID, "new sys", "")
 	require.NoError(t, err)
 
 	newSession, err := sessionMgr.GetSession(newSid)
@@ -297,7 +337,7 @@ func TestCloneDBSession_WithToolCalls(t *testing.T) {
 	}))
 
 	tgtUserID := ensureTestUser(t, "net", "tgt")
-	newSid, err := cloneDBSession(srcSid, "net", "#c", tgtUserID, "new sys")
+	newSid, err := cloneDBSession(srcSid, "net", "#c", tgtUserID, "new sys", "")
 	require.NoError(t, err)
 
 	newMsgs, err := loadDBSessionMessages(newSid)
@@ -336,7 +376,7 @@ func TestCloneDBSession_MidConversationSystemMessagesPreserved(t *testing.T) {
 	require.NoError(t, sessionMgr.AddMessage(srcSid, ChatMessage{Role: RoleAssistant, Content: "reply"}))
 
 	tgtUserID := ensureTestUser(t, "net", "tgt")
-	newSid, err := cloneDBSession(srcSid, "net", "#c", tgtUserID, "fresh sys")
+	newSid, err := cloneDBSession(srcSid, "net", "#c", tgtUserID, "fresh sys", "")
 	require.NoError(t, err)
 
 	newMsgs, err := loadDBSessionMessages(newSid)
@@ -697,7 +737,7 @@ func TestCloneDBSession_EncryptedReasoning(t *testing.T) {
 	}))
 
 	tgtUserID := ensureTestUser(t, "net", "tgt")
-	newSid, err := cloneDBSession(srcSid, "net", "#c", tgtUserID, "new sys")
+	newSid, err := cloneDBSession(srcSid, "net", "#c", tgtUserID, "new sys", "")
 	require.NoError(t, err)
 
 	newMsgs, err := loadDBSessionMessages(newSid)

@@ -723,7 +723,17 @@ func historyClone(network Network, c *girc.Client, e girc.Event, ctx context.Con
 
 	systemContent := renderFreshSystemPrompt(cfg, network, c, channel, e.Source.Name, cfg.System)
 
-	newSessionID, cloneErr := cloneDBSession(sourceSession.ID, network.Name, channel, callingUserID, systemContent)
+	var resolvedSourceNick string
+	if sourceNick != "" {
+		resolvedSourceNick = sourceNick
+	} else if sourceSession.UserID != nil {
+		var srcUser User
+		if err := theDB.Where("id = ?", *sourceSession.UserID).First(&srcUser).Error; err == nil && srcUser.ID != 0 {
+			resolvedSourceNick = displayNick(&srcUser)
+		}
+	}
+
+	newSessionID, cloneErr := cloneDBSession(sourceSession.ID, network.Name, channel, callingUserID, systemContent, resolvedSourceNick)
 	if cloneErr != nil {
 		sendOrDone(ctx, output, errorNotice(n.DB.InternalError, map[string]string{"error": cloneErr.Error()}))
 		return
@@ -732,19 +742,10 @@ func historyClone(network Network, c *girc.Client, e girc.Event, ctx context.Con
 	apiLogger.RestoreSession(newSessionID, network.Name, channel, callingUserID)
 
 	vars := map[string]string{
-		"id":        fmt.Sprintf("%d", newSessionID),
-		"source_id": fmt.Sprintf("%d", sourceSession.ID),
-		"count":     "0",
-	}
-	if sourceNick != "" {
-		vars["source_nick"] = sourceNick
-	} else {
-		if sourceSession.UserID != nil {
-			var srcUser User
-			if err := theDB.Where("id = ?", *sourceSession.UserID).First(&srcUser).Error; err == nil && srcUser.ID != 0 {
-				vars["source_nick"] = displayNick(&srcUser)
-			}
-		}
+		"id":          fmt.Sprintf("%d", newSessionID),
+		"source_id":   fmt.Sprintf("%d", sourceSession.ID),
+		"count":       "0",
+		"source_nick": resolvedSourceNick,
 	}
 	newMsgs, _ := loadDBSessionMessages(newSessionID)
 	vars["count"] = fmt.Sprintf("%d", len(newMsgs))

@@ -157,7 +157,7 @@ func (m *genericJobMgr[T]) cancelWhere(predicate func(*jobEntry[T]) bool) {
 
 type chatRunnerInterface interface {
 	setChannel(channel, nick string, userID int64)
-	runTurn(messages []ChatMessage) ([]ChatMessage, bool)
+	runTurn(turn *turnContext) bool
 	setSessionInfo(sessionID int64, convID string)
 }
 

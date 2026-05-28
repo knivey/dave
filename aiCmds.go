@@ -464,7 +464,6 @@ func (cr *chatRunner) shouldRetryWithoutResponseID(usePrevID bool, err error, me
 }
 
 type responsesStreamResult struct {
-	messages          []ChatMessage
 	done              bool
 	emptyRetries      int
 	currentResponseID string
@@ -475,7 +474,7 @@ type responsesStreamResult struct {
 func (cr *chatRunner) runTurnResponsesStream(
 	ctx context.Context,
 	params responses.ResponseNewParams,
-	messages []ChatMessage,
+	turn *turnContext,
 	iteration int,
 	emptyRetries int,
 	maxEmptyRetries int,
@@ -486,9 +485,8 @@ func (cr *chatRunner) runTurnResponsesStream(
 	resp, err := cr.callResponsesStream(ctx, params)
 	durationMs := int(time.Since(apiStart).Milliseconds())
 	if err != nil {
-		if newInput, newResponseID, retry := cr.shouldRetryWithoutResponseID(usePrevID, err, messages, iteration, "responses_stream", currentResponseID); retry {
+		if newInput, newResponseID, retry := cr.shouldRetryWithoutResponseID(usePrevID, err, turn.Messages(), iteration, "responses_stream", currentResponseID); retry {
 			return responsesStreamResult{
-				messages:          messages,
 				currentResponseID: newResponseID,
 				input:             newInput,
 				usePrevID:         false,
@@ -497,12 +495,12 @@ func (cr *chatRunner) runTurnResponsesStream(
 		}
 		cr.sendError(err.Error())
 		cr.logger.Error(err.Error())
-		cr.logAPIIncident(err, messages, iteration, "responses_stream")
-		return responsesStreamResult{messages: messages, done: true, currentResponseID: currentResponseID, usePrevID: usePrevID, emptyRetries: emptyRetries}
+		cr.logAPIIncident(err, turn.Messages(), iteration, "responses_stream")
+		return responsesStreamResult{done: true, currentResponseID: currentResponseID, usePrevID: usePrevID, emptyRetries: emptyRetries}
 	}
 
 	if resp == nil {
-		return responsesStreamResult{messages: messages, done: true, currentResponseID: currentResponseID, usePrevID: usePrevID, emptyRetries: emptyRetries}
+		return responsesStreamResult{done: true, currentResponseID: currentResponseID, usePrevID: usePrevID, emptyRetries: emptyRetries}
 	}
 	text, reasoning, encReasoning, toolCalls := parseSDKResponseOutput(*resp)
 	currentResponseID = cr.handleResponseIDSave(resp.ID, text, toolCalls, currentResponseID)
@@ -517,45 +515,41 @@ func (cr *chatRunner) runTurnResponsesStream(
 	if len(toolCalls) == 0 {
 		if retry, newText := cr.checkEmptyRetry(text, reasoning, emptyRetries, maxEmptyRetries); retry {
 			return responsesStreamResult{
-				messages:          messages,
 				emptyRetries:      emptyRetries + 1,
 				currentResponseID: currentResponseID,
 				usePrevID:         usePrevID,
-				input:             messagesToResponseInputItems(messages),
+				input:             messagesToResponseInputItems(turn.Messages()),
 			}
 		} else if newText != text {
 			text = newText
 			assistantMsg.Content = text
 		}
-		messages = append(messages, assistantMsg)
-		cr.addContext(assistantMsg)
+		turn.Add(assistantMsg)
 		cr.logger.Info(FormatOutput(text))
 		cr.storeUsage(sdkResponseUsageToUsage(resp.Usage, string(resp.Status)), "responses_stream", durationMs)
 		if reasoning != "" {
 			cr.logger.Info("reasoning", "content", reasoning)
 		}
-		return responsesStreamResult{messages: messages, done: true, currentResponseID: currentResponseID, usePrevID: usePrevID, emptyRetries: emptyRetries}
+		return responsesStreamResult{done: true, currentResponseID: currentResponseID, usePrevID: usePrevID, emptyRetries: emptyRetries}
 	}
 
 	emptyRetries = 0
 	assistantMsg.ToolCalls = toolCalls
-	messages = append(messages, assistantMsg)
-	cr.addContext(assistantMsg)
+	turn.Add(assistantMsg)
 	cr.logger.Info("assistant made tool calls", "count", len(toolCalls))
 	cr.storeUsage(sdkResponseUsageToUsage(resp.Usage, string(resp.Status)), "responses_stream", durationMs)
 
 	numToolCalls := len(toolCalls)
-	messages, _ = cr.executeToolCalls(messages, toolCalls)
+	cr.executeToolCalls(turn, toolCalls)
 
 	var newInput []responses.ResponseInputItemUnionParam
 	if cr.cfg.PreviousResponseID && currentResponseID != "" {
-		toolResultMsgs := messages[len(messages)-numToolCalls:]
+		toolResultMsgs := turn.LastN(numToolCalls)
 		newInput = toolResultMsgsToInputItems(toolResultMsgs)
 	} else {
-		newInput = messagesToResponseInputItems(messages)
+		newInput = messagesToResponseInputItems(turn.Messages())
 	}
 	return responsesStreamResult{
-		messages:          messages,
 		emptyRetries:      emptyRetries,
 		currentResponseID: currentResponseID,
 		usePrevID:         usePrevID,
@@ -563,7 +557,7 @@ func (cr *chatRunner) runTurnResponsesStream(
 	}
 }
 
-func (cr *chatRunner) runTurnStream(ctx context.Context, params openai.ChatCompletionNewParams, messages []ChatMessage, iterations, emptyRetries, maxEmptyRetries int) ([]ChatMessage, bool, int) {
+func (cr *chatRunner) runTurnStream(ctx context.Context, params openai.ChatCompletionNewParams, turn *turnContext, iterations, emptyRetries, maxEmptyRetries int) (bool, int) {
 	stream := cr.openaiClient.Chat.Completions.NewStreaming(ctx, params)
 	apiStart := time.Now()
 
@@ -596,7 +590,7 @@ StreamLoop:
 		if cr.ctx.Err() != nil {
 			cr.logger.Info("Closing stream")
 			stream.Close()
-			return messages, true, emptyRetries
+			return true, emptyRetries
 		}
 
 		ch := make(chan recvResult, 1)
@@ -620,8 +614,8 @@ StreamLoop:
 					stream.Close()
 					cr.sendError(res.err.Error())
 					cr.logger.Error(res.err.Error())
-					cr.logAPIIncident(res.err, messages, iterations, "chat_completions_stream")
-					return messages, true, emptyRetries
+					cr.logAPIIncident(res.err, turn.Messages(), iterations, "chat_completions_stream")
+					return true, emptyRetries
 				}
 				cr.logger.Info("Stream completed")
 				stream.Close()
@@ -704,8 +698,8 @@ StreamLoop:
 			timeoutErr := fmt.Errorf("stream timed out (no data received): timeout=%s", cr.cfg.StreamTimeout)
 			cr.sendError(timeoutErr.Error())
 			cr.logger.Error("stream idle timeout exceeded", "timeout", cr.cfg.StreamTimeout)
-			cr.logAPIIncident(timeoutErr, messages, iterations, "chat_completions_stream")
-			return messages, true, emptyRetries
+			cr.logAPIIncident(timeoutErr, turn.Messages(), iterations, "chat_completions_stream")
+			return true, emptyRetries
 		}
 	}
 
@@ -722,7 +716,7 @@ StreamLoop:
 		if content == "" && reasoningBuffer == "" {
 			content = "..."
 		}
-		cr.addContext(ChatMessage{
+		turn.Add(ChatMessage{
 			Role:             RoleAssistant,
 			Content:          content,
 			ReasoningContent: reasoningBuffer,
@@ -739,13 +733,13 @@ StreamLoop:
 		if len(accumulatedToolCalls) == 0 {
 			if retry, newContent := cr.checkEmptyRetry(fullContent, reasoningBuffer, emptyRetries, maxEmptyRetries); retry {
 				emptyRetries++
-				return messages, false, emptyRetries
+				return false, emptyRetries
 			} else if newContent != fullContent {
 				fullContent = newContent
 			}
 		}
 		flushStreamedOutput()
-		return messages, true, emptyRetries
+		return true, emptyRetries
 	}
 
 	emptyRetries = 0
@@ -763,7 +757,6 @@ StreamLoop:
 		ReasoningContent: reasoningBuffer,
 		ToolCalls:        accumulatedToolCalls,
 	}
-	messages = append(messages, assistantMsg)
 
 	if sOut.buffer != "" {
 		text := ExtractFinalText(sOut.buffer)
@@ -773,15 +766,15 @@ StreamLoop:
 		cr.sendIRC(text)
 	}
 
-	cr.addContext(assistantMsg)
+	turn.Add(assistantMsg)
 
-	messages, _ = cr.executeToolCalls(messages, accumulatedToolCalls)
-	return messages, false, emptyRetries
+	cr.executeToolCalls(turn, accumulatedToolCalls)
+	return false, emptyRetries
 }
 
-func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
+func (cr *chatRunner) runTurn(turn *turnContext) bool {
 	if cr.cfg.ResponsesAPI {
-		return cr.runTurnResponses(messages)
+		return cr.runTurnResponses(turn)
 	}
 	mcpTools := cr.getTools()
 
@@ -798,18 +791,18 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 	for {
 		iterations++
 		if cr.checkIterationLimit(iterations) {
-			return messages, true
+			return true
 		}
 
-		params := buildChatCompletionParams(cr.cfg, messages, mcpTools, cr.renderAPIUser())
+		params := buildChatCompletionParams(cr.cfg, turn.Messages(), mcpTools, cr.renderAPIUser())
 
 		if cr.cfg.Streaming {
 			var done bool
-			messages, done, emptyRetries = cr.runTurnStream(ctx, params, messages, iterations, emptyRetries, maxEmptyRetries)
+			done, emptyRetries = cr.runTurnStream(ctx, params, turn, iterations, emptyRetries, maxEmptyRetries)
 			if !done {
 				continue
 			}
-			return messages, true
+			return true
 		}
 
 		cr.transport.setCaptureBody(true)
@@ -819,8 +812,8 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 		if err != nil {
 			cr.sendError(err.Error())
 			cr.logger.Error(err.Error())
-			cr.logAPIIncident(err, messages, iterations, "chat_completions")
-			return messages, true
+			cr.logAPIIncident(err, turn.Messages(), iterations, "chat_completions")
+			return true
 		}
 		durationMs := int(time.Since(apiStart).Milliseconds())
 
@@ -843,7 +836,7 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 			} else {
 				content = newContent
 			}
-			cr.addContext(ChatMessage{
+			turn.Add(ChatMessage{
 				Role:             RoleAssistant,
 				Content:          content,
 				ReasoningContent: reasoning,
@@ -857,13 +850,13 @@ func (cr *chatRunner) runTurn(messages []ChatMessage) ([]ChatMessage, bool) {
 			}
 
 			cr.sendFinalText(content)
-			return messages, true
+			return true
 		}
 
 		emptyRetries = 0
 		cr.storeUsage(usage, "chat_completions", durationMs)
 		logTimings(cr.logger, nonStreamTimings)
-		messages = cr.handleToolCallResponse(messages, content, toolCalls, reasoning, "")
+		cr.handleToolCallResponse(turn, content, toolCalls, reasoning, "")
 	}
 }
 
@@ -1135,7 +1128,7 @@ func (cr *chatRunner) handleCheckBanHistory(turn *turnContext, call ToolCall) {
 	turn.Add(toolMsg)
 }
 
-func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, bool) {
+func (cr *chatRunner) runTurnResponses(turn *turnContext) bool {
 	mu, _ := responseChainMu.LoadOrStore(fmt.Sprintf("%s%s%d", cr.network.Name, cr.channel, cr.userID), &sync.Mutex{})
 	mu.(*sync.Mutex).Lock()
 	defer mu.(*sync.Mutex).Unlock()
@@ -1154,11 +1147,11 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 
 	var input []responses.ResponseInputItemUnionParam
 	if usePrevID {
-		if len(messages) > 0 {
-			input = messagesToResponseInputItems(messages[len(messages)-1:])
+		if len(turn.Messages()) > 0 {
+			input = messagesToResponseInputItems(turn.LastN(1))
 		}
 	} else {
-		input = messagesToResponseInputItems(messages)
+		input = messagesToResponseInputItems(turn.Messages())
 	}
 
 	emptyRetries := 0
@@ -1172,14 +1165,13 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 	for {
 		iteration++
 		if cr.checkIterationLimit(iteration) {
-			return messages, true
+			return true
 		}
 
 		params := buildResponseParams(cr.cfg, input, responseTools, currentResponseID, cr.renderAPIUser())
 
 		if cr.cfg.Streaming {
-			r := cr.runTurnResponsesStream(ctx, params, messages, iteration, emptyRetries, maxEmptyRetries, currentResponseID, usePrevID)
-			messages = r.messages
+			r := cr.runTurnResponsesStream(ctx, params, turn, iteration, emptyRetries, maxEmptyRetries, currentResponseID, usePrevID)
 			currentResponseID = r.currentResponseID
 			input = r.input
 			emptyRetries = r.emptyRetries
@@ -1187,7 +1179,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 			if !r.done {
 				continue
 			}
-			return messages, true
+			return true
 		}
 
 		cr.transport.setCaptureBody(true)
@@ -1195,15 +1187,15 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 		resp, err := cr.openaiClient.Responses.New(ctx, params)
 		cr.transport.setCaptureBody(false)
 		if err != nil {
-			if newInput, newResponseID, retry := cr.shouldRetryWithoutResponseID(usePrevID, err, messages, iteration, "responses", currentResponseID); retry {
+			if newInput, newResponseID, retry := cr.shouldRetryWithoutResponseID(usePrevID, err, turn.Messages(), iteration, "responses", currentResponseID); retry {
 				input, currentResponseID = newInput, newResponseID
 				usePrevID = false
 				continue
 			}
 			cr.sendError(err.Error())
 			cr.logger.Error(err.Error())
-			cr.logAPIIncident(err, messages, iteration, "responses")
-			return messages, true
+			cr.logAPIIncident(err, turn.Messages(), iteration, "responses")
+			return true
 		}
 		durationMs := int(time.Since(apiStart).Milliseconds())
 
@@ -1224,7 +1216,7 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 				ReasoningContent:   reasoning,
 				EncryptedReasoning: encReasoning,
 			}
-			cr.addContext(assistantMsg)
+			turn.Add(assistantMsg)
 			out := FormatOutput(content)
 			cr.logger.Info(out)
 
@@ -1234,19 +1226,19 @@ func (cr *chatRunner) runTurnResponses(messages []ChatMessage) ([]ChatMessage, b
 			}
 
 			cr.sendFinalText(content)
-			return messages, true
+			return true
 		}
 
 		emptyRetries = 0
 		cr.storeUsage(sdkResponseUsageToUsage(resp.Usage, string(resp.Status)), "responses", durationMs)
 		numToolCalls := len(toolCalls)
-		messages = cr.handleToolCallResponse(messages, text, toolCalls, reasoning, encReasoning)
+		cr.handleToolCallResponse(turn, text, toolCalls, reasoning, encReasoning)
 
 		if cr.cfg.PreviousResponseID && currentResponseID != "" {
-			toolResultMsgs := messages[len(messages)-numToolCalls:]
+			toolResultMsgs := turn.LastN(numToolCalls)
 			input = toolResultMsgsToInputItems(toolResultMsgs)
 		} else {
-			input = messagesToResponseInputItems(messages)
+			input = messagesToResponseInputItems(turn.Messages())
 		}
 	}
 }

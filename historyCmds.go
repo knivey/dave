@@ -721,17 +721,13 @@ func historyClone(network Network, c *girc.Client, e girc.Event, ctx context.Con
 	mu.Lock()
 	defer mu.Unlock()
 
-	newSessionID, cloneErr := cloneDBSession(sourceSession.ID, network.Name, channel, callingUserID)
+	systemContent := renderFreshSystemPrompt(cfg, network, c, channel, e.Source.Name, cfg.System)
+
+	newSessionID, cloneErr := cloneDBSession(sourceSession.ID, network.Name, channel, callingUserID, systemContent)
 	if cloneErr != nil {
 		sendOrDone(ctx, output, errorNotice(n.DB.InternalError, map[string]string{"error": cloneErr.Error()}))
 		return
 	}
-
-	systemContent := renderFreshSystemPrompt(cfg, network, c, channel, e.Source.Name, cfg.System)
-	sessionMgr.AddMessage(newSessionID, ChatMessage{
-		Role:    RoleSystem,
-		Content: systemContent,
-	})
 
 	apiLogger.RestoreSession(newSessionID, network.Name, channel, callingUserID)
 

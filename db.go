@@ -665,7 +665,7 @@ func sessionHasIncompleteToolCalls(sessionID int64) (bool, error) {
 	return false, nil
 }
 
-func cloneDBSession(sourceSessionID int64, targetNetwork, targetChannel string, targetUserID int64) (int64, error) {
+func cloneDBSession(sourceSessionID int64, targetNetwork, targetChannel string, targetUserID int64, systemPrompt string) (int64, error) {
 	tx := theDB.Begin()
 	if tx.Error != nil {
 		return 0, tx.Error
@@ -720,6 +720,17 @@ func cloneDBSession(sourceSessionID int64, targetNetwork, targetChannel string, 
 		return 0, fmt.Errorf("create new session: %w", err)
 	}
 
+	if systemPrompt != "" {
+		sysMsg := Message{
+			SessionID: newSession.ID,
+			Role:      RoleSystem,
+			Content:   systemPrompt,
+		}
+		if err := tx.Create(&sysMsg).Error; err != nil {
+			return 0, fmt.Errorf("insert system prompt: %w", err)
+		}
+	}
+
 	var sourceMessages []Message
 	if err := tx.Where("session_id = ? AND archived = ? AND superseded = ?", sourceSessionID, false, false).
 		Order("id ASC").Find(&sourceMessages).Error; err != nil {
@@ -729,7 +740,7 @@ func cloneDBSession(sourceSessionID int64, targetNetwork, targetChannel string, 
 	skippedSystem := false
 	var firstUserContent string
 	for _, m := range sourceMessages {
-		if !skippedSystem && m.Role == "system" {
+		if !skippedSystem && m.Role == RoleSystem {
 			skippedSystem = true
 			continue
 		}

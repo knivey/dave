@@ -317,3 +317,174 @@ func TestWrapLine(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildPastebinHelpText(t *testing.T) {
+	text := buildPastebinHelpText("testbot", "!", Network{})
+	assert.Contains(t, text, "# testbot Help")
+	assert.Contains(t, text, "!support")
+	assert.Contains(t, text, "## Example Session")
+	assert.Contains(t, text, "<alice>")
+	assert.NotEmpty(t, text)
+}
+
+func TestBuildPastebinHelpTextUsesBotnickAndTrigger(t *testing.T) {
+	text := buildPastebinHelpText("mybot", ".", Network{})
+	assert.Contains(t, text, "# mybot Help")
+	assert.Contains(t, text, "mybot, your message here")
+	assert.Contains(t, text, ".stop")
+	assert.Contains(t, text, "<mybot>")
+}
+
+func TestBuildPastebinHelpTextWithChats(t *testing.T) {
+	config.Commands.Chats = map[string]AIConfig{
+		"ask": {Name: "ask", Regex: "ask", Service: "openai", Model: "gpt-4", Description: "ask questions"},
+	}
+	defer func() { config.Commands.Chats = nil }()
+	text := buildPastebinHelpText("testbot", "!", Network{})
+	assert.Contains(t, text, "## Chat Commands")
+	assert.Contains(t, text, "!ask")
+	assert.Contains(t, text, "gpt-4")
+	assert.Contains(t, text, "ask questions")
+	assert.Contains(t, text, "## Example Session")
+	chatIdx := strings.Index(text, "## Chat Commands")
+	exampleIdx := strings.Index(text, "## Example Session")
+	assert.True(t, chatIdx < exampleIdx, "Chat Commands should come before Example Session")
+}
+
+func TestBuildPastebinHelpTextWithCompletions(t *testing.T) {
+	config.Commands.Completions = map[string]AIConfig{
+		"complete": {Name: "complete", Regex: "complete", Service: "openai", Model: "gpt-4"},
+	}
+	defer func() { config.Commands.Completions = nil }()
+	text := buildPastebinHelpText("testbot", "!", Network{})
+	assert.Contains(t, text, "## Completions")
+	assert.Contains(t, text, "!complete")
+}
+
+func TestBuildPastebinHelpTextWithTools(t *testing.T) {
+	config.Commands.Tools = map[string]MCPCommandConfig{
+		"img": {Name: "img", Regex: "img", MCP: "img-mcp", Tool: "generate_image", Description: "generate an image"},
+	}
+	defer func() { config.Commands.Tools = nil }()
+	text := buildPastebinHelpText("testbot", "!", Network{})
+	assert.Contains(t, text, "## Tool Commands")
+	assert.Contains(t, text, "!img")
+	assert.Contains(t, text, "img-mcp")
+	assert.Contains(t, text, "generate_image")
+}
+
+func TestBuildPastebinHelpTextDisabledCommands(t *testing.T) {
+	network := Network{
+		DisabledCommands: []string{"stop"},
+	}
+	text := buildPastebinHelpText("testbot", "!", network)
+	assert.NotContains(t, text, "!stop")
+	assert.Contains(t, text, "!support")
+}
+
+func TestBuildPastebinHelpTextChatBeforeCompletions(t *testing.T) {
+	config.Commands.Chats = map[string]AIConfig{
+		"chat": {Name: "chat", Regex: "chat", Service: "openai", Model: "gpt-4"},
+	}
+	config.Commands.Completions = map[string]AIConfig{
+		"complete": {Name: "complete", Regex: "complete", Service: "openai", Model: "gpt-4"},
+	}
+	defer func() {
+		config.Commands.Chats = nil
+		config.Commands.Completions = nil
+	}()
+	text := buildPastebinHelpText("testbot", "!", Network{})
+	chatIdx := strings.Index(text, "## Chat Commands")
+	compIdx := strings.Index(text, "## Completions")
+	assert.True(t, chatIdx < compIdx, "Chat Commands should come before Completions")
+}
+
+func TestBuildPastebinHelpTextGFMTables(t *testing.T) {
+	config.Commands.Chats = map[string]AIConfig{
+		"chat": {Name: "chat", Regex: "chat", Service: "openai", Model: "gpt-4", Description: "general chat"},
+	}
+	defer func() { config.Commands.Chats = nil }()
+	text := buildPastebinHelpText("testbot", "!", Network{})
+	assert.Contains(t, text, "| Command | Regex | Service | Model | Media | Description |")
+	assert.Contains(t, text, "| `!chat` |  | openai | gpt-4 |  | general chat |")
+}
+
+func TestBuildPastebinHelpTextExampleUsesTrigger(t *testing.T) {
+	text := buildPastebinHelpText("dave", "dave:", Network{})
+	assert.Contains(t, text, "dave:chat")
+	assert.Contains(t, text, "dave:stop")
+	assert.Contains(t, text, "<dave>")
+}
+
+func TestBuildPastebinHelpTextRegexMarker(t *testing.T) {
+	config.Commands.Chats = map[string]AIConfig{
+		"chat": {Name: "chat", Regex: "chat.*", Service: "openai", Model: "gpt-4", Description: "chat"},
+	}
+	defer func() { config.Commands.Chats = nil }()
+	text := buildPastebinHelpText("testbot", "!", Network{})
+	assert.Contains(t, text, "✱")
+	assert.NotContains(t, text, "(regex)")
+	lines := strings.Split(text, "\n")
+	for _, line := range lines {
+		if strings.Contains(line, "✱") {
+			assert.Contains(t, line, "| ✱ |", "✱ should be in its own Regex column")
+		}
+	}
+}
+
+func TestBuildPastebinHelpTextPipeEscaped(t *testing.T) {
+	config.Commands.Chats = map[string]AIConfig{
+		"img": {Name: "img", Regex: "img|image", Service: "openai", Model: "gpt-4", Description: "images"},
+	}
+	defer func() { config.Commands.Chats = nil }()
+	text := buildPastebinHelpText("testbot", "!", Network{})
+	expected := "`!img" + `\|` + "image`"
+	assert.Contains(t, text, expected)
+	assert.NotContains(t, text, "| `!img|image`")
+}
+
+func TestBuildPastebinHelpTextDetectImagesCol(t *testing.T) {
+	config.Commands.Chats = map[string]AIConfig{
+		"chat": {Name: "chat", Regex: "chat", Service: "openai", Model: "gpt-4o", DetectImages: true, Description: "vision chat"},
+	}
+	defer func() { config.Commands.Chats = nil }()
+	text := buildPastebinHelpText("testbot", "!", Network{})
+	assert.Contains(t, text, "| `!chat` |  | openai | gpt-4o | 🖼️ | vision chat |")
+}
+
+func TestBuildPastebinHelpTextNoStopInExample(t *testing.T) {
+	text := buildPastebinHelpText("testbot", "!", Network{})
+	assert.NotContains(t, text, "Session paused")
+}
+
+func TestBuildPastebinHelpTextHistoryPipeEscaped(t *testing.T) {
+	setupTestDB(t)
+	text := buildPastebinHelpText("testbot", "!", Network{})
+	assert.Contains(t, text, "## History & Sessions")
+	lines := strings.Split(text, "\n")
+	for _, line := range lines {
+		if strings.Contains(line, "sessions") && strings.Contains(line, "List sessions") {
+			assert.Contains(t, line, `\|`, "pipe in [nick|*] should be escaped")
+			assert.NotContains(t, line, "[nick|*]", "raw pipe should be escaped")
+		}
+		if strings.Contains(line, "clone") && strings.Contains(line, "Clone") {
+			assert.Contains(t, line, `\|`, "pipe in [nick|id] should be escaped")
+			assert.NotContains(t, line, "[nick|id]", "raw pipe should be escaped")
+		}
+	}
+}
+
+func TestBuildPastebinHelpTextNoRegexExplanation(t *testing.T) {
+	text := buildPastebinHelpText("testbot", "!", Network{})
+	assert.NotContains(t, text, "Commands marked with ✱ use pattern matching")
+}
+
+func TestBuildPastebinHelpTextDescPipeEscaped(t *testing.T) {
+	config.Commands.Chats = map[string]AIConfig{
+		"chat": {Name: "chat", Regex: "chat", Service: "openai", Model: "gpt-4", Description: "chat with user | group support"},
+	}
+	defer func() { config.Commands.Chats = nil }()
+	text := buildPastebinHelpText("testbot", "!", Network{})
+	assert.Contains(t, text, "&#124;")
+	assert.NotContains(t, text, "| group support |")
+}

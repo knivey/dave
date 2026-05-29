@@ -177,8 +177,8 @@ func handleMention(network Network, client *girc.Client, event girc.Event, chann
 			return
 		}
 		helpURL := ""
-		helpText := buildHelpText(client.GetNick(), network.Trigger, network)
-		url, err := uploadToPastebin("```\n"+helpText+"\n```", "Dave Help")
+		mdText := buildPastebinHelpText(client.GetNick(), network.Trigger, network)
+		url, err := uploadToPastebin(mdText, "Dave's Help")
 		if err != nil {
 			logger.Warn("failed to upload help to pastebin for no_context notice", "error", err)
 			helpURL = network.Trigger + "help"

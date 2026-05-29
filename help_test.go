@@ -196,6 +196,44 @@ func TestFormatTable(t *testing.T) {
 	}
 }
 
+func TestBuildHelpText(t *testing.T) {
+	text := buildHelpText("testbot", "!", Network{})
+	assert.Contains(t, text, "testbot")
+	assert.Contains(t, text, "!stop")
+	assert.Contains(t, text, "!support")
+	assert.NotEmpty(t, text)
+}
+
+func TestBuildHelpTextWithDisabledCommands(t *testing.T) {
+	network := Network{
+		DisabledCommands: []string{"stop"},
+	}
+	text := buildHelpText("testbot", "!", network)
+	assert.Contains(t, text, "testbot")
+	assert.NotContains(t, text, "!stop")
+	assert.Contains(t, text, "!support")
+}
+
+func TestBuildHelpTextWithCompletions(t *testing.T) {
+	config.Commands.Completions = map[string]AIConfig{
+		"chat": {Name: "chat", Regex: "chat", Service: "openai", Model: "gpt-4"},
+	}
+	defer func() { config.Commands.Completions = nil }()
+	text := buildHelpText("testbot", "!", Network{})
+	assert.Contains(t, text, "Completions:")
+	assert.Contains(t, text, "!chat")
+}
+
+func TestBuildHelpTextWithChats(t *testing.T) {
+	config.Commands.Chats = map[string]AIConfig{
+		"ask": {Name: "ask", Regex: "ask", Service: "openai", Model: "gpt-4"},
+	}
+	defer func() { config.Commands.Chats = nil }()
+	text := buildHelpText("testbot", "!", Network{})
+	assert.Contains(t, text, "Chats:")
+	assert.Contains(t, text, "!ask")
+}
+
 func TestWrapLine(t *testing.T) {
 	tests := []struct {
 		name string

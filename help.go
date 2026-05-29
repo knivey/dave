@@ -18,9 +18,7 @@ type helpEntry struct {
 	mcpInfo string
 }
 
-func help(network Network, client *girc.Client, event girc.Event, ctx context.Context, output chan<- string, args ...string) {
-	botnick := client.GetNick()
-
+func buildHelpText(botnick, trigger string, network Network) string {
 	var completions map[string]AIConfig
 	var chats map[string]AIConfig
 	var tools map[string]MCPCommandConfig
@@ -41,42 +39,14 @@ func help(network Network, client *girc.Client, event girc.Event, ctx context.Co
 
 	var lines []string
 
-	if len(args) > 0 && args[0] != "" {
-		cmdName := args[0]
-		entry, found := findCommandHelp(network, cmdName)
-		if !found {
-			select {
-			case output <- fmt.Sprintf("\x0304❗ Command '%s' not found. Use %shelp to see all commands.", cmdName, network.Trigger):
-			case <-ctx.Done():
-			}
-			return
-		}
-		lines = append(lines, fmt.Sprintf("Help for %s:", entry.cmd))
-		if entry.info != "" {
-			lines = append(lines, "  "+entry.info)
-		}
-		lines = append(lines, "  "+entry.desc)
-		if entry.mcpInfo != "" {
-			lines = append(lines, "  "+entry.mcpInfo)
-		}
-		for _, line := range lines {
-			select {
-			case output <- line:
-			case <-ctx.Done():
-				return
-			}
-		}
-		return
-	}
-
 	lines = append(lines, fmt.Sprintf("I'm %s! Use my commands below to chat or generate images.", botnick))
 	lines = append(lines, fmt.Sprintf("Only Chat commands start a persistent context. After starting one, reply with my nick (e.g. \"%s, your message here\") to continue that context without using a command.", botnick))
 	lines = append(lines, "Commands marked with (regex) use pattern matching, the trigger can match more than one name.")
 	if !isNetworkCommandDisabled(network, "stop") {
-		lines = append(lines, fmt.Sprintf("  %sstop \u2014 Stop text generation (including this help message)", network.Trigger))
+		lines = append(lines, fmt.Sprintf("  %sstop \u2014 Stop text generation (including this help message)", trigger))
 	}
 	if !isNetworkCommandDisabled(network, "support") {
-		lines = append(lines, fmt.Sprintf("  %ssupport \u2014 Support dave's development", network.Trigger))
+		lines = append(lines, fmt.Sprintf("  %ssupport \u2014 Support dave's development", trigger))
 	}
 
 	if theDB != nil {
@@ -85,14 +55,14 @@ func help(network Network, client *girc.Client, event girc.Event, ctx context.Co
 			name string
 			line string
 		}{
-			{"sessions", fmt.Sprintf("  %ssessions [nick|*] \u2014 List sessions (yours, another user's, or all)", network.Trigger)},
-			{"history", fmt.Sprintf("  %shistory <id> \u2014 Show messages from a session", network.Trigger)},
-			{"resume", fmt.Sprintf("  %sresume <id> \u2014 Resume a previous session", network.Trigger)},
-			{"delete", fmt.Sprintf("  %sdelete <id> \u2014 Delete a session", network.Trigger)},
-			{"mystats", fmt.Sprintf("  %smystats \u2014 Show your session/message stats", network.Trigger)},
-			{"jobs", fmt.Sprintf("  %sjobs \u2014 List your chat queue and background jobs", network.Trigger)},
-			{"compact", fmt.Sprintf("  %scompact \u2014 Summarize old messages in your active session to free context", network.Trigger)},
-			{"clone", fmt.Sprintf("  %sclone <nick|id> \u2014 Clone another user's session (or your own, to fork it)", network.Trigger)},
+			{"sessions", fmt.Sprintf("  %ssessions [nick|*] \u2014 List sessions (yours, another user's, or all)", trigger)},
+			{"history", fmt.Sprintf("  %shistory <id> \u2014 Show messages from a session", trigger)},
+			{"resume", fmt.Sprintf("  %sresume <id> \u2014 Resume a previous session", trigger)},
+			{"delete", fmt.Sprintf("  %sdelete <id> \u2014 Delete a session", trigger)},
+			{"mystats", fmt.Sprintf("  %smystats \u2014 Show your session/message stats", trigger)},
+			{"jobs", fmt.Sprintf("  %sjobs \u2014 List your chat queue and background jobs", trigger)},
+			{"compact", fmt.Sprintf("  %scompact \u2014 Summarize old messages in your active session to free context", trigger)},
+			{"clone", fmt.Sprintf("  %sclone <nick|id> \u2014 Clone another user's session (or your own, to fork it)", trigger)},
 		}
 		for _, h := range histBuiltins {
 			if !isNetworkCommandDisabled(network, h.name) {
@@ -113,7 +83,7 @@ func help(network Network, client *girc.Client, event girc.Event, ctx context.Co
 	}
 	if len(filteredCompletions) > 0 {
 		lines = append(lines, "\x02Completions:\x02")
-		for _, l := range formatTable(sortedAIConfigEntries(network.Trigger, filteredCompletions)) {
+		for _, l := range formatTable(sortedAIConfigEntries(trigger, filteredCompletions)) {
 			lines = append(lines, "  "+l)
 		}
 	}
@@ -126,7 +96,7 @@ func help(network Network, client *girc.Client, event girc.Event, ctx context.Co
 	}
 	if len(filteredChats) > 0 {
 		lines = append(lines, "\x02Chats:\x02")
-		for _, l := range formatTable(sortedAIConfigEntries(network.Trigger, filteredChats)) {
+		for _, l := range formatTable(sortedAIConfigEntries(trigger, filteredChats)) {
 			lines = append(lines, "  "+l)
 		}
 	}
@@ -149,7 +119,7 @@ func help(network Network, client *girc.Client, event girc.Event, ctx context.Co
 		for _, k := range toolKeys {
 			c := filteredTools[k]
 			entries = append(entries, helpEntry{
-				cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
+				cmd:  formatCmd(trigger, c.Regex, c.Name),
 				info: formatToolInfo(c.MCP, c.Tool),
 				desc: formatDesc(c.Description, false),
 			})
@@ -168,9 +138,45 @@ func help(network Network, client *girc.Client, event girc.Event, ctx context.Co
 		}
 	}
 
+	return strings.Join(lines, "\n")
+}
+
+func help(network Network, client *girc.Client, event girc.Event, ctx context.Context, output chan<- string, args ...string) {
+	botnick := client.GetNick()
+
+	if len(args) > 0 && args[0] != "" {
+		cmdName := args[0]
+		entry, found := findCommandHelp(network, cmdName)
+		if !found {
+			select {
+			case output <- fmt.Sprintf("\x0304❗ Command '%s' not found. Use %shelp to see all commands.", cmdName, network.Trigger):
+			case <-ctx.Done():
+			}
+			return
+		}
+		var lines []string
+		lines = append(lines, fmt.Sprintf("Help for %s:", entry.cmd))
+		if entry.info != "" {
+			lines = append(lines, "  "+entry.info)
+		}
+		lines = append(lines, "  "+entry.desc)
+		if entry.mcpInfo != "" {
+			lines = append(lines, "  "+entry.mcpInfo)
+		}
+		for _, line := range lines {
+			select {
+			case output <- line:
+			case <-ctx.Done():
+				return
+			}
+		}
+		return
+	}
+
+	rawText := buildHelpText(botnick, network.Trigger, network)
+
 	chCfg := network.GetChannelConfig(event.Params[0])
 	if chCfg.Pastebin {
-		rawText := strings.Join(lines, "\n")
 		wrappedLines := wrapForIRC(rawText)
 		if len(wrappedLines) >= chCfg.GetMaxLines() {
 			url, err := uploadToPastebin("```\n"+rawText+"\n```", "Dave's Help")
@@ -219,7 +225,7 @@ func help(network Network, client *girc.Client, event girc.Event, ctx context.Co
 		}
 	}
 
-	for _, line := range lines {
+	for _, line := range strings.Split(rawText, "\n") {
 		for _, wrapped := range wrapLine(line) {
 			select {
 			case output <- wrapped:

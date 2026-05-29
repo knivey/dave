@@ -195,7 +195,7 @@ func handleMention(network Network, client *girc.Client, event girc.Event, chann
 		if count >= threshold {
 			var mutedMsg string
 			readConfig(func() { mutedMsg = config.Notices.Mentions.Muted })
-			mutedMsg = expandNotice(mutedMsg, map[string]string{"trigger": network.Trigger})
+			mutedMsg = expandNotice(mutedMsg, map[string]string{})
 			client.Cmd.Reply(event, warnMsg(mutedMsg))
 			theMentionTracker.setMuted(network.Name, userID)
 		}

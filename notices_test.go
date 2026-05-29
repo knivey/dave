@@ -346,8 +346,8 @@ func TestMentionNoticesDefaults(t *testing.T) {
 	var n NoticesConfig
 	setNoticesDefaults(&n)
 	assert.Contains(t, n.Mentions.NoContext, "{help_url}")
-	assert.Contains(t, n.Mentions.Muted, "{trigger}")
-	assert.Contains(t, n.Mentions.NoContext, "{trigger}")
+	assert.Contains(t, n.Mentions.NoContext, "reply to my nick")
+	assert.NotEmpty(t, n.Mentions.Muted)
 }
 
 func TestAllSessionTemplatesHavePlaceholders(t *testing.T) {

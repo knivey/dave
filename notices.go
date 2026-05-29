@@ -196,10 +196,10 @@ func setNoticesDefaults(n *NoticesConfig) {
 		n.Format.WarnPrefix = "\x0307⚠️ "
 	}
 	if n.Mentions.NoContext == "" {
-		n.Mentions.NoContext = "You need to start a chat session first! See {help_url} for help. Once started, you can use {trigger}help or reply to my nick to continue the conversation."
+		n.Mentions.NoContext = "You need to start a chat session first! See {help_url} for help. Once started, reply to my nick to continue the conversation."
 	}
 	if n.Mentions.Muted == "" {
-		n.Mentions.Muted = "Further mentions will be ignored until you start a session. Use {trigger}help to get started."
+		n.Mentions.Muted = "Further mentions will be ignored until you start a session."
 	}
 	if n.Sessions.Header == "" {
 		n.Sessions.Header = "\x02Session History ({nick} on {network}):\x02"

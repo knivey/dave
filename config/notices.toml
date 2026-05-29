@@ -17,9 +17,8 @@
 #
 # [mentions] options:
 #   no_context       (string)    Sent when user mentions bot without a session.
-#                                  Placeholders: {trigger}, {help_url}
+#                                  Placeholders: {help_url}
 #   muted            (string)    Sent when user hits mention threshold.
-#                                  Placeholders: {trigger}
 #
 # [sessions] options:
 #   header           (string)    Session list header. Placeholders: {nick}, {network}
@@ -132,8 +131,8 @@
 # warn_prefix = "\x0307⚠️ "
 #
 # [mentions]
-# no_context = "You need to start a chat session first! See {help_url} for help. Once started, you can use {trigger}help or reply to my nick to continue the conversation."
-# muted = "Further mentions will be ignored until you start a session. Use {trigger}help to get started."
+# no_context = "You need to start a chat session first! See {help_url} for help. Once started, reply to my nick to continue the conversation."
+# muted = "Further mentions will be ignored until you start a session."
 #
 # [sessions]
 # header = "\x02Session History ({nick} on {network}):\x02"

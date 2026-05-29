@@ -160,6 +160,8 @@ func (bot *Bot) isReady(channel string) bool {
 var bots map[string]*Bot
 var botsMu sync.RWMutex
 
+var theMentionTracker = newMentionTracker()
+
 func init() {
 	bots = make(map[string]*Bot)
 }
@@ -497,6 +499,14 @@ func main() {
 	loadIgnores(ignorePath)
 	watchIgnores(ignorePath)
 	startRateLimitGC()
+
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			theMentionTracker.sweep()
+		}
+	}()
 
 	go func() {
 		ticker := time.NewTicker(60 * time.Second)

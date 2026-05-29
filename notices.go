@@ -16,6 +16,7 @@ type NoticesConfig struct {
 	Rate       RateNotices       `toml:"rate"`
 	Format     FormatNotices     `toml:"format"`
 	Context    ContextNotices    `toml:"context"`
+	Mentions   MentionNotices    `toml:"mentions"`
 	Sessions   SessionNotices    `toml:"sessions"`
 	DB         DBNotices         `toml:"db"`
 	Images     ImageNotices      `toml:"images"`
@@ -46,7 +47,11 @@ type FormatNotices struct {
 }
 
 type ContextNotices struct {
+}
+
+type MentionNotices struct {
 	NoContext string `toml:"no_context"`
+	Muted     string `toml:"muted"`
 }
 
 type SessionNotices struct {
@@ -194,8 +199,11 @@ func setNoticesDefaults(n *NoticesConfig) {
 	if n.Format.WarnPrefix == "" {
 		n.Format.WarnPrefix = "\x0307⚠️ "
 	}
-	if n.Context.NoContext == "" {
-		n.Context.NoContext = "You need to start a chat session first! Use {trigger}help to see available commands. once you start one you can reply to my nick to continue the conversation."
+	if n.Mentions.NoContext == "" {
+		n.Mentions.NoContext = "You need to start a chat session first! See {help_url} for help. Once started, you can use {trigger}help or reply to my nick to continue the conversation."
+	}
+	if n.Mentions.Muted == "" {
+		n.Mentions.Muted = "Further mentions will be ignored until you start a session. Use {trigger}help to get started."
 	}
 	if n.Sessions.Header == "" {
 		n.Sessions.Header = "\x02Session History ({nick} on {network}):\x02"

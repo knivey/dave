@@ -174,7 +174,7 @@ func handleMention(network Network, client *girc.Client, event girc.Event, chann
 	if !ContextExists(network.Name, channel, userID) {
 		logger.Info("Ignoring message due to no existing chat context")
 		var noCtxMsg string
-		readConfig(func() { noCtxMsg = config.Notices.Context.NoContext })
+		readConfig(func() { noCtxMsg = config.Notices.Mentions.NoContext })
 		noCtxMsg = expandNotice(noCtxMsg, map[string]string{"trigger": network.Trigger})
 		client.Cmd.Reply(event, warnMsg(noCtxMsg))
 		return

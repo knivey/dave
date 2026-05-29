@@ -81,7 +81,8 @@ func TestSetNoticesDefaults(t *testing.T) {
 	assert.Equal(t, []string{"hold on you're going to fast"}, n.Rate.Msgs)
 	assert.Equal(t, "\x0304❗ ", n.Format.ErrorPrefix)
 	assert.Equal(t, "\x0307⚠️ ", n.Format.WarnPrefix)
-	assert.NotEmpty(t, n.Context.NoContext)
+	assert.NotEmpty(t, n.Mentions.NoContext)
+	assert.NotEmpty(t, n.Mentions.Muted)
 	assert.NotEmpty(t, n.Sessions.Header)
 	assert.NotEmpty(t, n.Sessions.None)
 	assert.NotEmpty(t, n.Sessions.DetailHeader)
@@ -339,6 +340,14 @@ func TestQueueManagerUpdateNotices(t *testing.T) {
 
 	assert.Equal(t, "updated msg", qm.queueMsg)
 	assert.Equal(t, "updated started", qm.startedMsg)
+}
+
+func TestMentionNoticesDefaults(t *testing.T) {
+	var n NoticesConfig
+	setNoticesDefaults(&n)
+	assert.Contains(t, n.Mentions.NoContext, "{help_url}")
+	assert.Contains(t, n.Mentions.Muted, "{trigger}")
+	assert.Contains(t, n.Mentions.NoContext, "{trigger}")
 }
 
 func TestAllSessionTemplatesHavePlaceholders(t *testing.T) {

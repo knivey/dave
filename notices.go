@@ -15,7 +15,6 @@ type NoticesConfig struct {
 	Queue      QueueNotices      `toml:"queue"`
 	Rate       RateNotices       `toml:"rate"`
 	Format     FormatNotices     `toml:"format"`
-	Context    ContextNotices    `toml:"context"`
 	Mentions   MentionNotices    `toml:"mentions"`
 	Sessions   SessionNotices    `toml:"sessions"`
 	DB         DBNotices         `toml:"db"`
@@ -44,9 +43,6 @@ type RateNotices struct {
 type FormatNotices struct {
 	ErrorPrefix string `toml:"error_prefix"`
 	WarnPrefix  string `toml:"warn_prefix"`
-}
-
-type ContextNotices struct {
 }
 
 type MentionNotices struct {

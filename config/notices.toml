@@ -15,8 +15,11 @@
 #   error_prefix     (string)    IRC format prefix for error messages
 #   warn_prefix      (string)    IRC format prefix for warning messages
 #
-# [context] options:
-#   no_context       (string)    No active chat context. Placeholders: (none)
+# [mentions] options:
+#   no_context       (string)    Sent when user mentions bot without a session.
+#                                  Placeholders: {trigger}, {help_url}
+#   muted            (string)    Sent when user hits mention threshold.
+#                                  Placeholders: {trigger}
 #
 # [sessions] options:
 #   header           (string)    Session list header. Placeholders: {nick}, {network}
@@ -128,8 +131,9 @@
 # error_prefix = "\x0304❗ "
 # warn_prefix = "\x0307⚠️ "
 #
-# [context]
-# no_context = "You need to start a chat session first! Use {trigger}help to see available commands. once you start one you can reply to my nick to continue the conversation."
+# [mentions]
+# no_context = "You need to start a chat session first! See {help_url} for help. Once started, you can use {trigger}help or reply to my nick to continue the conversation."
+# muted = "Further mentions will be ignored until you start a session. Use {trigger}help to get started."
 #
 # [sessions]
 # header = "\x02Session History ({nick} on {network}):\x02"

@@ -1899,3 +1899,11 @@ host = "irc.example.com"
 	assert.Equal(t, 200, logging.BatchSize, "BatchSize should be 200")
 	assert.Equal(t, 5*time.Second, logging.FlushInterval, "FlushInterval should be 5s")
 }
+
+func TestMentionSpamConfigDefaults(t *testing.T) {
+	dir := createTestConfigDir(t, "", nil)
+	defer os.RemoveAll(dir)
+	cfg, err := loadConfigDir(dir)
+	require.NoError(t, err)
+	assert.Equal(t, 2, cfg.MentionSpam.Threshold)
+}

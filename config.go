@@ -41,12 +41,17 @@ type Config struct {
 	MCPToolSets          map[string][]string `toml:"-"`
 	Bans                 BanConfig           `toml:"bans"`
 	Compaction           CompactionConfig    `toml:"compaction"`
+	MentionSpam          MentionSpamConfig   `toml:"mention_spam"`
 	Logging              LoggingConfig       `toml:"logging"`
 }
 
 type BanConfig struct {
 	MaxDuration     string `toml:"max_duration"`
 	DefaultDuration string `toml:"default_duration"`
+}
+
+type MentionSpamConfig struct {
+	Threshold int `toml:"threshold"`
 }
 
 type LoggingConfig struct {
@@ -531,6 +536,9 @@ func loadConfigDir(dir string) (Config, error) {
 		config.Bans.DefaultDuration = "5m"
 	}
 	config.Compaction.ApplyDefaults()
+	if config.MentionSpam.Threshold == 0 {
+		config.MentionSpam.Threshold = 2
+	}
 	config.Logging.SetDefaults()
 	if config.TUI.ScrollbackLines == 0 {
 		config.TUI.ScrollbackLines = 5000

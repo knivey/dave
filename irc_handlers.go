@@ -171,12 +171,36 @@ func handleMention(network Network, client *girc.Client, event girc.Event, chann
 		return
 	}
 
+	theMentionTracker.reset(network.Name, userID)
+
 	if !ContextExists(network.Name, channel, userID) {
 		logger.Info("Ignoring message due to no existing chat context")
+		if theMentionTracker.isMuted(network.Name, userID) {
+			return
+		}
+		helpURL := ""
+		helpText := buildHelpText(client.GetNick(), network.Trigger, network)
+		url, err := uploadToPastebin("```\n"+helpText+"\n```", "Dave Help")
+		if err != nil {
+			logger.Warn("failed to upload help to pastebin for no_context notice", "error", err)
+			helpURL = network.Trigger + "help"
+		} else {
+			helpURL = url
+		}
 		var noCtxMsg string
 		readConfig(func() { noCtxMsg = config.Notices.Mentions.NoContext })
-		noCtxMsg = expandNotice(noCtxMsg, map[string]string{"trigger": network.Trigger, "help_url": network.Trigger + "help"})
+		noCtxMsg = expandNotice(noCtxMsg, map[string]string{"trigger": network.Trigger, "help_url": helpURL})
 		client.Cmd.Reply(event, warnMsg(noCtxMsg))
+		count := theMentionTracker.recordMention(network.Name, userID)
+		var threshold int
+		readConfig(func() { threshold = config.MentionSpam.Threshold })
+		if count >= threshold {
+			var mutedMsg string
+			readConfig(func() { mutedMsg = config.Notices.Mentions.Muted })
+			mutedMsg = expandNotice(mutedMsg, map[string]string{"trigger": network.Trigger})
+			client.Cmd.Reply(event, warnMsg(mutedMsg))
+			theMentionTracker.setMuted(network.Name, userID)
+		}
 		return
 	}
 	if !checkRate(network, channel) {
@@ -294,6 +318,8 @@ func handleTrigger(network Network, client *girc.Client, event girc.Event, chann
 		logger.Info("User is banned", "user_id", userID, "nick", event.Source.Name)
 		return
 	}
+
+	theMentionTracker.reset(network.Name, userID)
 
 	// Execute the matched command.
 	if match.builtin {

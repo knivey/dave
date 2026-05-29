@@ -427,7 +427,7 @@ func help(network Network, client *girc.Client, event girc.Event, ctx context.Co
 			return
 		}
 		select {
-		case output <- expandNotice(n.Pastebin.Link, map[string]string{"url": url}):
+		case output <- fmt.Sprintf("Here is my help: %s", url):
 		case <-ctx.Done():
 			return
 		}

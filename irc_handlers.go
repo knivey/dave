@@ -171,8 +171,6 @@ func handleMention(network Network, client *girc.Client, event girc.Event, chann
 		return
 	}
 
-	theMentionTracker.reset(network.Name, userID)
-
 	if !ContextExists(network.Name, channel, userID) {
 		logger.Info("Ignoring message due to no existing chat context")
 		if theMentionTracker.isMuted(network.Name, userID) {
@@ -203,6 +201,9 @@ func handleMention(network Network, client *girc.Client, event girc.Event, chann
 		}
 		return
 	}
+
+	theMentionTracker.reset(network.Name, userID)
+
 	if !checkRate(network, channel) {
 		var rateMsg string
 		readConfig(func() { rateMsg = config.Notices.Ratemsg() })

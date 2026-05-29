@@ -51,10 +51,11 @@ func (t *mentionTracker) isMuted(network string, userID int64) bool {
 func (t *mentionTracker) setMuted(network string, userID int64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	s, ok := t.users[t.key(network, userID)]
+	k := t.key(network, userID)
+	s, ok := t.users[k]
 	if !ok {
 		s = &mentionState{}
-		t.users[t.key(network, userID)] = s
+		t.users[k] = s
 	}
 	s.muted = true
 }

@@ -21,6 +21,9 @@
 #   max_duration        (string, default: "6h")   Maximum ban duration (supports s/m/h/d)
 #   default_duration    (string, default: "5m")   Default ban duration when none is specified (supports s/m/h/d)
 #
+# [mention_spam] options:
+#   threshold           (int, default: 2)         No-context nick mentions before muting
+#
 # [compaction] options:
 #   enabled            (bool, default: false)   Enable session compaction (manual `^compact$` IRC command + TUI `/compact`)
 #   auto_enabled       (bool, default: false)   Auto-compact when prompt tokens exceed threshold (requires context_window)
@@ -110,6 +113,9 @@
 # [bans]
 # max_duration = "6h"
 # default_duration = "5m"
+#
+# [mention_spam]
+# threshold = 2
 #
 # [compaction]
 # enabled = true
@@ -206,6 +212,9 @@ hidden_tools = ["register_background_job", "check_ban_history"]
 [bans]
 max_duration = "6h"
 default_duration = "5m"
+
+[mention_spam]
+threshold = 2
 
 [database]
 # driver = "sqlite"       # Uncomment to use PostgreSQL: driver = "postgres"

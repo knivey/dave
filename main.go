@@ -130,6 +130,12 @@ var ignoreMu sync.RWMutex
 var ignoreWatcher *fsnotify.Watcher
 var ignoreFile string
 
+func getIgnoreCount() int {
+	ignoreMu.RLock()
+	defer ignoreMu.RUnlock()
+	return len(ignorePatterns)
+}
+
 type Bot struct {
 	Client      *girc.Client
 	Reconnect   bool

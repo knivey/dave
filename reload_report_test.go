@@ -57,6 +57,18 @@ func TestReloadReport_HasErrors(t *testing.T) {
 	assert.True(t, r.HasErrors())
 }
 
+func TestGetIgnoreCount(t *testing.T) {
+	ignoreMu.Lock()
+	ignorePatterns = []string{"a", "b", "c"}
+	ignoreMu.Unlock()
+	assert.Equal(t, 3, getIgnoreCount())
+
+	ignoreMu.Lock()
+	ignorePatterns = nil
+	ignoreMu.Unlock()
+	assert.Equal(t, 0, getIgnoreCount())
+}
+
 func TestReloadReport_PrintSingleError(t *testing.T) {
 	r := NewReloadReport("reload")
 	r.AddSuccess("config: ok")

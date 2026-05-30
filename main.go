@@ -523,7 +523,9 @@ func main() {
 	loadIgnores(ignorePath)
 	r.AddSuccess(fmt.Sprintf("ignores: %d patterns", getIgnoreCount()))
 	watchIgnores(ignorePath)
-	r.Print(logView)
+	if logView != nil {
+		r.Print(logView)
+	}
 	startRateLimitGC()
 
 	go func() {

@@ -467,6 +467,11 @@ func main() {
 		configDir = "config"
 	}
 	config = loadConfigDirOrDie(configDir)
+	r := NewReloadReport("startup")
+	r.AddSuccess(fmt.Sprintf("config: %d networks, %d services, %d chats, %d completions, %d tools, %d MCPs, %d template vars",
+		len(config.Networks), len(config.Services), len(config.Commands.Chats),
+		len(config.Commands.Completions), len(config.Commands.Tools),
+		len(config.MCPs), len(config.TemplateVars)))
 
 	noTUI := os.Getenv("DAVE_NO_TUI") != ""
 
@@ -503,7 +508,7 @@ func main() {
 
 	LoadContextStore()
 	CleanupContexts()
-	initMCPClients(nil)
+	initMCPClients(r)
 	queueMgr = NewQueueManager(config.Notices, config.MaxQueueDepth)
 	queueMgr.UpdateServiceLimits(config.Services)
 	queueMgr.Start()
@@ -516,7 +521,9 @@ func main() {
 
 	ignorePath := filepath.Join(configDir, "ignores.txt")
 	loadIgnores(ignorePath)
+	r.AddSuccess(fmt.Sprintf("ignores: %d patterns", getIgnoreCount()))
 	watchIgnores(ignorePath)
+	r.Print(logView)
 	startRateLimitGC()
 
 	go func() {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"text/template"
 
 	"github.com/lrstanley/girc"
 	logxi "github.com/mgutz/logxi/v1"
@@ -23,6 +24,13 @@ type mcpImageData struct {
 
 type mcpAsyncSubmitResult struct {
 	JobID string `json:"job_id"`
+}
+
+func executeToolTemplate(tmpl *template.Template, data map[string]any, buf *strings.Builder) (bool, error) {
+	if err := tmpl.Execute(buf, data); err != nil {
+		return true, err
+	}
+	return false, nil
 }
 
 func mcpCmd(network Network, c *girc.Client, e girc.Event, cfg MCPCommandConfig, ctx context.Context, output chan<- string, args ...string) {
@@ -76,6 +84,35 @@ func mcpCmd(network Network, c *girc.Client, e girc.Event, cfg MCPCommandConfig,
 	text := mcpToolResultToText(result)
 	if result.IsError {
 		sendOrDone(ctx, output, errorMsg(text))
+		return
+	}
+
+	if cfg.outputTmpl != nil {
+		var data map[string]any
+		if err := json.Unmarshal([]byte(text), &data); err != nil {
+			log.Warn("failed to parse tool result as JSON for template, sending raw", "error", err)
+			sendImageOrTextResult(text, ctx, output)
+			return
+		}
+		data["_nick"] = nick
+		data["_channel"] = channel
+		data["_network"] = network.Name
+		var buf strings.Builder
+		fallback, err := executeToolTemplate(cfg.outputTmpl, data, &buf)
+		if fallback || err != nil {
+			log.Warn("template execution failed, sending raw result", "error", err)
+			sendImageOrTextResult(text, ctx, output)
+			return
+		}
+		rendered := strings.TrimSpace(buf.String())
+		for _, line := range strings.Split(rendered, "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" {
+				if !sendOrDone(ctx, output, line) {
+					return
+				}
+			}
+		}
 		return
 	}
 

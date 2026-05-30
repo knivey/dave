@@ -155,7 +155,7 @@ func connectMCPServer(name string, mcpCfg MCPConfig) (*MCPServer, error) {
 	return srv, nil
 }
 
-func initMCPClients() {
+func initMCPClients(r *ReloadReport) {
 	mcpServersMu.Lock()
 	mcpServers = make(map[string]*MCPServer)
 	mcpToolToServer = make(map[string]string)
@@ -171,6 +171,9 @@ func initMCPClients() {
 		srv, err := connectMCPServer(name, mcpCfg)
 		if err != nil {
 			logger.Error("failed to connect MCP server", "name", name, "error", err)
+			if r != nil {
+				r.AddError(fmt.Sprintf("MCP %s: %s", name, err))
+			}
 			continue
 		}
 
@@ -178,6 +181,10 @@ func initMCPClients() {
 			"tools", len(srv.Tools),
 			"resources", len(srv.Resources),
 			"prompts", len(srv.Prompts))
+
+		if r != nil {
+			r.AddSuccess(fmt.Sprintf("MCP %s: connected (%d tools)", name, len(srv.Tools)))
+		}
 
 		mcpServersMu.Lock()
 		mcpServers[name] = srv
@@ -212,10 +219,10 @@ func closeAndClearMCPClients() {
 	mcpToolToServer = make(map[string]string)
 }
 
-func reloadMCPClients(newMCPs map[string]MCPConfig) {
+func reloadMCPClients(newMCPs map[string]MCPConfig, r *ReloadReport) {
 	closeAndClearMCPClients()
 	config.MCPs = newMCPs
-	initMCPClients()
+	initMCPClients(r)
 }
 
 type ReloadMCPServerResult struct {

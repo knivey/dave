@@ -434,7 +434,7 @@ func reloadAll() error {
 	}
 	initAPILogger(config, configDir)
 	initIncidentLogger(config)
-	reloadMCPClients(config.MCPs)
+	reloadMCPClients(config.MCPs, nil)
 	if err := registerCommandsLocked(config.Commands); err != nil {
 		return err
 	}
@@ -490,7 +490,7 @@ func main() {
 
 	LoadContextStore()
 	CleanupContexts()
-	initMCPClients()
+	initMCPClients(nil)
 	queueMgr = NewQueueManager(config.Notices, config.MaxQueueDepth)
 	queueMgr.UpdateServiceLimits(config.Services)
 	queueMgr.Start()

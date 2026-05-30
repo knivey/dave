@@ -26,11 +26,8 @@ type mcpAsyncSubmitResult struct {
 	JobID string `json:"job_id"`
 }
 
-func executeToolTemplate(tmpl *template.Template, data map[string]any, buf *strings.Builder) (bool, error) {
-	if err := tmpl.Execute(buf, data); err != nil {
-		return true, err
-	}
-	return false, nil
+func executeToolTemplate(tmpl *template.Template, data map[string]any, buf *strings.Builder) error {
+	return tmpl.Execute(buf, data)
 }
 
 func mcpCmd(network Network, c *girc.Client, e girc.Event, cfg MCPCommandConfig, ctx context.Context, output chan<- string, args ...string) {
@@ -98,8 +95,7 @@ func mcpCmd(network Network, c *girc.Client, e girc.Event, cfg MCPCommandConfig,
 		data["_channel"] = channel
 		data["_network"] = network.Name
 		var buf strings.Builder
-		fallback, err := executeToolTemplate(cfg.outputTmpl, data, &buf)
-		if fallback || err != nil {
+		if err := executeToolTemplate(cfg.outputTmpl, data, &buf); err != nil {
 			log.Warn("template execution failed, sending raw result", "error", err)
 			sendImageOrTextResult(text, ctx, output)
 			return

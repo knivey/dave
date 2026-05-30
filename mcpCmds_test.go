@@ -62,9 +62,8 @@ func TestExecuteToolTemplate(t *testing.T) {
 			data["_network"] = "testnet"
 
 			var buf strings.Builder
-			fallback, err := executeToolTemplate(tmpl, data, &buf)
+			err = executeToolTemplate(tmpl, data, &buf)
 			assert.NoError(t, err)
-			assert.False(t, fallback)
 
 			result := strings.TrimSpace(buf.String())
 			for _, want := range tt.wantContains {
@@ -80,8 +79,7 @@ func TestExecuteToolTemplate_FallbackOnError(t *testing.T) {
 
 	data := map[string]any{"foo": "not a struct"}
 	var buf strings.Builder
-	fallback, err := executeToolTemplate(tmpl, data, &buf)
+	err = executeToolTemplate(tmpl, data, &buf)
 
 	assert.Error(t, err)
-	assert.True(t, fallback)
 }

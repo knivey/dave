@@ -23,6 +23,9 @@ func tableFunc(slice any, columns string) (string, error) {
 	for i := range colNames {
 		colNames[i] = strings.TrimSpace(colNames[i])
 	}
+	if len(colNames) == 0 || (len(colNames) == 1 && colNames[0] == "") {
+		return "", fmt.Errorf("table: columns must not be empty")
+	}
 
 	headerRow := make(tables.TableRow, len(colNames))
 	for i, name := range colNames {

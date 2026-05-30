@@ -71,6 +71,20 @@ func TestTableFunc(t *testing.T) {
 			columns: "eta,count",
 			want:    "\n┌─────┬───────┐\n│ eta │ count │\n├─────┼───────┤\n│ 56  │ 0     │\n└─────┴───────┘",
 		},
+		{
+			name:    "EmptyColumns",
+			slice:   []any{map[string]any{"a": "b"}},
+			columns: "",
+			wantErr: true,
+		},
+		{
+			name: "WhitespaceColumns",
+			slice: []any{
+				map[string]any{"name": "alice", "age": float64(30)},
+			},
+			columns: " name , age ",
+			want:    "\n┌───────┬─────┐\n│ name  │ age │\n├───────┼─────┤\n│ alice │ 30  │\n└───────┴─────┘",
+		},
 	}
 
 	for _, tt := range tests {

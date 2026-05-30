@@ -206,17 +206,19 @@ type Commands struct {
 }
 
 type MCPCommandConfig struct {
-	Name        string
-	Regex       string
-	MCP         string         `toml:"mcp"`
-	Tool        string         `toml:"tool"`
-	Arg         string         `toml:"arg"`
-	Args        map[string]any `toml:"args"`
-	Timeout     time.Duration  `toml:"timeout"`
-	SkipBusy    bool           `toml:"skipbusy"`
-	Description string
-	Sync        bool   `toml:"sync"`
-	AsyncTool   string `toml:"async_tool"`
+	Name           string
+	Regex          string
+	MCP            string         `toml:"mcp"`
+	Tool           string         `toml:"tool"`
+	Arg            string         `toml:"arg"`
+	Args           map[string]any `toml:"args"`
+	Timeout        time.Duration  `toml:"timeout"`
+	SkipBusy       bool           `toml:"skipbusy"`
+	Description    string
+	Sync           bool   `toml:"sync"`
+	AsyncTool      string `toml:"async_tool"`
+	OutputTemplate string `toml:"template"`
+	outputTmpl     *template.Template
 }
 
 func (c MCPCommandConfig) GetAsyncTool() string {
@@ -879,6 +881,24 @@ func validateCommands(commands *Commands, config *Config) error {
 		}
 		if cfg.Tool == "" {
 			return fmt.Errorf("commands.tools.%s tool is required", name)
+		}
+		if cfg.OutputTemplate != "" {
+			tmpl, err := template.New(name + "_output").Funcs(toolTemplateFuncMap).Parse(cfg.OutputTemplate)
+			if err != nil {
+				return fmt.Errorf("commands.tools.%s template parse error: %w", name, err)
+			}
+			dummyData := map[string]any{
+				"example":  "test",
+				"items":    []any{map[string]any{"field": "val"}},
+				"_nick":    "test",
+				"_channel": "#test",
+				"_network": "test",
+			}
+			var buf strings.Builder
+			if err := tmpl.Execute(&buf, dummyData); err != nil {
+				return fmt.Errorf("commands.tools.%s template validation error: %w", name, err)
+			}
+			cfg.outputTmpl = tmpl
 		}
 		commands.Tools[name] = cfg
 	}

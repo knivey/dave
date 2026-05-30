@@ -1907,3 +1907,91 @@ func TestMentionSpamConfigDefaults(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, cfg.MentionSpam.Threshold)
 }
+
+func TestToolOutputTemplateValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		toml    string
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name: "ValidTemplate",
+			toml: `
+[test]
+mcp = "srv"
+tool = "my_tool"
+sync = true
+template = "Result: {{.example}}"
+`,
+			wantErr: false,
+		},
+		{
+			name: "ValidTemplateWithTable",
+			toml: `
+[test]
+mcp = "srv"
+tool = "my_tool"
+sync = true
+template = "{{table .items \"name,age\"}}"
+`,
+			wantErr: false,
+		},
+		{
+			name: "InvalidTemplateSyntax",
+			toml: `
+[test]
+mcp = "srv"
+tool = "my_tool"
+sync = true
+template = "{{.unclosed"
+`,
+			wantErr: true,
+			errMsg:  "template parse error",
+		},
+		{
+			name: "UnknownFunction",
+			toml: `
+[test]
+mcp = "srv"
+tool = "my_tool"
+sync = true
+template = "{{.example | unknownFunc}}"
+`,
+			wantErr: true,
+			errMsg:  "template parse error",
+		},
+		{
+			name: "NoTemplate",
+			toml: `
+[test]
+mcp = "srv"
+tool = "my_tool"
+sync = true
+`,
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := createTestConfigDir(t, `trigger = "!"
+[networks.test]
+server = "irc.test.net"
+channels = ["#test"]`, map[string]string{
+				"mcps.toml":  "[srv]\ntransport = \"stdio\"\ncommand = \"echo\"\ntimeout = \"30s\"",
+				"tools.toml": tt.toml,
+			})
+			defer os.RemoveAll(dir)
+			_, err := loadConfigDir(dir)
+			if tt.wantErr {
+				assert.Error(t, err)
+				if tt.errMsg != "" {
+					assert.Contains(t, err.Error(), tt.errMsg)
+				}
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}

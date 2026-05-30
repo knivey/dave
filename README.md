@@ -360,7 +360,22 @@ description = "View generation queue status"
 mcp = "img-mcp"
 tool = "queue_status"
 skipbusy = true
+sync = true
+template = """Queue: {{.queued}} queued, {{.running}} running, {{.completed}} done{{if .running_jobs}}
+{{table .running_jobs "job_id,workflow,eta_seconds"}}{{end}}"""
 ```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `mcp` | string | required | MCP server name from `mcps.toml` |
+| `tool` | string | required | Tool name on the MCP server |
+| `arg` | string | | Map user input to this tool argument name |
+| `args` | map | | Static key=value arguments passed to the tool |
+| `timeout` | duration | MCP timeout | Tool call timeout |
+| `skipbusy` | bool | false | Skip queue check, allow running when queue is full |
+| `sync` | bool | false | Run synchronously (blocks queue) |
+| `async_tool` | string | `tool + "_async"` | Async variant tool name |
+| `template` | string | | Go `text/template` for formatting JSON output (sync only). Functions: `table(slice, "col1,col2")`. Context: `._nick`, `._channel`, `._network`. Without this, raw text is sent to IRC. |
 
 ### `templatevars.toml` — Custom Template Variables
 

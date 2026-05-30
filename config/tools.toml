@@ -12,6 +12,11 @@
 #   regex        (string, default: section name)  Regex for command trigger (no ^$ anchors)
 #   sync         (bool, default: false)  Run synchronously (blocks queue). Default: async mode
 #   async_tool   (string)            Async variant tool name. Default: tool + "_async"
+#   template     (string)            Go text/template for formatting tool JSON output (sync only).
+#                          Available functions: table(slice, "col1,col2") renders a box-drawn table.
+#                          Template data is parsed JSON as map[string]any.
+#                          Context: ._nick, ._channel, ._network.
+#                          Without this, raw text is sent to IRC.
 #
 # By default, tool commands run asynchronously:
 #   - Calls async_tool instead of tool (default: <tool>_async)
@@ -34,6 +39,7 @@
 # regex = "example"
 # sync = false
 # async_tool = "my_tool_async"
+# template = "Result: {{.count}} items"
 
 [qwen]
 description = "Qwen enhanced image generation"
@@ -65,3 +71,5 @@ mcp = "img-mcp"
 tool = "queue_status"
 skipbusy = true
 sync = true
+template = """Queue: {{.queued}} queued, {{.running}} running, {{.completed}} done{{if .running_jobs}}
+{{table .running_jobs "job_id,workflow,eta_seconds"}}{{end}}"""

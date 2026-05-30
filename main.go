@@ -421,7 +421,8 @@ func reloadAll() error {
 	defer configMu.Unlock()
 	if err := loadReloadableDir(configDir, &config); err != nil {
 		r.AddError(fmt.Sprintf("config: %s", err))
-		r.Print(logView)
+		drainPipe()
+		r.QueuePrint()
 		return err
 	}
 	r.AddSuccess(fmt.Sprintf("config: %d services, %d chats, %d completions, %d tools, %d template vars, notices ok",
@@ -445,7 +446,8 @@ func reloadAll() error {
 	reloadMCPClients(config.MCPs, r)
 	if err := registerCommandsLocked(config.Commands); err != nil {
 		r.AddError(fmt.Sprintf("commands: %s", err))
-		r.Print(logView)
+		drainPipe()
+		r.QueuePrint()
 		return err
 	}
 	if queueMgr != nil {
@@ -455,7 +457,8 @@ func reloadAll() error {
 	loadIgnores(filepath.Join(configDir, "ignores.txt"))
 	r.AddSuccess(fmt.Sprintf("ignores: %d patterns", getIgnoreCount()))
 
-	r.Print(logView)
+	drainPipe()
+	r.QueuePrint()
 	return nil
 }
 
@@ -524,7 +527,8 @@ func main() {
 	r.AddSuccess(fmt.Sprintf("ignores: %d patterns", getIgnoreCount()))
 	watchIgnores(ignorePath)
 	if logView != nil {
-		r.Print(logView)
+		drainPipe()
+		r.QueuePrint()
 	}
 	startRateLimitGC()
 

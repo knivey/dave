@@ -32,6 +32,8 @@ var (
 	logPipeR     *os.File
 	logFile      *os.File
 
+	pipeDrainSync chan struct{}
+
 	logBufMu     sync.Mutex
 	logBuf       []string
 	logFlushStop chan struct{}
@@ -274,6 +276,7 @@ func initTUI() (*tview.Application, error) {
 		return event
 	})
 
+	pipeDrainSync = make(chan struct{})
 	go readPipeToView(logPipeR, logView, app)
 
 	if err := openLogFile(); err != nil {
@@ -333,6 +336,12 @@ func readPipeToView(reader *os.File, view *tview.TextView, app *tview.Applicatio
 	for scanner.Scan() {
 		line := scanner.Text()
 		line = strings.TrimRight(line, "\r")
+		if line == "\x00PIPE_DRAIN\x00" {
+			if pipeDrainSync != nil {
+				pipeDrainSync <- struct{}{}
+			}
+			continue
+		}
 		if logFile != nil {
 			logFile.WriteString(line + "\n")
 		}
@@ -385,6 +394,15 @@ func flushLogBuf(view *tview.TextView, app *tview.Application, stop <-chan struc
 			})
 		}
 	}
+}
+
+func drainPipe() {
+	if pipeDrainSync == nil {
+		return
+	}
+	fmt.Fprintln(os.Stdout, "\x00PIPE_DRAIN\x00")
+	os.Stdout.Sync()
+	<-pipeDrainSync
 }
 
 // pollStatusBar refreshes the TUI status bar every 5 seconds with the current

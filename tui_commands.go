@@ -86,11 +86,7 @@ func tuiCmdReload(parts []string, _ string) {
 			}
 		}
 	} else {
-		if err := reloadAll(); err != nil {
-			fmt.Fprintf(logView, "[red]Reload failed: %s[white]\n", err)
-		} else {
-			fmt.Fprintf(logView, "[green]Reloaded commands, services, and prompt enhancements[white]\n")
-		}
+		reloadAll()
 	}
 }
 

@@ -413,13 +413,21 @@ func registerCommandsLocked(cmds Commands) error {
 }
 
 func reloadAll() error {
+	r := NewReloadReport("reload")
+
 	commandsMutex.Lock()
 	defer commandsMutex.Unlock()
 	configMu.Lock()
 	defer configMu.Unlock()
 	if err := loadReloadableDir(configDir, &config); err != nil {
+		r.AddError(fmt.Sprintf("config: %s", err))
+		r.Print(logView)
 		return err
 	}
+	r.AddSuccess(fmt.Sprintf("config: %d services, %d chats, %d completions, %d tools, %d template vars, notices ok",
+		len(config.Services), len(config.Commands.Chats), len(config.Commands.Completions),
+		len(config.Commands.Tools), len(config.TemplateVars)))
+
 	for name, bot := range snapshotBots() {
 		bot.mu.Lock()
 		cm := bot.casemapping
@@ -434,8 +442,10 @@ func reloadAll() error {
 	}
 	initAPILogger(config, configDir)
 	initIncidentLogger(config)
-	reloadMCPClients(config.MCPs, nil)
+	reloadMCPClients(config.MCPs, r)
 	if err := registerCommandsLocked(config.Commands); err != nil {
+		r.AddError(fmt.Sprintf("commands: %s", err))
+		r.Print(logView)
 		return err
 	}
 	if queueMgr != nil {
@@ -443,6 +453,9 @@ func reloadAll() error {
 		queueMgr.UpdateNotices(config.Notices)
 	}
 	loadIgnores(filepath.Join(configDir, "ignores.txt"))
+	r.AddSuccess(fmt.Sprintf("ignores: %d patterns", getIgnoreCount()))
+
+	r.Print(logView)
 	return nil
 }
 

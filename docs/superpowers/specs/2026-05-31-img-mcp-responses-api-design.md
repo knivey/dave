@@ -50,17 +50,12 @@ When `enhCfg.ResponsesAPI` is true, use the Responses API path instead of Chat C
 3. Parse `resp.Output []responses.ResponseOutputItemUnion`:
    - `item.Type == "message"` → extract text from `item.Content` where `part.Type == "output_text"`
    - `item.Type == "reasoning"` → concatenate `item.Summary[i].Text` (summary is an array of `{Text, Type}` structs, not a flat string). Log at INFO.
-   - `item.EncryptedContent` → log receipt at DEBUG (flat string, only populated if `params.Include` has `ResponseIncludableReasoningEncryptedContent`)
 
 ### Reasoning logging
 
 - Reasoning summary text logged at INFO level:
   ```
   INFO  tools: enhancement reasoning  model=grok-4-1-fast-reasoning  reasoning="The user wants..."
-  ```
-- Encrypted reasoning content: log receipt at DEBUG (don't log the blob):
-  ```
-  DEBUG tools: encrypted reasoning received  model=grok-4-1-fast-reasoning  length=1234
   ```
 
 ### Chat Completions path (default)
@@ -82,7 +77,6 @@ Unchanged from current behavior.
 - **JSON schema response format is different**: Chat Completions uses top-level `ResponseFormat.OfJSONSchema`. Responses API uses `params.Text.Format.OfJSONSchema` with `responses.ResponseFormatTextJSONSchemaConfigParam`. The schema object itself is the same.
 - **Reasoning summary is an array**: `item.Summary` is `[]ResponseReasoningItemSummary`, each with `.Text` and `.Type`. Must concatenate all entries, not read as a flat string.
 - **Reasoning also has a `Content` field**: `ResponseReasoningItem.Content` contains raw reasoning text (different from `Summary`). Dave only reads `Summary`. We should do the same for consistency — log `Summary` text only.
-- **Encrypted content requires opt-in**: `item.EncryptedContent` is empty unless `params.Include` contains `ResponseIncludableReasoningEncryptedContent`. We don't need encrypted content (just logging receipt), so we can skip the include flag entirely.
 - **Reasoning effort only works on reasoning models**: Setting it on non-reasoning models may cause errors or be silently ignored depending on provider.
 
 ## Out of Scope
@@ -91,5 +85,5 @@ Unchanged from current behavior.
 - Changes to tool output schemas (enhance_prompt, enhance_and_generate responses stay the same)
 - Changes to dave's config or code
 - Streaming support (enhancement is a simple request/response)
-- `encrypted_reasoning` support beyond logging receipt (no passthrough to dave)
+- Encrypted reasoning content (not needed)
 - `previous_response_id` chaining (each enhancement call is stateless)

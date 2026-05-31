@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -175,8 +176,37 @@ func buildHTTPHandler(cfg Config, handlers *ToolHandlers, queue *JobQueue, confi
 		json.NewEncoder(w).Encode(resp)
 	})
 
+	var handler http.Handler = mux
+
 	if cfg.Auth.APIKey != "" {
-		return apiKeyMiddleware(cfg.Auth.APIKey)(mux)
+		handler = apiKeyMiddleware(cfg.Auth.APIKey)(handler)
 	}
-	return mux
+	handler = requestLogMiddleware(handler)
+
+	return handler
+}
+
+func requestLogMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		lrw := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+		next.ServeHTTP(lrw, r)
+		logger.Info("http request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", lrw.statusCode,
+			"duration", time.Since(start).Round(time.Millisecond),
+			"remote_addr", r.RemoteAddr,
+		)
+	})
+}
+
+type loggingResponseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (w *loggingResponseWriter) WriteHeader(code int) {
+	w.statusCode = code
+	w.ResponseWriter.WriteHeader(code)
 }

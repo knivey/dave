@@ -257,6 +257,8 @@ func (h *ToolHandlers) handleEnhancePrompt(ctx context.Context, req *mcp.CallToo
 	}
 	enhancementName, _ = h.applyNetworkPolicy(input.Network, enhancementName, JobTypeEnhanceGenerate)
 
+	loggerTools.Info("tool: enhance_prompt", "prompt", input.Prompt, "enhancement", enhancementName)
+
 	result, err := enhancePrompt(ctx, h.getConfig(), enhancementName, input.Prompt)
 	if err != nil {
 		return nil, EnhancePromptOutput{}, err
@@ -274,6 +276,7 @@ func (h *ToolHandlers) handleGenerateImageAsync(ctx context.Context, req *mcp.Ca
 		return nil, GenerateImageAsyncOutput{}, err
 	}
 	enhancement, jobType := h.applyNetworkPolicy(input.Network, "", JobTypeGenerate)
+	loggerTools.Info("tool: generate_image_async", "prompt", input.Prompt, "workflow", workflow, "enhancement", enhancement)
 	job, err := h.queue.Submit(jobType, workflow, JobInput{
 		Prompt:         input.Prompt,
 		NegativePrompt: input.NegativePrompt,
@@ -294,6 +297,7 @@ func (h *ToolHandlers) handleEnhanceAndGenerateAsync(ctx context.Context, req *m
 		return nil, EnhanceAndGenerateAsyncOutput{}, err
 	}
 	enhancement, jobType := h.applyNetworkPolicy(input.Network, input.Enhancement, JobTypeEnhanceGenerate)
+	loggerTools.Info("tool: enhance_and_generate_async", "prompt", input.Prompt, "workflow", workflow, "enhancement", enhancement)
 	job, err := h.queue.Submit(jobType, workflow, JobInput{
 		Prompt:       input.Prompt,
 		Enhancement:  enhancement,
@@ -312,6 +316,7 @@ func (h *ToolHandlers) handleGenerateImage(ctx context.Context, req *mcp.CallToo
 		return nil, GenerateImageOutput{}, err
 	}
 	enhancement, jobType := h.applyNetworkPolicy(input.Network, "", JobTypeGenerate)
+	loggerTools.Info("tool: generate_image", "prompt", input.Prompt, "workflow", workflow, "enhancement", enhancement)
 	job, err := h.queue.Submit(jobType, workflow, JobInput{
 		Prompt:         input.Prompt,
 		NegativePrompt: input.NegativePrompt,
@@ -348,6 +353,7 @@ func (h *ToolHandlers) handleEnhanceAndGenerate(ctx context.Context, req *mcp.Ca
 		return nil, EnhanceAndGenerateOutput{}, err
 	}
 	enhancement, jobType := h.applyNetworkPolicy(input.Network, input.Enhancement, JobTypeEnhanceGenerate)
+	loggerTools.Info("tool: enhance_and_generate", "prompt", input.Prompt, "workflow", workflow, "enhancement", enhancement)
 	job, err := h.queue.Submit(jobType, workflow, JobInput{
 		Prompt:       input.Prompt,
 		Enhancement:  enhancement,
@@ -513,6 +519,8 @@ func (h *ToolHandlers) handleUploadImage(ctx context.Context, req *mcp.CallToolR
 	if err != nil {
 		return nil, UploadImageOutput{}, fmt.Errorf("decoding base64: %w", err)
 	}
+
+	loggerTools.Info("tool: upload_image", "filename", input.Filename, "size", len(data), "mime_type", input.MIMEType)
 
 	url, err := uploadImage(h.getConfig(), data, input.Filename)
 	if err != nil {

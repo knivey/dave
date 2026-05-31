@@ -42,6 +42,12 @@ func enhancePrompt(ctx context.Context, cfg Config, enhancementName, rawPrompt s
 		return nil, fmt.Errorf("enhancement %q not found", enhancementName)
 	}
 
+	loggerTools.Debug("enhancing prompt",
+		"enhancement", enhancementName,
+		"model", enhCfg.Model,
+		"raw_prompt", rawPrompt,
+	)
+
 	clientOpts := []option.RequestOption{
 		option.WithAPIKey(enhCfg.Key),
 	}
@@ -78,18 +84,33 @@ func enhancePrompt(ctx context.Context, cfg Config, enhancementName, rawPrompt s
 	}
 
 	enhanced := strings.TrimSpace(resp.Choices[0].Message.Content)
+
+	loggerTools.Info("enhancement LLM response",
+		"model", resp.Model,
+		"finish_reason", resp.Choices[0].FinishReason,
+		"prompt_tokens", resp.Usage.PromptTokens,
+		"completion_tokens", resp.Usage.CompletionTokens,
+		"total_tokens", resp.Usage.TotalTokens,
+	)
+
 	var result EnhancementResponse
 	if err := json.Unmarshal([]byte(enhanced), &result); err != nil {
 		return nil, fmt.Errorf("parsing enhancement response: %w", err)
 	}
 
 	if result.Refused {
+		loggerTools.Warn("enhancement refused", "reason", result.Reason, "raw_prompt", rawPrompt)
 		return nil, fmt.Errorf("enhancement refused: %s", result.Reason)
 	}
 
 	if result.EnhancedPrompt == "" {
 		return nil, fmt.Errorf("enhancement returned empty prompt")
 	}
+
+	loggerTools.Info("enhancement complete",
+		"enhanced_prompt", strings.TrimSpace(result.EnhancedPrompt),
+		"negative_prompt", strings.TrimSpace(result.NegativePrompt),
+	)
 
 	return &EnhanceResult{
 		EnhancedPrompt: strings.TrimSpace(result.EnhancedPrompt),

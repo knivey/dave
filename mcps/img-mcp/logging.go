@@ -15,6 +15,7 @@ var (
 	loggerQueue logxi.Logger
 	loggerDB    logxi.Logger
 	loggerTools logxi.Logger
+	loggerComfy logxi.Logger
 
 	logFile *os.File
 )
@@ -51,6 +52,9 @@ func initLogger(exeDir string) {
 
 	loggerTools = logxi.NewLogger(writer, "tools")
 	loggerTools.SetLevel(logxi.LevelAll)
+
+	loggerComfy = logxi.NewLogger(writer, "comfy")
+	loggerComfy.SetLevel(logxi.LevelAll)
 }
 
 func closeLogger() {

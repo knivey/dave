@@ -134,6 +134,12 @@ func submitComfyPrompt(ctx context.Context, cfg Config, workflowName string, wor
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		loggerComfy.Error("comfyui prompt rejected", "status", resp.StatusCode, "body", string(body))
+		return "", fmt.Errorf("comfyui returned status %d: %s", resp.StatusCode, string(body))
+	}
+
 	var promptResp ComfyPromptResponse
 	if err := json.NewDecoder(resp.Body).Decode(&promptResp); err != nil {
 		return "", fmt.Errorf("decoding prompt response: %w", err)
@@ -161,6 +167,11 @@ func interruptComfyPrompt(ctx context.Context, cfg Config, promptID string) erro
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != http.StatusOK {
+		loggerComfy.Warn("comfyui interrupt returned non-OK", "prompt_id", promptID, "status", resp.StatusCode)
+	} else {
+		loggerComfy.Info("comfyui interrupt sent", "prompt_id", promptID)
+	}
 	return nil
 }
 
@@ -168,9 +179,12 @@ func monitorComfyGeneration(ctx context.Context, cfg Config, workflowName, promp
 	wc := cfg.Workflows[workflowName]
 	baseURL := cfg.Comfy.BaseURL
 
+	loggerComfy.Info("monitoring generation", "prompt_id", promptID, "workflow", workflowName)
+
 	wsURL := "ws://" + comfySchemeRegex.ReplaceAllString(baseURL, "") + "/ws?clientId=" + wc.ClientID
 	wsConn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, nil)
 	if err != nil {
+		loggerComfy.Error("websocket connect failed", "prompt_id", promptID, "error", err)
 		return ComfyResult{}, fmt.Errorf("websocket connect: %w", err)
 	}
 	defer wsConn.Close()
@@ -243,6 +257,7 @@ func checkComfyOutput(ctx context.Context, cfg Config, wc WorkflowConfig, baseUR
 	for _, img := range output.Images {
 		data, err := downloadComfyImage(baseURL, img)
 		if err != nil {
+			loggerComfy.Warn("failed to download comfyui image", "filename", img.Filename, "error", err)
 			continue
 		}
 		result.Images = append(result.Images, ComfyImageData{
@@ -289,5 +304,8 @@ func downloadComfyImage(baseURL string, img ComfyImage) ([]byte, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("download returned status %d", resp.StatusCode)
+	}
 	return io.ReadAll(resp.Body)
 }

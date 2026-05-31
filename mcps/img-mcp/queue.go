@@ -175,6 +175,12 @@ func (q *JobQueue) Submit(jobType JobType, workflow string, input JobInput) (*Jo
 		q.queuedOrder = append(q.queuedOrder, job)
 		q.orderMu.Unlock()
 
+		loggerQueue.Info("job submitted",
+			"job_id", job.ID,
+			"type", jobType,
+			"workflow", workflow,
+		)
+
 		return job, nil
 	default:
 		return nil, fmt.Errorf("queue is full (%d jobs pending)", cfg.Queue.MaxDepth)
@@ -514,6 +520,12 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 	prompt := job.Input.Prompt
 	negativePrompt := job.Input.NegativePrompt
 
+	loggerQueue.Info("processing job",
+		"job_id", job.ID,
+		"type", job.Type,
+		"workflow", job.Workflow,
+	)
+
 	if job.Type == JobTypeEnhanceGenerate {
 		enhancementName := job.Input.Enhancement
 		if enhancementName == "" {
@@ -528,6 +540,11 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 			q.failJob(job, fmt.Sprintf("prompt enhancement failed: %v", err))
 			return
 		}
+		loggerQueue.Debug("prompt enhanced",
+			"job_id", job.ID,
+			"enhanced_prompt", result.EnhancedPrompt,
+			"negative_prompt", result.NegativePrompt,
+		)
 		prompt = result.EnhancedPrompt
 		if negativePrompt == "" {
 			negativePrompt = result.NegativePrompt
@@ -540,6 +557,13 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 		return
 	}
 
+	loggerQueue.Info("submitting to comfyui",
+		"job_id", job.ID,
+		"workflow", job.Workflow,
+		"prompt", prompt,
+		"negative_prompt", negativePrompt,
+	)
+
 	promptID, err := submitComfyPrompt(jobCtx, cfg, job.Workflow, workflow)
 	if err != nil {
 		if jobCtx.Err() != nil {
@@ -550,6 +574,10 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 	}
 
 	job.ComfyPromptID = promptID
+	loggerQueue.Info("comfyui prompt accepted",
+		"job_id", job.ID,
+		"prompt_id", promptID,
+	)
 
 	if q.db != nil {
 		if err := dbUpdateJobComfyPromptID(q.db, job.ID, promptID); err != nil {
@@ -570,6 +598,13 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 	if outputFormat == "" {
 		outputFormat = "url"
 	}
+
+	loggerQueue.Info("generation complete",
+		"job_id", job.ID,
+		"prompt_id", promptID,
+		"images", len(comfyResult.Images),
+		"output_format", outputFormat,
+	)
 
 	jobResult := &JobResult{}
 	var comfyImgs []ComfyImage

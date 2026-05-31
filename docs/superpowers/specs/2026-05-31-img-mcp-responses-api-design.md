@@ -43,11 +43,14 @@ When `enhCfg.ResponsesAPI` is true, use the Responses API path instead of Chat C
 
 1. Build `responses.ResponseNewParams`:
    - `Model` from config
-   - Input: system message + user message (same content as current path)
-   - `Text.ResponseFormat` set to the same JSON schema used by Chat Completions
-   - `Reasoning.Effort` if `reasoning_effort` is set
+   - Input: `[]responses.ResponseInputItemUnionParam` with system message + user message (same content as current path, but using `responses.EasyInputMessageParam` instead of `openai.SystemMessage`/`openai.UserMessage`)
+   - `Text.Format` set to JSON schema via `responses.ResponseFormatTextConfigUnionParam{OfJSONSchema: &responses.ResponseFormatTextJSONSchemaConfigParam{...}}` — **not** the Chat Completions `ResponseFormat` field. The Responses API uses `params.Text.Format` for structured output, which is a different mechanism than Chat Completions' top-level `ResponseFormat`.
+   - `Reasoning.Effort` via `shared.ReasoningParam{Effort: shared.ReasoningEffort(val)}` if `reasoning_effort` is set
 2. Call `client.Responses.New(ctx, params)`
-3. Parse output items: iterate `resp.Output`, extract `"message"` items for text, log `"reasoning"` items
+3. Parse `resp.Output []responses.ResponseOutputItemUnion`:
+   - `item.Type == "message"` → extract text from `item.Content` where `part.Type == "output_text"`
+   - `item.Type == "reasoning"` → concatenate `item.Summary[i].Text` (summary is an array of `{Text, Type}` structs, not a flat string). Log at INFO.
+   - `item.EncryptedContent` → log receipt at DEBUG (flat string, only populated if `params.Include` has `ResponseIncludableReasoningEncryptedContent`)
 
 ### Reasoning logging
 
@@ -69,10 +72,18 @@ Unchanged from current behavior.
 | File | Change |
 |------|--------|
 | `mcps/img-mcp/config.go` | Add `ResponsesAPI`, `ReasoningEffort` to `EnhancementConfig` |
-| `mcps/img-mcp/enhance.go` | Add Responses API branch, add `responses` import |
+| `mcps/img-mcp/enhance.go` | Add Responses API branch, add `responses` + `shared` imports from `openai-go/v3` |
 | `mcps/img-mcp/example.toml` | Document new fields |
 | `mcps/img-mcp/config_test.go` | Test config loading with new fields |
 | `mcps/img-mcp/enhance_test.go` (new) | Test both API paths |
+
+## Gotchas (verified from dave's existing Responses API implementation)
+
+- **JSON schema response format is different**: Chat Completions uses top-level `ResponseFormat.OfJSONSchema`. Responses API uses `params.Text.Format.OfJSONSchema` with `responses.ResponseFormatTextJSONSchemaConfigParam`. The schema object itself is the same.
+- **Reasoning summary is an array**: `item.Summary` is `[]ResponseReasoningItemSummary`, each with `.Text` and `.Type`. Must concatenate all entries, not read as a flat string.
+- **Reasoning also has a `Content` field**: `ResponseReasoningItem.Content` contains raw reasoning text (different from `Summary`). Dave only reads `Summary`. We should do the same for consistency — log `Summary` text only.
+- **Encrypted content requires opt-in**: `item.EncryptedContent` is empty unless `params.Include` contains `ResponseIncludableReasoningEncryptedContent`. We don't need encrypted content (just logging receipt), so we can skip the include flag entirely.
+- **Reasoning effort only works on reasoning models**: Setting it on non-reasoning models may cause errors or be silently ignored depending on provider.
 
 ## Out of Scope
 

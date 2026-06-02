@@ -1,10 +1,10 @@
 # Completions use the legacy completions API (not chat). Good for simple prompt-in, text-out commands.
-# Each section name becomes the command trigger (overridable with `regex`).
+# Each section name becomes the command trigger. Use `aliases` for additional triggers.
 #
 # Available options (per [section]):
 #   service              (string, required)              Service name from services.toml
 #   model                (string)                        Model name (e.g. "gpt-3.5-turbo-instruct")
-#   regex                (string, default: section name) Regex for command trigger (no ^$ anchors)
+#   aliases               (string array, default: [])    Additional trigger names for this command
 #   description          (string)                        Short description for help listings
 #   mcps                 (string array)                  Opt-in MCP server names for tool access
 #   maxtokens            (int, cascades from service)    Max tokens per response
@@ -25,7 +25,7 @@
 # [example-completion]
 # service = "openai"
 # model = "gpt-3.5-turbo-instruct"
-# regex = "example"
+# aliases = ["alt-name", "another-name"]
 # description = "Example completion command"
 # mcps = ["filesystem"]
 # maxtokens = 500
@@ -43,7 +43,4 @@
 [dave]
 service = "openai"
 model = "gpt-3.5-turbo-instruct"
-#optionally you may override the regex for the command name
-#in this case both -dave and -dav would trigger this command
-#note this regex is used to construct a larger regex so ^$ shouldn't be used
-regex = "dave?"
+aliases = ["dav", "davee"]

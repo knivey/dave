@@ -10,7 +10,7 @@
 # Available options (per [section]):
 #   service              (string, required)         Service name from services.toml
 #   model                (string)                    Model name (e.g. "gpt-4o")
-#   regex                (string, default: section name)  Regex for command trigger (no ^$ anchors)
+#   aliases               (string array, default: [])     Additional trigger names for this command
 #   system               (string)                    System prompt (supports Go templates)
 #   description          (string)                    Short description for help listings
 #   streaming            (bool, default: false)      Stream responses to IRC as they generate
@@ -58,7 +58,7 @@
 # [example-chat]
 # service = "openai"
 # model = "gpt-4o"
-# regex = "chat"
+# aliases = ["alt-name"]
 # description = "Example chat with all options"
 # system = "You are {{.BotNick}} chatting with {{.Nick}} in {{.Channel}} on {{.Network}}.\n{{.Vars.IRCActionNote}}"
 # streaming = true

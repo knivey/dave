@@ -1,5 +1,5 @@
 # Tool commands call a single MCP tool and return the result directly (no LLM involved).
-# Each section name becomes the command trigger (overridable with `regex`).
+# Each section name becomes the command trigger.
 #
 # Available options (per [section]):
 #   mcp          (string, required)  MCP server name from mcps.toml
@@ -9,7 +9,6 @@
 #   timeout      (duration)          Tool call timeout. Default: MCP server timeout from mcps.toml (30s)
 #   skipbusy     (bool, default: false)  Skip queue check, allow running when queue is full
 #   description  (string)            Short description for help listings
-#   regex        (string, default: section name)  Regex for command trigger (no ^$ anchors)
 #   sync         (bool, default: false)  Run synchronously (blocks queue). Default: async mode
 #   async_tool   (string)            Async variant tool name. Default: tool + "_async"
 #   template     (string)            Go text/template for formatting tool JSON output (sync only).
@@ -36,7 +35,6 @@
 # args = { format = "json", verbose = true }
 # timeout = "1m"
 # skipbusy = false
-# regex = "example"
 # sync = false
 # async_tool = "my_tool_async"
 # template = "Result: {{.count}} items"

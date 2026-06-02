@@ -245,7 +245,7 @@ func buildPastebinHelpText(botnick, trigger string, network Network) string {
 				desc:    formatDesc(c.Description, false),
 			})
 		}
-		writeGFMCmdTable(&b, "## Tool Commands", entries)
+		writeGFMToolTable(&b, "## Tool Commands", entries)
 		b.WriteString("\n")
 	}
 
@@ -356,6 +356,21 @@ func writeGFMCmdTable(b *strings.Builder, header string, entries []pastebinEntry
 			media = "🖼️"
 		}
 		fmt.Fprintf(b, "| %s | %s | %s | %s | %s | %s |\n", cmd, regexCol, e.service, e.model, media, escapeDescPipe(e.desc))
+	}
+}
+
+func writeGFMToolTable(b *strings.Builder, header string, entries []pastebinEntry) {
+	b.WriteString(header)
+	b.WriteString("\n\n")
+	b.WriteString("| Command | Regex | MCP | Tool | Description |\n")
+	b.WriteString("|---------|-------|-----|------|-------------|\n")
+	for _, e := range entries {
+		cmd := "`" + e.cmd + "`"
+		regexCol := ""
+		if e.regex {
+			regexCol = "✱"
+		}
+		fmt.Fprintf(b, "| %s | %s | %s | %s | %s |\n", cmd, regexCol, e.service, e.model, escapeDescPipe(e.desc))
 	}
 }
 

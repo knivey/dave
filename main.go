@@ -266,7 +266,10 @@ func splitFirstWord(s string) (word, rest string, hasArgs bool) {
 	if idx == -1 {
 		return s, "", false
 	}
-	return s[:idx], s[idx+1:], true
+	word = s[:idx]
+	rest = strings.TrimSpace(s[idx+1:])
+	hasArgs = rest != ""
+	return
 }
 
 func extractSubmatchArgs(re *regexp.Regexp, input string) []string {
@@ -373,13 +376,16 @@ func registerCommandsLocked(cmds Commands) error {
 	newChatCmds := make(map[string]bool)
 	newTakesArgs := make(map[string]bool)
 
-	triggers := make(map[string]string)
+	type triggerOwner struct {
+		canonical, section string
+	}
+	triggers := make(map[string]triggerOwner)
 
 	addTrigger := func(trigger, canonical, section string) error {
 		if existing, ok := triggers[trigger]; ok {
-			return fmt.Errorf("command trigger %q (%s.%s) conflicts with %q (%s)", trigger, section, canonical, existing, section)
+			return fmt.Errorf("command trigger %q (%s.%s) conflicts with %q (%s.%s)", trigger, section, canonical, existing.canonical, existing.section, existing.canonical)
 		}
-		triggers[trigger] = canonical
+		triggers[trigger] = triggerOwner{canonical: canonical, section: section}
 		return nil
 	}
 

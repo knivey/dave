@@ -294,9 +294,7 @@ func handleTrigger(network Network, client *girc.Client, event girc.Event, chann
 		triggerWord, rest, hasArgs := splitFirstWord(stripped)
 		if cmd, ok := configCmds[triggerWord]; ok {
 			takesArgs := configCmdTakesArgs[triggerWord]
-			if takesArgs != hasArgs {
-				// No match — wrong arg presence
-			} else {
+			if takesArgs == hasArgs {
 				name := configCmdNames[triggerWord]
 				var args []string
 				if hasArgs {

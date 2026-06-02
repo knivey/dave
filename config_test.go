@@ -1552,6 +1552,22 @@ func TestRegisterCommandsLocked_TriggerCollisions(t *testing.T) {
 		assert.Contains(t, err.Error(), "shared")
 	})
 
+	t.Run("cross-section canonical collision error includes both sections", func(t *testing.T) {
+		cmds := Commands{
+			Completions: map[string]AIConfig{
+				"shared": {Name: "shared"},
+			},
+			Chats: map[string]AIConfig{
+				"shared": {Name: "shared"},
+			},
+		}
+		err := registerCommandsLocked(cmds)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "shared")
+		assert.Contains(t, err.Error(), "completions")
+		assert.Contains(t, err.Error(), "chats")
+	})
+
 	t.Run("tool name collides with chat alias returns error", func(t *testing.T) {
 		cmds := Commands{
 			Chats: map[string]AIConfig{
@@ -1748,9 +1764,11 @@ func TestSplitFirstWord(t *testing.T) {
 	}{
 		{"chat hello world", "chat", "hello world", true},
 		{"chat", "chat", "", false},
+		{"chat ", "chat", "", false},
+		{"chat  hello", "chat", "hello", true},
 		{"gpt what is ai", "gpt", "what is ai", true},
 		{"", "", "", false},
-		{"  leading", "", " leading", true},
+		{"  leading", "", "leading", true},
 	}
 
 	for _, tt := range tests {

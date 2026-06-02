@@ -43,4 +43,4 @@
 [dave]
 service = "openai"
 model = "gpt-3.5-turbo-instruct"
-aliases = ["dav", "davee"]
+aliases = ["dav"]

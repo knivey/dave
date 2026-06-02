@@ -930,6 +930,19 @@ func validateAndSetAPIUserTemplate(cfg *AIConfig, name, section string) error {
 
 func validateAIConfig(cfg AIConfig, name, section string, config *Config) (AIConfig, error) {
 	cfg.Name = name
+	for _, alias := range cfg.Aliases {
+		if alias == name {
+			return cfg, fmt.Errorf("commands.%s.%s aliases: %q is the same as the canonical name", section, name, alias)
+		}
+		if strings.TrimSpace(alias) == "" {
+			return cfg, fmt.Errorf("commands.%s.%s aliases: alias must not be empty or whitespace", section, name)
+		}
+		for _, builtin := range builtinCommandNames {
+			if alias == builtin {
+				return cfg, fmt.Errorf("commands.%s.%s aliases: %q conflicts with builtin command %q", section, name, alias, builtin)
+			}
+		}
+	}
 	if service, ok := config.Services[cfg.Service]; ok {
 		cfg.ApplyDefaults(service)
 	} else {

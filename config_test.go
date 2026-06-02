@@ -462,6 +462,40 @@ service = "test"
 	assert.Nil(t, chat2.Aliases)
 }
 
+func TestValidateAIConfigAliasValidation(t *testing.T) {
+	cfg := Config{Services: map[string]Service{"svc": {}}}
+
+	t.Run("alias equals canonical name rejected", func(t *testing.T) {
+		_, err := validateAIConfig(AIConfig{Service: "svc", Aliases: []string{"mychat"}}, "mychat", "chats", &cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "same as the canonical name")
+	})
+
+	t.Run("empty alias rejected", func(t *testing.T) {
+		_, err := validateAIConfig(AIConfig{Service: "svc", Aliases: []string{""}}, "mychat", "chats", &cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must not be empty")
+	})
+
+	t.Run("whitespace-only alias rejected", func(t *testing.T) {
+		_, err := validateAIConfig(AIConfig{Service: "svc", Aliases: []string{"  "}}, "mychat", "chats", &cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must not be empty")
+	})
+
+	t.Run("alias collides with builtin rejected", func(t *testing.T) {
+		_, err := validateAIConfig(AIConfig{Service: "svc", Aliases: []string{"stop"}}, "mychat", "chats", &cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "conflicts with builtin")
+		assert.Contains(t, err.Error(), "stop")
+	})
+
+	t.Run("valid aliases pass", func(t *testing.T) {
+		_, err := validateAIConfig(AIConfig{Service: "svc", Aliases: []string{"gpt", "ask"}}, "chat", "chats", &cfg)
+		require.NoError(t, err)
+	})
+}
+
 func TestSystemPromptTemplateValidation(t *testing.T) {
 	tests := []struct {
 		name        string

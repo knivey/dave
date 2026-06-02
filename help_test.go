@@ -187,6 +187,18 @@ func TestFormatTable(t *testing.T) {
 				"!ask            ",
 			},
 		},
+		{
+			name: "mixed single and multi-line entries",
+			entries: []helpEntry{
+				{cmds: []string{"!x"}, info: "[a]", desc: "d1"},
+				{cmds: []string{"!longer", "!lr"}, info: "[b]", desc: "d2"},
+			},
+			want: []string{
+				"!x       [a]  d1",
+				"!longer  [b]  d2",
+				"!lr           ",
+			},
+		},
 	}
 
 	for _, tt := range tests {

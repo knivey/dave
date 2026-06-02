@@ -2024,6 +2024,30 @@ aliases = ["gpt", "ask"]
 	assert.Contains(t, err.Error(), "chat")
 }
 
+func TestDisabledCanonicalBlocksAliases(t *testing.T) {
+	if logger == nil {
+		logger = logxi.New("test")
+		logger.SetLevel(logxi.LevelAll)
+	}
+
+	cmds := Commands{
+		Chats: map[string]AIConfig{
+			"chat": {Name: "chat", Aliases: []string{"gpt", "ask"}, Service: "svc", Model: "m"},
+		},
+	}
+	err := registerCommandsLocked(cmds)
+	require.NoError(t, err)
+
+	commandsMutex.RLock()
+	defer commandsMutex.RUnlock()
+
+	network := Network{DisabledCommands: []string{"chat"}}
+
+	assert.True(t, isNetworkCommandDisabled(network, configCmdNames["chat"]))
+	assert.True(t, isNetworkCommandDisabled(network, configCmdNames["gpt"]))
+	assert.True(t, isNetworkCommandDisabled(network, configCmdNames["ask"]))
+}
+
 func TestLoadConfigDirLoggingDefaults(t *testing.T) {
 	mainTOML := `
 [networks.testnet]

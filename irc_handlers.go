@@ -277,6 +277,7 @@ func handleTrigger(network Network, client *girc.Client, event girc.Event, chann
 		args     []string
 		builtin  bool
 		disabled bool
+		trigger  string // config command trigger word (empty for builtins)
 	}
 	var match *cmdMatch
 	commandsMutex.RLock()
@@ -290,11 +291,23 @@ func handleTrigger(network Network, client *girc.Client, event girc.Event, chann
 		}
 	}
 	if match == nil {
-		for r, cmd := range configCmds {
-			if r.Match([]byte(stripped)) {
-				name := configCmdNames[r]
-				match = &cmdMatch{cmd: cmd, re: r, args: extractSubmatchArgs(r, stripped), disabled: isNetworkCommandDisabled(network, name)}
-				break
+		triggerWord, rest, hasArgs := splitFirstWord(stripped)
+		if cmd, ok := configCmds[triggerWord]; ok {
+			takesArgs := configCmdTakesArgs[triggerWord]
+			if takesArgs != hasArgs {
+				// No match — wrong arg presence
+			} else {
+				name := configCmdNames[triggerWord]
+				var args []string
+				if hasArgs {
+					args = []string{rest}
+				}
+				match = &cmdMatch{
+					cmd:      cmd,
+					args:     args,
+					disabled: isNetworkCommandDisabled(network, name),
+					trigger:  triggerWord,
+				}
 			}
 		}
 	}
@@ -378,8 +391,8 @@ func handleTrigger(network Network, client *girc.Client, event girc.Event, chann
 		client.Cmd.Reply(event, warnMsg(rateMsg))
 		return
 	}
-	if rateExemptCmds[match.re] {
-		if chatCmds[match.re] {
+	if rateExemptCmds[match.trigger] {
+		if chatCmds[match.trigger] {
 			ClearContext(network.Name, channel, userID)
 		}
 		outCh := make(chan string, outputChannelSize)
@@ -390,10 +403,10 @@ func handleTrigger(network Network, client *girc.Client, event girc.Event, chann
 		go drainToChannel(client, channel, time.Millisecond*network.Throttle, outCh, nil, network.Name)
 		return
 	}
-	if chatCmds[match.re] {
+	if chatCmds[match.trigger] {
 		ClearContext(network.Name, channel, userID)
 	}
-	svc := getServiceForConfigCmd(match.re)
+	svc := getServiceForConfigCmd(match.trigger)
 	position := queueMgr.Enqueue(network.Name, channel, userID, event.Source.Name, svc, msg,
 		func(cx context.Context, output chan<- string) {
 			match.cmd(network, client, event, ctxWithResolvedUser(cx, resolvedUser), output, match.args...)
@@ -401,24 +414,19 @@ func handleTrigger(network Network, client *girc.Client, event girc.Event, chann
 	replyIfQueued(client, event, position)
 }
 
-func getServiceForConfigCmd(r *regexp.Regexp) string {
+func getServiceForConfigCmd(trigger string) string {
 	commandsMutex.RLock()
 	defer commandsMutex.RUnlock()
+	canonical := configCmdNames[trigger]
 	var svc string
 	readConfig(func() {
-		for _, c := range config.Commands.Completions {
-			re := regexp.MustCompile("^" + c.Regex + " (.+)$")
-			if re.String() == r.String() {
-				svc = c.Service
-				return
-			}
+		if c, ok := config.Commands.Completions[canonical]; ok {
+			svc = c.Service
+			return
 		}
-		for _, c := range config.Commands.Chats {
-			re := regexp.MustCompile("^" + c.Regex + " (.+)$")
-			if re.String() == r.String() {
-				svc = c.Service
-				return
-			}
+		if c, ok := config.Commands.Chats[canonical]; ok {
+			svc = c.Service
+			return
 		}
 	})
 	return svc

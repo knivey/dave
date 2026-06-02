@@ -389,7 +389,7 @@ service = "test"
 
 [chat2]
 service = "test"
-regex = "custom"
+aliases = ["custom"]
 
 [chat3]
 service = "test"
@@ -408,15 +408,15 @@ system = "Static message"
 	config := loadConfigDirOrDie(dir)
 
 	tests := []struct {
-		name      string
-		wantName  string
-		wantRegex string
-		hasTmpl   bool
+		name        string
+		wantName    string
+		wantAliases []string
+		hasTmpl     bool
 	}{
-		{"chat1", "chat1", "chat1", false},
-		{"chat2", "chat2", "custom", false},
-		{"chat3", "chat3", "chat3", true},
-		{"chat4", "chat4", "chat4", true},
+		{"chat1", "chat1", nil, false},
+		{"chat2", "chat2", []string{"custom"}, false},
+		{"chat3", "chat3", nil, true},
+		{"chat4", "chat4", nil, true},
 	}
 
 	for _, tt := range tests {
@@ -424,10 +424,42 @@ system = "Static message"
 			cfg, ok := config.Commands.Chats[tt.name]
 			require.True(t, ok, "command %s not found", tt.name)
 			assert.Equal(t, tt.wantName, cfg.Name, "Name")
-			assert.Equal(t, tt.wantRegex, cfg.Regex, "Regex")
+			assert.Equal(t, tt.wantAliases, cfg.Aliases, "Aliases")
 			assert.Equal(t, tt.hasTmpl, cfg.SystemTmpl != nil, "SystemTmpl presence")
 		})
 	}
+}
+
+func TestChatCommandAliases(t *testing.T) {
+	mainTOML := ``
+	servicesTOML := `
+[test]
+maxtokens = 100
+maxhistory = 10
+`
+	chatsTOML := `
+[chat1]
+service = "test"
+aliases = ["gpt", "ask"]
+
+[chat2]
+service = "test"
+`
+	dir := createTestConfigDir(t, mainTOML, map[string]string{
+		"services.toml": servicesTOML,
+		"chats.toml":    chatsTOML,
+	})
+	defer os.RemoveAll(dir)
+
+	config := loadConfigDirOrDie(dir)
+
+	chat1 := config.Commands.Chats["chat1"]
+	assert.Equal(t, "chat1", chat1.Name)
+	assert.Equal(t, []string{"gpt", "ask"}, chat1.Aliases)
+
+	chat2 := config.Commands.Chats["chat2"]
+	assert.Equal(t, "chat2", chat2.Name)
+	assert.Nil(t, chat2.Aliases)
 }
 
 func TestSystemPromptTemplateValidation(t *testing.T) {
@@ -1487,50 +1519,60 @@ system = "test"
 	assert.Equal(t, []string{"img-async-management"}, chat.HiddenMCPToolSets, "command should inherit root→service→command hidden_mcp_tool_sets")
 }
 
-func TestRegisterCommandsLocked_InvalidRegex(t *testing.T) {
+func TestRegisterCommandsLocked_TriggerCollisions(t *testing.T) {
 	if logger == nil {
 		logger = logxi.New("test")
 		logger.SetLevel(logxi.LevelAll)
 	}
 
-	t.Run("invalid completions regex returns error", func(t *testing.T) {
-		cmds := Commands{
-			Completions: map[string]AIConfig{
-				"bad": {Regex: "[invalid"},
-			},
-		}
-		err := registerCommandsLocked(cmds)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "invalid regex for completions command")
-		assert.Contains(t, err.Error(), "[invalid")
-	})
-
-	t.Run("invalid chats regex returns error", func(t *testing.T) {
+	t.Run("canonical-alias collision between chats returns error", func(t *testing.T) {
 		cmds := Commands{
 			Chats: map[string]AIConfig{
-				"bad": {Regex: "(?P<name"},
+				"chat1": {Name: "chat1", Aliases: []string{"shared"}},
+				"chat2": {Name: "chat2", Aliases: []string{"shared"}},
 			},
 		}
 		err := registerCommandsLocked(cmds)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "invalid regex for chats command")
+		assert.Contains(t, err.Error(), "shared")
+		assert.Contains(t, err.Error(), "conflicts")
 	})
 
-	t.Run("invalid tools regex returns error", func(t *testing.T) {
-		cmds := Commands{
-			Tools: map[string]MCPCommandConfig{
-				"bad": {Regex: "[a-z", MCP: "test", Tool: "test"},
-			},
-		}
-		err := registerCommandsLocked(cmds)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "invalid regex for tools command")
-	})
-
-	t.Run("valid regex does not return error", func(t *testing.T) {
+	t.Run("canonical name collision returns error", func(t *testing.T) {
 		cmds := Commands{
 			Completions: map[string]AIConfig{
-				"ok": {Regex: `test\d+`},
+				"shared": {Name: "shared"},
+			},
+			Chats: map[string]AIConfig{
+				"shared": {Name: "shared"},
+			},
+		}
+		err := registerCommandsLocked(cmds)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "shared")
+	})
+
+	t.Run("tool name collides with chat alias returns error", func(t *testing.T) {
+		cmds := Commands{
+			Chats: map[string]AIConfig{
+				"chat": {Name: "chat", Aliases: []string{"tool1"}},
+			},
+			Tools: map[string]MCPCommandConfig{
+				"tool1": {Name: "tool1", MCP: "mcp", Tool: "test"},
+			},
+		}
+		err := registerCommandsLocked(cmds)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "tool1")
+	})
+
+	t.Run("valid commands with no collisions succeed", func(t *testing.T) {
+		cmds := Commands{
+			Completions: map[string]AIConfig{
+				"comp1": {Name: "comp1"},
+			},
+			Chats: map[string]AIConfig{
+				"chat1": {Name: "chat1", Aliases: []string{"gpt"}},
 			},
 		}
 		err := registerCommandsLocked(cmds)
@@ -1541,7 +1583,8 @@ func TestRegisterCommandsLocked_InvalidRegex(t *testing.T) {
 		orig := configCmds
 		cmds := Commands{
 			Chats: map[string]AIConfig{
-				"bad": {Regex: "[invalid"},
+				"a": {Name: "a", Aliases: []string{"dup"}},
+				"b": {Name: "b", Aliases: []string{"dup"}},
 			},
 		}
 		_ = registerCommandsLocked(cmds)
@@ -1611,13 +1654,13 @@ func TestRegisterCommandsLocked_PopulatesConfigCmdNames(t *testing.T) {
 
 	cmds := Commands{
 		Completions: map[string]AIConfig{
-			"comp1": {Regex: `comp1`},
+			"comp1": {Name: "comp1"},
 		},
 		Chats: map[string]AIConfig{
-			"chat1": {Regex: `chat1`},
+			"chat1": {Name: "chat1"},
 		},
 		Tools: map[string]MCPCommandConfig{
-			"tool1": {Regex: `tool1`, MCP: "mcp", Tool: "test"},
+			"tool1": {Name: "tool1", MCP: "mcp", Tool: "test"},
 		},
 	}
 	err := registerCommandsLocked(cmds)
@@ -1626,14 +1669,98 @@ func TestRegisterCommandsLocked_PopulatesConfigCmdNames(t *testing.T) {
 	commandsMutex.RLock()
 	defer commandsMutex.RUnlock()
 
-	names := make(map[string]bool)
-	for _, name := range configCmdNames {
-		names[name] = true
-	}
-	assert.True(t, names["comp1"], "configCmdNames should contain comp1")
-	assert.True(t, names["chat1"], "configCmdNames should contain chat1")
-	assert.True(t, names["tool1"], "configCmdNames should contain tool1")
+	assert.Equal(t, "comp1", configCmdNames["comp1"])
+	assert.Equal(t, "chat1", configCmdNames["chat1"])
+	assert.Equal(t, "tool1", configCmdNames["tool1"])
 	assert.Len(t, configCmdNames, 3)
+}
+
+func TestRegisterCommandsLocked_AliasesCreateDispatchEntries(t *testing.T) {
+	if logger == nil {
+		logger = logxi.New("test")
+		logger.SetLevel(logxi.LevelAll)
+	}
+
+	cmds := Commands{
+		Completions: map[string]AIConfig{
+			"comp1": {Name: "comp1", Service: "svc"},
+		},
+		Chats: map[string]AIConfig{
+			"chat1": {Name: "chat1", Aliases: []string{"gpt", "ask"}, Service: "svc"},
+		},
+		Tools: map[string]MCPCommandConfig{
+			"tool1": {Name: "tool1", MCP: "mcp", Tool: "test"},
+		},
+	}
+	err := registerCommandsLocked(cmds)
+	require.NoError(t, err)
+
+	commandsMutex.RLock()
+	defer commandsMutex.RUnlock()
+
+	assert.NotNil(t, configCmds["comp1"], "comp1 trigger")
+	assert.NotNil(t, configCmds["chat1"], "chat1 trigger")
+	assert.NotNil(t, configCmds["gpt"], "gpt alias trigger")
+	assert.NotNil(t, configCmds["ask"], "ask alias trigger")
+	assert.NotNil(t, configCmds["tool1"], "tool1 trigger")
+
+	assert.Equal(t, "comp1", configCmdNames["comp1"])
+	assert.Equal(t, "chat1", configCmdNames["chat1"])
+	assert.Equal(t, "chat1", configCmdNames["gpt"])
+	assert.Equal(t, "chat1", configCmdNames["ask"])
+	assert.Equal(t, "tool1", configCmdNames["tool1"])
+
+	assert.True(t, chatCmds["chat1"])
+	assert.True(t, chatCmds["gpt"])
+	assert.True(t, chatCmds["ask"])
+}
+
+func TestHandleTrigger_AliasDispatchesToCanonical(t *testing.T) {
+	if logger == nil {
+		logger = logxi.New("test")
+		logger.SetLevel(logxi.LevelAll)
+	}
+
+	cmds := Commands{
+		Chats: map[string]AIConfig{
+			"mychat": {Name: "mychat", Aliases: []string{"gpt"}, Service: "svc", Model: "m"},
+		},
+	}
+	err := registerCommandsLocked(cmds)
+	require.NoError(t, err)
+
+	commandsMutex.RLock()
+	defer commandsMutex.RUnlock()
+
+	assert.Equal(t, "mychat", configCmdNames["gpt"])
+	assert.NotNil(t, configCmds["gpt"])
+	assert.NotNil(t, configCmds["mychat"])
+	assert.True(t, configCmdTakesArgs["gpt"])
+	assert.True(t, configCmdTakesArgs["mychat"])
+}
+
+func TestSplitFirstWord(t *testing.T) {
+	tests := []struct {
+		input   string
+		word    string
+		rest    string
+		hasArgs bool
+	}{
+		{"chat hello world", "chat", "hello world", true},
+		{"chat", "chat", "", false},
+		{"gpt what is ai", "gpt", "what is ai", true},
+		{"", "", "", false},
+		{"  leading", "", " leading", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			w, r, h := splitFirstWord(tt.input)
+			assert.Equal(t, tt.word, w, "word")
+			assert.Equal(t, tt.rest, r, "rest")
+			assert.Equal(t, tt.hasArgs, h, "hasArgs")
+		})
+	}
 }
 
 func TestHandleTrigger_DisabledCommandReturnsEarly(t *testing.T) {
@@ -1644,7 +1771,7 @@ func TestHandleTrigger_DisabledCommandReturnsEarly(t *testing.T) {
 
 	cmds := Commands{
 		Chats: map[string]AIConfig{
-			"mychat": {Regex: `mychat`, Service: "svc", Model: "m"},
+			"mychat": {Name: "mychat", Service: "svc", Model: "m"},
 		},
 	}
 	err := registerCommandsLocked(cmds)
@@ -1715,7 +1842,6 @@ host = "irc.example.com"
 `
 		chatsTOML := `
 [mychat]
-regex = "mychat"
 service = "svc"
 model = "m"
 `
@@ -1786,18 +1912,15 @@ api_key = "test"
 `
 		chatsWithBothTOML := `
 [mychat]
-regex = "mychat"
 service = "svc"
 model = "m"
 
 [removed]
-regex = "removed"
 service = "svc"
 model = "m"
 `
 		chatsWithoutRemovedTOML := `
 [mychat]
-regex = "mychat"
 service = "svc"
 model = "m"
 `
@@ -1834,7 +1957,6 @@ api_key = "test"
 `
 		chatsTOML := `
 [mychat]
-regex = "mychat"
 service = "svc"
 model = "m"
 `
@@ -1850,6 +1972,38 @@ model = "m"
 		err = loadReloadableDir(dir, &cfg)
 		require.NoError(t, err)
 	})
+}
+
+func TestLoadConfigDirDisabledCommandsRejectsAlias(t *testing.T) {
+	mainTOML := `
+[networks.testnet]
+nick = "bot"
+disabled_commands = ["gpt"]
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+	servicesTOML := `
+[svc]
+api_base = "http://localhost"
+api_key = "test"
+`
+	chatsTOML := `
+[chat]
+service = "svc"
+aliases = ["gpt", "ask"]
+`
+	dir := createTestConfigDir(t, mainTOML, map[string]string{
+		"chats.toml":    chatsTOML,
+		"services.toml": servicesTOML,
+	})
+	defer os.RemoveAll(dir)
+
+	_, err := loadConfigDir(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "disabled_commands")
+	assert.Contains(t, err.Error(), "gpt")
+	assert.Contains(t, err.Error(), "alias")
+	assert.Contains(t, err.Error(), "chat")
 }
 
 func TestLoadConfigDirLoggingDefaults(t *testing.T) {

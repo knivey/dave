@@ -207,7 +207,6 @@ type Commands struct {
 
 type MCPCommandConfig struct {
 	Name           string
-	Regex          string
 	MCP            string         `toml:"mcp"`
 	Tool           string         `toml:"tool"`
 	Arg            string         `toml:"arg"`
@@ -232,7 +231,7 @@ type AIConfig struct {
 	Name                 string //gets set to key name
 	Service              string
 	Model                string
-	Regex                string
+	Aliases              []string `toml:"aliases"`
 	System               string
 	SystemTmpl           *template.Template `json:"-"`
 	Streaming            bool
@@ -463,14 +462,22 @@ func (cfg *AIConfig) UnmarshalJSON(data []byte) error {
 
 func validateNetworkDisabledCommands(config *Config) error {
 	known := make(map[string]bool)
+	aliasToCanonical := make(map[string]string)
+
 	for _, name := range builtinCommandNames {
 		known[name] = true
 	}
-	for name := range config.Commands.Completions {
+	for name, c := range config.Commands.Completions {
 		known[name] = true
+		for _, alias := range c.Aliases {
+			aliasToCanonical[alias] = name
+		}
 	}
-	for name := range config.Commands.Chats {
+	for name, c := range config.Commands.Chats {
 		known[name] = true
+		for _, alias := range c.Aliases {
+			aliasToCanonical[alias] = name
+		}
 	}
 	for name := range config.Commands.Tools {
 		known[name] = true
@@ -478,6 +485,9 @@ func validateNetworkDisabledCommands(config *Config) error {
 
 	for netName, network := range config.Networks {
 		for _, cmd := range network.DisabledCommands {
+			if canonical, isAlias := aliasToCanonical[cmd]; isAlias {
+				return fmt.Errorf("networks.%s disabled_commands: %q is an alias of %q, use the canonical name %q instead", netName, cmd, canonical, canonical)
+			}
 			if !known[cmd] {
 				return fmt.Errorf("networks.%s disabled_commands: %q is not a known command", netName, cmd)
 			}
@@ -866,9 +876,6 @@ func validateCommands(commands *Commands, config *Config) error {
 
 	for name, cfg := range commands.Tools {
 		cfg.Name = name
-		if cfg.Regex == "" {
-			cfg.Regex = name
-		}
 		if cfg.MCP == "" {
 			return fmt.Errorf("commands.tools.%s mcp is required", name)
 		}
@@ -923,9 +930,6 @@ func validateAndSetAPIUserTemplate(cfg *AIConfig, name, section string) error {
 
 func validateAIConfig(cfg AIConfig, name, section string, config *Config) (AIConfig, error) {
 	cfg.Name = name
-	if cfg.Regex == "" {
-		cfg.Regex = name
-	}
 	if service, ok := config.Services[cfg.Service]; ok {
 		cfg.ApplyDefaults(service)
 	} else {

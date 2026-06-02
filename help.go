@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -12,7 +11,7 @@ import (
 )
 
 type helpEntry struct {
-	cmd     string
+	cmds    []string // trigger words, canonical first
 	info    string
 	desc    string
 	mcpInfo string
@@ -41,7 +40,6 @@ func buildHelpText(botnick, trigger string, network Network) string {
 
 	lines = append(lines, fmt.Sprintf("I'm %s! Use my commands below to chat or generate images.", botnick))
 	lines = append(lines, fmt.Sprintf("Only Chat commands start a persistent context. After starting one, reply with my nick (e.g. \"%s, your message here\") to continue that context without using a command.", botnick))
-	lines = append(lines, "Commands marked with (regex) use pattern matching, the trigger can match more than one name.")
 	if !isNetworkCommandDisabled(network, "stop") {
 		lines = append(lines, fmt.Sprintf("  %sstop \u2014 Stop text generation (including this help message)", trigger))
 	}
@@ -119,7 +117,7 @@ func buildHelpText(botnick, trigger string, network Network) string {
 		for _, k := range toolKeys {
 			c := filteredTools[k]
 			entries = append(entries, helpEntry{
-				cmd:  formatCmd(trigger, c.Regex, c.Name),
+				cmds: formatCmds(trigger, c.Name, nil),
 				info: formatToolInfo(c.MCP, c.Tool),
 				desc: formatDesc(c.Description, false),
 			})
@@ -142,8 +140,7 @@ func buildHelpText(botnick, trigger string, network Network) string {
 }
 
 type pastebinEntry struct {
-	cmd          string
-	regex        bool
+	cmds         []string // trigger words, canonical first
 	service      string
 	model        string
 	detectImages bool
@@ -238,8 +235,7 @@ func buildPastebinHelpText(botnick, trigger string, network Network) string {
 		for _, k := range toolKeys {
 			c := filteredTools[k]
 			entries = append(entries, pastebinEntry{
-				cmd:     escapeMDPipe(trigger + c.Regex),
-				regex:   c.Regex != c.Name,
+				cmds:    []string{trigger + c.Name},
 				service: c.MCP,
 				model:   c.Tool,
 				desc:    formatDesc(c.Description, false),
@@ -328,9 +324,12 @@ func sortedPastebinEntries(trigger string, m map[string]AIConfig) []pastebinEntr
 	entries := make([]pastebinEntry, 0, len(m))
 	for _, k := range keys {
 		c := m[k]
+		cmds := []string{trigger + c.Name}
+		for _, a := range c.Aliases {
+			cmds = append(cmds, trigger+a)
+		}
 		entries = append(entries, pastebinEntry{
-			cmd:          escapeMDPipe(trigger + c.Regex),
-			regex:        c.Regex != c.Name,
+			cmds:         cmds,
 			service:      c.Service,
 			model:        c.Model,
 			detectImages: c.DetectImages,
@@ -343,34 +342,30 @@ func sortedPastebinEntries(trigger string, m map[string]AIConfig) []pastebinEntr
 func writeGFMCmdTable(b *strings.Builder, header string, entries []pastebinEntry) {
 	b.WriteString(header)
 	b.WriteString("\n\n")
-	b.WriteString("| Command | Regex | Service | Model | Media | Description |\n")
-	b.WriteString("|---------|-------|---------|-------|-------|-------------|\n")
+	b.WriteString("| Command | Service | Model | Media | Description |\n")
+	b.WriteString("|---------|---------|-------|-------|-------------|\n")
 	for _, e := range entries {
-		cmd := "`" + e.cmd + "`"
-		regexCol := ""
-		if e.regex {
-			regexCol = "✱"
+		cmdParts := make([]string, len(e.cmds))
+		for i, c := range e.cmds {
+			cmdParts[i] = "`" + escapeMDPipe(c) + "`"
 		}
+		cmd := strings.Join(cmdParts, "<br>")
 		media := ""
 		if e.detectImages {
 			media = "🖼️"
 		}
-		fmt.Fprintf(b, "| %s | %s | %s | %s | %s | %s |\n", cmd, regexCol, e.service, e.model, media, escapeDescPipe(e.desc))
+		fmt.Fprintf(b, "| %s | %s | %s | %s | %s |\n", cmd, e.service, e.model, media, escapeDescPipe(e.desc))
 	}
 }
 
 func writeGFMToolTable(b *strings.Builder, header string, entries []pastebinEntry) {
 	b.WriteString(header)
 	b.WriteString("\n\n")
-	b.WriteString("| Command | Regex | MCP | Tool | Description |\n")
-	b.WriteString("|---------|-------|-----|------|-------------|\n")
+	b.WriteString("| Command | MCP | Tool | Description |\n")
+	b.WriteString("|---------|-----|------|-------------|\n")
 	for _, e := range entries {
-		cmd := "`" + e.cmd + "`"
-		regexCol := ""
-		if e.regex {
-			regexCol = "✱"
-		}
-		fmt.Fprintf(b, "| %s | %s | %s | %s | %s |\n", cmd, regexCol, e.service, e.model, escapeDescPipe(e.desc))
+		cmd := "`" + escapeMDPipe(e.cmds[0]) + "`"
+		fmt.Fprintf(b, "| %s | %s | %s | %s |\n", cmd, e.service, e.model, escapeDescPipe(e.desc))
 	}
 }
 
@@ -388,7 +383,7 @@ func help(network Network, client *girc.Client, event girc.Event, ctx context.Co
 			return
 		}
 		var lines []string
-		lines = append(lines, fmt.Sprintf("Help for %s:", entry.cmd))
+		lines = append(lines, fmt.Sprintf("Help for %s:", strings.Join(entry.cmds, ", ")))
 		if entry.info != "" {
 			lines = append(lines, "  "+entry.info)
 		}
@@ -471,20 +466,21 @@ func formatModelInfo(service, model string, detectImages bool) string {
 	return fmt.Sprintf("[%s/%s]%s", service, model, icon)
 }
 
-func matchesCommand(cmdName, name, regex string) bool {
-	if name == cmdName || regex == cmdName {
+func matchesCommand(cmdName, name string, aliases []string) bool {
+	if name == cmdName {
 		return true
 	}
-	if regex != name {
-		re := regexp.MustCompile("^" + regex + "$")
-		return re.MatchString(cmdName)
+	for _, a := range aliases {
+		if a == cmdName {
+			return true
+		}
 	}
 	return false
 }
 
 func buildAIConfigEntry(trigger string, c AIConfig) helpEntry {
 	return helpEntry{
-		cmd:     formatCmd(trigger, c.Regex, c.Name),
+		cmds:    formatCmds(trigger, c.Name, c.Aliases),
 		info:    formatModelInfo(c.Service, c.Model, c.DetectImages),
 		desc:    formatDesc(c.Description, false),
 		mcpInfo: getMCPServerNames(c.MCPs),
@@ -517,7 +513,7 @@ func findCommandHelp(network Network, cmdName string) (helpEntry, bool) {
 		tools = config.Commands.Tools
 	})
 	for _, c := range completions {
-		if matchesCommand(cmdName, c.Name, c.Regex) {
+		if matchesCommand(cmdName, c.Name, c.Aliases) {
 			if isNetworkCommandDisabled(network, c.Name) {
 				return helpEntry{}, false
 			}
@@ -525,7 +521,7 @@ func findCommandHelp(network Network, cmdName string) (helpEntry, bool) {
 		}
 	}
 	for _, c := range chats {
-		if matchesCommand(cmdName, c.Name, c.Regex) {
+		if matchesCommand(cmdName, c.Name, c.Aliases) {
 			if isNetworkCommandDisabled(network, c.Name) {
 				return helpEntry{}, false
 			}
@@ -533,12 +529,12 @@ func findCommandHelp(network Network, cmdName string) (helpEntry, bool) {
 		}
 	}
 	for _, c := range tools {
-		if matchesCommand(cmdName, c.Name, c.Regex) {
+		if matchesCommand(cmdName, c.Name, nil) {
 			if isNetworkCommandDisabled(network, c.Name) {
 				return helpEntry{}, false
 			}
 			return helpEntry{
-				cmd:  formatCmd(network.Trigger, c.Regex, c.Name),
+				cmds: formatCmds(network.Trigger, c.Name, nil),
 				info: formatToolInfo(c.MCP, c.Tool),
 				desc: formatDesc(c.Description, false),
 			}, true
@@ -549,7 +545,7 @@ func findCommandHelp(network Network, cmdName string) (helpEntry, bool) {
 			return helpEntry{}, false
 		}
 		return helpEntry{
-			cmd:  network.Trigger + tmpl.cmdSuffix,
+			cmds: []string{network.Trigger + tmpl.cmdSuffix},
 			desc: tmpl.desc,
 		}, true
 	}
@@ -570,7 +566,7 @@ func sortedAIConfigEntries(trigger string, m map[string]AIConfig) []helpEntry {
 	for _, k := range keys {
 		c := m[k]
 		entries = append(entries, helpEntry{
-			cmd:  formatCmd(trigger, c.Regex, c.Name),
+			cmds: formatCmds(trigger, c.Name, c.Aliases),
 			info: formatModelInfo(c.Service, c.Model, c.DetectImages),
 			desc: formatDesc(c.Description, false),
 		})
@@ -578,12 +574,12 @@ func sortedAIConfigEntries(trigger string, m map[string]AIConfig) []helpEntry {
 	return entries
 }
 
-func formatCmd(trigger, regex, name string) string {
-	cmd := trigger + regex
-	if regex != name {
-		cmd += " (regex)"
+func formatCmds(trigger, name string, aliases []string) []string {
+	cmds := []string{trigger + name}
+	for _, a := range aliases {
+		cmds = append(cmds, trigger+a)
 	}
-	return cmd
+	return cmds
 }
 
 func formatDesc(desc string, detectImages bool) string {
@@ -608,11 +604,13 @@ func formatTable(entries []helpEntry) []string {
 	maxCmd := 0
 	maxInfo := 0
 	for _, e := range entries {
-		cmdLen := utf8.RuneCountInString(e.cmd)
-		infoLen := utf8.RuneCountInString(e.info)
-		if cmdLen > maxCmd {
-			maxCmd = cmdLen
+		for _, c := range e.cmds {
+			cmdLen := utf8.RuneCountInString(c)
+			if cmdLen > maxCmd {
+				maxCmd = cmdLen
+			}
 		}
+		infoLen := utf8.RuneCountInString(e.info)
 		if infoLen > maxInfo {
 			maxInfo = infoLen
 		}
@@ -620,16 +618,27 @@ func formatTable(entries []helpEntry) []string {
 
 	var lines []string
 	for _, e := range entries {
-		cmdLen := utf8.RuneCountInString(e.cmd)
 		infoLen := utf8.RuneCountInString(e.info)
-		line := e.cmd + strings.Repeat(" ", maxCmd-cmdLen+2)
+		infoPadding := strings.Repeat(" ", maxInfo-infoLen+2)
+		infoCol := ""
 		if e.info != "" {
-			line += e.info + strings.Repeat(" ", maxInfo-infoLen+2)
+			infoCol = e.info + infoPadding
 		} else if maxInfo > 0 {
-			line += strings.Repeat(" ", maxInfo+2)
+			infoCol = strings.Repeat(" ", maxInfo+2)
 		}
-		line += e.desc
-		lines = append(lines, line)
+
+		for i, c := range e.cmds {
+			cmdLen := utf8.RuneCountInString(c)
+			line := c + strings.Repeat(" ", maxCmd-cmdLen+2)
+			if i == 0 {
+				line += infoCol + e.desc
+			} else {
+				if maxInfo > 0 {
+					line += strings.Repeat(" ", maxInfo+2)
+				}
+			}
+			lines = append(lines, line)
+		}
 	}
 	return lines
 }

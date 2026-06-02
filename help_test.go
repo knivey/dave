@@ -8,48 +8,48 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestFormatCmd(t *testing.T) {
+func TestFormatCmds(t *testing.T) {
 	tests := []struct {
 		name    string
 		trigger string
-		regex   string
 		cmdName string
-		want    string
+		aliases []string
+		want    []string
 	}{
 		{
-			name:    "simple command",
+			name:    "simple command no aliases",
 			trigger: "!",
-			regex:   "chat",
 			cmdName: "chat",
-			want:    "!chat",
+			aliases: nil,
+			want:    []string{"!chat"},
 		},
 		{
-			name:    "command with regex suffix",
+			name:    "command with aliases",
 			trigger: "!",
-			regex:   "chat.*",
 			cmdName: "chat",
-			want:    "!chat.* (regex)",
+			aliases: []string{"gpt", "ask"},
+			want:    []string{"!chat", "!gpt", "!ask"},
 		},
 		{
 			name:    "trigger with dot",
 			trigger: ".",
-			regex:   "img",
 			cmdName: "img",
-			want:    ".img",
+			aliases: nil,
+			want:    []string{".img"},
 		},
 		{
 			name:    "different trigger",
 			trigger: "dave:",
-			regex:   "ask",
 			cmdName: "ask",
-			want:    "dave:ask",
+			aliases: nil,
+			want:    []string{"dave:ask"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := formatCmd(tt.trigger, tt.regex, tt.cmdName)
-			assert.Equal(t, tt.want, got, "formatCmd()")
+			got := formatCmds(tt.trigger, tt.cmdName, tt.aliases)
+			assert.Equal(t, tt.want, got, "formatCmds()")
 		})
 	}
 }
@@ -143,15 +143,15 @@ func TestFormatTable(t *testing.T) {
 		{
 			name: "single entry",
 			entries: []helpEntry{
-				{cmd: "!test", info: "[ai]", desc: "test command"},
+				{cmds: []string{"!test"}, info: "[ai]", desc: "test command"},
 			},
 			want: []string{"!test  [ai]  test command"},
 		},
 		{
 			name: "multiple entries with alignment",
 			entries: []helpEntry{
-				{cmd: "!a", info: "[x]", desc: "short"},
-				{cmd: "!longer", info: "[y]", desc: "longer description"},
+				{cmds: []string{"!a"}, info: "[x]", desc: "short"},
+				{cmds: []string{"!longer"}, info: "[y]", desc: "longer description"},
 			},
 			want: []string{
 				"!a       [x]  short",
@@ -161,15 +161,15 @@ func TestFormatTable(t *testing.T) {
 		{
 			name: "entries with empty info",
 			entries: []helpEntry{
-				{cmd: "!img", info: "", desc: "generate image"},
+				{cmds: []string{"!img"}, info: "", desc: "generate image"},
 			},
 			want: []string{"!img  generate image"},
 		},
 		{
 			name: "entries with different info lengths",
 			entries: []helpEntry{
-				{cmd: "!x", info: "[a]", desc: "desc1"},
-				{cmd: "!y", info: "[abc]", desc: "desc2"},
+				{cmds: []string{"!x"}, info: "[a]", desc: "desc1"},
+				{cmds: []string{"!y"}, info: "[abc]", desc: "desc2"},
 			},
 			want: []string{
 				"!x  [a]    desc1",
@@ -177,11 +177,15 @@ func TestFormatTable(t *testing.T) {
 			},
 		},
 		{
-			name: "regex commands",
+			name: "entry with aliases produces multiple lines",
 			entries: []helpEntry{
-				{cmd: "!chat.* (regex)", info: "[gpt-4]", desc: "chatty"},
+				{cmds: []string{"!chat", "!gpt", "!ask"}, info: "[gpt-4]", desc: "chatty"},
 			},
-			want: []string{"!chat.* (regex)  [gpt-4]  chatty"},
+			want: []string{
+				"!chat  [gpt-4]  chatty",
+				"!gpt            ",
+				"!ask            ",
+			},
 		},
 	}
 
@@ -216,7 +220,7 @@ func TestBuildHelpTextWithDisabledCommands(t *testing.T) {
 
 func TestBuildHelpTextWithCompletions(t *testing.T) {
 	config.Commands.Completions = map[string]AIConfig{
-		"chat": {Name: "chat", Regex: "chat", Service: "openai", Model: "gpt-4"},
+		"chat": {Name: "chat", Service: "openai", Model: "gpt-4"},
 	}
 	defer func() { config.Commands.Completions = nil }()
 	text := buildHelpText("testbot", "!", Network{})
@@ -226,12 +230,24 @@ func TestBuildHelpTextWithCompletions(t *testing.T) {
 
 func TestBuildHelpTextWithChats(t *testing.T) {
 	config.Commands.Chats = map[string]AIConfig{
-		"ask": {Name: "ask", Regex: "ask", Service: "openai", Model: "gpt-4"},
+		"ask": {Name: "ask", Service: "openai", Model: "gpt-4"},
 	}
 	defer func() { config.Commands.Chats = nil }()
 	text := buildHelpText("testbot", "!", Network{})
 	assert.Contains(t, text, "Chats:")
 	assert.Contains(t, text, "!ask")
+}
+
+func TestBuildHelpTextWithAliases(t *testing.T) {
+	config.Commands.Chats = map[string]AIConfig{
+		"chat": {Name: "chat", Aliases: []string{"gpt", "ask"}, Service: "openai", Model: "gpt-4", Description: "general chat"},
+	}
+	defer func() { config.Commands.Chats = nil }()
+	text := buildHelpText("testbot", "!", Network{})
+	assert.Contains(t, text, "!chat")
+	assert.Contains(t, text, "!gpt")
+	assert.Contains(t, text, "!ask")
+	assert.NotContains(t, text, "(regex)")
 }
 
 func TestWrapLine(t *testing.T) {
@@ -337,7 +353,7 @@ func TestBuildPastebinHelpTextUsesBotnickAndTrigger(t *testing.T) {
 
 func TestBuildPastebinHelpTextWithChats(t *testing.T) {
 	config.Commands.Chats = map[string]AIConfig{
-		"ask": {Name: "ask", Regex: "ask", Service: "openai", Model: "gpt-4", Description: "ask questions"},
+		"ask": {Name: "ask", Service: "openai", Model: "gpt-4", Description: "ask questions"},
 	}
 	defer func() { config.Commands.Chats = nil }()
 	text := buildPastebinHelpText("testbot", "!", Network{})
@@ -353,7 +369,7 @@ func TestBuildPastebinHelpTextWithChats(t *testing.T) {
 
 func TestBuildPastebinHelpTextWithCompletions(t *testing.T) {
 	config.Commands.Completions = map[string]AIConfig{
-		"complete": {Name: "complete", Regex: "complete", Service: "openai", Model: "gpt-4"},
+		"complete": {Name: "complete", Service: "openai", Model: "gpt-4"},
 	}
 	defer func() { config.Commands.Completions = nil }()
 	text := buildPastebinHelpText("testbot", "!", Network{})
@@ -363,7 +379,7 @@ func TestBuildPastebinHelpTextWithCompletions(t *testing.T) {
 
 func TestBuildPastebinHelpTextWithTools(t *testing.T) {
 	config.Commands.Tools = map[string]MCPCommandConfig{
-		"img": {Name: "img", Regex: "img", MCP: "img-mcp", Tool: "generate_image", Description: "generate an image"},
+		"img": {Name: "img", MCP: "img-mcp", Tool: "generate_image", Description: "generate an image"},
 	}
 	defer func() { config.Commands.Tools = nil }()
 	text := buildPastebinHelpText("testbot", "!", Network{})
@@ -384,10 +400,10 @@ func TestBuildPastebinHelpTextDisabledCommands(t *testing.T) {
 
 func TestBuildPastebinHelpTextChatBeforeCompletions(t *testing.T) {
 	config.Commands.Chats = map[string]AIConfig{
-		"chat": {Name: "chat", Regex: "chat", Service: "openai", Model: "gpt-4"},
+		"chat": {Name: "chat", Service: "openai", Model: "gpt-4"},
 	}
 	config.Commands.Completions = map[string]AIConfig{
-		"complete": {Name: "complete", Regex: "complete", Service: "openai", Model: "gpt-4"},
+		"complete": {Name: "complete", Service: "openai", Model: "gpt-4"},
 	}
 	defer func() {
 		config.Commands.Chats = nil
@@ -401,12 +417,12 @@ func TestBuildPastebinHelpTextChatBeforeCompletions(t *testing.T) {
 
 func TestBuildPastebinHelpTextGFMTables(t *testing.T) {
 	config.Commands.Chats = map[string]AIConfig{
-		"chat": {Name: "chat", Regex: "chat", Service: "openai", Model: "gpt-4", Description: "general chat"},
+		"chat": {Name: "chat", Service: "openai", Model: "gpt-4", Description: "general chat"},
 	}
 	defer func() { config.Commands.Chats = nil }()
 	text := buildPastebinHelpText("testbot", "!", Network{})
-	assert.Contains(t, text, "| Command | Regex | Service | Model | Media | Description |")
-	assert.Contains(t, text, "| `!chat` |  | openai | gpt-4 |  | general chat |")
+	assert.Contains(t, text, "| Command | Service | Model | Media | Description |")
+	assert.Contains(t, text, "| `!chat` | openai | gpt-4 |  | general chat |")
 }
 
 func TestBuildPastebinHelpTextExampleUsesTrigger(t *testing.T) {
@@ -416,40 +432,22 @@ func TestBuildPastebinHelpTextExampleUsesTrigger(t *testing.T) {
 	assert.Contains(t, text, "<dave>")
 }
 
-func TestBuildPastebinHelpTextRegexMarker(t *testing.T) {
-	config.Commands.Chats = map[string]AIConfig{
-		"chat": {Name: "chat", Regex: "chat.*", Service: "openai", Model: "gpt-4", Description: "chat"},
-	}
-	defer func() { config.Commands.Chats = nil }()
-	text := buildPastebinHelpText("testbot", "!", Network{})
-	assert.Contains(t, text, "✱")
-	assert.NotContains(t, text, "(regex)")
-	lines := strings.Split(text, "\n")
-	for _, line := range lines {
-		if strings.Contains(line, "✱") {
-			assert.Contains(t, line, "| ✱ |", "✱ should be in its own Regex column")
-		}
-	}
-}
-
 func TestBuildPastebinHelpTextPipeEscaped(t *testing.T) {
 	config.Commands.Chats = map[string]AIConfig{
-		"img": {Name: "img", Regex: "img|image", Service: "openai", Model: "gpt-4", Description: "images"},
+		"img": {Name: "img", Service: "openai", Model: "gpt-4", Description: "images"},
 	}
 	defer func() { config.Commands.Chats = nil }()
 	text := buildPastebinHelpText("testbot", "!", Network{})
-	expected := "`!img" + `\|` + "image`"
-	assert.Contains(t, text, expected)
-	assert.NotContains(t, text, "| `!img|image`")
+	assert.Contains(t, text, "`!img`")
 }
 
 func TestBuildPastebinHelpTextDetectImagesCol(t *testing.T) {
 	config.Commands.Chats = map[string]AIConfig{
-		"chat": {Name: "chat", Regex: "chat", Service: "openai", Model: "gpt-4o", DetectImages: true, Description: "vision chat"},
+		"chat": {Name: "chat", Service: "openai", Model: "gpt-4o", DetectImages: true, Description: "vision chat"},
 	}
 	defer func() { config.Commands.Chats = nil }()
 	text := buildPastebinHelpText("testbot", "!", Network{})
-	assert.Contains(t, text, "| `!chat` |  | openai | gpt-4o | 🖼️ | vision chat |")
+	assert.Contains(t, text, "| `!chat` | openai | gpt-4o | 🖼️ | vision chat |")
 }
 
 func TestBuildPastebinHelpTextNoStopInExample(t *testing.T) {
@@ -481,10 +479,39 @@ func TestBuildPastebinHelpTextNoRegexExplanation(t *testing.T) {
 
 func TestBuildPastebinHelpTextDescPipeEscaped(t *testing.T) {
 	config.Commands.Chats = map[string]AIConfig{
-		"chat": {Name: "chat", Regex: "chat", Service: "openai", Model: "gpt-4", Description: "chat with user | group support"},
+		"chat": {Name: "chat", Service: "openai", Model: "gpt-4", Description: "chat with user | group support"},
 	}
 	defer func() { config.Commands.Chats = nil }()
 	text := buildPastebinHelpText("testbot", "!", Network{})
 	assert.Contains(t, text, "&#124;")
 	assert.NotContains(t, text, "| group support |")
+}
+
+func TestBuildPastebinHelpTextWithAliases(t *testing.T) {
+	config.Commands.Chats = map[string]AIConfig{
+		"chat": {Name: "chat", Aliases: []string{"gpt", "ask"}, Service: "openai", Model: "gpt-4", Description: "general chat"},
+	}
+	defer func() { config.Commands.Chats = nil }()
+	text := buildPastebinHelpText("testbot", "!", Network{})
+	assert.Contains(t, text, "`!chat`<br>`!gpt`<br>`!ask`")
+	assert.NotContains(t, text, "| Regex |")
+	assert.NotContains(t, text, "✱")
+}
+
+func TestFindCommandHelpByAlias(t *testing.T) {
+	config.Commands.Chats = map[string]AIConfig{
+		"chat": {Name: "chat", Aliases: []string{"gpt", "ask"}, Service: "openai", Model: "gpt-4", Description: "general chat"},
+	}
+	defer func() { config.Commands.Chats = nil }()
+
+	entry, found := findCommandHelp(Network{}, "gpt")
+	require.True(t, found, "should find chat via alias 'gpt'")
+	assert.Contains(t, entry.cmds[0], "chat")
+
+	entry, found = findCommandHelp(Network{}, "ask")
+	require.True(t, found, "should find chat via alias 'ask'")
+	assert.Contains(t, entry.cmds[0], "chat")
+
+	entry, found = findCommandHelp(Network{}, "nonexistent")
+	assert.False(t, found)
 }

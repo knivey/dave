@@ -97,7 +97,7 @@ func getActiveBans(db *gorm.DB, network string) ([]Ban, error) {
 
 func getBanHistory(db *gorm.DB, userID int64) ([]Ban, error) {
 	var bans []Ban
-	err := db.Where("user_id = ?", userID).Order("created_at DESC").Limit(20).Find(&bans).Error
+	err := db.Where("user_id = ?", userID).Order("created_at DESC").Limit(10).Find(&bans).Error
 	return bans, err
 }
 

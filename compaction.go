@@ -232,11 +232,13 @@ func renderFreshSystemPrompt(cfg AIConfig, network Network, client *girc.Client,
 // Reasoning, tools, and streaming are all disabled. Responses API is never
 // used here — the session-state implications are too tangled for a transient
 // helper, and Chat Completions is universally supported.
-func callSummarizer(ctx context.Context, cfg AIConfig, summarizerSys string, archived []ChatMessage) (string, *Usage, int, error) {
+func callSummarizer(ctx context.Context, cfg AIConfig, summarizerSys string, archived []ChatMessage, sessionID int64) (string, *Usage, int, error) {
 	var svc Service
 	readConfig(func() { svc = config.Services[cfg.Service] })
 
 	transport := newDaveTransport(nil, nil)
+	transport.setAPILogger(apiLogger, sessionID)
+	transport.setCaptureBody(true)
 	httpClient := &http.Client{Transport: transport}
 	openaiClient := openai.NewClient(
 		option.WithAPIKey(svc.Key),
@@ -443,7 +445,7 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 		prompt = compactionCfg.PromptTemplate
 	}
 
-	summary, usage, durationMs, err := callSummarizer(ctx, cfg, prompt, archivedSlice)
+	summary, usage, durationMs, err := callSummarizer(ctx, cfg, prompt, archivedSlice, inputs.SessionID)
 	if err != nil {
 		return nil, fmt.Errorf("summarizer call: %w", err)
 	}

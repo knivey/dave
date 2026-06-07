@@ -5,11 +5,16 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"text/template"
 	"time"
 	"unicode/utf8"
 
 	"github.com/rivo/tview"
 )
+
+var botIsInChannel = func(bot *Bot, channel string) bool {
+	return bot.Client != nil && bot.Client.LookupChannel(channel) != nil
+}
 
 var tuiCommands = map[string]func(parts []string, text string){
 	"/help":        tuiCmdHelp,
@@ -30,6 +35,8 @@ var tuiCommands = map[string]func(parts []string, text string){
 	"/flagged":     tuiCmdFlagged,
 	"/sessions":    tuiCmdSessions,
 	"/compact":     tuiCmdCompact,
+	"/reinject":    tuiCmdReinject,
+	"/systemmsg":   tuiCmdSystemMsg,
 }
 
 func formatClonedFromTUI(s Session, sourceNicks map[int64]string) string {
@@ -71,6 +78,8 @@ func tuiCmdHelp(_ []string, _ string) {
 	fmt.Fprintf(logView, "  /sessions <network> <nick|id> [channel]\n")
 	fmt.Fprintf(logView, "                               - List sessions for a user\n")
 	fmt.Fprintf(logView, "  /compact <session-id>        - Summarize old messages of a session\n")
+	fmt.Fprintf(logView, "  /reinject <session-id>       - Re-render and inject system prompt into session\n")
+	fmt.Fprintf(logView, "  /systemmsg <session-id> <text> - Inject custom system message (Go template) into session\n")
 }
 
 func tuiCmdReload(parts []string, _ string) {
@@ -736,4 +745,148 @@ func tuiCmdCompact(parts []string, _ string) {
 				sessionID, vars["count"], vars["total"], vars["cached"], res.DurationMs)
 		})
 	}()
+}
+
+func tuiCmdReinject(parts []string, _ string) {
+	if len(parts) < 2 {
+		fmt.Fprintf(logView, "[yellow]Usage: /reinject <session-id>[white]\n")
+		return
+	}
+	sessionID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		fmt.Fprintf(logView, "[red]Invalid session id: %s[white]\n", parts[1])
+		return
+	}
+
+	session, err := getDBSessionByID(sessionID)
+	if err != nil || session == nil {
+		fmt.Fprintf(logView, "[red]Session %d not found[white]\n", sessionID)
+		return
+	}
+
+	bot, ok := getBot(session.Network)
+	if !ok {
+		fmt.Fprintf(logView, "[red]No bot connected for network %s[white]\n", session.Network)
+		return
+	}
+
+	if !botIsInChannel(bot, session.Channel) {
+		fmt.Fprintf(logView, "[red]Bot is not joined to %s on %s[white]\n", session.Channel, session.Network)
+		return
+	}
+
+	if session.UserID == nil {
+		fmt.Fprintf(logView, "[red]Session %d has no associated user[white]\n", sessionID)
+		return
+	}
+	u, err := getUserByID(*session.UserID)
+	if err != nil || u == nil {
+		fmt.Fprintf(logView, "[red]User for session %d not found[white]\n", sessionID)
+		return
+	}
+	userNick := displayNick(u)
+
+	cfg, cfgOk := getSessionConfig(session)
+	if !cfgOk {
+		fmt.Fprintf(logView, "[red]Chat command %q for session %d no longer exists[white]\n", session.ChatCommand, sessionID)
+		return
+	}
+
+	rendered := renderFreshSystemPrompt(cfg, bot.Network, bot.Client, session.Channel, userNick, "")
+	if rendered == "" {
+		fmt.Fprintf(logView, "[red]No system prompt configured for session %d[white]\n", sessionID)
+		return
+	}
+
+	if session.Status == "completed" {
+		fmt.Fprintf(logView, "[yellow]Warning: session %d is completed[white]\n", sessionID)
+	}
+
+	if err := sessionMgr.AddMessage(sessionID, ChatMessage{Role: RoleSystem, Content: rendered}); err != nil {
+		fmt.Fprintf(logView, "[red]Failed to inject message: %s[white]\n", err)
+		return
+	}
+
+	if err := sessionMgr.UpdateResponseID(sessionID, nil); err != nil {
+		fmt.Fprintf(logView, "[red]Failed to clear response_id: %s[white]\n", err)
+		return
+	}
+
+	fmt.Fprintf(logView, "[green]Injected system prompt into session %d (%d chars)[white]\n", sessionID, len(rendered))
+}
+
+func tuiCmdSystemMsg(parts []string, text string) {
+	if len(parts) < 3 {
+		fmt.Fprintf(logView, "[yellow]Usage: /systemmsg <session-id> <template-text>[white]\n")
+		return
+	}
+	sessionID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		fmt.Fprintf(logView, "[red]Invalid session id: %s[white]\n", parts[1])
+		return
+	}
+
+	tmplText := strings.TrimSpace(strings.TrimPrefix(text, parts[0]+" "+parts[1]+" "))
+	if tmplText == "" {
+		fmt.Fprintf(logView, "[red]Empty template text[white]\n")
+		return
+	}
+
+	session, err := getDBSessionByID(sessionID)
+	if err != nil || session == nil {
+		fmt.Fprintf(logView, "[red]Session %d not found[white]\n", sessionID)
+		return
+	}
+
+	bot, ok := getBot(session.Network)
+	if !ok {
+		fmt.Fprintf(logView, "[red]No bot connected for network %s[white]\n", session.Network)
+		return
+	}
+
+	if !botIsInChannel(bot, session.Channel) {
+		fmt.Fprintf(logView, "[red]Bot is not joined to %s on %s[white]\n", session.Channel, session.Network)
+		return
+	}
+
+	if session.UserID == nil {
+		fmt.Fprintf(logView, "[red]Session %d has no associated user[white]\n", sessionID)
+		return
+	}
+	u, err := getUserByID(*session.UserID)
+	if err != nil || u == nil {
+		fmt.Fprintf(logView, "[red]User for session %d not found[white]\n", sessionID)
+		return
+	}
+	userNick := displayNick(u)
+
+	tmpl, err := template.New("systemmsg").Parse(tmplText)
+	if err != nil {
+		fmt.Fprintf(logView, "[red]Template parse error: %s[white]\n", err)
+		return
+	}
+
+	data := buildSystemPromptData(bot.Network, bot.Client, session.Channel, userNick)
+	var buf strings.Builder
+	if err := tmpl.Execute(&buf, data); err != nil {
+		fmt.Fprintf(logView, "[red]Template execute error: %s[white]\n", err)
+		return
+	}
+	rendered := buf.String()
+
+	if session.Status == "completed" {
+		fmt.Fprintf(logView, "[yellow]Warning: session %d is completed[white]\n", sessionID)
+	}
+
+	if err := sessionMgr.AddMessage(sessionID, ChatMessage{Role: RoleSystem, Content: rendered}); err != nil {
+		fmt.Fprintf(logView, "[red]Failed to inject message: %s[white]\n", err)
+		return
+	}
+
+	if err := sessionMgr.UpdateResponseID(sessionID, nil); err != nil {
+		fmt.Fprintf(logView, "[red]Failed to clear response_id: %s[white]\n", err)
+		return
+	}
+
+	fmt.Fprintf(logView, "[green]Injected system message into session %d (%d chars)[white]\n", sessionID, len(rendered))
 }

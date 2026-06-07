@@ -1478,6 +1478,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 		runner.convID = *session.ConvID
 	}
 
+	apiLogger.RestoreSession(session.ID, network.Name, channel, userID)
 	runner.syncAPISessionID()
 	runner.syncConvID()
 

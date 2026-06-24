@@ -21,7 +21,7 @@ import (
 	"golang.org/x/image/draw"
 )
 
-const maxImageSize = 5 * 1024 * 1024 // 5MB
+const maxImageSize = 10 * 1024 * 1024 // 5MB
 const defaultImageFormat = "jpg"
 const defaultImageQuality = 75
 const defaultMaxImageWidth = 1024

@@ -106,6 +106,7 @@ type ChannelConfig struct {
 	Pastebin             bool   `toml:"pastebin"`
 	MaxLines             int    `toml:"max_lines"`
 	PastebinPreviewLines *int   `toml:"pastebin_preview_lines"`
+	AutoRejoin           *bool  `toml:"auto_rejoin"`
 }
 
 func (c ChannelConfig) GetMaxLines() int {
@@ -159,9 +160,11 @@ type Network struct {
 	ReconnectDelay   *time.Duration `toml:"reconnect_delay"`
 	Trigger          string
 	Quitmsg          string
-	SASL             *SASLConfig `toml:"sasl"`
-	DisabledCommands []string    `toml:"disabled_commands"`
-	Casemapping      string      `toml:"-"`
+	SASL             *SASLConfig    `toml:"sasl"`
+	DisabledCommands []string       `toml:"disabled_commands"`
+	AutoRejoin       *bool          `toml:"auto_rejoin"`
+	AutoRejoinDelay  *time.Duration `toml:"auto_rejoin_delay"`
+	Casemapping      string         `toml:"-"`
 }
 
 func (n *Network) GetChannelConfig(channel string) ChannelConfig {
@@ -189,6 +192,28 @@ func (n *Network) IsEnabled() bool {
 		return true
 	}
 	return *n.Enabled
+}
+
+// shouldAutoRejoin reports whether the bot should automatically rejoin a
+// channel after being kicked. A per-channel setting (ChannelConfig.AutoRejoin)
+// takes precedence, then the network-level setting, then the default (true).
+func shouldAutoRejoin(net *Network, chCfg ChannelConfig) bool {
+	if chCfg.AutoRejoin != nil {
+		return *chCfg.AutoRejoin
+	}
+	if net.AutoRejoin != nil {
+		return *net.AutoRejoin
+	}
+	return true
+}
+
+// autoRejoinDelay returns the delay before auto-rejoining after a kick, using
+// the network-level setting and defaulting to 3s when unset.
+func autoRejoinDelay(net *Network) time.Duration {
+	if net.AutoRejoinDelay != nil {
+		return *net.AutoRejoinDelay
+	}
+	return 3 * time.Second
 }
 
 type Server struct {

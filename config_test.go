@@ -2225,3 +2225,73 @@ channels = ["#test"]`, map[string]string{
 		})
 	}
 }
+
+func TestShouldAutoRejoin(t *testing.T) {
+	tests := []struct {
+		name string
+		net  *bool
+		ch   *bool
+		want bool
+	}{
+		{"default true when both unset", nil, nil, true},
+		{"network true", boolPtr(true), nil, true},
+		{"network false", boolPtr(false), nil, false},
+		{"channel overrides network to true", boolPtr(false), boolPtr(true), true},
+		{"channel overrides network to false", boolPtr(true), boolPtr(false), false},
+		{"channel set when network nil", nil, boolPtr(false), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			net := &Network{AutoRejoin: tt.net}
+			ch := ChannelConfig{AutoRejoin: tt.ch}
+			assert.Equal(t, tt.want, shouldAutoRejoin(net, ch))
+		})
+	}
+}
+
+func TestAutoRejoinDelay(t *testing.T) {
+	t.Run("defaults to 3s when unset", func(t *testing.T) {
+		assert.Equal(t, 3*time.Second, autoRejoinDelay(&Network{}))
+	})
+	t.Run("uses configured delay", func(t *testing.T) {
+		d := 10 * time.Second
+		assert.Equal(t, 10*time.Second, autoRejoinDelay(&Network{AutoRejoinDelay: &d}))
+	})
+}
+
+func TestLoadConfigDirNetworkAutoRejoin(t *testing.T) {
+	t.Run("nil when unset (default-on via helper)", func(t *testing.T) {
+		mainTOML := `
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+		dir := createTestConfigDir(t, mainTOML, nil)
+		defer os.RemoveAll(dir)
+		net := loadConfigDirOrDie(dir).Networks["testnet"]
+		assert.Nil(t, net.AutoRejoin)
+		assert.Nil(t, net.AutoRejoinDelay)
+	})
+	t.Run("parses network + channel settings", func(t *testing.T) {
+		mainTOML := `
+[networks.testnet]
+nick = "bot"
+auto_rejoin = false
+auto_rejoin_delay = "10s"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+[networks.testnet.channels."#x"]
+auto_rejoin = true
+`
+		dir := createTestConfigDir(t, mainTOML, nil)
+		defer os.RemoveAll(dir)
+		net := loadConfigDirOrDie(dir).Networks["testnet"]
+		require.NotNil(t, net.AutoRejoin)
+		assert.False(t, *net.AutoRejoin)
+		require.NotNil(t, net.AutoRejoinDelay)
+		assert.Equal(t, 10*time.Second, *net.AutoRejoinDelay)
+		require.NotNil(t, net.Channels["#x"].AutoRejoin)
+		assert.True(t, *net.Channels["#x"].AutoRejoin)
+	})
+}

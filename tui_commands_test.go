@@ -272,3 +272,31 @@ func TestTuiCmdSystemMsg_PlainTextNoTemplate(t *testing.T) {
 	require.Len(t, msgs, 1)
 	assert.Equal(t, "Be more helpful", msgs[0].Content)
 }
+
+func TestTuiCmdJoin(t *testing.T) {
+	t.Run("creates config entry when channel missing", func(t *testing.T) {
+		setupTUITest(t)
+		tuiCmdJoin([]string{"/join", "testnet", "#newchan"}, "/join testnet #newchan")
+		assert.Contains(t, getLogViewText(), "Joined #newchan on testnet")
+		bot := bots["testnet"]
+		_, ok := bot.Network.Channels["#newchan"]
+		assert.True(t, ok, "config entry should be created for new channel")
+	})
+
+	t.Run("preserves existing channel key (no clobber)", func(t *testing.T) {
+		setupTUITest(t)
+		bots["testnet"].Network.Channels = map[string]ChannelConfig{"#secret": {Key: "passw0rd"}}
+		tuiCmdJoin([]string{"/join", "testnet", "#secret"}, "/join testnet #secret")
+		assert.Contains(t, getLogViewText(), "Joined #secret on testnet")
+		assert.Equal(t, "passw0rd", bots["testnet"].Network.Channels["#secret"].Key,
+			"existing key must not be clobbered")
+	})
+
+	t.Run("does not report already in (joins regardless)", func(t *testing.T) {
+		setupTUITest(t)
+		bots["testnet"].Network.Channels = map[string]ChannelConfig{"#x": {}}
+		tuiCmdJoin([]string{"/join", "testnet", "#x"}, "/join testnet #x")
+		assert.NotContains(t, getLogViewText(), "Already in")
+		assert.Contains(t, getLogViewText(), "Joined #x on testnet")
+	})
+}

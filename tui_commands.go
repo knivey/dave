@@ -114,19 +114,26 @@ func tuiCmdJoin(parts []string, _ string) {
 		fmt.Fprintf(logView, "[red]Unknown network: %s[white]\n", network)
 		return
 	}
+	// Send the IRC JOIN regardless of cached/config state — girc's joined-state
+	// can lag or be wrong, and joining while already joined is harmless. Use the
+	// configured key (if any) so +k channels work.
 	bot.mu.Lock()
+	key := bot.Network.GetChannelConfig(channel).Key
 	if bot.Network.Channels == nil {
 		bot.Network.Channels = make(map[string]ChannelConfig)
 	}
-	_, alreadyJoined := bot.Network.Channels[channel]
-	if alreadyJoined {
-		bot.mu.Unlock()
-		fmt.Fprintf(logView, "[yellow]Already in %s on %s[white]\n", channel, network)
-		return
+	// Create a config entry only if one doesn't exist, so we never clobber a
+	// configured key or other channel settings.
+	if _, exists := bot.Network.Channels[channel]; !exists {
+		bot.Network.Channels[channel] = ChannelConfig{}
 	}
-	bot.Network.Channels[channel] = ChannelConfig{}
 	bot.mu.Unlock()
-	bot.Client.Cmd.Join(channel)
+
+	if key != "" {
+		bot.Client.Cmd.JoinKey(channel, key)
+	} else {
+		bot.Client.Cmd.Join(channel)
+	}
 	fmt.Fprintf(logView, "[green]Joined %s on %s[white]\n", channel, network)
 }
 

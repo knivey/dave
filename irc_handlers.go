@@ -10,6 +10,51 @@ import (
 	logxi "github.com/mgutz/logxi/v1"
 )
 
+// rejoinChannel sends the IRC JOIN for a channel, guarded against a nil or
+// disconnected client so a late timer callback (after shutdown or during a
+// netsplit) is a safe no-op. Injectable for tests.
+var rejoinChannel = func(bot *Bot, channel, key string) {
+	if bot.Client == nil || !bot.Client.IsConnected() {
+		return
+	}
+	if key != "" {
+		bot.Client.Cmd.JoinKey(channel, key)
+	} else {
+		bot.Client.Cmd.Join(channel)
+	}
+}
+
+// scheduleRejoin defers f by delay. Defaults to time.AfterFunc; injected in
+// tests so the callback runs synchronously.
+var scheduleRejoin = func(delay time.Duration, f func()) {
+	time.AfterFunc(delay, f)
+}
+
+// handleSelfKick is invoked when the bot itself is kicked from a channel. It
+// NEVER mutates bot.Network.Channels: the channel config (key, settings) must
+// survive so a later /join or a reconnect (RPL_WELCOME rejoin loop) still has
+// it. The config read happens under bot.mu because /join and /part mutate the
+// same Channels map from other goroutines (a concurrent map read+write would
+// panic). When auto-rejoin is enabled for the channel, it schedules a delayed
+// rejoin using the configured key if any.
+func handleSelfKick(bot *Bot, log logxi.Logger, networkName, channel string) {
+	bot.mu.Lock()
+	chCfg := bot.Network.GetChannelConfig(channel)
+	enabled := shouldAutoRejoin(&bot.Network, chCfg)
+	delay := autoRejoinDelay(&bot.Network)
+	key := chCfg.Key
+	bot.mu.Unlock()
+
+	if !enabled {
+		log.Debug("auto_rejoin disabled for kicked channel", "channel", channel, "network", networkName)
+		return
+	}
+	log.Info("bot kicked; scheduling auto-rejoin", "channel", channel, "network", networkName, "delay", delay)
+	scheduleRejoin(delay, func() {
+		rejoinChannel(bot, channel, key)
+	})
+}
+
 func registerIRCHandlers(bot *Bot, client *girc.Client, network Network, log logxi.Logger) {
 	client.Handlers.Add(girc.ALL_EVENTS, func(client *girc.Client, event girc.Event) {
 		if str, ok := event.Pretty(); ok {
@@ -109,6 +154,7 @@ func registerIRCHandlers(bot *Bot, client *girc.Client, network Network, log log
 		}
 		kickedNick := event.Params[1]
 		if kickedNick == client.GetNick() {
+			handleSelfKick(bot, log, network.Name, event.Params[0])
 			return
 		}
 		if u := client.LookupUser(kickedNick); u == nil || len(u.ChannelList) == 0 {

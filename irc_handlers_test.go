@@ -41,6 +41,22 @@ func TestHandleSelfKick(t *testing.T) {
 		assert.Equal(t, "sekret", bot.Network.Channels["#Foo"].Key, "config must be untouched")
 	})
 
+	t.Run("uses configured auto_rejoin_delay", func(t *testing.T) {
+		customDelay := 7 * time.Second
+		bot := &Bot{Network: Network{
+			Name:            "testnet",
+			AutoRejoinDelay: &customDelay,
+			Channels:        map[string]ChannelConfig{"#foo": {Key: "k"}},
+		}}
+		var gotDelay time.Duration
+		scheduleRejoin = func(d time.Duration, f func()) { gotDelay = d; f() }
+		rejoinChannel = func(*Bot, string, string) {}
+
+		handleSelfKick(bot, newTestLogger(), "testnet", "#foo")
+
+		assert.Equal(t, customDelay, gotDelay, "should use the configured delay, not the default")
+	})
+
 	t.Run("disabled by network does not schedule", func(t *testing.T) {
 		bot := &Bot{Network: Network{
 			Name:       "testnet",

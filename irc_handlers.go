@@ -13,6 +13,8 @@ import (
 // rejoinChannel sends the IRC JOIN for a channel, guarded against a nil or
 // disconnected client so a late timer callback (after shutdown or during a
 // netsplit) is a safe no-op. Injectable for tests.
+//
+// Package-level test seam: NOT safe under t.Parallel() (swapped globally).
 var rejoinChannel = func(bot *Bot, channel, key string) {
 	if bot.Client == nil || !bot.Client.IsConnected() {
 		return
@@ -26,6 +28,8 @@ var rejoinChannel = func(bot *Bot, channel, key string) {
 
 // scheduleRejoin defers f by delay. Defaults to time.AfterFunc; injected in
 // tests so the callback runs synchronously.
+//
+// Package-level test seam: NOT safe under t.Parallel() (swapped globally).
 var scheduleRejoin = func(delay time.Duration, f func()) {
 	time.AfterFunc(delay, f)
 }

@@ -26,14 +26,13 @@ const (
 )
 
 type ChatMessage struct {
-	Role               string
-	Content            string
-	ReasoningContent   string
-	EncryptedReasoning string
-	MultiContent       []MessagePart
-	ToolCalls          []ToolCall
-	ToolCallID         string
-	Name               string
+	Role             string
+	Content          string
+	ReasoningContent string
+	MultiContent     []MessagePart
+	ToolCalls        []ToolCall
+	ToolCallID       string
+	Name             string
 }
 
 func toolResultMsg(callID, content string) ChatMessage {
@@ -153,9 +152,6 @@ func summarizeMessages(messages []ChatMessage) string {
 		}
 		if m.ReasoningContent != "" {
 			s += " [reasoning]"
-		}
-		if m.EncryptedReasoning != "" {
-			s += " [enc_reasoning]"
 		}
 		return s
 	}

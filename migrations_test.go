@@ -475,3 +475,42 @@ func TestMigration7_ResolvesDuplicates(t *testing.T) {
 	assert.True(t, theDB.Migrator().HasIndex(&User{}, "idx_users_nick_active"),
 		"partial unique index should be recreated after resolution")
 }
+
+// TestMigration9_DropMessagesEncryptedReasoning stages a messages table with
+// the legacy encrypted_reasoning column, runs the migration, and verifies the
+// column is gone and that messages can still be inserted afterwards.
+func TestMigration9_DropMessagesEncryptedReasoning(t *testing.T) {
+	_, cleanup := setupMigrationDB(t)
+	defer cleanup()
+
+	// setupMigrationDB already ran migration #9, so re-add the column to
+	// simulate a pre-migration database.
+	require.NoError(t, theDB.Exec("ALTER TABLE messages ADD COLUMN encrypted_reasoning TEXT").Error)
+	require.True(t, theDB.Migrator().HasColumn(&Message{}, "encrypted_reasoning"),
+		"encrypted_reasoning column should exist after manual add")
+
+	require.NoError(t, dropMessagesEncryptedReasoning(theDB))
+
+	assert.False(t, theDB.Migrator().HasColumn(&Message{}, "encrypted_reasoning"),
+		"encrypted_reasoning column should be gone after migration")
+
+	// Inserting a message must still work without the column.
+	userID := ensureTestUser(t, "testnet", "user")
+	sid, err := sessionMgr.CreateSession("testnet", "#test", userID, "cmd", "svc", "model")
+	require.NoError(t, err)
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "hi"}))
+}
+
+func TestMigration9_Idempotent(t *testing.T) {
+	_, cleanup := setupMigrationDB(t)
+	defer cleanup()
+
+	require.False(t, theDB.Migrator().HasColumn(&Message{}, "encrypted_reasoning"),
+		"fresh DB should not have encrypted_reasoning column")
+
+	err := dropMessagesEncryptedReasoning(theDB)
+	assert.NoError(t, err, "should succeed on DB without encrypted_reasoning column")
+
+	err = dropMessagesEncryptedReasoning(theDB)
+	assert.NoError(t, err, "should be idempotent")
+}

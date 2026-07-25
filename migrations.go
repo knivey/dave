@@ -42,6 +42,7 @@ var migrations = []migration{
 	{ID: 6, Name: "add_users_last_nick", Up: addUsersLastNick},
 	{ID: 7, Name: "convert_sentinels_to_released_column", Up: convertSentinelsToReleasedColumn},
 	{ID: 8, Name: "add_sessions_cloned_from", Up: addSessionsClonedFrom},
+	{ID: 9, Name: "drop_messages_encrypted_reasoning", Up: dropMessagesEncryptedReasoning},
 }
 
 func runMigrations(db *gorm.DB, dbPath string) error {
@@ -297,6 +298,26 @@ func dropSessionsNick(db *gorm.DB) error {
 		return db.Exec("ALTER TABLE sessions DROP COLUMN IF EXISTS nick").Error
 	default:
 		return db.Migrator().DropColumn(&Session{}, "nick")
+	}
+}
+
+// dropMessagesEncryptedReasoning drops the messages.encrypted_reasoning column.
+// Encrypted reasoning content was only useful while a previous_response_id chain
+// was intact; it became stale (and triggered API errors) once the chain was
+// broken by compaction or expiry, so the whole feature was removed. GORM's
+// AutoMigrate won't drop columns, so we drop it explicitly here. Idempotent.
+func dropMessagesEncryptedReasoning(db *gorm.DB) error {
+	if !db.Migrator().HasColumn(&Message{}, "encrypted_reasoning") {
+		return nil
+	}
+
+	switch db.Dialector.Name() {
+	case "sqlite":
+		return db.Exec("ALTER TABLE messages DROP COLUMN encrypted_reasoning").Error
+	case "postgres":
+		return db.Exec("ALTER TABLE messages DROP COLUMN IF EXISTS encrypted_reasoning").Error
+	default:
+		return db.Migrator().DropColumn(&Message{}, "encrypted_reasoning")
 	}
 }
 

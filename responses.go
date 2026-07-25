@@ -59,13 +59,6 @@ func messagesToResponseInputItems(messages []ChatMessage) []responses.ResponseIn
 			}
 
 		case RoleAssistant:
-			if msg.EncryptedReasoning != "" {
-				input = append(input, responses.ResponseInputItemUnionParam{
-					OfReasoning: &responses.ResponseReasoningItemParam{
-						EncryptedContent: openai.Opt(msg.EncryptedReasoning),
-					},
-				})
-			}
 			if len(msg.ToolCalls) > 0 {
 				if msg.Content != "" {
 					input = append(input, responses.ResponseInputItemUnionParam{
@@ -135,7 +128,7 @@ func toolsToResponseToolParams(tools []Tool) []responses.ToolUnionParam {
 	return result
 }
 
-func parseSDKResponseOutput(resp responses.Response) (text string, reasoning string, encryptedReasoning string, toolCalls []ToolCall) {
+func parseSDKResponseOutput(resp responses.Response) (text string, reasoning string, toolCalls []ToolCall) {
 	for _, item := range resp.Output {
 		switch item.Type {
 		case "message":
@@ -150,9 +143,6 @@ func parseSDKResponseOutput(resp responses.Response) (text string, reasoning str
 			for _, s := range item.Summary {
 				reasoning += s.Text
 			}
-			if item.EncryptedContent != "" {
-				encryptedReasoning = item.EncryptedContent
-			}
 		case "function_call":
 			toolCalls = append(toolCalls, ToolCall{
 				ID:   item.CallID,
@@ -164,7 +154,7 @@ func parseSDKResponseOutput(resp responses.Response) (text string, reasoning str
 			})
 		}
 	}
-	return text, reasoning, encryptedReasoning, toolCalls
+	return text, reasoning, toolCalls
 }
 
 func buildResponseParams(cfg AIConfig, input []responses.ResponseInputItemUnionParam, tools []responses.ToolUnionParam, previousResponseID string, user string) responses.ResponseNewParams {
@@ -173,11 +163,6 @@ func buildResponseParams(cfg AIConfig, input []responses.ResponseInputItemUnionP
 		Input: responses.ResponseNewParamsInputUnion{
 			OfInputItemList: input,
 		},
-	}
-	if cfg.EncryptedReasoning {
-		params.Include = []responses.ResponseIncludable{
-			responses.ResponseIncludableReasoningEncryptedContent,
-		}
 	}
 	if user != "" {
 		params.User = openai.String(user)

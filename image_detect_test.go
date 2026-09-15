@@ -2,8 +2,14 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
+	"hash/crc32"
 	"image"
+	"image/color"
+	"image/color/palette"
+	"image/gif"
 	"image/jpeg"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -11,6 +17,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/image/bmp"
 )
 
 func TestFormatSize(t *testing.T) {
@@ -745,4 +752,286 @@ func TestBuildImageMessageNonImageURLPreserved(t *testing.T) {
 		assert.Contains(t, textPart, "see", "surrounding text 'see' should be preserved")
 		assert.Contains(t, textPart, "now", "surrounding text 'now' should be preserved")
 	})
+}
+
+// patchPNGDimensions rewrites the IHDR width/height fields of a PNG and
+// recomputes the chunk CRC so the header still parses. Width and height are
+// big-endian uint32 at byte offsets 16/20; the CRC covers bytes 12..28 and is
+// stored big-endian at 29..32.
+func patchPNGDimensions(t *testing.T, pngData []byte, width, height uint32) []byte {
+	t.Helper()
+	out := make([]byte, len(pngData))
+	copy(out, pngData)
+	require.GreaterOrEqual(t, len(out), 33, "PNG must contain a full IHDR chunk")
+	require.Equal(t, "IHDR", string(out[12:16]), "first chunk must be IHDR")
+	binary.BigEndian.PutUint32(out[16:20], width)
+	binary.BigEndian.PutUint32(out[20:24], height)
+	binary.BigEndian.PutUint32(out[29:33], crc32.ChecksumIEEE(out[12:29]))
+	return out
+}
+
+func TestConvertImageRejectsPixelBombPNG(t *testing.T) {
+	var buf bytes.Buffer
+	base := image.NewRGBA(image.Rect(0, 0, 4, 4))
+	require.NoError(t, png.Encode(&buf, base), "encode base png")
+	bomb := patchPNGDimensions(t, buf.Bytes(), 60000, 60000)
+
+	// Sanity: the patched header must still parse and report the lie.
+	cfg, err := png.DecodeConfig(bytes.NewReader(bomb))
+	require.NoError(t, err, "patched IHDR must parse")
+	require.Equal(t, 60000, cfg.Width, "claimed width")
+	require.Equal(t, 60000, cfg.Height, "claimed height")
+
+	start := time.Now()
+	data, _, err := convertImage(bomb, "image/png", "jpg", 75, 1024, 1024)
+	elapsed := time.Since(start)
+	t.Logf("pixel bomb skip took %s", elapsed)
+
+	require.Error(t, err, "convertImage must reject the pixel bomb")
+	require.ErrorIs(t, err, errImageTooManyPixels, "error must be the pixel-cap sentinel")
+	assert.Empty(t, data, "no output data on skip")
+	assert.Less(t, elapsed, time.Second, "skip path must return without decoding pixel data")
+}
+
+func createMultiFrameGIF(t *testing.T, frames, width, height int) []byte {
+	t.Helper()
+	imgs := make([]*image.Paletted, frames)
+	for i := range imgs {
+		p := image.NewPaletted(image.Rect(0, 0, width, height), palette.Plan9)
+		c1 := uint8(i % 2)
+		c2 := uint8(1 - i%2)
+		for y := 0; y < height; y++ {
+			for x := 0; x < width; x++ {
+				if (x/8+y/8)%2 == 0 {
+					p.SetColorIndex(x, y, c1)
+				} else {
+					p.SetColorIndex(x, y, c2)
+				}
+			}
+		}
+		imgs[i] = p
+	}
+	var buf bytes.Buffer
+	g := &gif.GIF{
+		Image:  imgs,
+		Delay:  make([]int, frames),
+		Config: image.Config{ColorModel: color.Palette(palette.Plan9), Width: width, Height: height},
+	}
+	require.NoError(t, gif.EncodeAll(&buf, g), "encode multi-frame gif")
+	return buf.Bytes()
+}
+
+func TestConvertImageRejectsMultiFrameGIF(t *testing.T) {
+	// 10 frames of 1600x1600 = 25.6M total pixels, each frame under the cap.
+	anim := createMultiFrameGIF(t, 10, 1600, 1600)
+
+	start := time.Now()
+	data, _, err := convertImage(anim, "image/gif", "jpg", 75, 1024, 1024)
+	elapsed := time.Since(start)
+	t.Logf("animated gif skip took %s", elapsed)
+
+	require.Error(t, err, "convertImage must reject the frame-multiplied pixel bomb")
+	require.ErrorIs(t, err, errImageTooManyPixels, "error must be the pixel-cap sentinel")
+	assert.Empty(t, data, "no output data on skip")
+	assert.Less(t, elapsed, 2*time.Second, "skip path must return without decoding frames")
+}
+
+func TestConvertImageAllowsSingleFrameGIFUnderCap(t *testing.T) {
+	anim := createMultiFrameGIF(t, 1, 1600, 1600)
+
+	data, dataURI, err := convertImage(anim, "image/gif", "jpg", 75, 1024, 1024)
+	require.NoError(t, err, "single-frame GIF under the cap must convert")
+	assert.Contains(t, dataURI, "data:image/jpeg;base64,", "dataURI")
+	assert.NotEmpty(t, data, "encoded data")
+}
+
+func TestConvertImageAllowsLargeImageUnderCap(t *testing.T) {
+	img := image.NewGray(image.Rect(0, 0, 4000, 4000))
+	for y := 0; y < 4000; y++ {
+		for x := 0; x < 4000; x++ {
+			img.Pix[y*4000+x] = uint8((x + y) % 256)
+		}
+	}
+	var buf bytes.Buffer
+	require.NoError(t, png.Encode(&buf, img), "encode 4000x4000 png")
+
+	data, dataURI, err := convertImage(buf.Bytes(), "image/png", "jpg", 75, 1024, 1024)
+	require.NoError(t, err, "16MP image is under the 25MP cap and must convert")
+
+	assert.Contains(t, dataURI, "data:image/jpeg;base64,", "dataURI")
+	decoded, err := jpeg.Decode(bytes.NewReader(data))
+	require.NoError(t, err, "result must be a valid jpeg")
+	assert.Equal(t, 1024, decoded.Bounds().Dx(), "resized width")
+	assert.Equal(t, 1024, decoded.Bounds().Dy(), "resized height")
+}
+
+func TestCountGIFFrames(t *testing.T) {
+	tests := []struct {
+		name   string
+		frames int
+		width  int
+		height int
+		want   int
+	}{
+		{name: "single frame", frames: 1, width: 8, height: 8, want: 1},
+		{name: "three frames", frames: 3, width: 8, height: 8, want: 3},
+		{name: "ten frames", frames: 10, width: 4, height: 4, want: 10},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := createMultiFrameGIF(t, tt.frames, tt.width, tt.height)
+			got, err := countGIFFrames(bytes.NewReader(data))
+			require.NoError(t, err, "countGIFFrames() error")
+			assert.Equal(t, tt.want, got, "countGIFFrames()")
+		})
+	}
+}
+
+func TestBuildImageMessageSkipsPixelBombNonFatal(t *testing.T) {
+	origClient := imageHTTPClient
+	imageHTTPClient = &http.Client{Timeout: 30 * time.Second}
+	defer func() { imageHTTPClient = origClient }()
+
+	var buf bytes.Buffer
+	base := image.NewRGBA(image.Rect(0, 0, 4, 4))
+	require.NoError(t, png.Encode(&buf, base), "encode base png")
+	bomb := patchPNGDimensions(t, buf.Bytes(), 60000, 60000)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Write(bomb)
+	}))
+	defer server.Close()
+
+	text := "see " + server.URL + "/bomb.png now"
+	msg, err := buildImageMessage(text, []string{server.URL + "/bomb.png"}, 5, "jpg", 75, 1024, 1024)
+	require.NoError(t, err, "pixel bomb skip must be non-fatal")
+
+	var imageCount int
+	var textPart string
+	for _, part := range msg.MultiContent {
+		if part.Type == PartTypeImageURL {
+			imageCount++
+		}
+		if part.Type == PartTypeText {
+			textPart = part.Text
+		}
+	}
+	assert.Equal(t, 0, imageCount, "bomb must not become an image part")
+	assert.Contains(t, textPart, server.URL, "skipped URL stays in text")
+	assert.Contains(t, textPart, "see", "surrounding text preserved")
+	assert.Contains(t, textPart, "now", "surrounding text preserved")
+}
+
+func TestDownloadImageChunkedBodyBounded(t *testing.T) {
+	origClient := imageHTTPClient
+	imageHTTPClient = &http.Client{Timeout: 5 * time.Second}
+	defer func() { imageHTTPClient = origClient }()
+
+	chunk := make([]byte, 1024*1024)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		// No Content-Length set: Go uses chunked transfer encoding.
+		for {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	start := time.Now()
+	_, _, err := downloadImage(server.URL)
+	elapsed := time.Since(start)
+	t.Logf("chunked oversize download rejected in %s", elapsed)
+
+	require.Error(t, err, "oversized chunked body must be rejected")
+	assert.Contains(t, err.Error(), "too large", "rejection must come from the size cap, not the timeout: %v", err)
+	assert.Less(t, elapsed, 4*time.Second, "bounded read must not run into the client timeout")
+}
+
+// craftBMPHeader builds a 62-byte 1bpp BMP: file header (14) +
+// BITMAPINFOHEADER (40) + default 2-entry palette (8), with NO pixel data.
+// bmp.DecodeConfig parses it and reports the claimed dimensions; bmp.Decode
+// would allocate the full image from those dimensions before hitting EOF.
+func craftBMPHeader(width, height int) []byte {
+	offset := 14 + 40 + 2*4 // file header + DIB + palette
+	buf := make([]byte, offset)
+	copy(buf[0:2], "BM")
+	binary.LittleEndian.PutUint32(buf[2:6], uint32(offset)) // file size (not validated)
+	binary.LittleEndian.PutUint32(buf[10:14], uint32(offset))
+	binary.LittleEndian.PutUint32(buf[14:18], 40) // BITMAPINFOHEADER
+	binary.LittleEndian.PutUint32(buf[18:22], uint32(width))
+	binary.LittleEndian.PutUint32(buf[22:26], uint32(height))
+	binary.LittleEndian.PutUint16(buf[26:28], 1) // planes
+	binary.LittleEndian.PutUint16(buf[28:30], 1) // bits per pixel
+	// compression [30:34] = 0 (BI_RGB), colorUsed [46:50] = 0 (defaults to
+	// 2 for 1bpp), palette entries left as zero (black). All other fields zero.
+	return buf
+}
+
+func TestConvertImageRejectsPixelBombBMP(t *testing.T) {
+	bomb := craftBMPHeader(6000, 6000)
+
+	// Sanity: the crafted header must parse and report the claim.
+	cfg, err := bmp.DecodeConfig(bytes.NewReader(bomb))
+	require.NoError(t, err, "crafted BMP header must parse")
+	require.Equal(t, 6000, cfg.Width, "claimed width")
+	require.Equal(t, 6000, cfg.Height, "claimed height")
+
+	start := time.Now()
+	data, _, err := convertImage(bomb, "image/bmp", "jpg", 75, 1024, 1024)
+	elapsed := time.Since(start)
+	t.Logf("bmp bomb skip took %s", elapsed)
+
+	require.Error(t, err, "convertImage must reject the BMP pixel bomb")
+	require.ErrorIs(t, err, errImageTooManyPixels, "error must be the pixel-cap sentinel")
+	assert.Empty(t, data, "no output data on skip")
+	assert.Less(t, elapsed, time.Second, "skip path must return without decoding pixel data")
+}
+
+func TestCountGIFFramesMalformed(t *testing.T) {
+	// "GIF89a" + logical screen descriptor (w=1, h=1, packed=0: no GCT).
+	validPrefix := []byte{'G', 'I', 'F', '8', '9', 'a', 1, 0, 1, 0, 0, 0, 0}
+
+	tests := []struct {
+		name  string
+		input []byte
+	}{
+		{
+			name:  "bad signature",
+			input: append([]byte("GIF88a"), validPrefix[6:]...),
+		},
+		{
+			name:  "truncated after logical screen descriptor",
+			input: validPrefix,
+		},
+		{
+			name:  "invalid block introducer",
+			input: append(append([]byte{}, validPrefix...), 0xFF),
+		},
+		{
+			name:  "truncated inside image descriptor",
+			input: append(append([]byte{}, validPrefix...), 0x2C, 0x00, 0x00, 0x00),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := countGIFFrames(bytes.NewReader(tt.input))
+			require.Error(t, err, "malformed GIF must produce an error, not a frame count")
+		})
+	}
+}
+
+func TestHeaderDimensionsClampsMalformedGIFFrames(t *testing.T) {
+	// Valid header (so gif.DecodeConfig succeeds) followed by an invalid
+	// block introducer (so the frame walker fails): the frame count must
+	// clamp to 1, not zero — a zero multiplier would bypass the cap.
+	input := append([]byte{'G', 'I', 'F', '8', '9', 'a', 1, 0, 1, 0, 0, 0, 0}, 0xFF)
+
+	w, h, frames, ok := headerDimensions(input, "image/gif")
+	require.True(t, ok, "valid GIF header must still pre-check")
+	assert.Equal(t, 1, w, "width")
+	assert.Equal(t, 1, h, "height")
+	assert.Equal(t, 1, frames, "frame count must clamp to at least 1")
 }

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"image"
 	"image/gif"
@@ -21,11 +23,193 @@ import (
 	"golang.org/x/image/draw"
 )
 
-const maxImageSize = 10 * 1024 * 1024 // 5MB
+const maxImageSize = 10 * 1024 * 1024 // 10MB
 const defaultImageFormat = "jpg"
 const defaultImageQuality = 75
 const defaultMaxImageWidth = 1024
 const defaultMaxImageHeight = 1024
+
+// maxPixels caps the total pixel count (width * height * frameCount) an image
+// may claim or decode at. Decode and resize cost is linear in megapixels, so
+// this bounds CPU/memory regardless of file size on disk — a few-KB
+// "decompression bomb" whose header claims huge dimensions is rejected from
+// the header alone, before any pixel data is touched.
+const maxPixels = 25_000_000
+
+// errImageTooManyPixels is returned by convertImage when an image exceeds
+// maxPixels. Callers treat it as a graceful skip (info-level log), not a hard
+// error.
+var errImageTooManyPixels = errors.New("image exceeds pixel cap")
+
+// DESIGN NOTE: decompression-bomb defense.
+//
+// Decode and resize cost is linear in TOTAL megapixels (width * height *
+// frameCount), not in file size — a few-KB image whose header claims huge
+// dimensions can stall the resize for minutes or OOM the process. The defense
+// is layered:
+//
+//  1. headerDimensions parses the claimed dimensions from the header only
+//     (image.DecodeConfig / webp.DecodeConfig / bmp.DecodeConfig — no pixel
+//     data touched) and convertImage rejects anything over maxPixels BEFORE
+//     decoding. For GIFs the frame count is included because animated images
+//     decode every frame.
+//  2. GIFs decode only their first frame (gif.Decode, not gif.DecodeAll) —
+//     the pipeline only ever used frame 0 anyway. Animated WebP/PNG are not a
+//     concern here: the decoders in use (chai2010/libwebp still-image decode,
+//     Go png ignoring APNG extension chunks) decode a single frame.
+//  3. After decode, convertImage re-checks the ACTUAL dimensions against the
+//     cap — crafted files can disagree with their headers.
+//
+// The skip is returned as errImageTooManyPixels, which callers treat as a
+// graceful, info-logged skip rather than a hard error.
+//
+// headerDimensions fails open (ok=false) when a header can't be parsed: a
+// broken header will fail the real decode anyway. BMP must NOT fail open
+// despite being byte-capped: x/image/bmp allocates the full image from the
+// header's claimed dimensions before reading any pixel data, and sub-8bpp
+// files decode to 1 byte/pixel on the heap — so a 62-byte header can demand
+// an arbitrarily large allocation regardless of file size.
+func headerDimensions(imgData []byte, mimeType string) (width, height, frames int, ok bool) {
+	switch {
+	case mimeType == "image/gif":
+		cfg, err := gif.DecodeConfig(bytes.NewReader(imgData))
+		if err != nil {
+			return 0, 0, 0, false
+		}
+		n, err := countGIFFrames(bytes.NewReader(imgData))
+		if err != nil || n < 1 {
+			// Malformed block structure: the decode path will surface the
+			// error (or decode frame 1 only). Clamp so the cap math can't be
+			// bypassed with a zero multiplier.
+			n = 1
+		}
+		return cfg.Width, cfg.Height, n, true
+	case mimeType == "image/webp":
+		// chai2010's webp.DecodeConfig does a single r.Read of the header —
+		// safe here because we always hand it a bytes.Reader over the full
+		// body. Do not pass it a streaming reader.
+		cfg, err := webp.DecodeConfig(bytes.NewReader(imgData))
+		if err != nil {
+			return 0, 0, 0, false
+		}
+		return cfg.Width, cfg.Height, 1, true
+	case mimeType == "image/bmp":
+		cfg, err := bmp.DecodeConfig(bytes.NewReader(imgData))
+		if err != nil {
+			return 0, 0, 0, false
+		}
+		return cfg.Width, cfg.Height, 1, true
+	default:
+		// jpeg, png, and any format registered via image.RegisterFormat
+		// (chai2010/webp registers itself, so mixed sniffed types work too).
+		cfg, _, err := image.DecodeConfig(bytes.NewReader(imgData))
+		if err != nil {
+			return 0, 0, 0, false
+		}
+		return cfg.Width, cfg.Height, 1, true
+	}
+}
+
+// exceedsPixelCap reports whether width*height*frames exceeds maxPixels.
+// The per-frame product is compared first so the frame multiplication can
+// never overflow int64 (once w*h <= maxPixels, multiplying by a frame count
+// bounded by the GIF format's 16-bit fields stays well in range).
+func exceedsPixelCap(width, height, frames int) bool {
+	if width <= 0 || height <= 0 {
+		return false
+	}
+	px := int64(width) * int64(height)
+	if px > maxPixels {
+		return true
+	}
+	if frames <= 1 {
+		return false
+	}
+	return px*int64(frames) > maxPixels
+}
+
+// countGIFFrames walks a GIF's block structure and counts image descriptors
+// without decompressing any pixel data. Layout per the GIF89a spec:
+// header (6) + logical screen descriptor (7) + optional global color table,
+// then blocks introduced by 0x21 (extension), 0x2C (image descriptor — one
+// per frame), or 0x3B (trailer).
+func countGIFFrames(r io.Reader) (int, error) {
+	br := bufio.NewReader(r)
+	header := make([]byte, 6)
+	if _, err := io.ReadFull(br, header); err != nil {
+		return 0, fmt.Errorf("reading GIF header: %w", err)
+	}
+	if string(header) != "GIF87a" && string(header) != "GIF89a" {
+		return 0, fmt.Errorf("invalid GIF signature %q", header)
+	}
+
+	lsd := make([]byte, 7)
+	if _, err := io.ReadFull(br, lsd); err != nil {
+		return 0, fmt.Errorf("reading logical screen descriptor: %w", err)
+	}
+	if lsd[4]&0x80 != 0 {
+		gctSize := int64(3) << ((lsd[4] & 0x07) + 1)
+		if _, err := io.CopyN(io.Discard, br, gctSize); err != nil {
+			return 0, fmt.Errorf("skipping global color table: %w", err)
+		}
+	}
+
+	frames := 0
+	intro := make([]byte, 1)
+	for {
+		if _, err := io.ReadFull(br, intro); err != nil {
+			return 0, fmt.Errorf("reading block introducer: %w", err)
+		}
+		switch intro[0] {
+		case 0x3B: // trailer
+			return frames, nil
+		case 0x21: // extension: label byte followed by sub-blocks
+			if _, err := io.ReadFull(br, intro); err != nil {
+				return 0, fmt.Errorf("reading extension label: %w", err)
+			}
+			if err := skipGIFSubBlocks(br); err != nil {
+				return 0, fmt.Errorf("skipping extension sub-blocks: %w", err)
+			}
+		case 0x2C: // image descriptor: one frame
+			frames++
+			desc := make([]byte, 9)
+			if _, err := io.ReadFull(br, desc); err != nil {
+				return 0, fmt.Errorf("reading image descriptor: %w", err)
+			}
+			// desc = left(2) + top(2) + width(2) + height(2) + packed(1)
+			if desc[8]&0x80 != 0 {
+				lctSize := int64(3) << ((desc[8] & 0x07) + 1)
+				if _, err := io.CopyN(io.Discard, br, lctSize); err != nil {
+					return 0, fmt.Errorf("skipping local color table: %w", err)
+				}
+			}
+			// LZW minimum code size byte, then the image's sub-blocks.
+			if _, err := io.ReadFull(br, intro); err != nil {
+				return 0, fmt.Errorf("reading LZW min code size: %w", err)
+			}
+			if err := skipGIFSubBlocks(br); err != nil {
+				return 0, fmt.Errorf("skipping image data sub-blocks: %w", err)
+			}
+		default:
+			return 0, fmt.Errorf("invalid block introducer 0x%02X", intro[0])
+		}
+	}
+}
+
+func skipGIFSubBlocks(br *bufio.Reader) error {
+	size := make([]byte, 1)
+	for {
+		if _, err := io.ReadFull(br, size); err != nil {
+			return err
+		}
+		if size[0] == 0 {
+			return nil
+		}
+		if _, err := io.CopyN(io.Discard, br, int64(size[0])); err != nil {
+			return err
+		}
+	}
+}
 
 func formatSize(b int) string {
 	const unit = 1024
@@ -132,10 +316,11 @@ func downloadImage(url string) ([]byte, string, error) {
 		return nil, "", fmt.Errorf("image too large (%d bytes, max %d)", contentLength, maxImageSize)
 	}
 
-	var bodyReader io.Reader = resp.Body
-	if contentLength > 0 {
-		bodyReader = io.LimitReader(resp.Body, maxImageSize+1)
-	}
+	// Always bound the body read: a missing/lying Content-Length (chunked
+	// transfer) must not turn into an unbounded read that buffers until the
+	// client timeout. Reading maxImageSize+1 lets the size check below
+	// distinguish "at the cap" from "over the cap".
+	bodyReader := io.LimitReader(resp.Body, maxImageSize+1)
 
 	data, err := io.ReadAll(bodyReader)
 	if err != nil {
@@ -153,6 +338,14 @@ func downloadImage(url string) ([]byte, string, error) {
 }
 
 func convertImage(imgData []byte, mimeType, format string, quality, maxW, maxH int) ([]byte, string, error) {
+	// Pre-decode guard: reject images whose headers claim more than maxPixels
+	// total (dimensions x frame count) before touching any pixel data.
+	if w, h, frames, ok := headerDimensions(imgData, mimeType); ok {
+		if exceedsPixelCap(w, h, frames) {
+			return nil, "", fmt.Errorf("%w: header claims %dx%d x %d frame(s)", errImageTooManyPixels, w, h, frames)
+		}
+	}
+
 	var img image.Image
 	var err error
 
@@ -163,11 +356,10 @@ func convertImage(imgData []byte, mimeType, format string, quality, maxW, maxH i
 	case mimeType == "image/png":
 		img, err = png.Decode(reader)
 	case mimeType == "image/gif":
-		var g *gif.GIF
-		g, err = gif.DecodeAll(reader)
-		if err == nil && len(g.Image) > 0 {
-			img = g.Image[0]
-		}
+		// gif.Decode (first frame only), NOT gif.DecodeAll: decoding every
+		// frame multiplies decode cost by frame count, and only frame 0 has
+		// ever been used here.
+		img, err = gif.Decode(reader)
 	case mimeType == "image/bmp":
 		img, err = decodeBMP(reader)
 	case mimeType == "image/webp":
@@ -183,6 +375,12 @@ func convertImage(imgData []byte, mimeType, format string, quality, maxW, maxH i
 	bounds := img.Bounds()
 	width := bounds.Dx()
 	height := bounds.Dy()
+
+	// Defense-in-depth: headers can disagree with decoded dimensions in
+	// crafted files, so re-check the real dimensions before resizing.
+	if exceedsPixelCap(width, height, 1) {
+		return nil, "", fmt.Errorf("%w: decoded image is %dx%d", errImageTooManyPixels, width, height)
+	}
 
 	if maxW > 0 || maxH > 0 {
 		newW := width
@@ -325,6 +523,13 @@ func buildImageMessage(text string, imageUrls []string, maxImages int, format st
 
 		imgData, dataURI, err := convertImage(imgData, mimeType, format, quality, maxW, maxH)
 		if err != nil {
+			if errors.Is(err, errImageTooManyPixels) {
+				// Decompression-bomb skip: observable but non-fatal.
+				if logger != nil {
+					logger.Info("skipping image: too many pixels", "url", url, "reason", err.Error())
+				}
+				continue
+			}
 			if logger != nil {
 				logger.Warn("failed to convert image", "url", url, "error", err.Error())
 			}

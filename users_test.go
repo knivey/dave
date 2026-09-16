@@ -1586,3 +1586,65 @@ func TestResolveUserReleasedNickFallback_DoesNotMatchFlagged(t *testing.T) {
 		"flagged released row must not be matched by the fallback")
 	assert.False(t, resolved.Flagged)
 }
+
+// TestRecoverByKnownHostAccountEligibility covers the shared-cloak conflation
+// fix: a row bound to an IRC services account can only be recovered via host
+// by the same account.
+func TestRecoverByKnownHostAccountEligibility(t *testing.T) {
+	setupTestDB(t)
+
+	owner, err := createNewUser("testnet", "Owner", "owner", "shrew", "~u", "cloak.example")
+	require.NoError(t, err)
+
+	t.Run("unauthed stranger does not inherit account-bound row", func(t *testing.T) {
+		resolved, err := resolveUser("testnet", "Stranger", "~u", "cloak.example", "", "rfc1459")
+		require.NoError(t, err)
+		require.NotNil(t, resolved)
+		assert.NotEqual(t, owner.ID, resolved.ID)
+	})
+
+	t.Run("differently authed user does not inherit account-bound row", func(t *testing.T) {
+		resolved, err := resolveUser("testnet", "Other", "~u", "cloak.example", "someoneelse", "rfc1459")
+		require.NoError(t, err)
+		require.NotNil(t, resolved)
+		assert.NotEqual(t, owner.ID, resolved.ID)
+	})
+
+	t.Run("same account still recovers via host", func(t *testing.T) {
+		// Direct call: resolveUser's account branch would find the row by
+		// account before host recovery ever runs.
+		user, err := recoverByKnownHost("testnet", "~u", "cloak.example", "whatever", "shrew")
+		require.NoError(t, err)
+		require.NotNil(t, user)
+		assert.Equal(t, owner.ID, user.ID)
+	})
+
+	t.Run("account-less rows still recover", func(t *testing.T) {
+		plain, err := createNewUser("testnet", "Plain", "plain", "", "~u", "other.example")
+		require.NoError(t, err)
+		resolved, err := resolveUser("testnet", "NewNick", "~u", "other.example", "", "rfc1459")
+		require.NoError(t, err)
+		require.NotNil(t, resolved)
+		assert.Equal(t, plain.ID, resolved.ID)
+	})
+
+	t.Run("multi-match filters account-bound rows before disambiguation", func(t *testing.T) {
+		// Two rows share the host: one account-bound, one with nick_changes
+		// history matching the incoming nick. Disambiguation must only see
+		// the eligible row.
+		hist, err := createNewUser("testnet", "HistUser", "histuser", "", "~u", "multi.example")
+		require.NoError(t, err)
+		_ = hist
+		require.NoError(t, upsertKnownHost(owner.ID, "~u", "multi.example"))
+		require.NoError(t, upsertKnownHost(hist.ID, "~u", "multi.example"))
+		require.True(t, recordNickChange("testnet", "HistUser", "HistAlt", "rfc1459"))
+
+		// Incoming nick is the FORMER nick ("HistUser"): current-nick lookup
+		// misses (recordNickChange moved NormalizedNick to histalt), so
+		// resolution must go through multi-match host recovery.
+		resolved, err := resolveUser("testnet", "HistUser", "~u", "multi.example", "", "rfc1459")
+		require.NoError(t, err)
+		require.NotNil(t, resolved)
+		assert.Equal(t, hist.ID, resolved.ID, "must resolve to the eligible row, not the account-bound one")
+	})
+}

@@ -301,7 +301,7 @@ func resolveUserOnce(network, nick, ident, host, account, casemapping string) (*
 			return nickUser, nil
 		}
 
-		hostUser, err := recoverByKnownHost(network, ident, host, norm)
+		hostUser, err := recoverByKnownHost(network, ident, host, norm, account)
 		if err != nil {
 			return nil, err
 		}
@@ -344,7 +344,7 @@ func resolveUserOnce(network, nick, ident, host, account, casemapping string) (*
 	}
 
 	loggerUsers.Debug("nick lookup missed, trying host recovery", "nick", nick, "ident", ident, "host", host, "network", network)
-	hostUser, err := recoverByKnownHost(network, ident, host, norm)
+	hostUser, err := recoverByKnownHost(network, ident, host, norm, "")
 	if err != nil {
 		return nil, err
 	}
@@ -518,6 +518,13 @@ func getMostRecentReleasedUserByNormalizedNick(network, normalizedNick string) (
 // multiple users, cross-references the normalized nick against nick_changes
 // history to disambiguate. Returns nil if no match or ambiguous.
 //
+// Account eligibility: a candidate row bound to an IRC services account
+// (IRCAccount != "") is only recoverable by an incoming user with the SAME
+// account. This blocks shared-host conflation (shared cloaks/vhosts with
+// coerced idents like ~u): an unauthed or differently-authed stranger on the
+// same host gets a fresh row instead of inheriting the account owner's
+// sessions, bans, and history.
+//
 // Flagged users are excluded from the JOIN — they are diagnostic placeholders
 // awaiting admin cleanup and must never be matched as a canonical identity.
 // Without this filter, a flagged row created via resolveUserFallback would
@@ -528,7 +535,7 @@ func getMostRecentReleasedUserByNormalizedNick(network, normalizedNick string) (
 // Released users ARE included: if a user quit and is coming back from the
 // same ident@host, we want to re-attach to their existing row. The caller
 // (resolveUserOnce) clears Released=false on match.
-func recoverByKnownHost(network, ident, host, normalizedNick string) (*User, error) {
+func recoverByKnownHost(network, ident, host, normalizedNick, account string) (*User, error) {
 	var hosts []UserKnownHost
 	err := theDB.Joins("JOIN users ON users.id = user_known_hosts.user_id").
 		Where("users.network = ? AND user_known_hosts.ident = ? AND user_known_hosts.host = ? AND users.flagged = ?",
@@ -541,29 +548,42 @@ func recoverByKnownHost(network, ident, host, normalizedNick string) (*User, err
 		loggerUsers.Debug("host recovery: no ident@host match", "ident", ident, "host", host, "nick", normalizedNick, "network", network)
 		return nil, nil
 	}
-	if len(hosts) == 1 {
+
+	var candidates []*User
+	for _, h := range hosts {
 		var user User
-		if err := theDB.First(&user, hosts[0].UserID).Error; err != nil {
+		if err := theDB.First(&user, h.UserID).Error; err != nil {
 			return nil, err
 		}
-		loggerUsers.Debug("host recovery: single match", "user_id", user.ID, "ident", ident, "host", host, "nick", normalizedNick, "network", network)
-		return &user, nil
+		if user.IRCAccount != "" && user.IRCAccount != account {
+			loggerUsers.Debug("host recovery: skipping account-bound row",
+				"user_id", user.ID, "row_account", user.IRCAccount,
+				"incoming_account", account, "ident", ident, "host", host,
+				"nick", normalizedNick, "network", network)
+			continue
+		}
+		candidates = append(candidates, &user)
+	}
+	if len(candidates) == 0 {
+		loggerUsers.Debug("host recovery: no eligible ident@host match (account rule)",
+			"ident", ident, "host", host, "nick", normalizedNick, "network", network)
+		return nil, nil
+	}
+	if len(candidates) == 1 {
+		loggerUsers.Debug("host recovery: single match", "user_id", candidates[0].ID, "ident", ident, "host", host, "nick", normalizedNick, "network", network)
+		return candidates[0], nil
 	}
 
-	loggerUsers.Debug("host recovery: multiple matches, disambiguating via nick_changes", "count", len(hosts), "ident", ident, "host", host, "nick", normalizedNick, "network", network)
-	for _, h := range hosts {
+	loggerUsers.Debug("host recovery: multiple matches, disambiguating via nick_changes", "count", len(candidates), "ident", ident, "host", host, "nick", normalizedNick, "network", network)
+	for _, c := range candidates {
 		var count int64
 		theDB.Model(&NickChange{}).
 			Where("user_id = ? AND (normalized_old = ? OR normalized_new = ?)",
-				h.UserID, normalizedNick, normalizedNick).
+				c.ID, normalizedNick, normalizedNick).
 			Count(&count)
 		if count > 0 {
-			var user User
-			if err := theDB.First(&user, h.UserID).Error; err != nil {
-				return nil, err
-			}
-			loggerUsers.Debug("host recovery: disambiguated via nick_changes", "user_id", user.ID, "nick_changes_count", count, "network", network)
-			return &user, nil
+			loggerUsers.Debug("host recovery: disambiguated via nick_changes", "user_id", c.ID, "nick_changes_count", count, "network", network)
+			return c, nil
 		}
 	}
 

@@ -284,6 +284,24 @@ func handleWHOXReply(network Network, event girc.Event, log logxi.Logger) {
 	}
 }
 
+// handleAccountChange re-resolves a user when the server reports an account
+// login (account-notify). This retro-fixes ghosts created before the account
+// was known (join happened pre-authentication) — resolveUser's account
+// branch finds the real row and claimNickFor displaces any ghost holding
+// the nick. Logouts ("*") are ignored: the row keeps its account as the
+// identity key and nick lookup still serves subsequent messages.
+func handleAccountChange(network Network, client *girc.Client, event girc.Event, log logxi.Logger) {
+	if len(event.Params) != 1 || event.Source == nil {
+		return
+	}
+	if event.Params[0] == "*" {
+		return
+	}
+	if _, err := resolveIRCUser(network, client, event); err != nil {
+		log.Error("failed to re-resolve user on account change", "nick", event.Source.Name, "error", err)
+	}
+}
+
 func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 	host := event.Source.Name + "!" + event.Source.Ident + "@" + event.Source.Host
 	msg := event.Params[len(event.Params)-1]

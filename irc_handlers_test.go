@@ -298,3 +298,59 @@ func TestHandleWHOXReply(t *testing.T) {
 		assert.True(t, takePendingJoinWHO("testnet", "mal"), "pending entry must survive")
 	})
 }
+
+func TestHandleAccountChange(t *testing.T) {
+	setupTestDB(t)
+
+	client := girc.New(girc.Config{Server: "localhost", Port: 6667, Nick: "testbot"})
+	network := Network{Name: "testnet"}
+	acctEvent := func(nick, account string) girc.Event {
+		return girc.Event{
+			Command: girc.CAP_ACCOUNT,
+			Source:  &girc.Source{Name: nick, Ident: "~u", Host: "cloak.example"},
+			Params:  []string{account},
+		}
+	}
+
+	t.Run("account attaches to active row holding the nick", func(t *testing.T) {
+		ghost, err := createNewUser("testnet", "Newbie", "newbie", "", "~u", "cloak.example")
+		require.NoError(t, err)
+
+		handleAccountChange(network, client, acctEvent("Newbie", "newacct"), newTestLogger())
+
+		var reloaded User
+		require.NoError(t, theDB.First(&reloaded, ghost.ID).Error)
+		assert.Equal(t, "newacct", reloaded.IRCAccount)
+	})
+
+	t.Run("account claim displaces ghost holding the nick (production incident)", func(t *testing.T) {
+		// Real account holder: active under a different nick.
+		owner, err := createNewUser("testnet", "again", "again", "shrew", "~u", "old.host")
+		require.NoError(t, err)
+		// Ghost row created at join time before the account was known.
+		ghost, err := createNewUser("testnet", "shrew2", "shrew2", "", "~u", "cloak.example")
+		require.NoError(t, err)
+
+		handleAccountChange(network, client, acctEvent("shrew2", "shrew"), newTestLogger())
+
+		var ownerRow, ghostRow User
+		require.NoError(t, theDB.First(&ownerRow, owner.ID).Error)
+		require.NoError(t, theDB.First(&ghostRow, ghost.ID).Error)
+		assert.Equal(t, "shrew2", ownerRow.CurrentNick, "account holder takes the nick")
+		assert.True(t, ghostRow.Released, "ghost nick released")
+	})
+
+	t.Run("logout is ignored", func(t *testing.T) {
+		before := int64(0)
+		theDB.Model(&User{}).Count(&before)
+		handleAccountChange(network, client, acctEvent("nobody", "*"), newTestLogger())
+		after := int64(0)
+		theDB.Model(&User{}).Count(&after)
+		assert.Equal(t, before, after, "logout must not create or change rows")
+	})
+
+	t.Run("malformed event is ignored", func(t *testing.T) {
+		e := girc.Event{Command: girc.CAP_ACCOUNT, Source: &girc.Source{Name: "x"}, Params: []string{}}
+		handleAccountChange(network, client, e, newTestLogger()) // must not panic
+	})
+}

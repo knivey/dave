@@ -1724,4 +1724,35 @@ func TestReleasedNickFallbackAccountEligibility(t *testing.T) {
 		require.NoError(t, err)
 		assert.Nil(t, user)
 	})
+
+	t.Run("differently authed nick reuser gets a fresh row", func(t *testing.T) {
+		// Self-contained scenario: the shared `bound` row cannot be used
+		// because the earlier subtest created an ACTIVE row on normalized
+		// nick "shrew", which would intercept at the nick-lookup tier
+		// before the released fallback ever runs. A fresh account-bound
+		// released row on an otherwise-unused nick exercises the fallback
+		// tier's account filter directly, with a case-variant nick so the
+		// normalized lookup is also covered.
+		bound2 := &User{
+			Network:        "net",
+			CurrentNick:    "crow",
+			NormalizedNick: "crow",
+			IRCAccount:     "crowacct",
+			Released:       true,
+			CreatedAt:      now.Add(-1 * time.Hour),
+			UpdatedAt:      now.Add(-1 * time.Hour),
+		}
+		require.NoError(t, theDB.Create(bound2).Error)
+
+		resolved, err := resolveUser("net", "Crow", "~u", "anotherhost", "attacker", "rfc1459")
+		require.NoError(t, err)
+		require.NotNil(t, resolved)
+		assert.NotEqual(t, bound2.ID, resolved.ID)
+		assert.Equal(t, "attacker", resolved.IRCAccount)
+		assert.Equal(t, "crow", resolved.NormalizedNick, "case-variant nick must resolve to the normalized nick")
+
+		var reloaded User
+		require.NoError(t, theDB.First(&reloaded, bound2.ID).Error)
+		assert.True(t, reloaded.Released, "account-bound released row must stay released")
+	})
 }

@@ -171,7 +171,8 @@ func claimNickFor(network string, user *User, norm string) error {
 //     the same host. If ident@host matches multiple users, the nick is
 //     cross-referenced against nick_changes history to disambiguate.
 //
-// Users are created only on bot interaction (not every channel message).
+// Users are created on join (event-sourced account info or WHOX deferral),
+// on ACCOUNT logins, and on bot interaction (commands/mentions).
 func resolveUser(network, nick, ident, host, account, casemapping string) (*User, error) {
 	if theDB == nil {
 		return nil, nil
@@ -433,6 +434,10 @@ func resolveUserByNick(network, nick, casemapping string) (*User, error) {
 // Released rows ARE returned: if someone with an account quits and comes
 // back, we want to re-attach them to the existing row (which has their
 // known hosts, bans, etc.). resolveUserOnce sets Released=false on match.
+// Through the normal resolveUser flow, same-account released rows are
+// normally caught here before the released-nick fallback runs; the
+// fallback's account filter keeps that function safe standalone and under
+// duplicate-account drift.
 func getUserByAccount(network, account string) (*User, error) {
 	if account == "" {
 		return nil, nil

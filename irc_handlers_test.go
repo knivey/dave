@@ -264,6 +264,12 @@ func TestHandleWHOXReply(t *testing.T) {
 		require.NoError(t, theDB.Where("normalized_nick = ?", "whouser").First(&user).Error)
 		assert.Equal(t, "whoacct", user.IRCAccount)
 		assert.False(t, takePendingJoinWHO("testnet", "whouser"), "entry consumed")
+
+		var hosts []UserKnownHost
+		theDB.Where("user_id = ?", user.ID).Find(&hosts)
+		require.Len(t, hosts, 1)
+		assert.Equal(t, "~u", hosts[0].Ident)
+		assert.Equal(t, "cloak.example", hosts[0].Host)
 	})
 
 	t.Run("whox 0 means unauthenticated", func(t *testing.T) {
@@ -272,6 +278,17 @@ func TestHandleWHOXReply(t *testing.T) {
 
 		var user User
 		require.NoError(t, theDB.Where("normalized_nick = ?", "zero").First(&user).Error)
+		assert.Equal(t, "", user.IRCAccount)
+	})
+
+	t.Run("whox star means unauthenticated", func(t *testing.T) {
+		// Unseen host so the row is created fresh here rather than recycled
+		// by host recovery from the earlier subtests' cloak.example rows.
+		recordPendingJoinWHO("testnet", "starnick")
+		handleWHOXReply(network, whoxEvent("StarNick", "~u", "star.example", "*"), newTestLogger())
+
+		var user User
+		require.NoError(t, theDB.Where("normalized_nick = ?", "starnick").First(&user).Error)
 		assert.Equal(t, "", user.IRCAccount)
 	})
 
@@ -340,6 +357,30 @@ func TestHandleAccountChange(t *testing.T) {
 		assert.True(t, ghostRow.Released, "ghost nick released")
 	})
 
+	t.Run("bot's own account event is ignored", func(t *testing.T) {
+		before := int64(0)
+		theDB.Model(&User{}).Count(&before)
+		handleAccountChange(network, client, acctEvent("testbot", "botacct"), newTestLogger())
+		after := int64(0)
+		theDB.Model(&User{}).Count(&after)
+		assert.Equal(t, before, after, "bot's own ACCOUNT must not create or change rows")
+	})
+
+	t.Run("previously unseen authed user gets a new row", func(t *testing.T) {
+		// Unseen host so the row is created fresh here rather than recycled
+		// by host recovery from the earlier subtests' cloak.example rows.
+		e := girc.Event{
+			Command: girc.CAP_ACCOUNT,
+			Source:  &girc.Source{Name: "FreshFace", Ident: "~u", Host: "unseen.example"},
+			Params:  []string{"freshacct"},
+		}
+		handleAccountChange(network, client, e, newTestLogger())
+
+		var user User
+		require.NoError(t, theDB.Where("normalized_nick = ?", "freshface").First(&user).Error)
+		assert.Equal(t, "freshacct", user.IRCAccount)
+	})
+
 	t.Run("logout is ignored", func(t *testing.T) {
 		before := int64(0)
 		theDB.Model(&User{}).Count(&before)
@@ -391,6 +432,19 @@ func TestHandleHostChange(t *testing.T) {
 		after := int64(0)
 		theDB.Model(&UserKnownHost{}).Count(&after)
 		assert.Equal(t, before, after)
+	})
+
+	t.Run("released row is a no-op", func(t *testing.T) {
+		rel, err := createNewUser("testnet", "GoneUser", "goneuser", "", "~old", "gone.example")
+		require.NoError(t, err)
+		require.NoError(t, releaseUserNick(rel.ID))
+
+		before := int64(0)
+		theDB.Model(&UserKnownHost{}).Count(&before)
+		handleHostChange("testnet", chgEvent("GoneUser", "~new", "new.example"), newTestLogger())
+		after := int64(0)
+		theDB.Model(&UserKnownHost{}).Count(&after)
+		assert.Equal(t, before, after, "released rows must not accumulate host evidence")
 	})
 
 	t.Run("malformed event is ignored", func(t *testing.T) {

@@ -223,6 +223,21 @@ func registerIRCHandlers(bot *Bot, client *girc.Client, network Network, log log
 			}
 		}
 	})
+
+	client.Handlers.Add(girc.RPL_WHOSPCRPL, func(client *girc.Client, event girc.Event) {
+		handleWHOXReply(network, event, log)
+	})
+
+	client.Handlers.Add(girc.CAP_ACCOUNT, func(client *girc.Client, event girc.Event) {
+		handleAccountChange(network, client, event, log)
+	})
+
+	client.Handlers.Add(girc.CAP_CHGHOST, func(client *girc.Client, event girc.Event) {
+		if event.Source != nil && event.Source.Name == client.GetNick() {
+			return
+		}
+		handleHostChange(network.Name, event, log)
+	})
 }
 
 // handleUserJoin resolves a joining user, deferring to the WHOX reply when
@@ -294,6 +309,9 @@ func handleAccountChange(network Network, client *girc.Client, event girc.Event,
 	if len(event.Params) != 1 || event.Source == nil {
 		return
 	}
+	if event.Source.Name == client.GetNick() {
+		return
+	}
 	if event.Params[0] == "*" {
 		return
 	}
@@ -306,7 +324,8 @@ func handleAccountChange(network Network, client *girc.Client, event girc.Event,
 // known hosts so future host-based recovery works after a vhost/cloak change.
 // No re-resolution is needed — identity did not change, only the host. If no
 // active row holds the nick (user never interacted), there is nothing to do;
-// a pending WHOX deferral carries the fresh host anyway.
+// the fresh host arrives via the pending WHOX deferral or the first
+// interaction's message source.
 func handleHostChange(network string, event girc.Event, log logxi.Logger) {
 	if len(event.Params) != 2 || event.Source == nil {
 		return

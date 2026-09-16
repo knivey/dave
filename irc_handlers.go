@@ -4,6 +4,7 @@ import (
 	"context"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/lrstanley/girc"
@@ -32,6 +33,60 @@ var rejoinChannel = func(bot *Bot, channel, key string) {
 // Package-level test seam: NOT safe under t.Parallel() (swapped globally).
 var scheduleRejoin = func(delay time.Duration, f func()) {
 	time.AfterFunc(delay, f)
+}
+
+// pendingJoinWHO tracks JOINs that could not be resolved at join time because
+// the connection lacks extended-join / account-tag (the event carried no
+// account info). girc's builtin sends `WHO <nick> %tacuhnr,1` for every
+// foreign JOIN; the 354 reply completes the deferred resolution. Entries are
+// consumed by the reply or expire (server without WHOX support, netsplit),
+// so a TTL prevents unbounded growth.
+const pendingJoinWHOTTL = 60 * time.Second
+
+var pendingJoinWHOMu sync.Mutex
+var pendingJoinWHO = map[string]map[string]time.Time{}
+
+// recordPendingJoinWHO registers a deferred JOIN resolution. Also prunes
+// expired entries from all networks so the map cannot grow without bound.
+func recordPendingJoinWHO(network, normNick string) {
+	pendingJoinWHOMu.Lock()
+	defer pendingJoinWHOMu.Unlock()
+	now := time.Now()
+	for net, nicks := range pendingJoinWHO {
+		for nick, at := range nicks {
+			if now.Sub(at) > pendingJoinWHOTTL {
+				delete(nicks, nick)
+			}
+		}
+		if len(nicks) == 0 {
+			delete(pendingJoinWHO, net)
+		}
+	}
+	netMap := pendingJoinWHO[network]
+	if netMap == nil {
+		netMap = map[string]time.Time{}
+		pendingJoinWHO[network] = netMap
+	}
+	netMap[normNick] = now
+}
+
+// takePendingJoinWHO reports whether a deferred JOIN resolution is pending
+// for the nick and removes the entry (one WHOX reply completes one deferral).
+func takePendingJoinWHO(network, normNick string) bool {
+	pendingJoinWHOMu.Lock()
+	defer pendingJoinWHOMu.Unlock()
+	netMap, ok := pendingJoinWHO[network]
+	if !ok {
+		return false
+	}
+	if _, ok := netMap[normNick]; !ok {
+		return false
+	}
+	delete(netMap, normNick)
+	if len(netMap) == 0 {
+		delete(pendingJoinWHO, network)
+	}
+	return true
 }
 
 // handleSelfKick is invoked when the bot itself is kicked from a channel. It

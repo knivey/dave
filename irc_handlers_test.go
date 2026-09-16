@@ -121,3 +121,51 @@ func TestHandleSelfKick(t *testing.T) {
 		assert.True(t, ok, "config must not be removed")
 	})
 }
+
+func TestPendingJoinWHO(t *testing.T) {
+	resetPendingJoinWHO(t)
+
+	t.Run("record then take roundtrip", func(t *testing.T) {
+		recordPendingJoinWHO("testnet", "shrew")
+		assert.True(t, takePendingJoinWHO("testnet", "shrew"))
+		assert.False(t, takePendingJoinWHO("testnet", "shrew"), "entry consumed by first take")
+	})
+
+	t.Run("network isolation", func(t *testing.T) {
+		recordPendingJoinWHO("testnet", "shrew")
+		assert.False(t, takePendingJoinWHO("othernet", "shrew"))
+		assert.True(t, takePendingJoinWHO("testnet", "shrew"))
+	})
+
+	t.Run("nick isolation", func(t *testing.T) {
+		recordPendingJoinWHO("testnet", "shrew")
+		assert.False(t, takePendingJoinWHO("testnet", "other"))
+	})
+
+	t.Run("expired entries are pruned on record", func(t *testing.T) {
+		recordPendingJoinWHO("testnet", "old")
+		// Age the entry past the TTL by manipulating the recorded time.
+		pendingJoinWHOMu.Lock()
+		pendingJoinWHO["testnet"]["old"] = time.Now().Add(-2 * pendingJoinWHOTTL)
+		pendingJoinWHOMu.Unlock()
+
+		recordPendingJoinWHO("testnet", "new")
+		assert.False(t, takePendingJoinWHO("testnet", "old"), "expired entry must be gone")
+		assert.True(t, takePendingJoinWHO("testnet", "new"))
+	})
+
+	t.Run("re-record refreshes the timestamp", func(t *testing.T) {
+		recordPendingJoinWHO("testnet", "shrew")
+		recordPendingJoinWHO("testnet", "shrew")
+		pendingJoinWHOMu.Lock()
+		assert.Len(t, pendingJoinWHO["testnet"], 1, "no duplicate entries")
+		pendingJoinWHOMu.Unlock()
+	})
+}
+
+func resetPendingJoinWHO(t *testing.T) {
+	t.Helper()
+	pendingJoinWHOMu.Lock()
+	pendingJoinWHO = map[string]map[string]time.Time{}
+	pendingJoinWHOMu.Unlock()
+}

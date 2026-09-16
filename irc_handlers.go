@@ -40,7 +40,9 @@ var scheduleRejoin = func(delay time.Duration, f func()) {
 // account info). girc's builtin sends `WHO <nick> %tacuhnr,1` for every
 // foreign JOIN; the 354 reply completes the deferred resolution. Entries are
 // consumed by the reply or expire (server without WHOX support, netsplit),
-// so a TTL prevents unbounded growth.
+// so a TTL prevents unbounded growth. Keys are normalized nicks
+// (normalizeIRC(nick, getCasemapping(network))); record and take must use
+// the same normalization or lookups silently miss.
 const pendingJoinWHOTTL = 60 * time.Second
 
 var pendingJoinWHOMu sync.Mutex
@@ -179,14 +181,7 @@ func registerIRCHandlers(bot *Bot, client *girc.Client, network Network, log log
 	})
 
 	client.Handlers.Add(girc.JOIN, func(client *girc.Client, event girc.Event) {
-		nick := event.Source.Name
-		if nick == client.GetNick() {
-			return
-		}
-		_, err := resolveIRCUser(network, client, event)
-		if err != nil {
-			log.Error("failed to resolve user on join", "nick", nick, "error", err)
-		}
+		handleUserJoin(network, client, event, log)
 	})
 
 	client.Handlers.Add(girc.PART, func(client *girc.Client, event girc.Event) {
@@ -228,6 +223,37 @@ func registerIRCHandlers(bot *Bot, client *girc.Client, network Network, log log
 			}
 		}
 	})
+}
+
+// handleUserJoin resolves a joining user, deferring to the WHOX reply when
+// the JOIN event carries no account information.
+//
+// DESIGN NOTE: account info comes from the event payload (extended-join
+// params / @account tag), never from client.LookupUser — girc runs all
+// handlers for an event concurrently, so its internal state population races
+// with ours. When the event has no account info (connection without
+// extended-join and without account-tag), no row is created at join time;
+// the resolution is deferred to the 354 reply for girc's per-join
+// `WHO <nick> %tacuhnr,1` (see handleWHOXReply). On servers without WHOX
+// support the deferral simply expires and the user is created on first
+// interaction.
+func handleUserJoin(network Network, client *girc.Client, event girc.Event, log logxi.Logger) {
+	if event.Source == nil {
+		return
+	}
+	nick := event.Source.Name
+	if nick == client.GetNick() {
+		return
+	}
+	account := accountFromEvent(client, event)
+	if len(event.Params) >= 2 || account != "" {
+		_, err := resolveIRCUser(network, client, event)
+		if err != nil {
+			log.Error("failed to resolve user on join", "nick", nick, "error", err)
+		}
+		return
+	}
+	recordPendingJoinWHO(network.Name, normalizeIRC(nick, getCasemapping(network.Name)))
 }
 
 func handleChanMessage(network Network, client *girc.Client, event girc.Event) {

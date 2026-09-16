@@ -4,8 +4,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lrstanley/girc"
 	logxi "github.com/mgutz/logxi/v1"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // newTestLogger returns a logxi logger with the level set to LevelAll, per the
@@ -168,4 +170,71 @@ func resetPendingJoinWHO(t *testing.T) {
 	pendingJoinWHOMu.Lock()
 	pendingJoinWHO = map[string]map[string]time.Time{}
 	pendingJoinWHOMu.Unlock()
+}
+
+func TestHandleUserJoin(t *testing.T) {
+	resetPendingJoinWHO(t)
+	setupTestDB(t)
+
+	client := girc.New(girc.Config{Server: "localhost", Port: 6667, Nick: "testbot"})
+	network := Network{Name: "testnet"}
+
+	countUsers := func() int64 {
+		var n int64
+		theDB.Model(&User{}).Count(&n)
+		return n
+	}
+
+	t.Run("extended-join account resolves immediately", func(t *testing.T) {
+		e := girc.Event{Command: girc.JOIN, Source: &girc.Source{Name: "shrew", Ident: "~u", Host: "cloak.example"}, Params: []string{"#gay", "shrew", "Ron"}}
+		handleUserJoin(network, client, e, newTestLogger())
+
+		var user User
+		require.NoError(t, theDB.Where("normalized_nick = ?", "shrew").First(&user).Error)
+		assert.Equal(t, "shrew", user.IRCAccount)
+	})
+
+	t.Run("extended-join star resolves immediately without account", func(t *testing.T) {
+		e := girc.Event{Command: girc.JOIN, Source: &girc.Source{Name: "anon", Ident: "~u", Host: "cloak.example"}, Params: []string{"#gay", "*", "Ron"}}
+		handleUserJoin(network, client, e, newTestLogger())
+
+		var user User
+		require.NoError(t, theDB.Where("normalized_nick = ?", "anon").First(&user).Error)
+		assert.Equal(t, "", user.IRCAccount)
+	})
+
+	t.Run("no account info defers resolution", func(t *testing.T) {
+		before := countUsers()
+		e := girc.Event{Command: girc.JOIN, Source: &girc.Source{Name: "deferred", Ident: "~u", Host: "cloak.example"}, Params: []string{"#gay"}}
+		handleUserJoin(network, client, e, newTestLogger())
+
+		assert.Equal(t, before, countUsers(), "no user row must be created yet")
+		assert.True(t, takePendingJoinWHO("testnet", "deferred"))
+	})
+
+	t.Run("account tag resolves immediately", func(t *testing.T) {
+		e := girc.Event{Command: girc.JOIN, Source: &girc.Source{Name: "tagged", Ident: "~u", Host: "cloak.example"}, Params: []string{"#gay"}}
+		e.Tags = girc.Tags{"account": "tagacct"}
+		handleUserJoin(network, client, e, newTestLogger())
+
+		var user User
+		require.NoError(t, theDB.Where("normalized_nick = ?", "tagged").First(&user).Error)
+		assert.Equal(t, "tagacct", user.IRCAccount)
+	})
+
+	t.Run("bot's own join is ignored", func(t *testing.T) {
+		before := countUsers()
+		e := girc.Event{Command: girc.JOIN, Source: &girc.Source{Name: "testbot", Ident: "~u", Host: "bot.example"}, Params: []string{"#gay", "botacct", "Bot"}}
+		handleUserJoin(network, client, e, newTestLogger())
+		assert.Equal(t, before, countUsers())
+	})
+
+	t.Run("mixed-case nick records normalized deferral key", func(t *testing.T) {
+		before := countUsers()
+		e := girc.Event{Command: girc.JOIN, Source: &girc.Source{Name: "Shrew^", Ident: "~u", Host: "cloak.example"}, Params: []string{"#gay"}}
+		handleUserJoin(network, client, e, newTestLogger())
+
+		assert.Equal(t, before, countUsers(), "no user row must be created yet")
+		assert.True(t, takePendingJoinWHO("testnet", "shrew^"), "deferral key must be casefolded")
+	})
 }

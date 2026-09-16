@@ -243,3 +243,58 @@ func TestHandleUserJoin(t *testing.T) {
 		handleUserJoin(network, client, e, newTestLogger())
 	})
 }
+
+func TestHandleWHOXReply(t *testing.T) {
+	resetPendingJoinWHO(t)
+	setupTestDB(t)
+
+	network := Network{Name: "testnet"}
+	whoxEvent := func(nick, ident, host, account string) girc.Event {
+		return girc.Event{
+			Command: girc.RPL_WHOSPCRPL,
+			Params:  []string{"testbot", "1", "#gay", ident, host, nick, account, "Real Name"},
+		}
+	}
+
+	t.Run("pending nick resolves with whox account", func(t *testing.T) {
+		recordPendingJoinWHO("testnet", "whouser")
+		handleWHOXReply(network, whoxEvent("whoUser", "~u", "cloak.example", "whoacct"), newTestLogger())
+
+		var user User
+		require.NoError(t, theDB.Where("normalized_nick = ?", "whouser").First(&user).Error)
+		assert.Equal(t, "whoacct", user.IRCAccount)
+		assert.False(t, takePendingJoinWHO("testnet", "whouser"), "entry consumed")
+	})
+
+	t.Run("whox 0 means unauthenticated", func(t *testing.T) {
+		recordPendingJoinWHO("testnet", "zero")
+		handleWHOXReply(network, whoxEvent("Zero", "~u", "cloak.example", "0"), newTestLogger())
+
+		var user User
+		require.NoError(t, theDB.Where("normalized_nick = ?", "zero").First(&user).Error)
+		assert.Equal(t, "", user.IRCAccount)
+	})
+
+	t.Run("non-pending nick is ignored", func(t *testing.T) {
+		before := int64(0)
+		theDB.Model(&User{}).Count(&before)
+		handleWHOXReply(network, whoxEvent("Random", "~u", "cloak.example", "acct"), newTestLogger())
+		after := int64(0)
+		theDB.Model(&User{}).Count(&after)
+		assert.Equal(t, before, after, "no row created for non-pending nick")
+	})
+
+	t.Run("wrong querytype is ignored, pending preserved", func(t *testing.T) {
+		recordPendingJoinWHO("testnet", "qt")
+		e := girc.Event{Command: girc.RPL_WHOSPCRPL, Params: []string{"testbot", "9", "#gay", "~u", "cloak.example", "QT", "acct", "Real"}}
+		handleWHOXReply(network, e, newTestLogger())
+		assert.True(t, takePendingJoinWHO("testnet", "qt"), "pending entry must survive")
+	})
+
+	t.Run("malformed reply is ignored", func(t *testing.T) {
+		recordPendingJoinWHO("testnet", "mal")
+		e := girc.Event{Command: girc.RPL_WHOSPCRPL, Params: []string{"testbot", "1"}}
+		handleWHOXReply(network, e, newTestLogger())
+		assert.True(t, takePendingJoinWHO("testnet", "mal"), "pending entry must survive")
+	})
+}

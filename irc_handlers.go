@@ -259,6 +259,31 @@ func handleUserJoin(network Network, client *girc.Client, event girc.Event, log 
 	recordPendingJoinWHO(network.Name, normalizeIRC(nick, getCasemapping(network.Name)))
 }
 
+// handleWHOXReply completes deferred JOIN resolutions when the WHOX (354)
+// reply for a pending nick arrives. girc's builtin sends
+// `WHO <nick> %tacuhnr,1` for every foreign JOIN, so replies have the
+// 8-param layout: <me> <querytype> <channel> <ident> <host> <nick>
+// <account> :<realname>. Replies for non-pending nicks (e.g. the
+// channel-wide WHO from the bot's own joins) are ignored.
+func handleWHOXReply(network Network, event girc.Event, log logxi.Logger) {
+	if len(event.Params) != 8 || event.Params[1] != "1" {
+		return
+	}
+	nick := event.Params[5]
+	casemapping := getCasemapping(network.Name)
+	norm := normalizeIRC(nick, casemapping)
+	if !takePendingJoinWHO(network.Name, norm) {
+		return
+	}
+	account := event.Params[6]
+	if account == "0" || account == "*" {
+		account = ""
+	}
+	if _, err := resolveUser(network.Name, nick, event.Params[3], event.Params[4], account, casemapping); err != nil {
+		log.Error("failed to resolve user on whox reply", "nick", nick, "error", err)
+	}
+}
+
 func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 	host := event.Source.Name + "!" + event.Source.Ident + "@" + event.Source.Host
 	msg := event.Params[len(event.Params)-1]

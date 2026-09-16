@@ -1647,4 +1647,25 @@ func TestRecoverByKnownHostAccountEligibility(t *testing.T) {
 		require.NotNil(t, resolved)
 		assert.Equal(t, hist.ID, resolved.ID, "must resolve to the eligible row, not the account-bound one")
 	})
+
+	t.Run("account-bound row with nick history loses to eligibility filter", func(t *testing.T) {
+		// The account-bound row holds the nick_changes history for the
+		// incoming nick; the account-less co-candidate has none. The old
+		// logic disambiguated to the account-bound row; eligibility must
+		// filter it out first so the account-less row wins by default.
+		bound, err := createNewUser("testnet", "BoundUser", "bounduser", "boundacct", "~u", "hist2.example")
+		require.NoError(t, err)
+		free, err := createNewUser("testnet", "FreeUser", "freeuser", "", "~u", "hist2.example")
+		require.NoError(t, err)
+		require.True(t, recordNickChange("testnet", "BoundUser", "BoundAlt", "rfc1459"))
+
+		// Incoming nick is the FORMER nick ("BoundUser"): current-nick lookup
+		// misses (recordNickChange moved NormalizedNick to boundalt), so
+		// resolution must go through multi-match host recovery.
+		resolved, err := resolveUser("testnet", "BoundUser", "~u", "hist2.example", "", "rfc1459")
+		require.NoError(t, err)
+		require.NotNil(t, resolved)
+		assert.Equal(t, free.ID, resolved.ID, "must resolve to the account-less row, not the filtered account-bound one")
+		assert.NotEqual(t, bound.ID, resolved.ID)
+	})
 }

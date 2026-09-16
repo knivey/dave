@@ -1634,7 +1634,6 @@ func TestRecoverByKnownHostAccountEligibility(t *testing.T) {
 		// the eligible row.
 		hist, err := createNewUser("testnet", "HistUser", "histuser", "", "~u", "multi.example")
 		require.NoError(t, err)
-		_ = hist
 		require.NoError(t, upsertKnownHost(owner.ID, "~u", "multi.example"))
 		require.NoError(t, upsertKnownHost(hist.ID, "~u", "multi.example"))
 		require.True(t, recordNickChange("testnet", "HistUser", "HistAlt", "rfc1459"))
@@ -1667,5 +1666,62 @@ func TestRecoverByKnownHostAccountEligibility(t *testing.T) {
 		require.NotNil(t, resolved)
 		assert.Equal(t, free.ID, resolved.ID, "must resolve to the account-less row, not the filtered account-bound one")
 		assert.NotEqual(t, bound.ID, resolved.ID)
+	})
+
+	t.Run("released account-bound row not host-recovered by stranger", func(t *testing.T) {
+		rel, err := createNewUser("testnet", "RelUser", "reluser", "relacct", "~u", "rel.example")
+		require.NoError(t, err)
+		require.NoError(t, releaseUserNick(rel.ID))
+
+		resolved, err := resolveUser("testnet", "Stranger2", "~u", "rel.example", "", "rfc1459")
+		require.NoError(t, err)
+		require.NotNil(t, resolved)
+		assert.NotEqual(t, rel.ID, resolved.ID, "released account-bound row must not be host-recovered by an unauthed stranger")
+	})
+}
+
+// TestReleasedNickFallbackAccountEligibility covers the security fix: a
+// released row bound to an account can only be reactivated by the same
+// account. Unauthed nick-reusers get fresh rows.
+func TestReleasedNickFallbackAccountEligibility(t *testing.T) {
+	setupTestDB(t)
+
+	now := time.Now()
+	bound := &User{
+		Network:        "net",
+		CurrentNick:    "shrew",
+		NormalizedNick: "shrew",
+		IRCAccount:     "shrew",
+		Released:       true,
+		CreatedAt:      now.Add(-1 * time.Hour),
+		UpdatedAt:      now.Add(-1 * time.Hour),
+	}
+	require.NoError(t, theDB.Create(bound).Error)
+
+	t.Run("unauthed nick reuser gets a fresh row", func(t *testing.T) {
+		resolved, err := resolveUser("net", "shrew", "~u", "brandnewhost", "", "rfc1459")
+		require.NoError(t, err)
+		require.NotNil(t, resolved)
+		assert.NotEqual(t, bound.ID, resolved.ID)
+		assert.Equal(t, "", resolved.IRCAccount)
+
+		// The bound row stays released.
+		var reloaded User
+		require.NoError(t, theDB.First(&reloaded, bound.ID).Error)
+		assert.True(t, reloaded.Released, "account-bound released row must stay released")
+	})
+
+	t.Run("same account reactivates", func(t *testing.T) {
+		user, count, err := getMostRecentReleasedUserByNormalizedNick("net", "shrew", "shrew")
+		require.NoError(t, err)
+		require.NotNil(t, user)
+		assert.Equal(t, bound.ID, user.ID)
+		assert.Equal(t, int64(1), count)
+	})
+
+	t.Run("different account does not reactivate", func(t *testing.T) {
+		user, _, err := getMostRecentReleasedUserByNormalizedNick("net", "shrew", "someoneelse")
+		require.NoError(t, err)
+		assert.Nil(t, user)
 	})
 }

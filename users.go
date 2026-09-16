@@ -237,7 +237,7 @@ func finalizeResolvedUser(user *User, nick, normalizedNick, account, ident, host
 }
 
 func tryReleasedNickFallback(network, nick, normalizedNick, account, ident, host, logMethod string) (*User, error) {
-	match, matchCount, err := getMostRecentReleasedUserByNormalizedNick(network, normalizedNick)
+	match, matchCount, err := getMostRecentReleasedUserByNormalizedNick(network, normalizedNick, account)
 	if err != nil {
 		return nil, err
 	}
@@ -477,25 +477,29 @@ func getActiveUserByNormalizedNick(network, normalizedNick string) (*User, error
 // (mobile networks, ISP DHCP, VPN cycling): nick alone is enough evidence
 // to re-attach to the previous row rather than create a duplicate.
 //
+// Account eligibility: a released row bound to an IRC services account can
+// only be reactivated by an incoming user with the same account. This
+// closes the documented security hole where anyone re-using a released nick
+// inherited the previous owner's sessions/bans/history.
+//
 // If more than one released row matches, returns the newest by updated_at
 // and the total match count so the caller can WARN about ambiguity. This
 // happens after multiple release/reclaim cycles without account or host
 // evidence linking them together — the bot is making a best-effort guess.
 //
 // Returns (nil, 0, nil) when there are no matches.
-//
-// Security note: on zero-trust networks this extends nick continuity across
-// disconnects, which means anyone re-using a released nick inherits the
-// previous owner's identity (sessions, bans, history). This is the same
-// trust posture the bot already had via in-channel nick continuity — the
-// fallback just preserves it across QUIT/PART/KICK. Full mitigation is
-// deferred to the Phase 5 account system.
-func getMostRecentReleasedUserByNormalizedNick(network, normalizedNick string) (*User, int64, error) {
+func getMostRecentReleasedUserByNormalizedNick(network, normalizedNick, account string) (*User, int64, error) {
+	where := "network = ? AND normalized_nick = ? AND released = ? AND flagged = ?"
+	args := []interface{}{network, normalizedNick, true, false}
+	if account == "" {
+		where += " AND (account IS NULL OR account = '')"
+	} else {
+		where += " AND (account IS NULL OR account = '' OR account = ?)"
+		args = append(args, account)
+	}
+
 	var count int64
-	err := theDB.Model(&User{}).Where(
-		"network = ? AND normalized_nick = ? AND released = ? AND flagged = ?",
-		network, normalizedNick, true, false,
-	).Count(&count).Error
+	err := theDB.Model(&User{}).Where(where, args...).Count(&count).Error
 	if err != nil {
 		return nil, 0, err
 	}
@@ -503,10 +507,7 @@ func getMostRecentReleasedUserByNormalizedNick(network, normalizedNick string) (
 		return nil, 0, nil
 	}
 	var user User
-	err = theDB.Where(
-		"network = ? AND normalized_nick = ? AND released = ? AND flagged = ?",
-		network, normalizedNick, true, false,
-	).Order("updated_at DESC, id DESC").First(&user).Error
+	err = theDB.Where(where, args...).Order("updated_at DESC, id DESC").First(&user).Error
 	if err != nil {
 		return nil, count, err
 	}

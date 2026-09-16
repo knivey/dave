@@ -228,10 +228,13 @@ func registerIRCHandlers(bot *Bot, client *girc.Client, network Network, log log
 // handleUserJoin resolves a joining user, deferring to the WHOX reply when
 // the JOIN event carries no account information.
 //
-// DESIGN NOTE: account info comes from the event payload (extended-join
-// params / @account tag), never from client.LookupUser — girc runs all
-// handlers for an event concurrently, so its internal state population races
-// with ours. When the event has no account info (connection without
+// DESIGN NOTE: payload account sources (extended-join params / @account
+// tag) are authoritative; the racy client.LookupUser read inside
+// accountFromEvent is a last resort that legitimately suppresses the
+// deferral when girc already knows the account (e.g. an earlier WHOX reply
+// on a connection without extended-join). girc runs all handlers for an
+// event concurrently, so its internal state population races with ours.
+// When the event has no account info (connection without
 // extended-join and without account-tag), no row is created at join time;
 // the resolution is deferred to the 354 reply for girc's per-join
 // `WHO <nick> %tacuhnr,1` (see handleWHOXReply). On servers without WHOX

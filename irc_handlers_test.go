@@ -237,4 +237,9 @@ func TestHandleUserJoin(t *testing.T) {
 		assert.Equal(t, before, countUsers(), "no user row must be created yet")
 		assert.True(t, takePendingJoinWHO("testnet", "shrew^"), "deferral key must be casefolded")
 	})
+
+	t.Run("nil source does not panic", func(t *testing.T) {
+		e := girc.Event{Command: girc.JOIN, Params: []string{"#gay"}}
+		handleUserJoin(network, client, e, newTestLogger())
+	})
 }

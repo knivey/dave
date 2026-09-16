@@ -354,3 +354,47 @@ func TestHandleAccountChange(t *testing.T) {
 		handleAccountChange(network, client, e, newTestLogger()) // must not panic
 	})
 }
+
+func TestHandleHostChange(t *testing.T) {
+	setupTestDB(t)
+
+	chgEvent := func(nick, ident, host string) girc.Event {
+		return girc.Event{
+			Command: girc.CAP_CHGHOST,
+			Source:  &girc.Source{Name: nick, Ident: "~old", Host: "old.example"},
+			Params:  []string{ident, host},
+		}
+	}
+
+	t.Run("new ident@host recorded for active user", func(t *testing.T) {
+		user, err := createNewUser("testnet", "Mover", "mover", "", "~old", "old.example")
+		require.NoError(t, err)
+
+		handleHostChange("testnet", chgEvent("Mover", "~new", "new.example"), newTestLogger())
+
+		var hosts []UserKnownHost
+		theDB.Where("user_id = ?", user.ID).Find(&hosts)
+		assert.Len(t, hosts, 2, "old and new host both known")
+		found := false
+		for _, h := range hosts {
+			if h.Ident == "~new" && h.Host == "new.example" {
+				found = true
+			}
+		}
+		assert.True(t, found, "new host must be recorded")
+	})
+
+	t.Run("unknown nick is a no-op", func(t *testing.T) {
+		before := int64(0)
+		theDB.Model(&UserKnownHost{}).Count(&before)
+		handleHostChange("testnet", chgEvent("Stranger", "~x", "x.example"), newTestLogger())
+		after := int64(0)
+		theDB.Model(&UserKnownHost{}).Count(&after)
+		assert.Equal(t, before, after)
+	})
+
+	t.Run("malformed event is ignored", func(t *testing.T) {
+		e := girc.Event{Command: girc.CAP_CHGHOST, Source: &girc.Source{Name: "x"}, Params: []string{"onlyone"}}
+		handleHostChange("testnet", e, newTestLogger()) // must not panic
+	})
+}

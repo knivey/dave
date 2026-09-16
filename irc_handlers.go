@@ -302,6 +302,29 @@ func handleAccountChange(network Network, client *girc.Client, event girc.Event,
 	}
 }
 
+// handleHostChange records ident/host changes (chghost cap) into the user's
+// known hosts so future host-based recovery works after a vhost/cloak change.
+// No re-resolution is needed — identity did not change, only the host. If no
+// active row holds the nick (user never interacted), there is nothing to do;
+// a pending WHOX deferral carries the fresh host anyway.
+func handleHostChange(network string, event girc.Event, log logxi.Logger) {
+	if len(event.Params) != 2 || event.Source == nil {
+		return
+	}
+	norm := normalizeIRC(event.Source.Name, getCasemapping(network))
+	user, err := getActiveUserByNormalizedNick(network, norm)
+	if err != nil {
+		log.Error("failed to look up user for chghost", "nick", event.Source.Name, "error", err)
+		return
+	}
+	if user == nil {
+		return
+	}
+	if err := upsertKnownHost(user.ID, event.Params[0], event.Params[1]); err != nil {
+		log.Error("failed to upsert known host on chghost", "nick", event.Source.Name, "error", err)
+	}
+}
+
 func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 	host := event.Source.Name + "!" + event.Source.Ident + "@" + event.Source.Host
 	msg := event.Params[len(event.Params)-1]

@@ -72,13 +72,52 @@ func buildSystemPromptData(network Network, client *girc.Client, channel, userNi
 	return data
 }
 
-func resolveIRCUser(network Network, c *girc.Client, nick string, source *girc.Source) (*User, error) {
-	casemapping := getCasemapping(network.Name)
-	account := ""
-	if u := c.LookupUser(nick); u != nil {
-		account = u.Extras.Account
+func resolveIRCUser(network Network, c *girc.Client, event girc.Event) (*User, error) {
+	if event.Source == nil {
+		return nil, fmt.Errorf("resolveIRCUser: event has no source")
 	}
-	return resolveUser(network.Name, nick, source.Ident, source.Host, account, casemapping)
+	casemapping := getCasemapping(network.Name)
+	account := accountFromEvent(c, event)
+	return resolveUser(network.Name, event.Source.Name, event.Source.Ident, event.Source.Host, account, casemapping)
+}
+
+// accountFromEvent extracts the IRC services account for an event's source
+// user from the most reliable race-free source available.
+//
+// DESIGN NOTE: girc dispatches ALL handlers for an event concurrently —
+// internal handlers included (handler.go exec() launches every handler as a
+// goroutine, "no specific order/priority"). Reading
+// client.LookupUser(...).Extras.Account therefore races against girc's own
+// state tracking (handleJOIN/handleACCOUNT/handleWHO populating that field).
+// For JOIN and ACCOUNT events the account is in the event payload itself;
+// for tagged messages the @account tag is too. Those sources are read first;
+// the racy state lookup is the last resort for paths where the account was
+// learned from an earlier WHOX reply.
+func accountFromEvent(c *girc.Client, e girc.Event) string {
+	if e.Command == girc.JOIN && len(e.Params) >= 2 {
+		// extended-join: Params[1] is the account, "*" means not logged in.
+		// The param is authoritative — do not fall through to state.
+		if e.Params[1] != "*" {
+			return e.Params[1]
+		}
+		return ""
+	}
+	if e.Command == girc.CAP_ACCOUNT && len(e.Params) == 1 {
+		// account-notify: "*" means logged out.
+		if e.Params[0] != "*" {
+			return e.Params[0]
+		}
+		return ""
+	}
+	if tag, ok := e.Tags.Get("account"); ok && tag != "" && tag != "*" {
+		return tag
+	}
+	if e.Source != nil {
+		if u := c.LookupUser(e.Source.Name); u != nil {
+			return u.Extras.Account
+		}
+	}
+	return ""
 }
 
 func getSessionConfig(session *Session) (AIConfig, bool) {

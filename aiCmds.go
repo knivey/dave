@@ -1353,7 +1353,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 	}
 	if resolvedUser == nil {
 		var err error
-		resolvedUser, err = resolveIRCUser(network, c, nick, e.Source)
+		resolvedUser, err = resolveIRCUser(network, c, e)
 		if err != nil {
 			runner.logger.Error("failed to resolve user in chat()", "error", err)
 		}

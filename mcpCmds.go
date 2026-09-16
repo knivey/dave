@@ -51,7 +51,7 @@ func mcpCmd(network Network, c *girc.Client, e girc.Event, cfg MCPCommandConfig,
 
 	channel := normalizeIRC(e.Params[0], getCasemapping(network.Name))
 	nick := e.Source.Name
-	resolvedUser, _ := resolveIRCUser(network, c, nick, e.Source)
+	resolvedUser, _ := resolveIRCUser(network, c, e)
 	var userID int64
 	if resolvedUser != nil {
 		userID = resolvedUser.ID

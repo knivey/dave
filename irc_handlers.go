@@ -128,7 +128,7 @@ func registerIRCHandlers(bot *Bot, client *girc.Client, network Network, log log
 		if nick == client.GetNick() {
 			return
 		}
-		_, err := resolveIRCUser(network, client, nick, event.Source)
+		_, err := resolveIRCUser(network, client, event)
 		if err != nil {
 			log.Error("failed to resolve user on join", "nick", nick, "error", err)
 		}
@@ -207,7 +207,7 @@ func handleChanMessage(network Network, client *girc.Client, event girc.Event) {
 }
 
 func handleMention(network Network, client *girc.Client, event girc.Event, channel, msg string) {
-	resolvedUser, err := resolveIRCUser(network, client, event.Source.Name, event.Source)
+	resolvedUser, err := resolveIRCUser(network, client, event)
 	if err != nil {
 		logger.Error("failed to resolve user", "error", err)
 	}
@@ -288,7 +288,7 @@ func handleTrigger(network Network, client *girc.Client, event girc.Event, chann
 	// amibanned is a special case: it must work even for banned users,
 	// so it resolves the user and returns before the ban check.
 	if stripped == "amibanned" {
-		resolvedUser, err := resolveIRCUser(network, client, event.Source.Name, event.Source)
+		resolvedUser, err := resolveIRCUser(network, client, event)
 		if err != nil {
 			logger.Error("failed to resolve user", "error", err)
 		}
@@ -367,7 +367,7 @@ func handleTrigger(network Network, client *girc.Client, event girc.Event, chann
 	}
 
 	// Command matched — now resolve user and check bans.
-	resolvedUser, err := resolveIRCUser(network, client, event.Source.Name, event.Source)
+	resolvedUser, err := resolveIRCUser(network, client, event)
 	if err != nil {
 		logger.Error("failed to resolve user", "error", err)
 	}

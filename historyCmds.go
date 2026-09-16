@@ -81,7 +81,7 @@ func verifySessionOwnership(session *Session, network Network, c *girc.Client, e
 	if session.UserID == nil {
 		return false, errorMsg(n.Sessions.NotOwned)
 	}
-	resolvedUser, _ := resolveIRCUser(network, c, e.Source.Name, e.Source)
+	resolvedUser, _ := resolveIRCUser(network, c, e)
 	if resolvedUser == nil || resolvedUser.ID != *session.UserID {
 		return false, errorMsg(n.Sessions.NotOwned)
 	}
@@ -105,7 +105,7 @@ func parseSessionIDAndVerify(rawID string, network Network, c *girc.Client, e gi
 }
 
 func resolveIRCUserWithID(network Network, c *girc.Client, e girc.Event) int64 {
-	resolvedUser, _ := resolveIRCUser(network, c, e.Source.Name, e.Source)
+	resolvedUser, _ := resolveIRCUser(network, c, e)
 	if resolvedUser != nil {
 		return resolvedUser.ID
 	}
@@ -669,7 +669,7 @@ func historyCompact(network Network, c *girc.Client, e girc.Event, ctx context.C
 	}
 
 	channel := normalizeIRC(e.Params[0], getCasemapping(network.Name))
-	resolvedUser, err := resolveIRCUser(network, c, e.Source.Name, e.Source)
+	resolvedUser, err := resolveIRCUser(network, c, e)
 	if err != nil || resolvedUser == nil {
 		sendOrDone(ctx, output, errorMsg(n.Compaction.NoActive))
 		return
@@ -730,7 +730,7 @@ func historyClone(network Network, c *girc.Client, e girc.Event, ctx context.Con
 	casemapping := getCasemapping(network.Name)
 	channel := normalizeIRC(e.Params[0], casemapping)
 
-	resolvedUser, err := resolveIRCUser(network, c, e.Source.Name, e.Source)
+	resolvedUser, err := resolveIRCUser(network, c, e)
 	if err != nil || resolvedUser == nil {
 		sendOrDone(ctx, output, errorNotice(n.Clone.Usage, map[string]string{"trigger": network.Trigger}))
 		return

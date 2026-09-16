@@ -364,6 +364,10 @@ func TestHandleAccountChange(t *testing.T) {
 		after := int64(0)
 		theDB.Model(&User{}).Count(&after)
 		assert.Equal(t, before, after, "bot's own ACCOUNT must not create or change rows")
+
+		var botRows int64
+		theDB.Model(&User{}).Where("normalized_nick = ?", "testbot").Count(&botRows)
+		assert.Zero(t, botRows, "no row may ever hold the bot's nick")
 	})
 
 	t.Run("previously unseen authed user gets a new row", func(t *testing.T) {

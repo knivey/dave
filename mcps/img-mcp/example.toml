@@ -21,12 +21,13 @@ timeout = 90
 default_workflow = "zimage"
 
 [upload]
-# File upload service URL for hosting generated images
-url = "https://upload.example.com"
-# Length of generated URL suffix
-url_len = 16
-# Expiry time for uploaded images in seconds (86400 = 24 hours)
-expiry = 86400
+# Photo site base URL for hosting generated images (required).
+# The upload endpoint and image URLs are derived from it:
+#   POST <url>/updo  (multipart "file" + toirc=0) -> 303 to the photo page
+#   <url>/<id>/orig/<filename>                     -> original image
+# Uploads are permanent gallery entries; toirc=0 suppresses the site's
+# own IRC announcement so only dave posts the link.
+url = "https://img.example.com"
 
 [queue]
 # Maximum number of concurrent image generation workers

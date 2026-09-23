@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,16 +24,15 @@ func baseTestConfigToml(comfyURL string) string {
 }
 
 type testConfigTomlOpts struct {
-	ComfyURL      string
-	UploadURL     string
-	UploadURLLen  int
-	UploadExpiry  int
-	MaxWorkers    int
-	MaxDepth      int
-	ResultTTL     string
-	ServerName    string
-	ServerVersion string
-	ServerAddr    string
+	ComfyURL        string
+	UploadURL       string
+	NoUploadSection bool
+	MaxWorkers      int
+	MaxDepth        int
+	ResultTTL       string
+	ServerName      string
+	ServerVersion   string
+	ServerAddr      string
 }
 
 func testConfigToml(opts testConfigTomlOpts) string {
@@ -40,13 +40,7 @@ func testConfigToml(opts testConfigTomlOpts) string {
 		opts.ComfyURL = "http://localhost:8188"
 	}
 	if opts.UploadURL == "" {
-		opts.UploadURL = "https://upload.example.com"
-	}
-	if opts.UploadURLLen == 0 {
-		opts.UploadURLLen = 16
-	}
-	if opts.UploadExpiry == 0 {
-		opts.UploadExpiry = 86400
+		opts.UploadURL = "https://img.example.com"
 	}
 	if opts.MaxWorkers == 0 {
 		opts.MaxWorkers = 1
@@ -66,6 +60,13 @@ func testConfigToml(opts testConfigTomlOpts) string {
 	if opts.ServerAddr == "" {
 		opts.ServerAddr = ":8080"
 	}
+	uploadSection := `
+[upload]
+url = "` + opts.UploadURL + `"
+`
+	if opts.NoUploadSection {
+		uploadSection = ""
+	}
 	return `
 [server]
 name = "` + opts.ServerName + `"
@@ -76,12 +77,7 @@ addr = "` + opts.ServerAddr + `"
 baseurl = "` + opts.ComfyURL + `"
 timeout = 60
 default_workflow = "test"
-
-[upload]
-url = "` + opts.UploadURL + `"
-url_len = ` + fmt.Sprintf("%d", opts.UploadURLLen) + `
-expiry = ` + fmt.Sprintf("%d", opts.UploadExpiry) + `
-
+` + uploadSection + `
 [queue]
 max_workers = ` + fmt.Sprintf("%d", opts.MaxWorkers) + `
 max_depth = ` + fmt.Sprintf("%d", opts.MaxDepth) + `
@@ -96,6 +92,35 @@ timeout = 60
 `
 }
 
+func TestLoadConfigUploadURLRequired(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteWorkflow(t, dir)
+	path := writeTestConfigFile(t, dir, testConfigToml(testConfigTomlOpts{NoUploadSection: true}))
+
+	_, err := loadConfig(path)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "upload.url is required")
+}
+
+func TestLoadConfigLegacyUploadKeysIgnored(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteWorkflow(t, dir)
+	// Configs from the previous upload host still carry url_len/expiry;
+	// the decoder ignores unknown keys, so they must load cleanly.
+	toml := testConfigToml(testConfigTomlOpts{})
+	toml = strings.Replace(toml,
+		"[upload]\nurl = \"https://img.example.com\"",
+		"[upload]\nurl = \"https://img.example.com\"\nurl_len = 16\nexpiry = 86400",
+		1)
+	path := writeTestConfigFile(t, dir, toml)
+
+	cfg, err := loadConfig(path)
+
+	require.NoError(t, err)
+	assert.Equal(t, "https://img.example.com", cfg.Upload.URL)
+}
+
 func TestReloadConfigFromFile_ValidSwap(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteWorkflow(t, dir)
@@ -106,11 +131,9 @@ func TestReloadConfigFromFile_ValidSwap(t *testing.T) {
 	original.Database.Resolved = "/some/path.db"
 
 	updated := testConfigToml(testConfigTomlOpts{
-		ComfyURL:     "http://localhost:9999",
-		UploadURL:    "https://new-upload.example.com",
-		UploadURLLen: 20,
-		UploadExpiry: 3600,
-		ResultTTL:    "2h",
+		ComfyURL:  "http://localhost:9999",
+		UploadURL: "https://new-img.example.com",
+		ResultTTL: "2h",
 	})
 	writeTestConfigFile(t, dir, updated)
 
@@ -118,9 +141,7 @@ func TestReloadConfigFromFile_ValidSwap(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, warnings)
 	assert.Equal(t, "http://localhost:9999", newCfg.Comfy.BaseURL)
-	assert.Equal(t, "https://new-upload.example.com", newCfg.Upload.URL)
-	assert.Equal(t, 20, newCfg.Upload.URLLen)
-	assert.Equal(t, 3600, newCfg.Upload.Expiry)
+	assert.Equal(t, "https://new-img.example.com", newCfg.Upload.URL)
 	assert.Equal(t, 2*time.Hour, newCfg.Queue.ResultTTL)
 	assert.Equal(t, original.Server.Name, newCfg.Server.Name)
 	assert.Equal(t, original.Server.Addr, newCfg.Server.Addr)

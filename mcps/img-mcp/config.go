@@ -43,9 +43,9 @@ type ComfyServiceConfig struct {
 }
 
 type UploadConfig struct {
-	URL    string `toml:"url"`
-	URLLen int    `toml:"url_len"`
-	Expiry int    `toml:"expiry"`
+	// URL is the photo site's base URL (e.g. "https://img.zkpq.ca");
+	// the /updo and /<id>/orig/<file> paths are derived from it.
+	URL string `toml:"url"`
 }
 
 type QueueConfig struct {
@@ -102,12 +102,8 @@ func loadConfig(configFile string) (Config, error) {
 		cfg.Comfy.Timeout = 300
 	}
 
-	cfg.Upload.URL = defaultString(cfg.Upload.URL, "https://upload.beer")
-	if cfg.Upload.URLLen == 0 {
-		cfg.Upload.URLLen = 16
-	}
-	if cfg.Upload.Expiry == 0 {
-		cfg.Upload.Expiry = 86400
+	if cfg.Upload.URL == "" {
+		return cfg, fmt.Errorf("upload.url is required")
 	}
 
 	if cfg.Queue.MaxWorkers == 0 {

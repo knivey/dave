@@ -3,7 +3,6 @@
 # Root options:
 #   trigger             (string)              Command trigger prefix (e.g. "." for .chat, "-" for -chat)
 #   quitmsg             (string)              Default quit message
-#   uploadurl           (string)              URL prefix for paste uploads
 #   max_queue_depth     (int, default: 5)     Max queued requests per network
 #   maximagepixels      (int, default: 50000000) Max total pixels (width*height*framecount) for downloaded images; larger claims are skipped before decode (decompression-bomb guard)
 #   sessions_display_limit (int, default: 10) Max sessions shown in sessions list command
@@ -107,7 +106,6 @@
 # Example with all root + nested options:
 # trigger = "."
 # quitmsg = "goodbye"
-# uploadurl = "https://upload.example.com"
 # max_queue_depth = 5
 # maximagepixels = 50000000
 # sessions_display_limit = 10
@@ -212,7 +210,6 @@
 #this is the default trigger for commands Ex: set to . for .chat or - for -chat
 trigger = "-"
 quitmsg = "unplugged"
-uploadurl = "https://upload.beer"
 
 max_queue_depth = 5
 hidden_tools = ["register_background_job", "check_ban_history"]

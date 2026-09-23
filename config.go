@@ -22,8 +22,7 @@ type Config struct {
 	Networks             map[string]Network
 	Services             map[string]Service
 	Commands             Commands
-	MaxQueueDepth        int    `toml:"max_queue_depth"`
-	UploadURL            string `toml:"uploadurl"`
+	MaxQueueDepth        int `toml:"max_queue_depth"`
 	Database             DatabaseConfig
 	MCPs                 map[string]MCPConfig `toml:"mcps"`
 	TUI                  TUIConfig

@@ -241,7 +241,6 @@ ignores.txt                  # Wildcard host ignores (optional)
 ```toml
 trigger = "-"
 quitmsg = "unplugged"
-uploadurl = "https://upload.beer"
 
 queue_msgs = ["queued (position {position})"]
 started_msg = "\x0306\u25b6 {nick}: Processing your request (waited {wait})...\x0f"
@@ -476,7 +475,7 @@ Just reply to the bot's nick:
 
 ```
 <knivey> -qwen a sunset over mountains
-<dave>   https://upload.beer/abc123.jpg
+<dave>   https://img.zkpq.ca/4F4/orig/ComfyUI_00001_.png
 <dave>   All done ;)
 ```
 
@@ -553,7 +552,7 @@ Shows your queue position/status and any background async jobs.
 <knivey> -qwen cyberpunk city
          at night, neon rain
 <dave>   🔧 Generating image...
-<dave>   https://i.upload.beer/a1b2.jpg
+<dave>   https://img.zkpq.ca/4F5/orig/ComfyUI_00002_.png
 <dave>   All done ;)
 ```
 
@@ -653,7 +652,9 @@ baseurl = "http://localhost:8188"
 default_workflow = "zimage"
 
 [upload]
-url = "https://upload.example.com"
+# Photo site base URL (required) — upload endpoint and image URLs are
+# derived from it; uploads are permanent gallery entries
+url = "https://img.zkpq.ca"
 
 [enhancement.default]
 baseurl = "https://api.x.ai/v1/"

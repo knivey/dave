@@ -120,6 +120,9 @@ No Makefile, no linter config. Use `go fmt` + `go vet`.
 - Error: `log.Fatalln` at startup only. TUI `/reload` uses error-returning `loadReloadableDir`.
 - **Design comments**: Preserve and maintain block comments that explain non-obvious design decisions (e.g. "DESIGN NOTE", "Rationale", multi-line comments explaining why code is structured a certain way). When you encounter code that could be misunderstood or that implements a multi-layer defense, add a comment explaining the full picture. These comments are critical for maintaining correctness across future edits. See `isResponseIDError()` in `responses.go` for an example.
 
+## Subagent Model Selection
+Always dispatch subagents (code reviews, exploration, implementation) on the **zai-coding-plan** provider, preferably its best available model (e.g. `zai-coding-plan/glm-5.3#max`). Do NOT use other providers (opencode, llama.cpp) — they may be out of funds or inferior.
+
 ## Review Process
 - When implementing multi-task plans, perform **both spec compliance review AND code quality review** after every task, no matter how trivial. Never skip either review.
 - Spec review verifies the code matches the task requirements (nothing missing, nothing extra).

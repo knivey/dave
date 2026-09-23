@@ -156,33 +156,28 @@ func prepareComfyWorkflow(cfg Config, workflowName, prompt, negativePrompt strin
 
 	// DESIGN NOTE: The prompt note node is intentionally disconnected from the
 	// rest of the graph. ComfyUI only validates the INPUTS of nodes reachable
-	// from output nodes, so this node costs nothing at generation time, but the
-	// full submitted graph — orphan nodes included — is embedded in the PNG
-	// "prompt" metadata chunk by the save node. That lets us recover the
-	// original user prompt (pre-enhancement, otherwise overwritten in the
-	// prompt node below) and provenance from the image file itself.
+	// from output nodes, so this node costs nothing at generation time and
+	// needs no inputs beyond its text — the production workflows already carry
+	// a text-only orphan CLIPTextEncode (an unused negative prompt) that the
+	// server accepts. The full submitted graph — orphan nodes included — is
+	// embedded in the file metadata by the save node, so the original user
+	// prompt (pre-enhancement, otherwise overwritten in the prompt node above)
+	// and provenance are recoverable from the image file itself.
 	//
 	// The class MUST be a backend-registered core type: validate_prompt checks
 	// class_type registration for EVERY node in the prompt, even unreachable
 	// ones. "Note" is frontend-only (the editor strips it from API exports and
 	// the backend rejects it with missing_node_type — learned the hard way),
-	// so we use a disconnected CLIPTextEncode — the same shape as a real
-	// prompt node whose output link was deleted — copying the prompt node's
-	// clip input so it is indistinguishable from a merely-disconnected node.
-	// Orphan CLIPTextEncode nodes in API prompts are accepted in practice and
-	// ride along in the embedded graph.
-	// The orphan node overwrites any pre-existing key with this ID — dave's
-	// node wins. Editors export numeric node IDs only, so a collision means
-	// a hand-authored workflow deliberately used our namespaced ID.
-	noteNode := ComfyNode{
+	// so we use CLIPTextEncode.
+	//
+	// The write overwrites any pre-existing key with this ID — dave's node
+	// wins. Editors export numeric node IDs only, so a collision means a
+	// hand-authored workflow deliberately used our namespaced ID.
+	workflow[davePromptNoteNodeID] = ComfyNode{
 		Inputs: map[string]interface{}{"text": promptNote},
 		Class:  "CLIPTextEncode",
 		Meta:   &comfyNodeMeta{Title: davePromptNoteTitle},
 	}
-	if clip, ok := promptNode.Inputs["clip"]; ok {
-		noteNode.Inputs["clip"] = clip
-	}
-	workflow[davePromptNoteNodeID] = noteNode
 
 	return workflow, nil
 }

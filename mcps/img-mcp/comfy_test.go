@@ -148,8 +148,8 @@ func TestPrepareComfyWorkflowInjectsPromptNote(t *testing.T) {
 	require.NotNil(t, node.Meta, "note node meta")
 	assert.Equal(t, "dave original prompt", node.Meta.Title, "note node title")
 	assert.Equal(t, note, node.Inputs["text"], "note node text should be the payload verbatim")
-	assert.Equal(t, []interface{}{"18", float64(0)}, node.Inputs["clip"],
-		"note node should copy the prompt node's clip link so it looks like a real disconnected prompt node")
+	assert.NotContains(t, node.Inputs, "clip",
+		"orphan should be text-only even when the prompt node has a clip link — unreachable nodes are not input-validated")
 
 	assert.Equal(t, "enhanced cat", got["prompt-node"].Inputs["text"],
 		"prompt node should still receive the (possibly enhanced) prompt")

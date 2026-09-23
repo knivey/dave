@@ -460,3 +460,73 @@ func TestCompareNonReloadable(t *testing.T) {
 		assert.Contains(t, warnings[0], "requires restart")
 	})
 }
+
+func TestLoadConfigEnhancementAPIFields(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteWorkflow(t, dir)
+	content := baseTestConfigToml("http://localhost:8188") + `
+[enhancement.default]
+baseurl = "https://api.x.ai/v1/"
+key = "test-key"
+model = "grok-4.6"
+systemprompt = "enhance"
+timeout = 30
+responses_api = true
+reasoning_effort = "low"
+`
+	path := writeTestConfigFile(t, dir, content)
+
+	cfg, err := loadConfig(path)
+	require.NoError(t, err)
+	require.Contains(t, cfg.Enhancements, "default")
+	assert.True(t, cfg.Enhancements["default"].ResponsesAPI)
+	assert.Equal(t, "low", cfg.Enhancements["default"].ReasoningEffort)
+}
+
+func TestLoadConfigEnhancementAPIDefaults(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteWorkflow(t, dir)
+	content := baseTestConfigToml("http://localhost:8188") + `
+[enhancement.default]
+baseurl = "https://api.x.ai/v1/"
+key = "test-key"
+model = "grok-4.6"
+systemprompt = "enhance"
+timeout = 30
+`
+	path := writeTestConfigFile(t, dir, content)
+
+	cfg, err := loadConfig(path)
+	require.NoError(t, err)
+	require.Contains(t, cfg.Enhancements, "default")
+	assert.False(t, cfg.Enhancements["default"].ResponsesAPI, "responses_api must default to false (Chat Completions)")
+	assert.Empty(t, cfg.Enhancements["default"].ReasoningEffort, "reasoning_effort must default to empty (not sent)")
+}
+
+func TestReloadConfigFromFile_EnhancementAPIFieldsReloadable(t *testing.T) {
+	dir := t.TempDir()
+	mustWriteWorkflow(t, dir)
+	base := `
+[enhancement.default]
+baseurl = "https://api.x.ai/v1/"
+key = "k"
+model = "grok-4.6"
+systemprompt = "enhance"
+timeout = 30
+`
+	path := writeTestConfigFile(t, dir, baseTestConfigToml("http://localhost:8188")+base)
+
+	original, err := loadConfig(path)
+	require.NoError(t, err)
+	assert.False(t, original.Enhancements["default"].ResponsesAPI)
+
+	writeTestConfigFile(t, dir, baseTestConfigToml("http://localhost:8188")+base+`responses_api = true
+reasoning_effort = "high"
+`)
+
+	newCfg, warnings, err := reloadConfigFromFile(path, original)
+	require.NoError(t, err)
+	assert.Empty(t, warnings, "enhancement API fields must be reloadable without restart warnings")
+	assert.True(t, newCfg.Enhancements["default"].ResponsesAPI)
+	assert.Equal(t, "high", newCfg.Enhancements["default"].ReasoningEffort)
+}

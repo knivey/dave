@@ -61,6 +61,13 @@ type EnhancementConfig struct {
 	SystemPrompt string `toml:"systemprompt"`
 	Timeout      int    `toml:"timeout"`
 	Description  string `toml:"description"`
+	// ResponsesAPI uses POST /v1/responses instead of Chat Completions.
+	// Required to capture reasoning summaries in logs on reasoning models.
+	ResponsesAPI bool `toml:"responses_api"`
+	// ReasoningEffort is sent when non-empty: top-level reasoning_effort on
+	// Chat Completions, reasoning.effort on Responses. Provider is the source
+	// of truth for accepted values (xAI: low/medium/high, 4.7 adds xhigh).
+	ReasoningEffort string `toml:"reasoning_effort"`
 }
 
 type NetworkPolicy struct {

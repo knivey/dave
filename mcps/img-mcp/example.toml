@@ -64,19 +64,27 @@ description = "General purpose image prompt enhancer"
 baseurl = "https://api.x.ai/v1/"
 # API key for the LLM service
 key = "YOUR_API_KEY_HERE"
-# Model to use for enhancement
-model = "grok-4-1-fast-reasoning"
+# Model to use for enhancement (grok-4-1-fast family retired 2026-05-15; use
+# canonical slugs like grok-4.6)
+model = "grok-4.6"
 # System prompt for the enhancement model
 systemprompt = "You are an expert at writing prompts for AI image generation..."
 # Timeout in seconds for enhancement requests
 timeout = 30
+# Use the OpenAI Responses API (POST /v1/responses) instead of Chat Completions.
+# Captures reasoning summaries in the img-mcp log for reasoning models.
+responses_api = false
+# Reasoning effort for reasoning models ("low", "medium", "high"; Grok 4.7
+# also accepts "xhigh"). Sent on both API paths. Leave unset for non-reasoning
+# models — an empty value sends nothing.
+# reasoning_effort = "low"
 
 # Example: content-safe enhancement for networks with strict content policies (e.g., Libera)
 # [enhancement.libera-safe]
 # description = "Content-safe prompt enhancer for Libera"
 # baseurl = "https://api.x.ai/v1/"
 # key = "YOUR_API_KEY_HERE"
-# model = "grok-4-1-fast-reasoning"
+# model = "grok-4.6"
 # systemprompt = """You enhance prompts for AI image generation with strict content safety enforcement.
 #
 # REFUSE (set refused=true) any prompt requesting or implying:

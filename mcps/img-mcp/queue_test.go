@@ -303,6 +303,36 @@ func TestJobQueue_IsReady_NoDB(t *testing.T) {
 	require.True(t, q.IsReady(), "expected IsReady true when no DB")
 }
 
+func TestJobQueue_LLMGeneratedPersists(t *testing.T) {
+	cfg := testConfig("http://127.0.0.1:0")
+	cfg.Queue.MaxWorkers = 0
+	db := setupTestDB(t)
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	q := &JobQueue{
+		cfg:     cfg,
+		db:      db,
+		pending: make(chan *Job, cfg.Queue.MaxDepth),
+		results: make(map[string]*Job),
+		cancel:  cancel,
+	}
+
+	job, err := q.Submit(JobTypeGenerate, "test", JobInput{Prompt: "a cat", LLMGenerated: true})
+	require.NoError(t, err, "Submit")
+
+	dbj, err := dbGetJob(db, job.ID)
+	require.NoError(t, err, "dbGetJob")
+	recovered := jobFromDBJob(dbj)
+	assert.True(t, recovered.Input.LLMGenerated, "llm_generated should round-trip through the DB")
+
+	job2, err := q.Submit(JobTypeGenerate, "test", JobInput{Prompt: "a dog"})
+	require.NoError(t, err, "Submit")
+	dbj2, err := dbGetJob(db, job2.ID)
+	require.NoError(t, err, "dbGetJob")
+	assert.False(t, jobFromDBJob(dbj2).Input.LLMGenerated,
+		"llm_generated should default to false when never set")
+}
+
 func TestJobQueue_IsReady_WithDB(t *testing.T) {
 	cfg := testConfig("http://127.0.0.1:0")
 	cfg.Queue.MaxWorkers = 0

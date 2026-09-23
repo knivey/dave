@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	logxi "github.com/mgutz/logxi/v1"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1104,6 +1105,48 @@ func TestSignalMCPServer_Stdio_NoProcess(t *testing.T) {
 	_, err := signalMCPServer("img-mcp")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no process")
+}
+
+func TestInjectScopeArgsFromRunner_SetsLLMGenerated(t *testing.T) {
+	saveAndResetMCPServers(t)
+
+	mcpServers["img-mcp"] = &MCPServer{
+		Config: MCPConfig{Timeout: 10 * time.Second},
+		Tools: []*mcp.Tool{
+			{
+				Name: "generate_image",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"prompt":                     map[string]any{"type": "string"},
+						"_dave_inject_network":       map[string]any{"type": "string"},
+						"_dave_inject_llm_generated": map[string]any{"type": "boolean"},
+					},
+				},
+			},
+		},
+	}
+	mcpToolToServer["generate_image"] = "img-mcp"
+
+	// injectScopeArgsFromRunner only runs on the LLM tool-call path, so any
+	// value (or absence) the model produced must be overwritten with true.
+	toolArgs := map[string]any{
+		"prompt":                     "a cat",
+		"_dave_inject_llm_generated": false,
+	}
+	cr := &chatRunner{
+		network: Network{Name: "Libera"},
+		channel: "#test",
+		userID:  42,
+		nick:    "testuser",
+		logger:  logxi.New("test"),
+	}
+
+	injectScopeArgsFromRunner(toolArgs, "generate_image", cr)
+
+	assert.Equal(t, "Libera", toolArgs["_dave_inject_network"])
+	assert.Equal(t, true, toolArgs["_dave_inject_llm_generated"],
+		"LLM-path injection must always mark the call as llm_generated")
 }
 
 func TestSignalMCPServerHTTP_Success(t *testing.T) {

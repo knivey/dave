@@ -775,11 +775,18 @@ func injectScopeArgs(toolArgs map[string]any, toolName string, scopeValues map[s
 }
 
 func injectScopeArgsFromRunner(toolArgs map[string]any, toolName string, cr *chatRunner) {
+	// llm_generated is true by definition on this path: injectScopeArgsFromRunner
+	// is only called from executeToolCalls, where the LLM composed the arguments.
+	// Direct tool commands (tools.toml) never pass through here, so those calls
+	// keep the zero value false. Injection overwrites whatever the model itself
+	// wrote into the field (it is stripped from the schema the model sees, but
+	// defense in depth).
 	injectScopeArgs(toolArgs, toolName, map[string]any{
-		"network": cr.network.Name,
-		"channel": cr.channel,
-		"user_id": cr.userID,
-		"nick":    cr.nick,
+		"network":       cr.network.Name,
+		"channel":       cr.channel,
+		"user_id":       cr.userID,
+		"nick":          cr.nick,
+		"llm_generated": true,
 	})
 	cr.logger.Debug("injected scope args", "tool", toolName)
 }

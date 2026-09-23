@@ -22,9 +22,11 @@ var comfySchemeRegex = regexp.MustCompile(`^https?://`)
 type ComfyNode struct {
 	Inputs map[string]interface{} `json:"inputs"`
 	Class  string                 `json:"class_type"`
-	Meta   *struct {
-		Title string `json:"title"`
-	} `json:"_meta,omitempty"`
+	Meta   *comfyNodeMeta         `json:"_meta,omitempty"`
+}
+
+type comfyNodeMeta struct {
+	Title string `json:"title"`
 }
 
 type ComfyPromptRequest struct {
@@ -78,7 +80,35 @@ func randSeed() int64 {
 	return rand.Int63()
 }
 
-func prepareComfyWorkflow(cfg Config, workflowName, prompt, negativePrompt string, seedOverride *int64) (ComfyWorkflow, error) {
+// davePromptNoteNodeID is the node key img-mcp injects into every submitted
+// workflow. String key (not numeric) so it can never collide with the numeric
+// IDs editors export.
+const davePromptNoteNodeID = "dave_original_prompt"
+
+const davePromptNoteTitle = "dave original prompt"
+
+// promptNotePayload is the JSON stored in the note node. ComfyUI embeds the
+// full submitted workflow graph (including disconnected nodes) in the image's
+// "prompt" metadata chunk, so this survives inside every generated file.
+type promptNotePayload struct {
+	Prompt       string `json:"prompt"`
+	LLMGenerated bool   `json:"llm_generated"`
+	JobID        string `json:"job_id"`
+}
+
+func buildPromptNote(job *Job) (string, error) {
+	data, err := json.Marshal(promptNotePayload{
+		Prompt:       job.Input.Prompt,
+		LLMGenerated: job.Input.LLMGenerated,
+		JobID:        job.ID,
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshaling prompt note: %w", err)
+	}
+	return string(data), nil
+}
+
+func prepareComfyWorkflow(cfg Config, workflowName, prompt, negativePrompt string, seedOverride *int64, promptNote string) (ComfyWorkflow, error) {
 	wc, ok := cfg.Workflows[workflowName]
 	if !ok {
 		return nil, fmt.Errorf("workflow %q not found", workflowName)
@@ -105,6 +135,23 @@ func prepareComfyWorkflow(cfg Config, workflowName, prompt, negativePrompt strin
 				}
 			}
 		}
+	}
+
+	// DESIGN NOTE: The prompt note node is intentionally disconnected from the
+	// rest of the graph. ComfyUI only validates and executes nodes reachable
+	// from output nodes, so this node costs nothing at generation time, but
+	// ComfyUI embeds the full submitted graph — orphan nodes included — in the
+	// PNG "prompt" metadata chunk. That lets us recover the original user
+	// prompt (pre-enhancement, otherwise overwritten below the note's
+	// replacement in the prompt node) and provenance from the image itself.
+	// "Note" is a registered core ComfyUI class; the API rejects unknown
+	// class types even for unreachable nodes, so a missing/ancient Note node
+	// on the server will surface as a submission error rather than silent
+	// metadata loss.
+	workflow[davePromptNoteNodeID] = ComfyNode{
+		Inputs: map[string]interface{}{"text": promptNote},
+		Class:  "Note",
+		Meta:   &comfyNodeMeta{Title: davePromptNoteTitle},
 	}
 
 	return workflow, nil
@@ -223,8 +270,8 @@ func resumeComfyGeneration(ctx context.Context, cfg Config, workflowName, prompt
 	return monitorComfyGeneration(ctx, cfg, workflowName, promptID)
 }
 
-func submitComfyGeneration(ctx context.Context, cfg Config, workflowName, prompt, negativePrompt string, seedOverride *int64) (ComfyResult, error) {
-	workflow, err := prepareComfyWorkflow(cfg, workflowName, prompt, negativePrompt, seedOverride)
+func submitComfyGeneration(ctx context.Context, cfg Config, workflowName, prompt, negativePrompt string, seedOverride *int64, promptNote string) (ComfyResult, error) {
+	workflow, err := prepareComfyWorkflow(cfg, workflowName, prompt, negativePrompt, seedOverride, promptNote)
 	if err != nil {
 		return ComfyResult{}, err
 	}

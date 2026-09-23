@@ -27,6 +27,7 @@ type dbJob struct {
 	Enhancement    string  `db:"enhancement"`
 	Seed           *int64  `db:"seed"`
 	OutputFormat   string  `db:"output_format"`
+	LLMGenerated   bool    `db:"llm_generated"`
 	Error          *string `db:"error"`
 	ComfyPromptID  *string `db:"comfy_prompt_id"`
 	CreatedAt      string  `db:"created_at"`
@@ -86,11 +87,11 @@ func closeDB(db *sqlx.DB) {
 
 func dbInsertJob(db *sqlx.DB, job *Job) error {
 	_, err := db.Exec(
-		`INSERT INTO jobs (job_id, type, status, workflow, prompt, negative_prompt, enhancement, seed, output_format)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO jobs (job_id, type, status, workflow, prompt, negative_prompt, enhancement, seed, output_format, llm_generated)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		job.ID, string(job.Type), string(job.Status), job.Workflow,
 		job.Input.Prompt, job.Input.NegativePrompt, job.Input.Enhancement,
-		job.Input.Seed, job.Input.OutputFormat,
+		job.Input.Seed, job.Input.OutputFormat, job.Input.LLMGenerated,
 	)
 	return err
 }
@@ -239,6 +240,7 @@ func jobFromDBJob(dbj *dbJob) *Job {
 			Enhancement:    dbj.Enhancement,
 			Seed:           dbj.Seed,
 			OutputFormat:   dbj.OutputFormat,
+			LLMGenerated:   dbj.LLMGenerated,
 		},
 		Error: ptrStr(dbj.Error),
 	}

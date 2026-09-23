@@ -54,6 +54,11 @@ type JobInput struct {
 	Enhancement    string
 	Seed           *int64
 	OutputFormat   string
+	// LLMGenerated records whether the prompt was composed by an LLM tool
+	// call (dave injects _dave_inject_llm_generated=true on that path)
+	// versus typed directly by the IRC user. Persisted so restart-recovered
+	// jobs still carry it into the workflow's prompt note node.
+	LLMGenerated bool
 }
 
 type JobResult struct {
@@ -551,7 +556,13 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 		}
 	}
 
-	workflow, err := prepareComfyWorkflow(cfg, job.Workflow, prompt, negativePrompt, job.Input.Seed)
+	promptNote, err := buildPromptNote(job)
+	if err != nil {
+		q.failJob(job, fmt.Sprintf("workflow preparation failed: %v", err))
+		return
+	}
+
+	workflow, err := prepareComfyWorkflow(cfg, job.Workflow, prompt, negativePrompt, job.Input.Seed, promptNote)
 	if err != nil {
 		q.failJob(job, fmt.Sprintf("workflow preparation failed: %v", err))
 		return

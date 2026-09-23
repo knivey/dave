@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -59,6 +61,121 @@ func TestToolHandlersResolveWorkflow_AfterConfigSwap(t *testing.T) {
 	name, err = h.resolveWorkflow("")
 	require.NoError(t, err)
 	assert.Equal(t, "other", name)
+}
+
+// queuedTestQueue builds a JobQueue with no workers so submitted jobs stay
+// queued and inspectable.
+func queuedTestQueue(t *testing.T) *JobQueue {
+	t.Helper()
+	cfg := testConfig("http://127.0.0.1:0")
+	cfg.Queue.MaxWorkers = 0
+	db := setupTestDB(t)
+	_, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	q := &JobQueue{
+		cfg:     cfg,
+		db:      db,
+		pending: make(chan *Job, cfg.Queue.MaxDepth),
+		results: make(map[string]*Job),
+		cancel:  cancel,
+	}
+	return q
+}
+
+func TestGenerateToolsPassLLMGeneratedFlag(t *testing.T) {
+	tests := []struct {
+		name   string
+		submit func(t *testing.T, h *ToolHandlers) (string, error)
+	}{
+		{
+			name: "generate_image_async",
+			submit: func(t *testing.T, h *ToolHandlers) (string, error) {
+				_, out, err := h.handleGenerateImageAsync(context.Background(), nil,
+					GenerateImageAsyncInput{Prompt: "a cat", LLMGenerated: true})
+				return out.JobID, err
+			},
+		},
+		{
+			name: "enhance_and_generate_async",
+			submit: func(t *testing.T, h *ToolHandlers) (string, error) {
+				_, out, err := h.handleEnhanceAndGenerateAsync(context.Background(), nil,
+					EnhanceAndGenerateAsyncInput{Prompt: "a cat", LLMGenerated: true})
+				return out.JobID, err
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := NewToolHandlers(testConfig("http://127.0.0.1:0"), queuedTestQueue(t))
+
+			jobID, err := tt.submit(t, h)
+			require.NoError(t, err, "tool handler")
+
+			job, ok := h.queue.Get(jobID)
+			require.True(t, ok, "job should be findable in queue")
+			assert.True(t, job.Input.LLMGenerated,
+				"LLMGenerated from tool input should reach JobInput")
+		})
+	}
+}
+
+// TestGenerateToolsSyncPassLLMGeneratedFlag runs the blocking tool handlers
+// end-to-end against a mock ComfyUI and asserts the flag reaches the job.
+func TestGenerateToolsSyncPassLLMGeneratedFlag(t *testing.T) {
+	mockComfy := newMockComfyFlowServer(t)
+
+	tests := []struct {
+		name string
+		call func(t *testing.T, h *ToolHandlers) error
+	}{
+		{
+			name: "generate_image",
+			call: func(t *testing.T, h *ToolHandlers) error {
+				_, out, err := h.handleGenerateImage(context.Background(), nil,
+					GenerateImageInput{Prompt: "a cat", LLMGenerated: true, OutputFormat: "base64"})
+				assert.Equal(t, "completed", out.Status)
+				return err
+			},
+		},
+		{
+			name: "enhance_and_generate",
+			call: func(t *testing.T, h *ToolHandlers) error {
+				_, out, err := h.handleEnhanceAndGenerate(context.Background(), nil,
+					EnhanceAndGenerateInput{Prompt: "a cat", LLMGenerated: true, OutputFormat: "base64"})
+				assert.Equal(t, "completed", out.Status)
+				return err
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := testConfig(mockComfy.URL())
+			wc := cfg.Workflows["test"]
+			wc.WorkflowPath = mustWriteWorkflow(t, t.TempDir())
+			cfg.Workflows["test"] = wc
+			cfg.Enhancements = map[string]EnhancementConfig{
+				"default": {
+					BaseURL:      newMockEnhanceServer(t).URL,
+					Key:          "test-key",
+					Model:        "enhancer",
+					SystemPrompt: "enhance",
+				},
+			}
+			q, cleanup := setupTestQueue(t, cfg)
+			defer cleanup()
+			h := NewToolHandlers(cfg, q)
+
+			require.NoError(t, tt.call(t, h), "tool handler")
+
+			submitted := mockComfy.submittedPrompts()
+			require.NotEmpty(t, submitted, "job should have been submitted to comfy")
+			node, ok := submitted[len(submitted)-1].Prompt[davePromptNoteNodeID]
+			require.True(t, ok, "submitted workflow should contain the prompt note node")
+			var payload promptNotePayload
+			require.NoError(t, json.Unmarshal([]byte(node.Inputs["text"].(string)), &payload))
+			assert.True(t, payload.LLMGenerated, "note payload llm_generated")
+		})
+	}
 }
 
 func TestApplyNetworkPolicy(t *testing.T) {

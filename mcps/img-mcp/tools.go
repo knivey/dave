@@ -28,6 +28,10 @@ type GenerateImageAsyncInput struct {
 	Seed           *int64 `json:"seed,omitempty" jsonschema:"optional fixed seed for reproducibility"`
 	OutputFormat   string `json:"output_format,omitempty" jsonschema:"output format: url (default), base64, or both"`
 	Network        string `json:"_dave_inject_network"`
+	// LLMGenerated is injected by dave (true) when this call originates from
+	// an LLM tool call; absent for direct user tool commands. Recorded in the
+	// workflow's prompt note metadata for image provenance.
+	LLMGenerated bool `json:"_dave_inject_llm_generated"`
 }
 
 type GenerateImageAsyncOutput struct {
@@ -42,6 +46,10 @@ type GenerateImageInput struct {
 	OutputFormat   string `json:"output_format,omitempty" jsonschema:"output format: url (default), base64, or both"`
 	Timeout        int    `json:"timeout,omitempty" jsonschema:"max seconds to wait for generation (default: 300)"`
 	Network        string `json:"_dave_inject_network"`
+	// LLMGenerated is injected by dave (true) when this call originates from
+	// an LLM tool call; absent for direct user tool commands. Recorded in the
+	// workflow's prompt note metadata for image provenance.
+	LLMGenerated bool `json:"_dave_inject_llm_generated"`
 }
 
 type GenerateImageOutput struct {
@@ -56,6 +64,10 @@ type EnhanceAndGenerateAsyncInput struct {
 	Workflow     string `json:"workflow,omitempty" jsonschema:"name of the workflow config to use (empty or 'default' uses the default workflow)"`
 	OutputFormat string `json:"output_format,omitempty" jsonschema:"output format: url (default), base64, or both"`
 	Network      string `json:"_dave_inject_network"`
+	// LLMGenerated is injected by dave (true) when this call originates from
+	// an LLM tool call; absent for direct user tool commands. Recorded in the
+	// workflow's prompt note metadata for image provenance.
+	LLMGenerated bool `json:"_dave_inject_llm_generated"`
 }
 
 type EnhanceAndGenerateAsyncOutput struct {
@@ -69,6 +81,10 @@ type EnhanceAndGenerateInput struct {
 	OutputFormat string `json:"output_format,omitempty" jsonschema:"output format: url (default), base64, or both"`
 	Timeout      int    `json:"timeout,omitempty" jsonschema:"max seconds to wait for generation (default: 300)"`
 	Network      string `json:"_dave_inject_network"`
+	// LLMGenerated is injected by dave (true) when this call originates from
+	// an LLM tool call; absent for direct user tool commands. Recorded in the
+	// workflow's prompt note metadata for image provenance.
+	LLMGenerated bool `json:"_dave_inject_llm_generated"`
 }
 
 type EnhanceAndGenerateOutput struct {
@@ -283,6 +299,7 @@ func (h *ToolHandlers) handleGenerateImageAsync(ctx context.Context, req *mcp.Ca
 		Enhancement:    enhancement,
 		Seed:           input.Seed,
 		OutputFormat:   input.OutputFormat,
+		LLMGenerated:   input.LLMGenerated,
 	})
 	if err != nil {
 		return nil, GenerateImageAsyncOutput{}, err
@@ -302,6 +319,7 @@ func (h *ToolHandlers) handleEnhanceAndGenerateAsync(ctx context.Context, req *m
 		Prompt:       input.Prompt,
 		Enhancement:  enhancement,
 		OutputFormat: input.OutputFormat,
+		LLMGenerated: input.LLMGenerated,
 	})
 	if err != nil {
 		return nil, EnhanceAndGenerateAsyncOutput{}, err
@@ -323,6 +341,7 @@ func (h *ToolHandlers) handleGenerateImage(ctx context.Context, req *mcp.CallToo
 		Enhancement:    enhancement,
 		Seed:           input.Seed,
 		OutputFormat:   input.OutputFormat,
+		LLMGenerated:   input.LLMGenerated,
 	})
 	if err != nil {
 		return nil, GenerateImageOutput{}, err
@@ -358,6 +377,7 @@ func (h *ToolHandlers) handleEnhanceAndGenerate(ctx context.Context, req *mcp.Ca
 		Prompt:       input.Prompt,
 		Enhancement:  enhancement,
 		OutputFormat: input.OutputFormat,
+		LLMGenerated: input.LLMGenerated,
 	})
 	if err != nil {
 		return nil, EnhanceAndGenerateOutput{}, err

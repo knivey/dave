@@ -29,12 +29,13 @@ const defaultImageQuality = 75
 const defaultMaxImageWidth = 1024
 const defaultMaxImageHeight = 1024
 
-// maxPixels caps the total pixel count (width * height * frameCount) an image
-// may claim or decode at. Decode and resize cost is linear in megapixels, so
-// this bounds CPU/memory regardless of file size on disk — a few-KB
-// "decompression bomb" whose header claims huge dimensions is rejected from
-// the header alone, before any pixel data is touched.
-const maxPixels = 25_000_000
+// defaultMaxImagePixels is the default for the root-level maximagepixels
+// config option: it caps the total pixel count (width * height * frameCount)
+// an image may claim or decode at. Decode and resize cost is linear in
+// megapixels, so this bounds CPU/memory regardless of file size on disk — a
+// few-KB "decompression bomb" whose header claims huge dimensions is rejected
+// from the header alone, before any pixel data is touched.
+const defaultMaxImagePixels = 50_000_000
 
 // errImageTooManyPixels is returned by convertImage when an image exceeds
 // maxPixels. Callers treat it as a graceful skip (info-level log), not a hard
@@ -110,22 +111,22 @@ func headerDimensions(imgData []byte, mimeType string) (width, height, frames in
 	}
 }
 
-// exceedsPixelCap reports whether width*height*frames exceeds maxPixels.
+// exceedsPixelCap reports whether width*height*frames exceeds cap.
 // The per-frame product is compared first so the frame multiplication can
-// never overflow int64 (once w*h <= maxPixels, multiplying by a frame count
+// never overflow int64 (once w*h <= cap, multiplying by a frame count
 // bounded by the GIF format's 16-bit fields stays well in range).
-func exceedsPixelCap(width, height, frames int) bool {
+func exceedsPixelCap(width, height, frames int, cap int64) bool {
 	if width <= 0 || height <= 0 {
 		return false
 	}
 	px := int64(width) * int64(height)
-	if px > maxPixels {
+	if px > cap {
 		return true
 	}
 	if frames <= 1 {
 		return false
 	}
-	return px*int64(frames) > maxPixels
+	return px*int64(frames) > cap
 }
 
 // countGIFFrames walks a GIF's block structure and counts image descriptors
@@ -337,11 +338,15 @@ func downloadImage(url string) ([]byte, string, error) {
 	return data, contentType, nil
 }
 
-func convertImage(imgData []byte, mimeType, format string, quality, maxW, maxH int) ([]byte, string, error) {
+func convertImage(imgData []byte, mimeType, format string, quality, maxW, maxH, maxPixels int) ([]byte, string, error) {
+	if maxPixels <= 0 {
+		maxPixels = defaultMaxImagePixels
+	}
+
 	// Pre-decode guard: reject images whose headers claim more than maxPixels
 	// total (dimensions x frame count) before touching any pixel data.
 	if w, h, frames, ok := headerDimensions(imgData, mimeType); ok {
-		if exceedsPixelCap(w, h, frames) {
+		if exceedsPixelCap(w, h, frames, int64(maxPixels)) {
 			return nil, "", fmt.Errorf("%w: header claims %dx%d x %d frame(s)", errImageTooManyPixels, w, h, frames)
 		}
 	}
@@ -378,7 +383,7 @@ func convertImage(imgData []byte, mimeType, format string, quality, maxW, maxH i
 
 	// Defense-in-depth: headers can disagree with decoded dimensions in
 	// crafted files, so re-check the real dimensions before resizing.
-	if exceedsPixelCap(width, height, 1) {
+	if exceedsPixelCap(width, height, 1, int64(maxPixels)) {
 		return nil, "", fmt.Errorf("%w: decoded image is %dx%d", errImageTooManyPixels, width, height)
 	}
 
@@ -504,7 +509,7 @@ func stripSuccessfulURLs(text string, successfulURLs []string) string {
 	return strings.Join(strings.Fields(text), " ")
 }
 
-func buildImageMessage(text string, imageUrls []string, maxImages int, format string, quality, maxW, maxH int) (ChatMessage, error) {
+func buildImageMessage(text string, imageUrls []string, maxImages int, format string, quality, maxW, maxH, maxPixels int) (ChatMessage, error) {
 	if len(imageUrls) > maxImages {
 		imageUrls = imageUrls[:maxImages]
 	}
@@ -521,7 +526,7 @@ func buildImageMessage(text string, imageUrls []string, maxImages int, format st
 			continue
 		}
 
-		imgData, dataURI, err := convertImage(imgData, mimeType, format, quality, maxW, maxH)
+		imgData, dataURI, err := convertImage(imgData, mimeType, format, quality, maxW, maxH, maxPixels)
 		if err != nil {
 			if errors.Is(err, errImageTooManyPixels) {
 				// Decompression-bomb skip: observable but non-fatal.

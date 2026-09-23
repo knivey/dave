@@ -1105,6 +1105,52 @@ api_user = "svc/{{.Nick}}"
 	})
 }
 
+func TestLoadConfigDirMaxImagePixels(t *testing.T) {
+	t.Run("maximagepixels defaults to 50MP", func(t *testing.T) {
+		mainTOML := `
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+		dir := createTestConfigDir(t, mainTOML, nil)
+		defer os.RemoveAll(dir)
+
+		cfg := loadConfigDirOrDie(dir)
+		assert.Equal(t, 50_000_000, cfg.MaxImagePixels)
+	})
+
+	t.Run("maximagepixels explicit value overrides default", func(t *testing.T) {
+		mainTOML := `
+maximagepixels = 100000000
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+		dir := createTestConfigDir(t, mainTOML, nil)
+		defer os.RemoveAll(dir)
+
+		cfg := loadConfigDirOrDie(dir)
+		assert.Equal(t, 100_000_000, cfg.MaxImagePixels)
+	})
+
+	t.Run("maximagepixels zero or negative falls back to default", func(t *testing.T) {
+		mainTOML := `
+maximagepixels = -5
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+		dir := createTestConfigDir(t, mainTOML, nil)
+		defer os.RemoveAll(dir)
+
+		cfg := loadConfigDirOrDie(dir)
+		assert.Equal(t, 50_000_000, cfg.MaxImagePixels)
+	})
+}
+
 func TestLoadConfigDirHiddenToolsDefault(t *testing.T) {
 	t.Run("hidden_tools defaults to all builtin tools", func(t *testing.T) {
 		mainTOML := `

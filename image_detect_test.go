@@ -564,7 +564,7 @@ func TestConvertImage(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			data, dataURI, err := convertImage(tt.imgData, tt.mimeType, tt.format, tt.quality, tt.maxW, tt.maxH)
+			data, dataURI, err := convertImage(tt.imgData, tt.mimeType, tt.format, tt.quality, tt.maxW, tt.maxH, 0)
 			require.NoError(t, err, "convertImage() error")
 			if tt.wantContain != "" {
 				assert.Contains(t, dataURI, tt.wantContain, "dataURI")
@@ -688,7 +688,7 @@ func TestBuildImageMessageNonImageURLPreserved(t *testing.T) {
 		text := "check " + htmlServer.URL + "/page.html and " + imgServer.URL + "/pic.jpg here"
 		urls := []string{htmlServer.URL + "/page.html", imgServer.URL + "/pic.jpg"}
 
-		msg, err := buildImageMessage(text, urls, 5, "jpg", 75, 1024, 1024)
+		msg, err := buildImageMessage(text, urls, 5, "jpg", 75, 1024, 1024, 0)
 		require.NoError(t, err, "buildImageMessage() error")
 
 		require.GreaterOrEqual(t, len(msg.MultiContent), 2, "expected at least 2 parts")
@@ -714,7 +714,7 @@ func TestBuildImageMessageNonImageURLPreserved(t *testing.T) {
 		text := "visit " + htmlServer.URL + "/a and " + htmlServer.URL + "/b"
 		urls := []string{htmlServer.URL + "/a", htmlServer.URL + "/b"}
 
-		msg, err := buildImageMessage(text, urls, 5, "jpg", 75, 1024, 1024)
+		msg, err := buildImageMessage(text, urls, 5, "jpg", 75, 1024, 1024, 0)
 		require.NoError(t, err, "buildImageMessage() error")
 
 		var textPart string
@@ -738,7 +738,7 @@ func TestBuildImageMessageNonImageURLPreserved(t *testing.T) {
 		text := "see " + imgServer.URL + "/pic.jpg now"
 		urls := []string{imgServer.URL + "/pic.jpg"}
 
-		msg, err := buildImageMessage(text, urls, 5, "jpg", 75, 1024, 1024)
+		msg, err := buildImageMessage(text, urls, 5, "jpg", 75, 1024, 1024, 0)
 		require.NoError(t, err, "buildImageMessage() error")
 
 		var textPart string
@@ -783,7 +783,7 @@ func TestConvertImageRejectsPixelBombPNG(t *testing.T) {
 	require.Equal(t, 60000, cfg.Height, "claimed height")
 
 	start := time.Now()
-	data, _, err := convertImage(bomb, "image/png", "jpg", 75, 1024, 1024)
+	data, _, err := convertImage(bomb, "image/png", "jpg", 75, 1024, 1024, 0)
 	elapsed := time.Since(start)
 	t.Logf("pixel bomb skip took %s", elapsed)
 
@@ -826,7 +826,7 @@ func TestConvertImageRejectsMultiFrameGIF(t *testing.T) {
 	anim := createMultiFrameGIF(t, 10, 1600, 1600)
 
 	start := time.Now()
-	data, _, err := convertImage(anim, "image/gif", "jpg", 75, 1024, 1024)
+	data, _, err := convertImage(anim, "image/gif", "jpg", 75, 1024, 1024, 25_000_000)
 	elapsed := time.Since(start)
 	t.Logf("animated gif skip took %s", elapsed)
 
@@ -839,7 +839,7 @@ func TestConvertImageRejectsMultiFrameGIF(t *testing.T) {
 func TestConvertImageAllowsSingleFrameGIFUnderCap(t *testing.T) {
 	anim := createMultiFrameGIF(t, 1, 1600, 1600)
 
-	data, dataURI, err := convertImage(anim, "image/gif", "jpg", 75, 1024, 1024)
+	data, dataURI, err := convertImage(anim, "image/gif", "jpg", 75, 1024, 1024, 0)
 	require.NoError(t, err, "single-frame GIF under the cap must convert")
 	assert.Contains(t, dataURI, "data:image/jpeg;base64,", "dataURI")
 	assert.NotEmpty(t, data, "encoded data")
@@ -855,14 +855,52 @@ func TestConvertImageAllowsLargeImageUnderCap(t *testing.T) {
 	var buf bytes.Buffer
 	require.NoError(t, png.Encode(&buf, img), "encode 4000x4000 png")
 
-	data, dataURI, err := convertImage(buf.Bytes(), "image/png", "jpg", 75, 1024, 1024)
-	require.NoError(t, err, "16MP image is under the 25MP cap and must convert")
+	data, dataURI, err := convertImage(buf.Bytes(), "image/png", "jpg", 75, 1024, 1024, 0)
+	require.NoError(t, err, "16MP image is under the 50MP default cap and must convert")
 
 	assert.Contains(t, dataURI, "data:image/jpeg;base64,", "dataURI")
 	decoded, err := jpeg.Decode(bytes.NewReader(data))
 	require.NoError(t, err, "result must be a valid jpeg")
 	assert.Equal(t, 1024, decoded.Bounds().Dx(), "resized width")
 	assert.Equal(t, 1024, decoded.Bounds().Dy(), "resized height")
+}
+
+func TestConvertImageConfigurablePixelCap(t *testing.T) {
+	img := image.NewGray(image.Rect(0, 0, 4000, 4000))
+	for y := 0; y < 4000; y++ {
+		for x := 0; x < 4000; x++ {
+			img.Pix[y*4000+x] = uint8((x + y) % 256)
+		}
+	}
+	var buf bytes.Buffer
+	require.NoError(t, png.Encode(&buf, img), "encode 4000x4000 png")
+
+	_, _, err := convertImage(buf.Bytes(), "image/png", "jpg", 75, 1024, 1024, 10_000_000)
+	require.ErrorIs(t, err, errImageTooManyPixels, "16MP must exceed an explicit 10MP cap")
+
+	data, _, err := convertImage(buf.Bytes(), "image/png", "jpg", 75, 1024, 1024, 20_000_000)
+	require.NoError(t, err, "16MP must pass an explicit 20MP cap")
+	assert.NotEmpty(t, data, "encoded data")
+}
+
+func TestConvertImageDefaultPixelCapIs50MP(t *testing.T) {
+	// 0 resolves to the default cap: 25.6MP passes, a 64MP claim is rejected.
+	anim := createMultiFrameGIF(t, 10, 1600, 1600) // 25.6MP total
+	data, _, err := convertImage(anim, "image/gif", "jpg", 75, 1024, 1024, 0)
+	require.NoError(t, err, "25.6MP must be under the 50MP default cap")
+	assert.NotEmpty(t, data, "encoded data")
+
+	var buf bytes.Buffer
+	require.NoError(t, png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 4, 4))), "encode base png")
+	bomb := patchPNGDimensions(t, buf.Bytes(), 8000, 8000) // claims 64MP
+
+	start := time.Now()
+	_, _, err = convertImage(bomb, "image/png", "jpg", 75, 1024, 1024, 0)
+	elapsed := time.Since(start)
+	t.Logf("64MP claim vs default cap took %s", elapsed)
+
+	require.ErrorIs(t, err, errImageTooManyPixels, "64MP must exceed the 50MP default cap")
+	assert.Less(t, elapsed, time.Second, "skip path must return without decoding pixel data")
 }
 
 func TestCountGIFFrames(t *testing.T) {
@@ -904,7 +942,7 @@ func TestBuildImageMessageSkipsPixelBombNonFatal(t *testing.T) {
 	defer server.Close()
 
 	text := "see " + server.URL + "/bomb.png now"
-	msg, err := buildImageMessage(text, []string{server.URL + "/bomb.png"}, 5, "jpg", 75, 1024, 1024)
+	msg, err := buildImageMessage(text, []string{server.URL + "/bomb.png"}, 5, "jpg", 75, 1024, 1024, 0)
 	require.NoError(t, err, "pixel bomb skip must be non-fatal")
 
 	var imageCount int
@@ -980,7 +1018,7 @@ func TestConvertImageRejectsPixelBombBMP(t *testing.T) {
 	require.Equal(t, 6000, cfg.Height, "claimed height")
 
 	start := time.Now()
-	data, _, err := convertImage(bomb, "image/bmp", "jpg", 75, 1024, 1024)
+	data, _, err := convertImage(bomb, "image/bmp", "jpg", 75, 1024, 1024, 25_000_000)
 	elapsed := time.Since(start)
 	t.Logf("bmp bomb skip took %s", elapsed)
 

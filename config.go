@@ -34,6 +34,7 @@ type Config struct {
 	SessionsDisplayLimit int                 `toml:"sessions_display_limit"`
 	Notices              NoticesConfig       `toml:"-"`
 	HiddenTools          []string            `toml:"hidden_tools"`
+	MaxImagePixels       int                 `toml:"maximagepixels"`
 	DisabledBuiltins     []string            `toml:"disabled_builtins"`
 	DisabledBuiltinTools []string            `toml:"disabled_builtin_tools"`
 	HiddenMCPTools       []string            `toml:"hidden_mcp_tools"`
@@ -561,6 +562,9 @@ func loadConfigDir(dir string) (Config, error) {
 
 	if config.MaxQueueDepth <= 0 {
 		config.MaxQueueDepth = 5
+	}
+	if config.MaxImagePixels <= 0 {
+		config.MaxImagePixels = defaultMaxImagePixels
 	}
 	if len(config.HiddenTools) == 0 {
 		config.HiddenTools = []string{"register_background_job", "check_ban_history"}

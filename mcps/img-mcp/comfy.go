@@ -119,10 +119,27 @@ func prepareComfyWorkflow(cfg Config, workflowName, prompt, negativePrompt strin
 		return nil, fmt.Errorf("loading workflow: %w", err)
 	}
 
-	workflow[wc.PromptNode].Inputs["text"] = prompt
+	// Guards return errors instead of panicking on workflow-file/config
+	// mismatches: indexing a missing node yields a zero ComfyNode whose
+	// Inputs map is nil, and assigning into it kills the whole process.
+	promptNode, ok := workflow[wc.PromptNode]
+	if !ok {
+		return nil, fmt.Errorf("prompt node %q not found in workflow %q", wc.PromptNode, wc.WorkflowPath)
+	}
+	if promptNode.Inputs == nil {
+		return nil, fmt.Errorf("prompt node %q in workflow %q has no inputs map", wc.PromptNode, wc.WorkflowPath)
+	}
+	promptNode.Inputs["text"] = prompt
 
 	if wc.NegativePromptNode != "" && negativePrompt != "" {
-		workflow[wc.NegativePromptNode].Inputs["text"] = negativePrompt
+		negNode, ok := workflow[wc.NegativePromptNode]
+		if !ok {
+			return nil, fmt.Errorf("negative prompt node %q not found in workflow %q", wc.NegativePromptNode, wc.WorkflowPath)
+		}
+		if negNode.Inputs == nil {
+			return nil, fmt.Errorf("negative prompt node %q in workflow %q has no inputs map", wc.NegativePromptNode, wc.WorkflowPath)
+		}
+		negNode.Inputs["text"] = negativePrompt
 	}
 
 	for _, nodeID := range wc.SeedNodes {
@@ -154,15 +171,16 @@ func prepareComfyWorkflow(cfg Config, workflowName, prompt, negativePrompt strin
 	// clip input so it is indistinguishable from a merely-disconnected node.
 	// Orphan CLIPTextEncode nodes in API prompts are accepted in practice and
 	// ride along in the embedded graph.
+	// The orphan node overwrites any pre-existing key with this ID — dave's
+	// node wins. Editors export numeric node IDs only, so a collision means
+	// a hand-authored workflow deliberately used our namespaced ID.
 	noteNode := ComfyNode{
 		Inputs: map[string]interface{}{"text": promptNote},
 		Class:  "CLIPTextEncode",
 		Meta:   &comfyNodeMeta{Title: davePromptNoteTitle},
 	}
-	if promptNode, ok := workflow[wc.PromptNode]; ok {
-		if clip, ok := promptNode.Inputs["clip"]; ok {
-			noteNode.Inputs["clip"] = clip
-		}
+	if clip, ok := promptNode.Inputs["clip"]; ok {
+		noteNode.Inputs["clip"] = clip
 	}
 	workflow[davePromptNoteNodeID] = noteNode
 

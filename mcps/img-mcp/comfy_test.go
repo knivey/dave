@@ -155,6 +155,28 @@ func TestPrepareComfyWorkflowInjectsPromptNote(t *testing.T) {
 		"prompt node should still receive the (possibly enhanced) prompt")
 }
 
+func TestPrepareComfyWorkflowMissingPromptNode(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testConfig("http://127.0.0.1:0")
+	wc := cfg.Workflows["test"]
+	// Workflow whose nodes do NOT include the configured prompt node.
+	workflow := map[string]ComfyNode{
+		"output-node": {
+			Inputs: map[string]interface{}{"images": []string{"1"}},
+			Class:  "SaveImage",
+		},
+	}
+	data, err := json.Marshal(workflow)
+	require.NoError(t, err)
+	wc.WorkflowPath = filepath.Join(dir, "wf.json")
+	require.NoError(t, os.WriteFile(wc.WorkflowPath, data, 0644))
+	cfg.Workflows["test"] = wc
+
+	_, err = prepareComfyWorkflow(cfg, "test", "a cat", "", nil, "{}")
+	require.Error(t, err, "missing prompt node must be an error, not a panic")
+	assert.Contains(t, err.Error(), "prompt node")
+}
+
 func TestBuildPromptNote(t *testing.T) {
 	tests := []struct {
 		name string
@@ -268,6 +290,10 @@ func TestProcessJobSubmitsPromptNote(t *testing.T) {
 	node, ok := submitted[0].Prompt[davePromptNoteNodeID]
 	require.True(t, ok, "submitted workflow should contain the prompt note node")
 	assert.Equal(t, "CLIPTextEncode", node.Class)
+	// mustWriteWorkflow's prompt node has no clip input: the orphan must
+	// degrade to text-only (still accepted — unreachable nodes are not
+	// input-validated).
+	assert.NotContains(t, node.Inputs, "clip", "orphan should omit clip when the prompt node has none")
 
 	text, ok := node.Inputs["text"].(string)
 	require.True(t, ok, "note node text should be a string")

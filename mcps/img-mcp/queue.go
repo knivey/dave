@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -221,19 +222,27 @@ func (q *JobQueue) Get(jobID string) (*Job, bool) {
 }
 
 func (q *JobQueue) Cancel(jobID string) bool {
+	// Snapshot the job and its status under the read lock; the rest of this
+	// function mutates job terminal state and must be the only writer doing
+	// so unlocked-free (processJob's defer and recoverRunningJob synchronize
+	// the same fields on q.mu).
 	q.mu.RLock()
 	job, ok := q.results[jobID]
+	status := JobStatus("")
+	if ok {
+		status = job.Status
+	}
 	q.mu.RUnlock()
 
 	if !ok {
 		return false
 	}
 
-	if isTerminalStatus(job.Status) {
+	if isTerminalStatus(status) {
 		return false
 	}
 
-	if job.Status == StatusQueued {
+	if status == StatusQueued {
 		select {
 		case job.cancel <- struct{}{}:
 		default:
@@ -249,23 +258,37 @@ func (q *JobQueue) Cancel(jobID string) bool {
 		q.orderMu.Unlock()
 	}
 
-	if job.Status == StatusRunning {
-		if job.cancelCtx != nil {
-			job.cancelCtx()
+	if status == StatusRunning {
+		q.mu.RLock()
+		cancelFn := job.cancelCtx
+		comfyPromptID := job.ComfyPromptID
+		q.mu.RUnlock()
+		if cancelFn != nil {
+			cancelFn()
 		}
-		if job.ComfyPromptID != "" {
+		if comfyPromptID != "" {
 			interruptCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			if err := interruptComfyPrompt(interruptCtx, q.getConfig(), job.ComfyPromptID); err != nil {
-				loggerQueue.Warn("failed to interrupt comfy prompt", "prompt_id", job.ComfyPromptID, "job_id", jobID, "error", err)
+			if err := interruptComfyPrompt(interruptCtx, q.getConfig(), comfyPromptID); err != nil {
+				loggerQueue.Warn("failed to interrupt comfy prompt", "prompt_id", comfyPromptID, "job_id", jobID, "error", err)
 			}
 			cancel()
 		}
 	}
 
 	now := time.Now().UTC()
+	q.mu.Lock()
+	// Re-validate under the lock: the status was snapshotted before the
+	// (potentially seconds-long) interrupt call, and the job may have
+	// completed or failed in between — cancelling a finished job would
+	// overwrite its result and flip the DB row after dbCompleteJob.
+	if isTerminalStatus(job.Status) {
+		q.mu.Unlock()
+		return false
+	}
 	job.Status = StatusCancelled
 	job.CompletedAt = &now
 	job.closeOnce.Do(func() { close(job.done) })
+	q.mu.Unlock()
 
 	if q.db != nil {
 		if err := dbCancelJob(q.db, jobID); err != nil {
@@ -304,7 +327,10 @@ func (q *JobQueue) WaitForJob(jobID string, timeout time.Duration) *Job {
 		return nil
 	}
 
-	if isTerminalStatus(job.Status) {
+	q.mu.RLock()
+	terminal := isTerminalStatus(job.Status)
+	q.mu.RUnlock()
+	if terminal {
 		return job
 	}
 
@@ -489,14 +515,18 @@ func (q *JobQueue) worker(ctx context.Context, id int) {
 
 func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 	jobCtx, cancel := context.WithCancel(q.shutdownCtx)
+	q.mu.Lock()
 	job.cancelCtx = cancel
+	q.mu.Unlock()
 	defer cancel()
 
 	cfg := q.getConfig()
 
 	now := time.Now().UTC()
+	q.mu.Lock()
 	job.Status = StatusRunning
 	job.StartedAt = &now
+	q.mu.Unlock()
 
 	if q.db != nil {
 		if err := dbUpdateJobRunning(q.db, job.ID); err != nil {
@@ -505,6 +535,12 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 	}
 
 	defer func() {
+		// Terminal job state is shared with Cancel(), which may be flipping
+		// this job to cancelled concurrently (it cancels the job context
+		// before taking this lock) — synchronize on q.mu like recoverRunningJob.
+		q.mu.Lock()
+		defer q.mu.Unlock()
+
 		if job.Status == StatusCancelled {
 			return
 		}
@@ -584,7 +620,9 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 		return
 	}
 
+	q.mu.Lock()
 	job.ComfyPromptID = promptID
+	q.mu.Unlock()
 	loggerQueue.Info("comfyui prompt accepted",
 		"job_id", job.ID,
 		"prompt_id", promptID,
@@ -598,7 +636,14 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 
 	comfyResult, err := monitorComfyGeneration(jobCtx, cfg, job.Workflow, promptID)
 	if err != nil {
-		if job.Status == StatusCancelled {
+		// jobCtx cancellation means Cancel() is flipping this job to
+		// cancelled (it cancels the context before setting the status);
+		// reporting a failure in that window would leave the job marked
+		// failed with a bogus error.
+		q.mu.RLock()
+		cancelled := job.Status == StatusCancelled
+		q.mu.RUnlock()
+		if cancelled || errors.Is(err, context.Canceled) {
 			return
 		}
 		q.failJob(job, fmt.Sprintf("generation failed: %v", err))
@@ -651,8 +696,10 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 		jobResult.Images = append(jobResult.Images, imgData)
 	}
 
+	q.mu.Lock()
 	job.Result = jobResult
 	job.Status = StatusCompleted
+	q.mu.Unlock()
 
 	if q.db != nil {
 		if err := dbCompleteJob(q.db, job.ID, jobResult, comfyImgs); err != nil {
@@ -661,9 +708,14 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 	}
 }
 
+// failJob marks a job terminally failed. Callers must NOT hold q.mu — it
+// takes the lock itself (terminal job state is synchronized on q.mu, like
+// every other terminal mutation in this file).
 func (q *JobQueue) failJob(job *Job, errMsg string) {
+	q.mu.Lock()
 	job.Status = StatusFailed
 	job.Error = errMsg
+	q.mu.Unlock()
 	if q.db != nil {
 		if err := dbFailJob(q.db, job.ID, errMsg); err != nil {
 			loggerQueue.Error("error failing job in DB", "job_id", job.ID, "error", err)
@@ -731,9 +783,10 @@ func (q *JobQueue) recoverJobs(ctx context.Context) {
 
 		q.mu.Lock()
 		q.results[job.ID] = job
+		status := job.Status
 		q.mu.Unlock()
 
-		switch job.Status {
+		switch status {
 		case StatusQueued:
 			loggerQueue.Info("recovering queued job", "job_id", job.ID)
 			select {
@@ -744,10 +797,10 @@ func (q *JobQueue) recoverJobs(ctx context.Context) {
 				q.orderMu.Unlock()
 			default:
 				loggerQueue.Warn("queue full during recovery, dropping job", "job_id", job.ID)
-				q.mu.Lock()
 				q.failJob(job, "queue full during recovery")
+				q.mu.Lock()
 				job.CompletedAt = ptrTime(time.Now().UTC())
-				close(job.done)
+				job.closeOnce.Do(func() { close(job.done) })
 				q.mu.Unlock()
 			}
 
@@ -758,7 +811,9 @@ func (q *JobQueue) recoverJobs(ctx context.Context) {
 				go q.recoverRunningJob(ctx, job, comfyID)
 			} else {
 				loggerQueue.Info("recovering running job without comfy_prompt_id, re-queueing", "job_id", job.ID)
+				q.mu.Lock()
 				job.Status = StatusQueued
+				q.mu.Unlock()
 				if q.db != nil {
 					if err := dbUpdateJobStatus(q.db, job.ID, StatusQueued); err != nil {
 						loggerQueue.Error("error re-queueing job in DB", "job_id", job.ID, "error", err)
@@ -768,10 +823,10 @@ func (q *JobQueue) recoverJobs(ctx context.Context) {
 				case q.pending <- job:
 				default:
 					loggerQueue.Warn("queue full during recovery, dropping job", "job_id", job.ID)
-					q.mu.Lock()
 					q.failJob(job, "queue full during recovery")
+					q.mu.Lock()
 					job.CompletedAt = ptrTime(time.Now().UTC())
-					close(job.done)
+					job.closeOnce.Do(func() { close(job.done) })
 					q.mu.Unlock()
 				}
 				q.orderMu.Lock()
@@ -825,14 +880,14 @@ func (q *JobQueue) recoverRunningJob(_ context.Context, job *Job, comfyPromptID 
 	comfyResult, err := resumeComfyGeneration(recoverCtx, cfg, job.Workflow, comfyPromptID)
 	if err != nil {
 		loggerQueue.Error("failed to recover job", "job_id", job.ID, "error", err)
-		q.mu.Lock()
 		q.failJob(job, fmt.Sprintf("recovery failed: %v", err))
+		q.mu.Lock()
 		job.CompletedAt = ptrTime(time.Now().UTC())
 		job.closeOnce.Do(func() { close(job.done) })
+		q.mu.Unlock()
 		q.statsMu.Lock()
 		q.failedCount++
 		q.statsMu.Unlock()
-		q.mu.Unlock()
 		return
 	}
 
@@ -856,9 +911,7 @@ func (q *JobQueue) recoverRunningJob(_ context.Context, job *Job, comfyPromptID 
 		case "url":
 			url, err := uploadImage(cfg, img.Data, img.Filename)
 			if err != nil {
-				q.mu.Lock()
 				q.failJob(job, fmt.Sprintf("upload failed during recovery: %v", err))
-				q.mu.Unlock()
 				return
 			}
 			imgData.URL = url
@@ -867,9 +920,7 @@ func (q *JobQueue) recoverRunningJob(_ context.Context, job *Job, comfyPromptID 
 		case "both":
 			url, err := uploadImage(cfg, img.Data, img.Filename)
 			if err != nil {
-				q.mu.Lock()
 				q.failJob(job, fmt.Sprintf("upload failed during recovery: %v", err))
-				q.mu.Unlock()
 				return
 			}
 			imgData.URL = url

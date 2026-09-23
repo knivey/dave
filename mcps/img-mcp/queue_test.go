@@ -379,3 +379,47 @@ func TestJobQueue_ConfigSwap(t *testing.T) {
 	assert.Equal(t, cfg.Queue.MaxWorkers, got.Queue.MaxWorkers, "non-reloadable fields preserved")
 	assert.Equal(t, cfg.Queue.MaxDepth, got.Queue.MaxDepth, "non-reloadable fields preserved")
 }
+
+// TestCancelDuringMonitorKeepsJobCancelled pins the interaction between
+// Cancel() and a monitorComfyGeneration that returns promptly on context
+// cancellation. Cancel() cancels the job context BEFORE it sets
+// StatusCancelled (the interrupt HTTP call sits in between), so a cancelled
+// job must not be marked failed with a "generation failed: context canceled"
+// error in that window — it should end up cleanly cancelled.
+func TestCancelDuringMonitorKeepsJobCancelled(t *testing.T) {
+	// Never-ready history and a silent websocket keep the monitor polling
+	// until the cancel lands. The interrupt call is parked so Cancel() is
+	// deterministically still between cancelCtx() and the status update when
+	// the monitor returns.
+	silent := newSilentComfyServer(t, 0)
+	silent.interruptDelay = 500 * time.Millisecond
+
+	cfg := testConfig(silent.server.URL)
+	wc := cfg.Workflows["test"]
+	wc.WorkflowPath = mustWriteWorkflow(t, t.TempDir())
+	cfg.Workflows["test"] = wc
+
+	q, cleanup := setupTestQueue(t, cfg)
+	defer cleanup()
+
+	job, err := q.Submit(JobTypeGenerate, "test", JobInput{Prompt: "a cat"})
+	require.NoError(t, err, "Submit")
+
+	select {
+	case <-silent.promptAccepted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("job never submitted its prompt to comfy")
+	}
+	select {
+	case <-silent.wsConnected:
+	case <-time.After(10 * time.Second):
+		t.Fatal("monitor never connected to websocket")
+	}
+
+	require.True(t, q.Cancel(job.ID), "Cancel")
+	waitForJobDone(t, job, 15*time.Second)
+
+	assert.Equal(t, StatusCancelled, job.Status, "final status should be cancelled")
+	assert.Empty(t, job.Error, "cancelled job must not carry a generation-failure error")
+	assert.Equal(t, 0, q.Status().Failed, "cancelled job must not count as failed")
+}

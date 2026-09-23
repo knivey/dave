@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -42,6 +43,20 @@ type ComfyHistoryResponse map[string]ComfyHistoryEntry
 
 type ComfyHistoryEntry struct {
 	Outputs map[string]ComfyOutput `json:"outputs"`
+	Status  *ComfyHistoryStatus    `json:"status,omitempty"`
+}
+
+// ComfyHistoryStatus decodes the "status" chunk of a ComfyUI history entry.
+// Messages is an array of ["event", {...data}] JSON tuples. Tuples are kept
+// as raw JSON because encoding/json cannot decode arrays into structs
+// positionally — the event name and data object are decoded per tuple.
+type ComfyHistoryStatus struct {
+	Messages [][]json.RawMessage `json:"messages"`
+}
+
+type ComfyStatusData struct {
+	Timestamp int64  `json:"timestamp"`
+	PromptID  string `json:"prompt_id"`
 }
 
 type ComfyOutput struct {
@@ -57,6 +72,13 @@ type ComfyImage struct {
 type ComfyResult struct {
 	Images      []ComfyImageData
 	ComfyImages []ComfyImage
+	// ExecStartedAt / ExecSuccessAt are ComfyUI's own epoch-ms timestamps
+	// (execution_start / execution_success) parsed from the history status
+	// messages (ComfyUI 0.33+). Diagnostics only: they let the
+	// "generation detected" log line distinguish a slow generation from slow
+	// completion detection. Nil on ComfyUI versions without status messages.
+	ExecStartedAt *int64
+	ExecSuccessAt *int64
 }
 
 type ComfyImageData struct {
@@ -247,12 +269,19 @@ func interruptComfyPrompt(ctx context.Context, cfg Config, promptID string) erro
 	return nil
 }
 
+// comfyPollInterval is how often monitorComfyGeneration falls back to polling
+// the /history endpoint while waiting for websocket events. It bounds
+// completion-detection latency when ComfyUI's push delivery is delayed or
+// dropped entirely.
+const comfyPollInterval = 1 * time.Second
+
 func monitorComfyGeneration(ctx context.Context, cfg Config, workflowName, promptID string) (ComfyResult, error) {
 	wc := cfg.Workflows[workflowName]
 	baseURL := cfg.Comfy.BaseURL
 
 	loggerComfy.Info("monitoring generation", "prompt_id", promptID, "workflow", workflowName)
 
+	start := time.Now()
 	wsURL := "ws://" + comfySchemeRegex.ReplaceAllString(baseURL, "") + "/ws?clientId=" + wc.ClientID
 	wsConn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, nil)
 	if err != nil {
@@ -260,23 +289,104 @@ func monitorComfyGeneration(ctx context.Context, cfg Config, workflowName, promp
 		return ComfyResult{}, fmt.Errorf("websocket connect: %w", err)
 	}
 	defer wsConn.Close()
+	loggerComfy.Debug("websocket connected", "prompt_id", promptID, "dial_ms", time.Since(start).Milliseconds())
 
 	timeout := time.Duration(wc.Timeout) * time.Second
-	wsConn.SetReadDeadline(time.Now().Add(timeout))
 
-	for {
-		if _, _, err := wsConn.ReadMessage(); err != nil {
-			checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			result, found := checkComfyOutput(checkCtx, cfg, wc, baseURL, promptID)
-			cancel()
-			if found {
-				return result, nil
+	// DESIGN NOTE: completion detection is deliberately belt-and-suspenders.
+	// The websocket gives sub-second reaction when ComfyUI's push works, but a
+	// push-only monitor proved fragile in production: ComfyUI (0.33.3) delayed
+	// completion events by 9-17s under post-execution load — worst right after
+	// a restart, likely asset scans/GIL-starved event loop — and ComfyUI keys
+	// sockets by clientId, so a same-clientId reconnect silently evicts the
+	// previous socket and stops ALL delivery to it, broadcasts included. The
+	// poll ticker bounds detection latency at comfyPollInterval no matter what
+	// the websocket does; the message path keeps the common case instant. The
+	// read-error and timeout branches still do one final history check because
+	// the generation may have completed even though push delivery never did.
+	//
+	// wsMessages counts every websocket message received, so the
+	// "generation detected" log line can tell a deaf socket (only the
+	// single connect-status message, or none at all) from delayed delivery
+	// (messages flowing, detection late). When a ws message and the poll
+	// tick race, the select picks randomly — the source label is a coin
+	// flip in that case, but the history check that follows is identical.
+	var wsMessages atomic.Int64
+	msgCh := make(chan struct{}, 1)
+	readErrCh := make(chan error, 1)
+	go func() {
+		_ = wsConn.SetReadDeadline(time.Now().Add(timeout))
+		for {
+			if _, _, err := wsConn.ReadMessage(); err != nil {
+				readErrCh <- err
+				return
 			}
-			return ComfyResult{}, fmt.Errorf("websocket read error: %w", err)
+			wsMessages.Add(1)
+			select {
+			case msgCh <- struct{}{}:
+			default:
+			}
+		}
+	}()
+
+	// detected logs the observability summary — detection source (push vs
+	// poll vs final-check fallback), total monitor elapsed time, websocket
+	// message count, and ComfyUI's own execution duration when the history
+	// entry carries status timestamps. One line that separates every failure
+	// mode this monitor can hit.
+	detected := func(source string, result ComfyResult) ComfyResult {
+		args := []interface{}{
+			"prompt_id", promptID,
+			"source", source,
+			"elapsed_ms", time.Since(start).Milliseconds(),
+			"ws_messages", wsMessages.Load(),
+		}
+		if result.ExecStartedAt != nil && result.ExecSuccessAt != nil {
+			args = append(args, "exec_ms", *result.ExecSuccessAt-*result.ExecStartedAt)
+		}
+		loggerComfy.Info("generation detected", args...)
+		return result
+	}
+
+	// finalCheck runs one bounded history check on the way out (read error or
+	// overall timeout): the prompt may be complete even though push delivery
+	// failed, and succeeding here beats failing a finished job.
+	finalCheck := func() (ComfyResult, bool) {
+		checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		return checkComfyOutput(checkCtx, cfg, wc, baseURL, promptID)
+	}
+
+	ticker := time.NewTicker(comfyPollInterval)
+	defer ticker.Stop()
+	timeoutTimer := time.NewTimer(timeout)
+	defer timeoutTimer.Stop()
+
+	var wakeSource string
+	for {
+		select {
+		case <-ctx.Done():
+			return ComfyResult{}, ctx.Err()
+		case <-msgCh:
+			// websocket message arrived — check history now
+			wakeSource = "ws"
+		case <-ticker.C:
+			// no message since the last tick — poll history anyway
+			wakeSource = "poll"
+		case readErr := <-readErrCh:
+			if result, found := finalCheck(); found {
+				return detected("read_error_final_check", result), nil
+			}
+			return ComfyResult{}, fmt.Errorf("websocket read error: %w", readErr)
+		case <-timeoutTimer.C:
+			if result, found := finalCheck(); found {
+				return detected("timeout_final_check", result), nil
+			}
+			return ComfyResult{}, fmt.Errorf("generation timed out after %s (prompt_id %s)", timeout, promptID)
 		}
 
 		if result, found := checkComfyOutput(ctx, cfg, wc, baseURL, promptID); found {
-			return result, nil
+			return detected(wakeSource, result), nil
 		}
 	}
 }
@@ -298,6 +408,7 @@ func resumeComfyGeneration(ctx context.Context, cfg Config, workflowName, prompt
 func checkComfyOutput(ctx context.Context, cfg Config, wc WorkflowConfig, baseURL, promptID string) (ComfyResult, bool) {
 	history, err := getComfyHistory(ctx, baseURL, promptID)
 	if err != nil {
+		loggerComfy.Debug("history check failed", "prompt_id", promptID, "error", err)
 		return ComfyResult{}, false
 	}
 
@@ -327,6 +438,31 @@ func checkComfyOutput(ctx context.Context, cfg Config, wc WorkflowConfig, baseUR
 
 	if len(result.Images) == 0 {
 		return ComfyResult{}, false
+	}
+
+	if entry.Status != nil {
+		for _, msg := range entry.Status.Messages {
+			if len(msg) != 2 {
+				continue
+			}
+			var event string
+			if err := json.Unmarshal(msg[0], &event); err != nil {
+				continue
+			}
+			if event != "execution_start" && event != "execution_success" {
+				continue
+			}
+			var data ComfyStatusData
+			if err := json.Unmarshal(msg[1], &data); err != nil {
+				continue
+			}
+			ts := data.Timestamp
+			if event == "execution_start" {
+				result.ExecStartedAt = &ts
+			} else {
+				result.ExecSuccessAt = &ts
+			}
+		}
 	}
 
 	return result, true

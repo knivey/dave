@@ -195,7 +195,7 @@ func requestLogMiddleware(next http.Handler) http.Handler {
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", lrw.statusCode,
-			"duration", time.Since(start).Round(time.Millisecond),
+			"duration_ms", time.Since(start).Milliseconds(),
 			"remote_addr", r.RemoteAddr,
 		)
 	})

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,6 +18,269 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// silentComfyServer simulates the production failure mode observed on
+// ComfyUI 0.33.3: the monitor's websocket connects and receives ComfyUI's
+// initial status message, but the completion events never arrive (delayed or
+// dropped push delivery). The history endpoint flips from empty to a
+// completed entry shortly after the test starts, so only a monitor that
+// polls history can observe the completion.
+type silentComfyServer struct {
+	server *httptest.Server
+	ready  atomic.Bool
+
+	// interruptDelay parks Cancel()'s interrupt call, reproducing the window
+	// where the job context is already cancelled but Cancel() has not yet
+	// set StatusCancelled.
+	interruptDelay time.Duration
+	// wsConnected is closed on the first /ws connection.
+	wsConnected chan struct{}
+	// promptAccepted is closed on the first /prompt submission.
+	promptAccepted chan struct{}
+}
+
+func newSilentComfyServer(t *testing.T, readyAfter time.Duration) *silentComfyServer {
+	t.Helper()
+	s := &silentComfyServer{
+		wsConnected:    make(chan struct{}),
+		promptAccepted: make(chan struct{}),
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/prompt", func(w http.ResponseWriter, r *http.Request) {
+		var req ComfyPromptRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		closeOnce(s.promptAccepted)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(ComfyPromptResponse{PromptID: "test-prompt-1"})
+	})
+	mux.HandleFunc("/api/interrupt", func(w http.ResponseWriter, r *http.Request) {
+		if s.interruptDelay > 0 {
+			time.Sleep(s.interruptDelay)
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/history/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if !s.ready.Load() {
+			_ = json.NewEncoder(w).Encode(ComfyHistoryResponse{})
+			return
+		}
+		// Mirrors ComfyUI 0.33.x history shape exactly: status.messages is an
+		// array of ["event", {timestamp, prompt_id}] JSON tuples (NOT objects
+		// — the first mock of this used objects and hid a decode bug that only
+		// real ComfyUI exposed).
+		entry := ComfyHistoryEntry{
+			Outputs: map[string]ComfyOutput{
+				"output-node": {
+					Images: []ComfyImage{{Filename: "img_00001.png", Subfolder: "", Type: "output"}},
+				},
+			},
+			Status: &ComfyHistoryStatus{
+				Messages: [][]json.RawMessage{
+					{json.RawMessage(`"execution_start"`), json.RawMessage(`{"timestamp":1790200000000,"prompt_id":"test-prompt-1"}`)},
+					{json.RawMessage(`"execution_success"`), json.RawMessage(`{"timestamp":1790200015000,"prompt_id":"test-prompt-1"}`)},
+				},
+			},
+		}
+		_ = json.NewEncoder(w).Encode(ComfyHistoryResponse{"test-prompt-1": entry})
+	})
+	mux.HandleFunc("/view", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("fakedata"))
+	})
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		closeOnce(s.wsConnected)
+		// Real ComfyUI sends one status message on connect; after that this
+		// socket deliberately stays open and silent — no executing/executed/
+		// completion events are ever delivered.
+		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"status","data":{}}`))
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	})
+	s.server = httptest.NewServer(mux)
+	t.Cleanup(func() { s.server.Close() })
+	if readyAfter > 0 {
+		time.AfterFunc(readyAfter, func() { s.ready.Store(true) })
+	}
+	return s
+}
+
+func closeOnce(ch chan struct{}) {
+	closeOnceMu.Lock()
+	defer closeOnceMu.Unlock()
+	select {
+	case <-ch:
+	default:
+		close(ch)
+	}
+}
+
+var closeOnceMu sync.Mutex
+
+// TestMonitorDetectsCompletionByPollingWhenWebsocketSilent pins the fix for
+// delayed generation-completion detection: when ComfyUI's websocket push
+// never arrives, the monitor must still notice the completed prompt within
+// roughly one poll interval of the history entry appearing — not wait for
+// the workflow timeout to fire the read-deadline fallback.
+func TestMonitorDetectsCompletionByPollingWhenWebsocketSilent(t *testing.T) {
+	readyAfter := 300 * time.Millisecond
+	silent := newSilentComfyServer(t, readyAfter)
+
+	cfg := testConfig(silent.server.URL)
+	wc := cfg.Workflows["test"]
+	// Small but well above the expected poll-based detection time: with the
+	// bug, the monitor only exits via this read deadline (~10s), which the
+	// elapsed assertion below rejects.
+	wc.Timeout = 10
+	cfg.Workflows["test"] = wc
+
+	type monitorOutcome struct {
+		result ComfyResult
+		err    error
+	}
+	outcomeCh := make(chan monitorOutcome, 1)
+	start := time.Now()
+	go func() {
+		result, err := monitorComfyGeneration(context.Background(), cfg, "test", "test-prompt-1")
+		outcomeCh <- monitorOutcome{result: result, err: err}
+	}()
+
+	select {
+	case outcome := <-outcomeCh:
+		require.NoError(t, outcome.err, "monitor should succeed once history is ready")
+		assert.Len(t, outcome.result.Images, 1, "downloaded images")
+		elapsed := time.Since(start)
+		maxElapsed := readyAfter + 4*time.Second
+		assert.Less(t, elapsed, maxElapsed,
+			"completion should be detected via polling shortly after history is ready; took %v", elapsed)
+	case <-time.After(60 * time.Second):
+		t.Fatal("monitor never returned")
+	}
+}
+
+// TestMonitorReturnsComfyExecutionTimestamps pins the observability contract:
+// when the history entry carries ComfyUI's execution_start/execution_success
+// status messages, the monitor's result must expose them so the "generation
+// detected" log line can separate "comfyui was slow to finish" from
+// "img-mcp was slow to notice".
+func TestMonitorReturnsComfyExecutionTimestamps(t *testing.T) {
+	silent := newSilentComfyServer(t, 200*time.Millisecond)
+
+	cfg := testConfig(silent.server.URL)
+	wc := cfg.Workflows["test"]
+	wc.Timeout = 10
+	cfg.Workflows["test"] = wc
+
+	result, err := monitorComfyGeneration(context.Background(), cfg, "test", "test-prompt-1")
+	require.NoError(t, err, "monitor should succeed via polling")
+	require.NotNil(t, result.ExecStartedAt, "ExecStartedAt should be parsed from history status")
+	require.NotNil(t, result.ExecSuccessAt, "ExecSuccessAt should be parsed from history status")
+	assert.EqualValues(t, 1790200000000, *result.ExecStartedAt, "execution_start timestamp (ms)")
+	assert.EqualValues(t, 1790200015000, *result.ExecSuccessAt, "execution_success timestamp (ms)")
+}
+
+// TestCheckComfyOutputStatusMessageRobustness pins the history decode against
+// real ComfyUI 0.33.x status-message shapes: decode failures of the enclosing
+// response turn every poll into "not found" (a live incident showed this as
+// "generation timed out"), so malformed or unfamiliar tuples must be skipped,
+// never fatal.
+func TestCheckComfyOutputStatusMessageRobustness(t *testing.T) {
+	const outputJSON = `"outputs":{"output-node":{"images":[{"filename":"img_00001.png","subfolder":"","type":"output"}]}}`
+	tests := []struct {
+		name        string
+		historyBody string
+		wantFound   bool
+		wantStart   *int64
+		wantSuccess *int64
+	}{
+		{
+			name: "full real message set",
+			historyBody: `{"test-prompt-1":{` + outputJSON + `,"status":{"status_str":"success","completed":true,"messages":[
+				["execution_start",{"prompt_id":"test-prompt-1","timestamp":1790200000000}],
+				["execution_cached",{"nodes":["57","60","61"],"prompt_id":"test-prompt-1","timestamp":1790200000003}],
+				["execution_success",{"prompt_id":"test-prompt-1","timestamp":1790200015000}]
+			]}}}`,
+			wantFound:   true,
+			wantStart:   ptrInt64(1790200000000),
+			wantSuccess: ptrInt64(1790200015000),
+		},
+		{
+			name: "execution_error with traceback strings",
+			historyBody: `{"test-prompt-1":{` + outputJSON + `,"status":{"status_str":"error","completed":false,"messages":[
+				["execution_start",{"prompt_id":"test-prompt-1","timestamp":1790200000000}],
+				["execution_error",{"prompt_id":"test-prompt-1","exception_message":"boom","traceback":["  File x","    y"],"current_inputs":{"text":["a"]}}]
+			]}}}`,
+			wantFound: true,
+			wantStart: ptrInt64(1790200000000),
+		},
+		{
+			name: "malformed tuples ignored, valid ones still parsed",
+			historyBody: `{"test-prompt-1":{` + outputJSON + `,"status":{"messages":[
+				["execution_start","execution_start",{"timestamp":1}],
+				[123,{"timestamp":2}],
+				["execution_success","not-an-object"],
+				["execution_start",{"prompt_id":"test-prompt-1","timestamp":1790200000000}],
+				["execution_success",{"prompt_id":"test-prompt-1","timestamp":1790200015000}]
+			]}}}`,
+			wantFound:   true,
+			wantStart:   ptrInt64(1790200000000),
+			wantSuccess: ptrInt64(1790200015000),
+		},
+		{
+			name:        "status null",
+			historyBody: `{"test-prompt-1":{` + outputJSON + `,"status":null}}`,
+			wantFound:   true,
+		},
+		{
+			name:        "empty history",
+			historyBody: `{}`,
+			wantFound:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/history/", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tt.historyBody)
+			})
+			mux.HandleFunc("/view", func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte("fakedata"))
+			})
+			server := httptest.NewServer(mux)
+			t.Cleanup(func() { server.Close() })
+
+			cfg := testConfig(server.URL)
+			result, found := checkComfyOutput(context.Background(), cfg, cfg.Workflows["test"], server.URL, "test-prompt-1")
+			assert.Equal(t, tt.wantFound, found, "found")
+			if !tt.wantFound {
+				return
+			}
+			assert.Len(t, result.Images, 1, "downloaded images")
+			if tt.wantStart != nil {
+				require.NotNil(t, result.ExecStartedAt, "ExecStartedAt")
+				assert.EqualValues(t, *tt.wantStart, *result.ExecStartedAt, "execution_start ts")
+			}
+			if tt.wantSuccess != nil {
+				require.NotNil(t, result.ExecSuccessAt, "ExecSuccessAt")
+				assert.EqualValues(t, *tt.wantSuccess, *result.ExecSuccessAt, "execution_success ts")
+			}
+		})
+	}
+}
+
+func ptrInt64(v int64) *int64 { return &v }
 
 func TestInterruptComfyPrompt_Success(t *testing.T) {
 	var receivedBody map[string]string

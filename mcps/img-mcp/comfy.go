@@ -138,21 +138,33 @@ func prepareComfyWorkflow(cfg Config, workflowName, prompt, negativePrompt strin
 	}
 
 	// DESIGN NOTE: The prompt note node is intentionally disconnected from the
-	// rest of the graph. ComfyUI only validates and executes nodes reachable
-	// from output nodes, so this node costs nothing at generation time, but
-	// ComfyUI embeds the full submitted graph — orphan nodes included — in the
-	// PNG "prompt" metadata chunk. That lets us recover the original user
-	// prompt (pre-enhancement, otherwise overwritten below the note's
-	// replacement in the prompt node) and provenance from the image itself.
-	// "Note" is a registered core ComfyUI class; the API rejects unknown
-	// class types even for unreachable nodes, so a missing/ancient Note node
-	// on the server will surface as a submission error rather than silent
-	// metadata loss.
-	workflow[davePromptNoteNodeID] = ComfyNode{
+	// rest of the graph. ComfyUI only validates the INPUTS of nodes reachable
+	// from output nodes, so this node costs nothing at generation time, but the
+	// full submitted graph — orphan nodes included — is embedded in the PNG
+	// "prompt" metadata chunk by the save node. That lets us recover the
+	// original user prompt (pre-enhancement, otherwise overwritten in the
+	// prompt node below) and provenance from the image file itself.
+	//
+	// The class MUST be a backend-registered core type: validate_prompt checks
+	// class_type registration for EVERY node in the prompt, even unreachable
+	// ones. "Note" is frontend-only (the editor strips it from API exports and
+	// the backend rejects it with missing_node_type — learned the hard way),
+	// so we use a disconnected CLIPTextEncode — the same shape as a real
+	// prompt node whose output link was deleted — copying the prompt node's
+	// clip input so it is indistinguishable from a merely-disconnected node.
+	// Orphan CLIPTextEncode nodes in API prompts are accepted in practice and
+	// ride along in the embedded graph.
+	noteNode := ComfyNode{
 		Inputs: map[string]interface{}{"text": promptNote},
-		Class:  "Note",
+		Class:  "CLIPTextEncode",
 		Meta:   &comfyNodeMeta{Title: davePromptNoteTitle},
 	}
+	if promptNode, ok := workflow[wc.PromptNode]; ok {
+		if clip, ok := promptNode.Inputs["clip"]; ok {
+			noteNode.Inputs["clip"] = clip
+		}
+	}
+	workflow[davePromptNoteNodeID] = noteNode
 
 	return workflow, nil
 }

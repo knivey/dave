@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -110,22 +112,46 @@ func TestPrepareComfyWorkflowInjectsPromptNote(t *testing.T) {
 	dir := t.TempDir()
 	cfg := testConfig("http://127.0.0.1:0")
 	wc := cfg.Workflows["test"]
-	wc.WorkflowPath = mustWriteWorkflow(t, dir)
+	// A realistic prompt node with a clip link, so we can verify the orphan
+	// node copies it and looks like a real (merely disconnected) prompt node.
+	workflow := map[string]ComfyNode{
+		"18": {
+			Inputs: map[string]interface{}{"clip_name": "text_encoder.safetensors"},
+			Class:  "CLIPLoader",
+		},
+		"prompt-node": {
+			Inputs: map[string]interface{}{"text": "", "clip": []interface{}{"18", 0}},
+			Class:  "CLIPTextEncode",
+		},
+		"output-node": {
+			Inputs: map[string]interface{}{"images": []string{"1"}},
+			Class:  "SaveImage",
+		},
+	}
+	data, err := json.Marshal(workflow)
+	require.NoError(t, err)
+	wc.WorkflowPath = filepath.Join(dir, "wf.json")
+	require.NoError(t, os.WriteFile(wc.WorkflowPath, data, 0644))
 	cfg.Workflows["test"] = wc
 
 	note := `{"prompt":"a cat","llm_generated":false,"job_id":"j_123"}`
 
-	workflow, err := prepareComfyWorkflow(cfg, "test", "enhanced cat", "", nil, note)
+	got, err := prepareComfyWorkflow(cfg, "test", "enhanced cat", "", nil, note)
 	require.NoError(t, err, "prepareComfyWorkflow")
 
-	node, ok := workflow[davePromptNoteNodeID]
+	node, ok := got[davePromptNoteNodeID]
 	require.True(t, ok, "workflow should contain the prompt note node")
-	assert.Equal(t, "Note", node.Class, "note node class")
+	// DESIGN NOTE: this must be a registered core class (e.g. CLIPTextEncode),
+	// NOT "Note" — Note is a frontend-only node type and the backend rejects
+	// API prompts containing it with missing_node_type.
+	assert.Equal(t, "CLIPTextEncode", node.Class, "note node class")
 	require.NotNil(t, node.Meta, "note node meta")
 	assert.Equal(t, "dave original prompt", node.Meta.Title, "note node title")
 	assert.Equal(t, note, node.Inputs["text"], "note node text should be the payload verbatim")
+	assert.Equal(t, []interface{}{"18", float64(0)}, node.Inputs["clip"],
+		"note node should copy the prompt node's clip link so it looks like a real disconnected prompt node")
 
-	assert.Equal(t, "enhanced cat", workflow["prompt-node"].Inputs["text"],
+	assert.Equal(t, "enhanced cat", got["prompt-node"].Inputs["text"],
 		"prompt node should still receive the (possibly enhanced) prompt")
 }
 
@@ -241,7 +267,7 @@ func TestProcessJobSubmitsPromptNote(t *testing.T) {
 	require.Len(t, submitted, 1, "exactly one workflow should have been submitted")
 	node, ok := submitted[0].Prompt[davePromptNoteNodeID]
 	require.True(t, ok, "submitted workflow should contain the prompt note node")
-	assert.Equal(t, "Note", node.Class)
+	assert.Equal(t, "CLIPTextEncode", node.Class)
 
 	text, ok := node.Inputs["text"].(string)
 	require.True(t, ok, "note node text should be a string")
@@ -309,6 +335,7 @@ func TestProcessJobEnhanceKeepsOriginalPromptInNote(t *testing.T) {
 	require.Len(t, submitted, 1)
 	node, ok := submitted[0].Prompt[davePromptNoteNodeID]
 	require.True(t, ok, "submitted workflow should contain the prompt note node")
+	assert.Equal(t, "CLIPTextEncode", node.Class)
 
 	var payload promptNotePayload
 	require.NoError(t, json.Unmarshal([]byte(node.Inputs["text"].(string)), &payload))

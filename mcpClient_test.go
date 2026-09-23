@@ -24,6 +24,26 @@ var mcpServicesTOML = `
 maxtokens = 100
 `
 
+// buildDaveTestBinary compiles the dave binary once so subprocess tests can
+// exec it directly. The old approach (`go run . <dir>` per subtest) re-compiled
+// AND re-linked on every invocation — `go run` never caches its final link —
+// so a cold build cache or build load from a parallel `go test ./...` could
+// blow the 10s subprocess budget, killing the process mid-compile with zero
+// output and failing assertions on empty strings. Building once leaves the
+// whole budget for actual runtime (process start is milliseconds).
+//
+// The build itself gets no context timeout: it must absorb cold caches, and
+// the outer `go test` timeout still bounds it.
+func buildDaveTestBinary(t *testing.T) string {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "dave-testbin")
+	out, err := exec.Command("go", "build", "-o", bin, ".").CombinedOutput()
+	if err != nil {
+		t.Fatalf("building dave test binary: %v\n%s", err, out)
+	}
+	return bin
+}
+
 func TestMCPConfigValidation(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -109,6 +129,8 @@ mcps = ["nonexistent"]`,
 		},
 	}
 
+	daveBin := buildDaveTestBinary(t)
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			extraFiles := map[string]string{
@@ -123,7 +145,7 @@ mcps = ["nonexistent"]`,
 
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			cmd := exec.CommandContext(ctx, "go", "run", ".", dir)
+			cmd := exec.CommandContext(ctx, daveBin, dir)
 			cmd.Env = append(os.Environ(), "LOGXI_FORMAT=maxcol=9999", "DAVE_NO_TUI=1")
 			output, _ := cmd.CombinedOutput()
 			outStr := string(output)
@@ -351,9 +373,11 @@ maxtokens = 100
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "chats.toml"), []byte(chatsTOML), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "services.toml"), []byte(servicesTOML), 0644))
 
+	daveBin := buildDaveTestBinary(t)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "go", "run", ".", dir)
+	cmd := exec.CommandContext(ctx, daveBin, dir)
 	cmd.Env = append(os.Environ(), "LOGXI_FORMAT=maxcol=9999", "DAVE_NO_TUI=1")
 	output, _ := cmd.CombinedOutput()
 	outStr := string(output)

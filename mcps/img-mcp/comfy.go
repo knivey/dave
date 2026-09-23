@@ -270,20 +270,6 @@ func resumeComfyGeneration(ctx context.Context, cfg Config, workflowName, prompt
 	return monitorComfyGeneration(ctx, cfg, workflowName, promptID)
 }
 
-func submitComfyGeneration(ctx context.Context, cfg Config, workflowName, prompt, negativePrompt string, seedOverride *int64, promptNote string) (ComfyResult, error) {
-	workflow, err := prepareComfyWorkflow(cfg, workflowName, prompt, negativePrompt, seedOverride, promptNote)
-	if err != nil {
-		return ComfyResult{}, err
-	}
-
-	promptID, err := submitComfyPrompt(ctx, cfg, workflowName, workflow)
-	if err != nil {
-		return ComfyResult{}, err
-	}
-
-	return monitorComfyGeneration(ctx, cfg, workflowName, promptID)
-}
-
 func checkComfyOutput(ctx context.Context, cfg Config, wc WorkflowConfig, baseURL, promptID string) (ComfyResult, bool) {
 	history, err := getComfyHistory(ctx, baseURL, promptID)
 	if err != nil {

@@ -1393,9 +1393,11 @@ maxtokens = 100
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "chats.toml"), []byte(chatsTOML), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "services.toml"), []byte(servicesTOML), 0644))
 
+	daveBin := buildDaveTestBinary(t)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "go", "run", ".", dir)
+	cmd := exec.CommandContext(ctx, daveBin, dir)
 	cmd.Env = append(os.Environ(), "LOGXI_FORMAT=maxcol=9999", "DAVE_NO_TUI=1")
 	output, _ := cmd.CombinedOutput()
 	outStr := string(output)

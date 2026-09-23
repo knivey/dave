@@ -64,7 +64,9 @@ func uploadImage(cfg Config, data []byte, filename string) (string, error) {
 		return "", fmt.Errorf("closing multipart writer: %w", err)
 	}
 
+	postStart := time.Now()
 	resp, err := uploadHTTPClient.Post(base+"/updo", wr.FormDataContentType(), bytes.NewReader(body.Bytes()))
+	postDur := time.Since(postStart)
 	if err != nil {
 		logger.Error("upload request failed", "filename", filename, "error", err)
 		return "", fmt.Errorf("uploading: %w", err)
@@ -92,7 +94,9 @@ func uploadImage(cfg Config, data []byte, filename string) (string, error) {
 
 	origURL := base + "/" + url.PathEscape(segments[0]) + "/orig/" + url.PathEscape(filename)
 
+	verifyStart := time.Now()
 	vresp, err := uploadHTTPClient.Get(origURL)
+	verifyDur := time.Since(verifyStart)
 	if err != nil {
 		logger.Error("verifying upload failed", "filename", filename, "url", origURL, "error", err)
 		return "", fmt.Errorf("verifying upload: %w", err)
@@ -108,7 +112,8 @@ func uploadImage(cfg Config, data []byte, filename string) (string, error) {
 		return "", fmt.Errorf("verifying %s: redirect missing Location header", origURL)
 	}
 
-	logger.Info("upload complete", "filename", filename, "url", origURL)
+	logger.Info("upload complete", "filename", filename, "url", origURL,
+		"post_ms", postDur.Milliseconds(), "verify_ms", verifyDur.Milliseconds())
 	return origURL, nil
 }
 

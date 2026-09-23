@@ -13,7 +13,10 @@ import (
 type EnhancePromptInput struct {
 	Prompt      string `json:"prompt" jsonschema:"the raw prompt text to enhance"`
 	Enhancement string `json:"enhancement,omitempty" jsonschema:"name of enhancement config to use (default: 'default')"`
-	Network     string `json:"_dave_inject_network"`
+	// Injected by dave via the _dave_inject_ mechanism; omitting must stay
+	// valid — see the load-bearing omitempty note on the generation inputs
+	// and TestInjectLLMGeneratedNotRequired.
+	Network string `json:"_dave_inject_network,omitempty"`
 }
 
 type EnhancePromptOutput struct {
@@ -27,11 +30,15 @@ type GenerateImageAsyncInput struct {
 	Workflow       string `json:"workflow,omitempty" jsonschema:"name of the workflow config to use (empty or 'default' uses the default workflow)"`
 	Seed           *int64 `json:"seed,omitempty" jsonschema:"optional fixed seed for reproducibility"`
 	OutputFormat   string `json:"output_format,omitempty" jsonschema:"output format: url (default), base64, or both"`
-	Network        string `json:"_dave_inject_network"`
+	Network        string `json:"_dave_inject_network,omitempty"`
 	// LLMGenerated is injected by dave (true) when this call originates from
 	// an LLM tool call; absent for direct user tool commands. Recorded in the
 	// workflow's prompt note metadata for image provenance.
-	LLMGenerated bool `json:"_dave_inject_llm_generated"`
+	// The omitempty is load-bearing: jsonschema-go marks every non-omitempty
+	// field REQUIRED, and the SDK server then rejects callers that omit the
+	// field — dave's direct tools.toml commands never send _dave_inject_*
+	// fields (see TestInjectLLMGeneratedNotRequired).
+	LLMGenerated bool `json:"_dave_inject_llm_generated,omitempty"`
 }
 
 type GenerateImageAsyncOutput struct {
@@ -45,11 +52,15 @@ type GenerateImageInput struct {
 	Seed           *int64 `json:"seed,omitempty" jsonschema:"optional fixed seed for reproducibility"`
 	OutputFormat   string `json:"output_format,omitempty" jsonschema:"output format: url (default), base64, or both"`
 	Timeout        int    `json:"timeout,omitempty" jsonschema:"max seconds to wait for generation (default: 300)"`
-	Network        string `json:"_dave_inject_network"`
+	Network        string `json:"_dave_inject_network,omitempty"`
 	// LLMGenerated is injected by dave (true) when this call originates from
 	// an LLM tool call; absent for direct user tool commands. Recorded in the
 	// workflow's prompt note metadata for image provenance.
-	LLMGenerated bool `json:"_dave_inject_llm_generated"`
+	// The omitempty is load-bearing: jsonschema-go marks every non-omitempty
+	// field REQUIRED, and the SDK server then rejects callers that omit the
+	// field — dave's direct tools.toml commands never send _dave_inject_*
+	// fields (see TestInjectLLMGeneratedNotRequired).
+	LLMGenerated bool `json:"_dave_inject_llm_generated,omitempty"`
 }
 
 type GenerateImageOutput struct {
@@ -63,11 +74,15 @@ type EnhanceAndGenerateAsyncInput struct {
 	Enhancement  string `json:"enhancement,omitempty" jsonschema:"name of enhancement config (default: from workflow or 'default')"`
 	Workflow     string `json:"workflow,omitempty" jsonschema:"name of the workflow config to use (empty or 'default' uses the default workflow)"`
 	OutputFormat string `json:"output_format,omitempty" jsonschema:"output format: url (default), base64, or both"`
-	Network      string `json:"_dave_inject_network"`
+	Network      string `json:"_dave_inject_network,omitempty"`
 	// LLMGenerated is injected by dave (true) when this call originates from
 	// an LLM tool call; absent for direct user tool commands. Recorded in the
 	// workflow's prompt note metadata for image provenance.
-	LLMGenerated bool `json:"_dave_inject_llm_generated"`
+	// The omitempty is load-bearing: jsonschema-go marks every non-omitempty
+	// field REQUIRED, and the SDK server then rejects callers that omit the
+	// field — dave's direct tools.toml commands never send _dave_inject_*
+	// fields (see TestInjectLLMGeneratedNotRequired).
+	LLMGenerated bool `json:"_dave_inject_llm_generated,omitempty"`
 }
 
 type EnhanceAndGenerateAsyncOutput struct {
@@ -80,11 +95,15 @@ type EnhanceAndGenerateInput struct {
 	Workflow     string `json:"workflow,omitempty" jsonschema:"name of the workflow config to use (empty or 'default' uses the default workflow)"`
 	OutputFormat string `json:"output_format,omitempty" jsonschema:"output format: url (default), base64, or both"`
 	Timeout      int    `json:"timeout,omitempty" jsonschema:"max seconds to wait for generation (default: 300)"`
-	Network      string `json:"_dave_inject_network"`
+	Network      string `json:"_dave_inject_network,omitempty"`
 	// LLMGenerated is injected by dave (true) when this call originates from
 	// an LLM tool call; absent for direct user tool commands. Recorded in the
 	// workflow's prompt note metadata for image provenance.
-	LLMGenerated bool `json:"_dave_inject_llm_generated"`
+	// The omitempty is load-bearing: jsonschema-go marks every non-omitempty
+	// field REQUIRED, and the SDK server then rejects callers that omit the
+	// field — dave's direct tools.toml commands never send _dave_inject_*
+	// fields (see TestInjectLLMGeneratedNotRequired).
+	LLMGenerated bool `json:"_dave_inject_llm_generated,omitempty"`
 }
 
 type EnhanceAndGenerateOutput struct {

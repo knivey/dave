@@ -3,11 +3,97 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
+	"github.com/google/jsonschema-go/jsonschema"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestInjectLLMGeneratedNotRequired guards the regression where
+// _dave_inject_llm_generated was a REQUIRED schema property: jsonschema-go
+// marks every field without `omitempty` as required, and the MCP SDK server
+// rejects tool calls that miss required properties. dave's direct tools.toml
+// commands never send _dave_inject_* fields, so a required inject field
+// breaks every non-LLM caller with
+// "validating root: required: missing properties".
+// The same applies to _dave_inject_network (pre-existing instance of the
+// same bug, caught by the in-memory round-trip test below).
+func TestInjectLLMGeneratedNotRequired(t *testing.T) {
+	schemas := map[string]*jsonschema.Schema{}
+	for name, infer := range map[string]func() (*jsonschema.Schema, error){
+		"GenerateImageInput":           func() (*jsonschema.Schema, error) { return jsonschema.For[GenerateImageInput](nil) },
+		"GenerateImageAsyncInput":      func() (*jsonschema.Schema, error) { return jsonschema.For[GenerateImageAsyncInput](nil) },
+		"EnhanceAndGenerateInput":      func() (*jsonschema.Schema, error) { return jsonschema.For[EnhanceAndGenerateInput](nil) },
+		"EnhanceAndGenerateAsyncInput": func() (*jsonschema.Schema, error) { return jsonschema.For[EnhanceAndGenerateAsyncInput](nil) },
+		"EnhancePromptInput":           func() (*jsonschema.Schema, error) { return jsonschema.For[EnhancePromptInput](nil) },
+	} {
+		s, err := infer()
+		require.NoError(t, err, name)
+		schemas[name] = s
+	}
+
+	expectLLMGenerated := map[string]bool{
+		"GenerateImageInput":           true,
+		"GenerateImageAsyncInput":      true,
+		"EnhanceAndGenerateInput":      true,
+		"EnhanceAndGenerateAsyncInput": true,
+		"EnhancePromptInput":           false,
+	}
+	for name, s := range schemas {
+		for _, req := range s.Required {
+			assert.NotEqual(t, "_dave_inject_llm_generated", req,
+				"%s: inject fields must be optional (add omitempty to the json tag)", name)
+			assert.NotEqual(t, "_dave_inject_network", req,
+				"%s: inject fields must be optional (add omitempty to the json tag)", name)
+		}
+		// The properties must still be advertised so dave can discover and inject them.
+		_, hasNet := s.Properties["_dave_inject_network"]
+		assert.True(t, hasNet, "%s: _dave_inject_network should still be a declared property", name)
+		_, hasGen := s.Properties["_dave_inject_llm_generated"]
+		assert.Equal(t, expectLLMGenerated[name], hasGen,
+			"%s: unexpected presence of _dave_inject_llm_generated property", name)
+	}
+}
+
+// TestCallGenerationToolsWithoutInjectFields exercises the SDK server's
+// argument validation over a real (in-memory) MCP round trip: a caller that
+// sends no _dave_inject_* fields — exactly what dave's direct tools.toml
+// commands look like — must be accepted.
+func TestCallGenerationToolsWithoutInjectFields(t *testing.T) {
+	cfg := testConfig("http://127.0.0.1:0")
+	h := NewToolHandlers(cfg, queuedTestQueue(t))
+	server := createAsyncServer(cfg, h)
+
+	ct, st := mcp.NewInMemoryTransports()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go server.Run(ctx, st)
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	require.NoError(t, err, "connect")
+	defer cs.Close()
+
+	for _, tool := range []string{"generate_image_async", "enhance_and_generate_async"} {
+		t.Run(tool, func(t *testing.T) {
+			res, err := cs.CallTool(ctx, &mcp.CallToolParams{
+				Name:      tool,
+				Arguments: map[string]any{"prompt": "a cat", "output_format": "base64"},
+			})
+			require.NoError(t, err, "tool call must pass schema validation without inject fields")
+			var texts []string
+			for _, c := range res.Content {
+				if tc, ok := c.(*mcp.TextContent); ok {
+					texts = append(texts, tc.Text)
+				}
+			}
+			require.False(t, res.IsError, "tool call should not return an error result: %s", strings.Join(texts, "; "))
+		})
+	}
+}
 
 func TestToolHandlersConfigSwap(t *testing.T) {
 	cfg := testConfig("http://localhost:8188")

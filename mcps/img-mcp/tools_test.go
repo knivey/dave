@@ -44,10 +44,8 @@ func TestInjectLLMGeneratedNotRequired(t *testing.T) {
 	}
 	for name, s := range schemas {
 		for _, req := range s.Required {
-			assert.NotEqual(t, "_dave_inject_llm_generated", req,
-				"%s: inject fields must be optional (add omitempty to the json tag)", name)
-			assert.NotEqual(t, "_dave_inject_network", req,
-				"%s: inject fields must be optional (add omitempty to the json tag)", name)
+			assert.False(t, strings.HasPrefix(req, "_dave_inject_"),
+				"%s: inject fields must be optional (add omitempty to the json tag), found required %q", name, req)
 		}
 		// The properties must still be advertised so dave can discover and inject them.
 		_, hasNet := s.Properties["_dave_inject_network"]
@@ -62,6 +60,12 @@ func TestInjectLLMGeneratedNotRequired(t *testing.T) {
 // argument validation over a real (in-memory) MCP round trip: a caller that
 // sends no _dave_inject_* fields — exactly what dave's direct tools.toml
 // commands look like — must be accepted.
+//
+// Only the async server flavor is exercised: its handlers return immediately
+// after queueing, while the sync handlers block in WaitForJob for up to 300s.
+// All three server flavors (sync/async/stdio-full) register the same input
+// structs and share the same schema inference path, so the schema-level
+// assertions above cover the sync tools.
 func TestCallGenerationToolsWithoutInjectFields(t *testing.T) {
 	cfg := testConfig("http://127.0.0.1:0")
 	h := NewToolHandlers(cfg, queuedTestQueue(t))

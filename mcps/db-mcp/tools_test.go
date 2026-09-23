@@ -3,13 +3,42 @@ package main
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/jmoiron/sqlx"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestInjectFieldsOptional guards the scopeFields json tags: jsonschema-go
+// marks every field without `omitempty` as required, and the MCP SDK server
+// rejects tool calls missing required properties. The inject fields are
+// optional hints (dave injects them; other callers may not) and must never
+// be required — the same bug broke img-mcp's direct tool commands once.
+func TestInjectFieldsOptional(t *testing.T) {
+	inputs := map[string]func() (*jsonschema.Schema, error){
+		"PutNoteInput":     func() (*jsonschema.Schema, error) { return jsonschema.For[PutNoteInput](nil) },
+		"GetNotesInput":    func() (*jsonschema.Schema, error) { return jsonschema.For[GetNotesInput](nil) },
+		"SearchNotesInput": func() (*jsonschema.Schema, error) { return jsonschema.For[SearchNotesInput](nil) },
+		"RecentNotesInput": func() (*jsonschema.Schema, error) { return jsonschema.For[RecentNotesInput](nil) },
+		"DeleteNoteInput":  func() (*jsonschema.Schema, error) { return jsonschema.For[DeleteNoteInput](nil) },
+		"DeleteNotesInput": func() (*jsonschema.Schema, error) { return jsonschema.For[DeleteNotesInput](nil) },
+		"ListKeysInput":    func() (*jsonschema.Schema, error) { return jsonschema.For[ListKeysInput](nil) },
+		"CountNotesInput":  func() (*jsonschema.Schema, error) { return jsonschema.For[CountNotesInput](nil) },
+	}
+
+	for name, infer := range inputs {
+		s, err := infer()
+		require.NoError(t, err, name)
+		for _, req := range s.Required {
+			assert.False(t, strings.HasPrefix(req, "_dave_inject_"),
+				"%s: inject fields must be optional (add omitempty to the json tag), found required %q", name, req)
+		}
+	}
+}
 
 func setupTestEnv(t *testing.T) (*ToolHandlers, *sqlx.DB) {
 	t.Helper()

@@ -9,11 +9,17 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// scopeFields carries dave's injected scope values. Every tag MUST keep
+// omitempty: jsonschema-go marks non-omitempty fields required in the
+// advertised schema and the SDK server then rejects callers that omit them.
+// dave always injects these, but other MCP clients need not — and the
+// required-property failure mode is exactly the img-mcp incident documented
+// in AGENTS.md. Guarded by TestInjectFieldsOptional.
 type scopeFields struct {
-	Network string `json:"_dave_inject_network"`
-	Channel string `json:"_dave_inject_channel"`
-	UserID  int64  `json:"_dave_inject_user_id"`
-	Nick    string `json:"_dave_inject_nick"`
+	Network string `json:"_dave_inject_network,omitempty"`
+	Channel string `json:"_dave_inject_channel,omitempty"`
+	UserID  int64  `json:"_dave_inject_user_id,omitempty"`
+	Nick    string `json:"_dave_inject_nick,omitempty"`
 }
 
 type ToolHandlers struct {

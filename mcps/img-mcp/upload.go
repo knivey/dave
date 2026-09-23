@@ -2,12 +2,15 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -64,8 +67,38 @@ func uploadImage(cfg Config, data []byte, filename string) (string, error) {
 		return "", fmt.Errorf("closing multipart writer: %w", err)
 	}
 
+	// httptrace splits post_ms into its real costs: DNS+dial, TLS
+	// handshake (the suspected Atom-CPU tax), request-body upload, and
+	// the server's processing wait. Zero-value stages mean the event
+	// never fired (e.g. no dial/tls on a reused connection).
+	var connectDone, tlsDone, wroteReq, firstByte time.Time
+	var connReused bool
+	trace := &httptrace.ClientTrace{
+		GotConn: func(info httptrace.GotConnInfo) {
+			connReused = info.Reused
+		},
+		ConnectDone: func(network, addr string, err error) {
+			connectDone = time.Now()
+		},
+		TLSHandshakeDone: func(cs tls.ConnectionState, err error) {
+			tlsDone = time.Now()
+		},
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			wroteReq = time.Now()
+		},
+		GotFirstResponseByte: func() {
+			firstByte = time.Now()
+		},
+	}
 	postStart := time.Now()
-	resp, err := uploadHTTPClient.Post(base+"/updo", wr.FormDataContentType(), bytes.NewReader(body.Bytes()))
+	req, err := http.NewRequestWithContext(
+		httptrace.WithClientTrace(context.Background(), trace),
+		http.MethodPost, base+"/updo", bytes.NewReader(body.Bytes()))
+	if err != nil {
+		return "", fmt.Errorf("creating upload request: %w", err)
+	}
+	req.Header.Set("Content-Type", wr.FormDataContentType())
+	resp, err := uploadHTTPClient.Do(req)
 	postDur := time.Since(postStart)
 	if err != nil {
 		logger.Error("upload request failed", "filename", filename, "error", err)
@@ -112,9 +145,33 @@ func uploadImage(cfg Config, data []byte, filename string) (string, error) {
 		return "", fmt.Errorf("verifying %s: redirect missing Location header", origURL)
 	}
 
+	// Stage boundaries for the log; stages that never fired (reused
+	// connection skips dial/tls) stay zero and report 0ms.
+	connReady := postStart
+	if !connectDone.IsZero() {
+		connReady = connectDone
+	}
+	if !tlsDone.IsZero() {
+		connReady = tlsDone
+	}
+
 	logger.Info("upload complete", "filename", filename, "url", origURL,
-		"post_ms", postDur.Milliseconds(), "verify_ms", verifyDur.Milliseconds())
+		"post_ms", postDur.Milliseconds(), "verify_ms", verifyDur.Milliseconds(),
+		"conn_reused", connReused,
+		"dial_ms", elapsedMs(postStart, connectDone),
+		"tls_ms", elapsedMs(connectDone, tlsDone),
+		"send_ms", elapsedMs(connReady, wroteReq),
+		"srv_ms", elapsedMs(wroteReq, firstByte))
 	return origURL, nil
+}
+
+// elapsedMs reports the milliseconds between two httptrace timestamps,
+// or 0 when either boundary never fired (zero time).
+func elapsedMs(from, to time.Time) int64 {
+	if from.IsZero() || to.IsZero() || to.Before(from) {
+		return 0
+	}
+	return to.Sub(from).Milliseconds()
 }
 
 // sanitizeUploadFilename keeps the /orig/ URL derivable: the URL path is

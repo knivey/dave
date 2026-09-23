@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -206,6 +207,28 @@ func TestUploadImageErrors(t *testing.T) {
 			require.Error(t, err)
 			assert.Empty(t, url)
 			assert.Contains(t, err.Error(), tt.errMsg)
+		})
+	}
+}
+
+func TestElapsedMs(t *testing.T) {
+	base := time.Date(2026, 9, 23, 5, 52, 4, 0, time.UTC)
+	tests := []struct {
+		name string
+		from time.Time
+		to   time.Time
+		want int64
+	}{
+		{"FromNeverFired", time.Time{}, base.Add(1500 * time.Millisecond), 0},
+		{"ToNeverFired", base, time.Time{}, 0},
+		{"BothNeverFired", time.Time{}, time.Time{}, 0},
+		{"InvertedPair", base.Add(time.Second), base, 0},
+		{"PositiveDelta", base, base.Add(2844 * time.Millisecond), 2844},
+		{"SubMillisecondTruncates", base, base.Add(900 * time.Microsecond), 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, elapsedMs(tt.from, tt.to))
 		})
 	}
 }

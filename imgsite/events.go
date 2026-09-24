@@ -413,6 +413,12 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
+	// nginx buffers proxied responses by default, which silently stalls
+	// SSE (heartbeats are a few bytes per 20s — smaller than the buffer).
+	// It honors this response header from the upstream, so setting it here
+	// makes SSE work behind nginx with zero proxy-side config. Other
+	// proxies may still need explicit buffering disabled.
+	w.Header().Set("X-Accel-Buffering", "no")
 	// X-Content-Type-Options: nosniff arrives via the outer middleware.
 
 	// Retry hint first, flushed with the headers: it tunes the

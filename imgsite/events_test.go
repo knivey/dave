@@ -418,6 +418,7 @@ func TestEventsHeadersAndRetryHint(t *testing.T) {
 
 	assert.Equal(t, "text/event-stream", resp.Header.Get("Content-Type"))
 	assert.Equal(t, "no-cache", resp.Header.Get("Cache-Control"))
+	assert.Equal(t, "no", resp.Header.Get("X-Accel-Buffering"), "nginx needs this to stop buffering the stream")
 	assert.Equal(t, "nosniff", resp.Header.Get("X-Content-Type-Options"), "middleware applies to the stream too")
 
 	// The retry hint must be the first bytes on the wire — flushed out

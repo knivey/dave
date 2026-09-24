@@ -20,6 +20,7 @@ usage() {
     echo "Targets:"
     echo "  (none)           Build all targets"
     echo "  dave             Build main binary only"
+    echo "  imgsite          Build image site only"
     echo "  img-mcp          Build specific MCP server"
     echo "  <name>           Build by target name"
 }
@@ -82,6 +83,7 @@ add_target() {
 }
 
 add_target "dave" "." "dave"
+add_target "imgsite" "./imgsite" "imgsite/imgsite"
 
 for mainfile in mcps/*/main.go; do
     [[ -f "$mainfile" ]] || continue
@@ -95,6 +97,8 @@ for mainfile in cmd/*/main.go; do
     add_target "$name" "./cmd/$name" "cmd/$name/$name"
 done
 
+# build_target returns: 0 = skipped (target filter didn't match),
+# 1 = built successfully, 2 = build failed.
 build_target() {
     local name="$1"
     local src="$2"
@@ -112,10 +116,10 @@ build_target() {
 
     if log go build -o "$out" "$src"; then
         echo "OK"
-        return 0
+        return 1
     else
         echo "FAILED"
-        return 1
+        return 2
     fi
 }
 
@@ -164,11 +168,12 @@ failed=0
 built=0
 
 for i in "${!t_names[@]}"; do
-    if build_target "${t_names[$i]}" "${t_srcs[$i]}" "${t_outs[$i]}"; then
-        ((built++)) || true
-    else
-        ((failed++)) || true
-    fi
+    rc=0
+    build_target "${t_names[$i]}" "${t_srcs[$i]}" "${t_outs[$i]}" || rc=$?
+    case $rc in
+        1) ((built++)) || true ;;
+        2) ((failed++)) || true ;;
+    esac
 done
 
 echo ""

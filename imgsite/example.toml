@@ -49,7 +49,7 @@
 #   description = (string) site description                 default: "generations from IRC"
 #
 # Reloadable via SIGHUP or POST /admin/reload (X-API-Key):
-#   site.*, thumbnails.* (except workers), search.*, upload.rate_per_minute
+#   site.*, thumbnails.* (except workers), search.*, upload.*
 # Everything else requires a restart.
 
 # ---------------------------------------------------------------------------

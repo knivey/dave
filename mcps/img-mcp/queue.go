@@ -668,7 +668,14 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 			enhancementName = "default"
 		}
 
-		result, err := enhancePrompt(jobCtx, cfg, enhancementName, job.Input.Prompt)
+		// Per-workflow enhancement instructions live in the workflow file
+		// (dave_enhancement_instructions node) so steering travels with the
+		// workflow itself. Restart recovery re-runs enhancement from scratch
+		// and re-reads the file, so nothing needs persisting;
+		// prepareComfyWorkflow strips the node before submit.
+		workflowInstructions := workflowEnhancementInstructions(cfg, job.Workflow)
+
+		result, err := enhancePrompt(jobCtx, cfg, enhancementName, job.Input.Prompt, workflowInstructions)
 		if err != nil {
 			if jobCtx.Err() != nil {
 				return

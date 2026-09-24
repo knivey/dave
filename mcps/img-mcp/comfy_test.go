@@ -875,3 +875,174 @@ func TestProcessJobEnhanceEmbedsReasoningInNote(t *testing.T) {
 	assert.Equal(t, "a cat sitting on a mat", payload.Prompt,
 		"note should still preserve the original pre-enhancement prompt")
 }
+
+func TestWorkflowEnhancementInstructions(t *testing.T) {
+	tests := []struct {
+		name     string
+		workflow map[string]ComfyNode
+		want     string
+	}{
+		{
+			name: "node with instructions",
+			workflow: map[string]ComfyNode{
+				"prompt-node": {Inputs: map[string]interface{}{"text": ""}, Class: "CLIPTextEncode"},
+				daveEnhancementInstructionsNodeID: {
+					Inputs: map[string]interface{}{"text": "lean photorealistic, avoid anime"},
+					Class:  daveEnhancementInstructionsNodeID,
+				},
+			},
+			want: "lean photorealistic, avoid anime",
+		},
+		{
+			name: "no instructions node",
+			workflow: map[string]ComfyNode{
+				"prompt-node": {Inputs: map[string]interface{}{"text": ""}, Class: "CLIPTextEncode"},
+			},
+			want: "",
+		},
+		{
+			name: "empty text",
+			workflow: map[string]ComfyNode{
+				daveEnhancementInstructionsNodeID: {
+					Inputs: map[string]interface{}{"text": ""},
+					Class:  daveEnhancementInstructionsNodeID,
+				},
+			},
+			want: "",
+		},
+		{
+			name: "non-string text",
+			workflow: map[string]ComfyNode{
+				daveEnhancementInstructionsNodeID: {
+					Inputs: map[string]interface{}{"text": 42},
+					Class:  daveEnhancementInstructionsNodeID,
+				},
+			},
+			want: "",
+		},
+		{
+			name: "missing inputs map",
+			workflow: map[string]ComfyNode{
+				daveEnhancementInstructionsNodeID: {Class: daveEnhancementInstructionsNodeID},
+			},
+			want: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cfg := testConfig("http://127.0.0.1:0")
+			wc := cfg.Workflows["test"]
+			data, err := json.Marshal(tt.workflow)
+			require.NoError(t, err)
+			wc.WorkflowPath = filepath.Join(dir, "wf.json")
+			require.NoError(t, os.WriteFile(wc.WorkflowPath, data, 0644))
+			cfg.Workflows["test"] = wc
+
+			assert.Equal(t, tt.want, workflowEnhancementInstructions(cfg, "test"))
+		})
+	}
+}
+
+func TestWorkflowEnhancementInstructionsUnknownWorkflowAndUnreadableFile(t *testing.T) {
+	cfg := testConfig("http://127.0.0.1:0")
+	assert.Equal(t, "", workflowEnhancementInstructions(cfg, "nope"),
+		"unknown workflow must yield empty instructions, not an error")
+
+	wc := cfg.Workflows["test"]
+	wc.WorkflowPath = filepath.Join(t.TempDir(), "missing.json")
+	cfg.Workflows["test"] = wc
+	assert.Equal(t, "", workflowEnhancementInstructions(cfg, "test"),
+		"unreadable workflow file must yield empty instructions")
+}
+
+func TestPrepareComfyWorkflowStripsEnhancementInstructions(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testConfig("http://127.0.0.1:0")
+	wc := cfg.Workflows["test"]
+	workflow := map[string]ComfyNode{
+		"prompt-node": {Inputs: map[string]interface{}{"text": ""}, Class: "CLIPTextEncode"},
+		"output-node": {Inputs: map[string]interface{}{"images": []string{"1"}}, Class: "SaveImage"},
+		daveEnhancementInstructionsNodeID: {
+			Inputs: map[string]interface{}{"text": "lean photorealistic, avoid anime"},
+			Class:  daveEnhancementInstructionsNodeID,
+		},
+	}
+	data, err := json.Marshal(workflow)
+	require.NoError(t, err)
+	wc.WorkflowPath = filepath.Join(dir, "wf.json")
+	require.NoError(t, os.WriteFile(wc.WorkflowPath, data, 0644))
+	cfg.Workflows["test"] = wc
+
+	got, err := prepareComfyWorkflow(cfg, "test", "a cat", "", nil, "{}")
+	require.NoError(t, err, "prepareComfyWorkflow")
+
+	assert.NotContains(t, got, daveEnhancementInstructionsNodeID,
+		"instructions node must be stripped before submission — ComfyUI validates class_type registration on every node, even disconnected ones")
+}
+
+// TestProcessJobEnhanceUsesWorkflowInstructions runs an enhance_generate job
+// whose workflow file carries a dave_enhancement_instructions node and
+// asserts the full chain: processJob extracts the instructions,
+// enhancePrompt appends them to the enhancement system prompt on a new
+// line, and prepareComfyWorkflow strips the node before submission.
+func TestProcessJobEnhanceUsesWorkflowInstructions(t *testing.T) {
+	mockComfy := newMockComfyFlowServer(t)
+	enhServer, rec := newEnhancementStubServer(t, EnhancementResponse{
+		EnhancedPrompt: "a majestic cat, studio lighting, 4k",
+		NegativePrompt: "blurry",
+	})
+
+	cfg := testConfig(mockComfy.URL())
+	wc := cfg.Workflows["test"]
+	workflow := map[string]ComfyNode{
+		"prompt-node": {Inputs: map[string]interface{}{"text": ""}, Class: "CLIPTextEncode"},
+		"output-node": {Inputs: map[string]interface{}{"images": []string{"1"}}, Class: "SaveImage"},
+		daveEnhancementInstructionsNodeID: {
+			Inputs: map[string]interface{}{"text": "lean photorealistic, avoid anime"},
+			Class:  daveEnhancementInstructionsNodeID,
+		},
+	}
+	data, err := json.Marshal(workflow)
+	require.NoError(t, err)
+	dir := t.TempDir()
+	wc.WorkflowPath = filepath.Join(dir, "wf.json")
+	require.NoError(t, os.WriteFile(wc.WorkflowPath, data, 0644))
+	cfg.Workflows["test"] = wc
+	cfg.Enhancements = map[string]EnhancementConfig{
+		"default": {
+			BaseURL:      enhServer.URL + "/v1",
+			Key:          "test-key",
+			Model:        "enhancer",
+			SystemPrompt: "enhance",
+			Timeout:      10,
+		},
+	}
+	q, cleanup := setupTestQueue(t, cfg)
+	defer cleanup()
+
+	job, err := q.Submit(JobTypeEnhanceGenerate, "test", JobInput{
+		Prompt:       "a cat sitting on a mat",
+		OutputFormat: "base64",
+	})
+	require.NoError(t, err, "Submit")
+
+	waitForJobDone(t, job, 15*time.Second)
+	assertJobStatus(t, q, job.ID, StatusCompleted)
+
+	requests := rec.chat()
+	require.Len(t, requests, 1)
+	messages, ok := requests[0]["messages"].([]any)
+	require.True(t, ok, "chat request must carry a messages array")
+	require.Len(t, messages, 2)
+	sysMsg, ok := messages[0].(map[string]any)
+	require.True(t, ok, "first message must be an object")
+	assert.Equal(t, "system", sysMsg["role"])
+	assert.Equal(t, "enhance\nlean photorealistic, avoid anime", sysMsg["content"],
+		"workflow instructions must be appended after the system prompt on a new line")
+
+	submitted := mockComfy.submittedPrompts()
+	require.Len(t, submitted, 1)
+	assert.NotContains(t, submitted[0].Prompt, daveEnhancementInstructionsNodeID,
+		"instructions node must be stripped from the submitted workflow")
+}

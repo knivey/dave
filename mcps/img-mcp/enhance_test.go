@@ -101,7 +101,7 @@ func TestEnhancePromptChatCompletionsSendsReasoningEffort(t *testing.T) {
 	reply := EnhancementResponse{EnhancedPrompt: "a majestic cat", NegativePrompt: "blurry"}
 	srv, rec := newEnhancementStubServer(t, reply)
 
-	result, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, false, "low"), "default", "a cat")
+	result, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, false, "low"), "default", "a cat", "")
 	require.NoError(t, err)
 	assert.Equal(t, "a majestic cat", result.EnhancedPrompt)
 	assert.Equal(t, "blurry", result.NegativePrompt)
@@ -117,7 +117,7 @@ func TestEnhancePromptResponsesReturnsReasoningSummary(t *testing.T) {
 	reply := EnhancementResponse{EnhancedPrompt: "a majestic cat", NegativePrompt: "blurry"}
 	srv, _ := newEnhancementStubServer(t, reply)
 
-	result, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, true, ""), "default", "a cat")
+	result, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, true, ""), "default", "a cat", "")
 	require.NoError(t, err)
 	assert.Equal(t, "a majestic cat", result.EnhancedPrompt)
 	// The stub's reasoning item carries two summary entries ("step one",
@@ -130,7 +130,7 @@ func TestEnhancePromptChatCompletionsHasNoReasoning(t *testing.T) {
 	reply := EnhancementResponse{EnhancedPrompt: "a majestic cat"}
 	srv, _ := newEnhancementStubServer(t, reply)
 
-	result, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, false, ""), "default", "a cat")
+	result, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, false, ""), "default", "a cat", "")
 	require.NoError(t, err)
 	assert.Empty(t, result.Reasoning,
 		"chat completions exposes no reasoning summaries; payload stays compact")
@@ -140,7 +140,7 @@ func TestEnhancePromptChatCompletionsOmitsReasoningEffortWhenEmpty(t *testing.T)
 	reply := EnhancementResponse{EnhancedPrompt: "a cat"}
 	srv, rec := newEnhancementStubServer(t, reply)
 
-	_, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, false, ""), "default", "a cat")
+	_, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, false, ""), "default", "a cat", "")
 	require.NoError(t, err)
 
 	requests := rec.chat()
@@ -152,7 +152,7 @@ func TestEnhancePromptResponsesAPIRequestShape(t *testing.T) {
 	reply := EnhancementResponse{EnhancedPrompt: "a majestic cat", NegativePrompt: "blurry"}
 	srv, rec := newEnhancementStubServer(t, reply)
 
-	result, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, true, "high"), "default", "a cat")
+	result, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, true, "high"), "default", "a cat", "")
 	require.NoError(t, err)
 	assert.Equal(t, "a majestic cat", result.EnhancedPrompt)
 	assert.Empty(t, rec.chat(), "responses_api must not touch chat completions")
@@ -192,7 +192,7 @@ func TestEnhancePromptResponsesAPIOmitsReasoningWhenEmpty(t *testing.T) {
 	reply := EnhancementResponse{EnhancedPrompt: "a cat"}
 	srv, rec := newEnhancementStubServer(t, reply)
 
-	_, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, true, ""), "default", "a cat")
+	_, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, true, ""), "default", "a cat", "")
 	require.NoError(t, err)
 
 	requests := rec.responses()
@@ -209,7 +209,7 @@ func TestEnhancePromptResponsesAPINoMessageOutput(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	_, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, true, ""), "default", "a cat")
+	_, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, true, ""), "default", "a cat", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no message output")
 }
@@ -218,7 +218,7 @@ func TestEnhancePromptResponsesAPIRefused(t *testing.T) {
 	reply := EnhancementResponse{Refused: true, Reason: "policy"}
 	srv, _ := newEnhancementStubServer(t, reply)
 
-	_, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, true, "low"), "default", "a cat")
+	_, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, true, "low"), "default", "a cat", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "enhancement refused: policy")
 }
@@ -227,7 +227,81 @@ func TestEnhancePromptChatCompletionsRefused(t *testing.T) {
 	reply := EnhancementResponse{Refused: true, Reason: "policy"}
 	srv, _ := newEnhancementStubServer(t, reply)
 
-	_, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, false, ""), "default", "a cat")
+	_, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, false, ""), "default", "a cat", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "enhancement refused: policy")
+}
+
+func TestEnhancePromptAppendsWorkflowInstructions(t *testing.T) {
+	reply := EnhancementResponse{EnhancedPrompt: "a majestic cat", NegativePrompt: "blurry"}
+
+	t.Run("chat completions", func(t *testing.T) {
+		srv, rec := newEnhancementStubServer(t, reply)
+
+		_, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, false, ""), "default", "a cat", "lean photorealistic")
+		require.NoError(t, err)
+
+		requests := rec.chat()
+		require.Len(t, requests, 1)
+		messages, ok := requests[0]["messages"].([]any)
+		require.True(t, ok, "chat request must carry a messages array")
+		require.Len(t, messages, 2)
+		sysMsg, ok := messages[0].(map[string]any)
+		require.True(t, ok, "first message must be an object")
+		assert.Equal(t, "system", sysMsg["role"])
+		assert.Equal(t, "enhance the prompt\nlean photorealistic", sysMsg["content"],
+			"workflow instructions must be appended after the system prompt on a new line")
+	})
+
+	t.Run("responses", func(t *testing.T) {
+		srv, rec := newEnhancementStubServer(t, reply)
+
+		_, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, true, ""), "default", "a cat", "lean photorealistic")
+		require.NoError(t, err)
+
+		requests := rec.responses()
+		require.Len(t, requests, 1)
+		input, ok := requests[0]["input"].([]any)
+		require.True(t, ok, "responses request must carry an input array")
+		require.Len(t, input, 2)
+		sysMsg, ok := input[0].(map[string]any)
+		require.True(t, ok, "first input item must be an object")
+		assert.Equal(t, "system", sysMsg["role"])
+		assert.Equal(t, "enhance the prompt\nlean photorealistic", sysMsg["content"],
+			"workflow instructions must be appended after the system prompt on a new line")
+	})
+
+	t.Run("no instructions leaves system prompt untouched", func(t *testing.T) {
+		srv, rec := newEnhancementStubServer(t, reply)
+
+		_, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, false, ""), "default", "a cat", "")
+		require.NoError(t, err)
+
+		requests := rec.chat()
+		require.Len(t, requests, 1)
+		messages, ok := requests[0]["messages"].([]any)
+		require.True(t, ok, "chat request must carry a messages array")
+		require.Len(t, messages, 2)
+		sysMsg, ok := messages[0].(map[string]any)
+		require.True(t, ok, "first message must be an object")
+		assert.Equal(t, "enhance the prompt", sysMsg["content"],
+			"empty instructions must not alter the system prompt")
+	})
+
+	t.Run("whitespace-only instructions leave system prompt untouched", func(t *testing.T) {
+		srv, rec := newEnhancementStubServer(t, reply)
+
+		_, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, false, ""), "default", "a cat", "   ")
+		require.NoError(t, err)
+
+		requests := rec.chat()
+		require.Len(t, requests, 1)
+		messages, ok := requests[0]["messages"].([]any)
+		require.True(t, ok, "chat request must carry a messages array")
+		require.Len(t, messages, 2)
+		sysMsg, ok := messages[0].(map[string]any)
+		require.True(t, ok, "first message must be an object")
+		assert.Equal(t, "enhance the prompt", sysMsg["content"],
+			"whitespace-only instructions must not append a blank line to the system prompt")
+	})
 }

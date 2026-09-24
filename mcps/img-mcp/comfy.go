@@ -105,6 +105,41 @@ func loadComfyWorkflow(path string) (ComfyWorkflow, error) {
 	return workflow, nil
 }
 
+// workflowEnhancementInstructions reads the optional per-workflow
+// enhancement-instructions node (daveEnhancementInstructionsNodeID) from the
+// workflow file on disk. The node is authoring metadata that never reaches
+// ComfyUI — prepareComfyWorkflow strips it before submission — and its text
+// is appended to the enhancement LLM's system prompt so each workflow can
+// steer enhancement (e.g. photorealism for z_image_turbo, anime flourishes
+// for qwen) without a per-workflow TOML profile. Files are read fresh per
+// job, so edits apply to the next job with no reload machinery.
+//
+// Failures degrade to "": an unknown workflow name returns "" silently
+// (prepareComfyWorkflow fails the job moments later with "workflow %q not
+// found"), and an unreadable/unparseable file logs WARN and returns "" — a
+// genuinely broken file also fails the job moments later in
+// prepareComfyWorkflow with a proper error, so a second failure path here
+// would only duplicate it; enhancement still runs without the extra
+// steering in the meantime.
+func workflowEnhancementInstructions(cfg Config, workflowName string) string {
+	wc, ok := cfg.Workflows[workflowName]
+	if !ok {
+		return ""
+	}
+	workflow, err := loadComfyWorkflow(wc.WorkflowPath)
+	if err != nil {
+		loggerComfy.Warn("workflow enhancement instructions unreadable",
+			"workflow", workflowName, "error", err)
+		return ""
+	}
+	node, ok := workflow[daveEnhancementInstructionsNodeID]
+	if !ok || node.Inputs == nil {
+		return ""
+	}
+	text, _ := node.Inputs["text"].(string)
+	return text
+}
+
 func randSeed() int64 {
 	return rand.Int63()
 }
@@ -113,6 +148,22 @@ func randSeed() int64 {
 // workflow. String key (not numeric) so it can never collide with the numeric
 // IDs editors export.
 const davePromptNoteNodeID = "dave_original_prompt"
+
+// daveEnhancementInstructionsNodeID is the optional workflow-file key holding
+// per-workflow enhancement instructions. It rides in the API-format workflow
+// JSON as a pseudo-node:
+//
+//	"dave_enhancement_instructions": {
+//	  "inputs": {"text": "steer toward photorealism; avoid anime"},
+//	  "class_type": "dave_enhancement_instructions",
+//	  "_meta": {"title": "dave enhancement instructions (stripped before submit)"}
+//	}
+//
+// The class_type deliberately names no registered backend class — this node
+// must never be submitted (prepareComfyWorkflow deletes it right after load;
+// see the strip comment there for why an unregistered class is the safe
+// failure mode). Extracted by workflowEnhancementInstructions.
+const daveEnhancementInstructionsNodeID = "dave_enhancement_instructions"
 
 const davePromptNoteTitle = "dave original prompt"
 
@@ -177,6 +228,16 @@ func prepareComfyWorkflow(cfg Config, workflowName, prompt, negativePrompt strin
 	if err != nil {
 		return nil, fmt.Errorf("loading workflow: %w", err)
 	}
+
+	// The enhancement-instructions node is authoring metadata for img-mcp,
+	// never part of the prompt: strip it before anything else so it can
+	// never reach ComfyUI. Its class_type is deliberately NOT a registered
+	// backend class (unlike the prompt note node's real CLIPTextEncode):
+	// ComfyUI's validate_prompt checks class registration on EVERY node,
+	// even disconnected ones, so a leaked node fails loudly with
+	// missing_node_type instead of being silently accepted and embedded in
+	// image metadata.
+	delete(workflow, daveEnhancementInstructionsNodeID)
 
 	// Guards return errors instead of panicking on workflow-file/config
 	// mismatches: indexing a missing node yields a zero ComfyNode whose

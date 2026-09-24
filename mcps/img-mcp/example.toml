@@ -123,3 +123,19 @@ typical_time = "30s"
 
 # Add more [workflow.*] sections for additional workflows
 # The workflow name (e.g., "zimage") is what you'll use in tool calls
+
+# Per-workflow enhancement instructions (optional):
+# Add a "dave_enhancement_instructions" pseudo-node to any workflow JSON file
+# to steer prompt enhancement for that workflow. img-mcp extracts its text and
+# appends it (on a new line) to the enhancement LLM's system prompt, then
+# strips the node before submitting to ComfyUI — it never reaches the server.
+# Edits to workflow files apply to the next job (files are read per job).
+#
+#   "dave_enhancement_instructions": {
+#     "inputs": {"text": "Steer toward highly detailed photorealism; avoid anime stylization."},
+#     "class_type": "dave_enhancement_instructions",
+#     "_meta": {"title": "dave enhancement instructions (stripped before submit)"}
+#   }
+#
+# Omit the node for workflows that need no extra steering. Only
+# enhance_and_generate jobs consume it; plain generate_image jobs just strip it.

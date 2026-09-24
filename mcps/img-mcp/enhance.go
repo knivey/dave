@@ -44,12 +44,23 @@ var enhancementSchema = map[string]any{
 	"additionalProperties": false,
 }
 
-func enhancePrompt(ctx context.Context, cfg Config, enhancementName, rawPrompt string) (*EnhanceResult, error) {
+func enhancePrompt(ctx context.Context, cfg Config, enhancementName, rawPrompt, extraInstructions string) (*EnhanceResult, error) {
 	enhCfg, ok := cfg.Enhancements[enhancementName]
 	if !ok {
 		return nil, fmt.Errorf("enhancement %q not found", enhancementName)
 	}
 
+	// Per-workflow enhancement instructions (extracted from the workflow
+	// file's dave_enhancement_instructions node) ride on a new line after
+	// the profile's system prompt: the profile defines the enhancement
+	// persona, the workflow instructions refine it for the target workflow.
+	// Both API paths below read enhCfg.SystemPrompt, so merging here covers
+	// Chat Completions and Responses in one place. enhCfg is a value copy
+	// of the map entry — this assignment does not mutate shared config.
+	// Trimmed so a whitespace-only node text appends nothing.
+	if instructions := strings.TrimSpace(extraInstructions); instructions != "" {
+		enhCfg.SystemPrompt += "\n" + instructions
+	}
 	loggerTools.Debug("enhancing prompt",
 		"enhancement", enhancementName,
 		"model", enhCfg.Model,

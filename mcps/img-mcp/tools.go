@@ -294,7 +294,10 @@ func (h *ToolHandlers) handleEnhancePrompt(ctx context.Context, req *mcp.CallToo
 
 	loggerTools.Info("tool: enhance_prompt", "prompt", input.Prompt, "enhancement", enhancementName)
 
-	result, err := enhancePrompt(ctx, h.getConfig(), enhancementName, input.Prompt)
+	// The standalone enhance_prompt tool has no workflow context, so there
+	// are no per-workflow instructions to apply (enhance+generate jobs pick
+	// theirs up in processJob).
+	result, err := enhancePrompt(ctx, h.getConfig(), enhancementName, input.Prompt, "")
 	if err != nil {
 		return nil, EnhancePromptOutput{}, err
 	}

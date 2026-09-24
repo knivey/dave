@@ -113,6 +113,29 @@ func TestEnhancePromptChatCompletionsSendsReasoningEffort(t *testing.T) {
 	assert.NotContains(t, requests[0], "reasoning", "Chat Completions must not carry a reasoning object")
 }
 
+func TestEnhancePromptResponsesReturnsReasoningSummary(t *testing.T) {
+	reply := EnhancementResponse{EnhancedPrompt: "a majestic cat", NegativePrompt: "blurry"}
+	srv, _ := newEnhancementStubServer(t, reply)
+
+	result, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, true, ""), "default", "a cat")
+	require.NoError(t, err)
+	assert.Equal(t, "a majestic cat", result.EnhancedPrompt)
+	// The stub's reasoning item carries two summary entries ("step one",
+	// "step two"); production concatenates them with no separator.
+	assert.Equal(t, "step onestep two", result.Reasoning,
+		"responses path must surface the reasoning summary for the prompt note")
+}
+
+func TestEnhancePromptChatCompletionsHasNoReasoning(t *testing.T) {
+	reply := EnhancementResponse{EnhancedPrompt: "a majestic cat"}
+	srv, _ := newEnhancementStubServer(t, reply)
+
+	result, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, false, ""), "default", "a cat")
+	require.NoError(t, err)
+	assert.Empty(t, result.Reasoning,
+		"chat completions exposes no reasoning summaries; payload stays compact")
+}
+
 func TestEnhancePromptChatCompletionsOmitsReasoningEffortWhenEmpty(t *testing.T) {
 	reply := EnhancementResponse{EnhancedPrompt: "a cat"}
 	srv, rec := newEnhancementStubServer(t, reply)

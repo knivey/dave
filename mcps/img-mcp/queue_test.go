@@ -132,6 +132,15 @@ func TestJobQueue_Cancel_RunningJob_InterruptsComfy(t *testing.T) {
 	interrupts := mockComfy.getInterrupts()
 	require.Len(t, interrupts, 1, "interrupt calls")
 	assert.Equal(t, "comfy-prompt-456", interrupts[0]["prompt_id"], "interrupt prompt_id")
+
+	// The interrupt only lands if the prompt is the one currently executing
+	// on the GPU; under max_workers > 1 a cancelled job's prompt may still be
+	// PENDING in ComfyUI's internal queue, where a prompt_id-targeted
+	// interrupt is a no-op — without the queue delete ComfyUI would execute
+	// the cancelled job anyway (orphan output, wasted GPU time).
+	deletes := mockComfy.getQueueDeletes()
+	require.Len(t, deletes, 1, "queue delete calls")
+	assert.Equal(t, []string{"comfy-prompt-456"}, deletes[0], "queue delete prompt_ids")
 }
 
 func TestJobQueue_Cancel_RunningJob_WithoutComfyPromptID(t *testing.T) {

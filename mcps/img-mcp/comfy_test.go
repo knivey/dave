@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -128,6 +129,18 @@ func closeOnce(ch chan struct{}) {
 
 var closeOnceMu sync.Mutex
 
+// TestComfyClientIDDerivation pins the per-job client id contract: ComfyUI
+// keys /ws sockets by clientId and routes per-prompt events only to the
+// socket registered under the client id the prompt was submitted with. Every
+// submit and monitor must derive the same value for the same job (a mismatch
+// means a deaf monitor), and the derivation must be stable across restarts
+// so recoverRunningJob reconnects under the id the original process used.
+func TestComfyClientIDDerivation(t *testing.T) {
+	wc := WorkflowConfig{ClientID: "img-mcp"}
+	assert.Equal(t, "img-mcp-ab12cd34", comfyClientID(wc, "ab12cd34"),
+		"per-job client id is the configured base plus the job id")
+}
+
 // TestMonitorDetectsCompletionByPollingWhenWebsocketSilent pins the fix for
 // delayed generation-completion detection: when ComfyUI's websocket push
 // never arrives, the monitor must still notice the completed prompt within
@@ -152,7 +165,7 @@ func TestMonitorDetectsCompletionByPollingWhenWebsocketSilent(t *testing.T) {
 	outcomeCh := make(chan monitorOutcome, 1)
 	start := time.Now()
 	go func() {
-		result, err := monitorComfyGeneration(context.Background(), cfg, "test", "test-prompt-1")
+		result, err := monitorComfyGeneration(context.Background(), cfg, "test", "test-prompt-1", "test-job")
 		outcomeCh <- monitorOutcome{result: result, err: err}
 	}()
 
@@ -182,7 +195,7 @@ func TestMonitorReturnsComfyExecutionTimestamps(t *testing.T) {
 	wc.Timeout = 10
 	cfg.Workflows["test"] = wc
 
-	result, err := monitorComfyGeneration(context.Background(), cfg, "test", "test-prompt-1")
+	result, err := monitorComfyGeneration(context.Background(), cfg, "test", "test-prompt-1", "test-job")
 	require.NoError(t, err, "monitor should succeed via polling")
 	require.NotNil(t, result.ExecStartedAt, "ExecStartedAt should be parsed from history status")
 	require.NotNil(t, result.ExecSuccessAt, "ExecSuccessAt should be parsed from history status")
@@ -469,7 +482,7 @@ func TestSubmitComfyPrompt_UsesContext(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	_, err := submitComfyPrompt(ctx, cfg, "test", ComfyWorkflow{})
+	_, err := submitComfyPrompt(ctx, cfg, "test", ComfyWorkflow{}, "test-job")
 	require.Error(t, err, "expected error due to context cancellation")
 }
 
@@ -544,9 +557,10 @@ func TestPrepareComfyWorkflowMissingPromptNode(t *testing.T) {
 
 func TestBuildPromptNote(t *testing.T) {
 	tests := []struct {
-		name string
-		job  *Job
-		want string
+		name      string
+		job       *Job
+		reasoning string
+		want      string
 	}{
 		{
 			name: "user prompt",
@@ -558,14 +572,58 @@ func TestBuildPromptNote(t *testing.T) {
 			job:  &Job{ID: "j_2", Input: JobInput{Prompt: "a cat", LLMGenerated: true}},
 			want: `{"prompt":"a cat","llm_generated":true,"job_id":"j_2"}`,
 		},
+		{
+			name:      "enhancement reasoning",
+			job:       &Job{ID: "j_3", Input: JobInput{Prompt: "a cat"}},
+			reasoning: "the user wants a cat",
+			want:      `{"prompt":"a cat","llm_generated":false,"job_id":"j_3","enhancement_reasoning":"the user wants a cat"}`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := buildPromptNote(tt.job)
+			got, err := buildPromptNote(tt.job, tt.reasoning)
 			require.NoError(t, err, "buildPromptNote")
 			assert.JSONEq(t, tt.want, got)
 		})
 	}
+}
+
+// TestBuildPromptNoteTruncatesReasoning pins the cap on embedded reasoning:
+// the note rides inside every generated image's metadata permanently, so a
+// pathological rambling summary must not bloat all images.
+func TestBuildPromptNoteTruncatesReasoning(t *testing.T) {
+	job := &Job{ID: "j_t", Input: JobInput{Prompt: "a cat"}}
+
+	exact := strings.Repeat("x", maxPromptNoteReasoningRunes)
+	got, err := buildPromptNote(job, exact)
+	require.NoError(t, err, "buildPromptNote")
+	var payload promptNotePayload
+	require.NoError(t, json.Unmarshal([]byte(got), &payload))
+	assert.Equal(t, exact, payload.EnhancementReasoning,
+		"reasoning at exactly the cap must pass through untouched")
+
+	over := strings.Repeat("y", maxPromptNoteReasoningRunes+50)
+	got, err = buildPromptNote(job, over)
+	require.NoError(t, err, "buildPromptNote")
+	require.NoError(t, json.Unmarshal([]byte(got), &payload))
+	assert.Equal(t, strings.Repeat("y", maxPromptNoteReasoningRunes)+promptNoteTruncationMarker,
+		payload.EnhancementReasoning,
+		"reasoning over the cap must be truncated with a marker")
+
+	// Multi-byte safety: truncation must land on a rune boundary so the
+	// embedded JSON never carries invalid UTF-8. The leading ASCII byte
+	// matters: with pure 2-byte runes a naive byte-slice at the (even) cap
+	// would coincidentally cut on a boundary — "a" + é's pushes the cap
+	// offset to an odd position, mid-rune, so only rune-aware truncation
+	// passes. (A byte-split rune would surface as U+FFFD after the JSON
+	// round-trip and fail the equality below.)
+	multibyte := "a" + strings.Repeat("é", maxPromptNoteReasoningRunes+10)
+	got, err = buildPromptNote(job, multibyte)
+	require.NoError(t, err, "buildPromptNote")
+	require.NoError(t, json.Unmarshal([]byte(got), &payload))
+	want := "a" + strings.Repeat("é", maxPromptNoteReasoningRunes-1) + promptNoteTruncationMarker
+	assert.Equal(t, want, payload.EnhancementReasoning,
+		"truncation must cut on rune boundaries")
 }
 
 // mockComfyFlowServer stands in for ComfyUI's HTTP+WS API: it records every
@@ -573,9 +631,10 @@ func TestBuildPromptNote(t *testing.T) {
 // prompt it handed out, serves /view bytes, and accepts+immediately closes
 // the /ws monitor socket so monitorComfyGeneration falls back to history.
 type mockComfyFlowServer struct {
-	server  *httptest.Server
-	mu      sync.Mutex
-	prompts []ComfyPromptRequest
+	server      *httptest.Server
+	mu          sync.Mutex
+	prompts     []ComfyPromptRequest
+	wsClientIDs []string
 }
 
 func newMockComfyFlowServer(t *testing.T) *mockComfyFlowServer {
@@ -610,6 +669,9 @@ func newMockComfyFlowServer(t *testing.T) *mockComfyFlowServer {
 		w.Write([]byte("fakedata"))
 	})
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		m.mu.Lock()
+		m.wsClientIDs = append(m.wsClientIDs, r.URL.Query().Get("clientId"))
+		m.mu.Unlock()
 		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
 		if err != nil {
 			return
@@ -625,6 +687,12 @@ func (m *mockComfyFlowServer) submittedPrompts() []ComfyPromptRequest {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]ComfyPromptRequest{}, m.prompts...)
+}
+
+func (m *mockComfyFlowServer) wsClientIDList() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string{}, m.wsClientIDs...)
 }
 
 func (m *mockComfyFlowServer) URL() string {
@@ -667,9 +735,25 @@ func TestProcessJobSubmitsPromptNote(t *testing.T) {
 	assert.Equal(t, "a cat sitting on a mat", payload.Prompt, "original prompt")
 	assert.True(t, payload.LLMGenerated, "llm_generated flag")
 	assert.Equal(t, job.ID, payload.JobID, "job id")
+	assert.Empty(t, payload.EnhancementReasoning,
+		"plain generate jobs must not carry an enhancement_reasoning field")
+	// Struct decoding can't distinguish an absent key from "" — pin the
+	// serialized shape too: omitempty must keep the key out entirely.
+	assert.NotContains(t, text, "enhancement_reasoning",
+		"raw note JSON must omit the enhancement_reasoning key for plain generate jobs")
 
 	assert.Equal(t, "a cat sitting on a mat", submitted[0].Prompt["prompt-node"].Inputs["text"],
 		"prompt node should receive the unenhanced prompt for a plain generate job")
+
+	// Per-job client id: submit and the monitor websocket must both use the
+	// derived id (ComfyUI routes per-prompt events only to the submitting
+	// client's socket, and evicts same-id ws reconnects — which matters once
+	// max_workers > 1 lets monitors overlap).
+	wantClientID := comfyClientID(wc, job.ID)
+	assert.Equal(t, wantClientID, submitted[0].ClientID,
+		"prompt submission must carry the per-job client id")
+	assert.Contains(t, mockComfy.wsClientIDList(), wantClientID,
+		"monitor websocket must connect under the same per-job client id as the submission")
 }
 
 // newMockEnhanceServer stands in for an OpenAI-compatible prompt-enhancement
@@ -734,7 +818,60 @@ func TestProcessJobEnhanceKeepsOriginalPromptInNote(t *testing.T) {
 		"note should preserve the original pre-enhancement prompt")
 	assert.False(t, payload.LLMGenerated)
 	assert.Equal(t, job.ID, payload.JobID)
+	assert.Empty(t, payload.EnhancementReasoning,
+		"chat completions enhancement returns no reasoning summaries")
 
 	assert.Equal(t, "a majestic cat, studio lighting, 4k", submitted[0].Prompt["prompt-node"].Inputs["text"],
 		"prompt node should receive the enhanced prompt")
+}
+
+// TestProcessJobEnhanceEmbedsReasoningInNote runs an enhance_generate job
+// against a Responses-API enhancement stub that emits reasoning summaries,
+// and asserts the summary lands in the prompt note node's payload — the
+// provenance chain is: enhancePrompt → processJob → buildPromptNote →
+// dave_original_prompt node (embedded in the image by the save node).
+func TestProcessJobEnhanceEmbedsReasoningInNote(t *testing.T) {
+	mockComfy := newMockComfyFlowServer(t)
+	enhServer, _ := newEnhancementStubServer(t, EnhancementResponse{
+		EnhancedPrompt: "a majestic cat, studio lighting, 4k",
+		NegativePrompt: "blurry",
+	})
+
+	cfg := testConfig(mockComfy.URL())
+	wc := cfg.Workflows["test"]
+	wc.WorkflowPath = mustWriteWorkflow(t, t.TempDir())
+	cfg.Workflows["test"] = wc
+	cfg.Enhancements = map[string]EnhancementConfig{
+		"default": {
+			BaseURL:      enhServer.URL + "/v1",
+			Key:          "test-key",
+			Model:        "enhancer",
+			SystemPrompt: "enhance",
+			Timeout:      10,
+			ResponsesAPI: true,
+		},
+	}
+	q, cleanup := setupTestQueue(t, cfg)
+	defer cleanup()
+
+	job, err := q.Submit(JobTypeEnhanceGenerate, "test", JobInput{
+		Prompt:       "a cat sitting on a mat",
+		OutputFormat: "base64",
+	})
+	require.NoError(t, err, "Submit")
+
+	waitForJobDone(t, job, 15*time.Second)
+	assertJobStatus(t, q, job.ID, StatusCompleted)
+
+	submitted := mockComfy.submittedPrompts()
+	require.Len(t, submitted, 1)
+	node, ok := submitted[0].Prompt[davePromptNoteNodeID]
+	require.True(t, ok, "submitted workflow should contain the prompt note node")
+
+	var payload promptNotePayload
+	require.NoError(t, json.Unmarshal([]byte(node.Inputs["text"].(string)), &payload))
+	assert.Equal(t, "step onestep two", payload.EnhancementReasoning,
+		"note should embed the enhancement model's reasoning summary")
+	assert.Equal(t, "a cat sitting on a mat", payload.Prompt,
+		"note should still preserve the original pre-enhancement prompt")
 }

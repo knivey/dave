@@ -23,6 +23,13 @@ type EnhancementResponse struct {
 type EnhanceResult struct {
 	EnhancedPrompt string
 	NegativePrompt string
+	// Reasoning is the enhancement model's reasoning summary (Responses API
+	// path only — Chat Completions does not return summaries). Carried into
+	// the workflow's prompt note node so it is embedded in the image
+	// metadata alongside the original prompt. Deliberately NOT trimmed
+	// (unlike its siblings): it is verbatim provenance, concatenated
+	// as-is from the summary items exactly like the log line emits it.
+	Reasoning string
 }
 
 var enhancementSchema = map[string]any{
@@ -65,9 +72,10 @@ func enhancePrompt(ctx context.Context, cfg Config, enhancementName, rawPrompt s
 	defer cancel()
 
 	var enhanced string
+	var reasoning string
 	var err error
 	if enhCfg.ResponsesAPI {
-		enhanced, err = enhanceViaResponses(enhanceCtx, client, enhCfg, rawPrompt)
+		enhanced, reasoning, err = enhanceViaResponses(enhanceCtx, client, enhCfg, rawPrompt)
 	} else {
 		enhanced, err = enhanceViaChatCompletions(enhanceCtx, client, enhCfg, rawPrompt)
 	}
@@ -98,6 +106,7 @@ func enhancePrompt(ctx context.Context, cfg Config, enhancementName, rawPrompt s
 	return &EnhanceResult{
 		EnhancedPrompt: strings.TrimSpace(result.EnhancedPrompt),
 		NegativePrompt: strings.TrimSpace(result.NegativePrompt),
+		Reasoning:      reasoning,
 	}, nil
 }
 
@@ -143,11 +152,13 @@ func enhanceViaChatCompletions(ctx context.Context, client openai.Client, enhCfg
 }
 
 // enhanceViaResponses calls the OpenAI Responses API (POST /v1/responses) and
-// returns the concatenated output_text of the assistant message. Reasoning
-// summaries are logged at INFO — the Responses API is the only way to get
-// them back from reasoning models. Structured output goes in Text.Format,
-// NOT a top-level ResponseFormat (different mechanism than Chat Completions).
-func enhanceViaResponses(ctx context.Context, client openai.Client, enhCfg EnhancementConfig, rawPrompt string) (string, error) {
+// returns the concatenated output_text of the assistant message plus the
+// concatenated reasoning summary (empty when the model emitted none).
+// Reasoning summaries are logged at INFO — the Responses API is the only way
+// to get them back from reasoning models. Structured output goes in
+// Text.Format, NOT a top-level ResponseFormat (different mechanism than Chat
+// Completions).
+func enhanceViaResponses(ctx context.Context, client openai.Client, enhCfg EnhancementConfig, rawPrompt string) (string, string, error) {
 	params := responses.ResponseNewParams{
 		Model: enhCfg.Model,
 		Input: responses.ResponseNewParamsInputUnion{
@@ -184,7 +195,7 @@ func enhanceViaResponses(ctx context.Context, client openai.Client, enhCfg Enhan
 
 	resp, err := client.Responses.New(ctx, params)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	// Same output-walk as dave's parseSDKResponseOutput (responses.go): message
@@ -222,7 +233,7 @@ func enhanceViaResponses(ctx context.Context, client openai.Client, enhCfg Enhan
 		"total_tokens", resp.Usage.TotalTokens,
 	)
 	if text == "" {
-		return "", fmt.Errorf("responses API returned no message output")
+		return "", "", fmt.Errorf("responses API returned no message output")
 	}
-	return text, nil
+	return text, reasoning, nil
 }

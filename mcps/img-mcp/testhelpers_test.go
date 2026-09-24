@@ -90,6 +90,7 @@ type mockInterruptServer struct {
 	server      *httptest.Server
 	mu          sync.Mutex
 	interrupts  []map[string]string
+	queueDelete [][]string
 	promptDelay time.Duration
 }
 
@@ -98,9 +99,33 @@ func newMockInterruptServer(t *testing.T) *mockInterruptServer {
 	m := &mockInterruptServer{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/interrupt", m.handleInterrupt)
+	mux.HandleFunc("/queue", m.handleQueue)
 	m.server = httptest.NewServer(mux)
 	t.Cleanup(func() { m.server.Close() })
 	return m
+}
+
+func (m *mockInterruptServer) handleQueue(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Delete []string `json:"delete"`
+	}
+	body, _ := io.ReadAll(r.Body)
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	m.mu.Lock()
+	m.queueDelete = append(m.queueDelete, req.Delete)
+	m.mu.Unlock()
+
+	w.WriteHeader(http.StatusOK)
+}
+
+func (m *mockInterruptServer) getQueueDeletes() [][]string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([][]string{}, m.queueDelete...)
 }
 
 func (m *mockInterruptServer) handleInterrupt(w http.ResponseWriter, r *http.Request) {

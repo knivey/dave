@@ -116,20 +116,50 @@ const davePromptNoteNodeID = "dave_original_prompt"
 
 const davePromptNoteTitle = "dave original prompt"
 
+// Cap on the reasoning text embedded in the prompt note node. The note is
+// baked into every generated image's metadata permanently (uploads are
+// permanent gallery entries), so a pathological rambling summary must not
+// bloat every file. Normal enhancement reasoning is a few hundred runes;
+// 16k is generous headroom. Counted in runes, not bytes, so truncation
+// always lands on a rune boundary and the embedded JSON stays valid UTF-8.
+const maxPromptNoteReasoningRunes = 16 * 1024
+
+const promptNoteTruncationMarker = "…[truncated]"
+
+// truncateForPromptNote caps reasoning text for the note payload. Inputs at
+// or below the cap pass through untouched (byte-identical).
+func truncateForPromptNote(reasoning string) string {
+	if len(reasoning) <= maxPromptNoteReasoningRunes {
+		// Fast path: rune count is always <= byte count, so a short-enough
+		// byte length needs no rune walk.
+		return reasoning
+	}
+	runes := []rune(reasoning)
+	if len(runes) <= maxPromptNoteReasoningRunes {
+		return reasoning
+	}
+	return string(runes[:maxPromptNoteReasoningRunes]) + promptNoteTruncationMarker
+}
+
 // promptNotePayload is the JSON stored in the note node. ComfyUI embeds the
 // full submitted workflow graph (including disconnected nodes) in the image's
 // "prompt" metadata chunk, so this survives inside every generated file.
+// EnhancementReasoning is omitempty: plain-generate jobs (and Chat
+// Completions enhancement, which exposes no reasoning summaries) produce the
+// same compact payload as before the field existed.
 type promptNotePayload struct {
-	Prompt       string `json:"prompt"`
-	LLMGenerated bool   `json:"llm_generated"`
-	JobID        string `json:"job_id"`
+	Prompt               string `json:"prompt"`
+	LLMGenerated         bool   `json:"llm_generated"`
+	JobID                string `json:"job_id"`
+	EnhancementReasoning string `json:"enhancement_reasoning,omitempty"`
 }
 
-func buildPromptNote(job *Job) (string, error) {
+func buildPromptNote(job *Job, enhancementReasoning string) (string, error) {
 	data, err := json.Marshal(promptNotePayload{
-		Prompt:       job.Input.Prompt,
-		LLMGenerated: job.Input.LLMGenerated,
-		JobID:        job.ID,
+		Prompt:               job.Input.Prompt,
+		LLMGenerated:         job.Input.LLMGenerated,
+		JobID:                job.ID,
+		EnhancementReasoning: truncateForPromptNote(enhancementReasoning),
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshaling prompt note: %w", err)
@@ -211,12 +241,30 @@ func prepareComfyWorkflow(cfg Config, workflowName, prompt, negativePrompt strin
 	return workflow, nil
 }
 
-func submitComfyPrompt(ctx context.Context, cfg Config, workflowName string, workflow ComfyWorkflow) (string, error) {
+// comfyClientID derives the per-job ComfyUI client id used at prompt
+// submission AND on the monitor's /ws connection. ComfyUI keys /ws sockets
+// by clientId and evicts same-id reconnects, so with concurrent workers a
+// shared id would deafen every earlier monitor's push socket. It also routes
+// per-prompt events (executing/executed/progress) only to the socket
+// registered under the client id the prompt was submitted with, so submit
+// and monitor MUST derive the same value or the monitor hears nothing. The
+// job id — not a process-local counter — is the suffix because it is
+// persisted in the DB: restart recovery re-derives the same id the previous
+// process submitted under, keeping push delivery alive for recovered jobs.
+// (Caveat: this only holds while the configured clientid is unchanged —
+// it hot-reloads, and a restart with a different value means the recovered
+// monitor listens under an id nobody submitted with. The monitor's /history
+// poll fallback covers that case; push is never assumed.)
+func comfyClientID(wc WorkflowConfig, jobID string) string {
+	return wc.ClientID + "-" + jobID
+}
+
+func submitComfyPrompt(ctx context.Context, cfg Config, workflowName string, workflow ComfyWorkflow, jobID string) (string, error) {
 	wc := cfg.Workflows[workflowName]
 
 	promptReq := ComfyPromptRequest{
 		Prompt:   workflow,
-		ClientID: wc.ClientID,
+		ClientID: comfyClientID(wc, jobID),
 	}
 	jsonData, err := json.Marshal(promptReq)
 	if err != nil {
@@ -276,20 +324,56 @@ func interruptComfyPrompt(ctx context.Context, cfg Config, promptID string) erro
 	return nil
 }
 
+// deleteComfyQueuedPrompt removes a PENDING prompt from ComfyUI's internal
+// queue (POST /queue {"delete": [prompt_id]}). ComfyUI's prompt_id-targeted
+// /api/interrupt only fires when the prompt is the one currently executing
+// (verified against v0.33.3: it skips non-running ids), so under
+// queue.max_workers > 1 a cancelled job whose prompt is still pending behind
+// another worker's generation would otherwise be executed anyway after the
+// cancel — orphan output files nobody downloads and wasted GPU time. The
+// delete is a no-op for running or finished prompts, so it is always safe to
+// send alongside the interrupt: together the two calls cover both states.
+func deleteComfyQueuedPrompt(ctx context.Context, cfg Config, promptID string) error {
+	body := map[string][]string{"delete": {promptID}}
+	jsonData, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshaling queue delete request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.Comfy.BaseURL+"/queue", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("creating queue delete request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("sending queue delete: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		loggerComfy.Warn("comfyui queue delete returned non-OK", "prompt_id", promptID, "status", resp.StatusCode)
+	} else {
+		loggerComfy.Info("comfyui queued prompt deleted", "prompt_id", promptID)
+	}
+	return nil
+}
+
 // comfyPollInterval is how often monitorComfyGeneration falls back to polling
 // the /history endpoint while waiting for websocket events. It bounds
 // completion-detection latency when ComfyUI's push delivery is delayed or
 // dropped entirely.
 const comfyPollInterval = 1 * time.Second
 
-func monitorComfyGeneration(ctx context.Context, cfg Config, workflowName, promptID string) (ComfyResult, error) {
+func monitorComfyGeneration(ctx context.Context, cfg Config, workflowName, promptID, jobID string) (ComfyResult, error) {
 	wc := cfg.Workflows[workflowName]
 	baseURL := cfg.Comfy.BaseURL
 
-	loggerComfy.Info("monitoring generation", "prompt_id", promptID, "workflow", workflowName)
+	loggerComfy.Info("monitoring generation", "prompt_id", promptID, "workflow", workflowName, "client_id", comfyClientID(wc, jobID))
 
 	start := time.Now()
-	wsURL := "ws://" + comfySchemeRegex.ReplaceAllString(baseURL, "") + "/ws?clientId=" + wc.ClientID
+	wsURL := "ws://" + comfySchemeRegex.ReplaceAllString(baseURL, "") + "/ws?clientId=" + comfyClientID(wc, jobID)
 	wsConn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, nil)
 	if err != nil {
 		loggerComfy.Error("websocket connect failed", "prompt_id", promptID, "error", err)
@@ -307,10 +391,13 @@ func monitorComfyGeneration(ctx context.Context, cfg Config, workflowName, promp
 	// a restart, likely asset scans/GIL-starved event loop — and ComfyUI keys
 	// sockets by clientId, so a same-clientId reconnect silently evicts the
 	// previous socket and stops ALL delivery to it, broadcasts included. The
-	// poll ticker bounds detection latency at comfyPollInterval no matter what
-	// the websocket does; the message path keeps the common case instant. The
-	// read-error and timeout branches still do one final history check because
-	// the generation may have completed even though push delivery never did.
+	// per-job client id (comfyClientID) keeps concurrent monitors from evicting
+	// each other, but the eviction hazard is why this monitor must never assume
+	// push works. The poll ticker bounds detection latency at
+	// comfyPollInterval no matter what the websocket does; the message path
+	// keeps the common case instant. The read-error and timeout branches still
+	// do one final history check because the generation may have completed
+	// even though push delivery never did.
 	//
 	// wsMessages counts every websocket message received, so the
 	// "generation detected" log line can tell a deaf socket (only the
@@ -427,7 +514,7 @@ func monitorComfyGeneration(ctx context.Context, cfg Config, workflowName, promp
 	}
 }
 
-func resumeComfyGeneration(ctx context.Context, cfg Config, workflowName, promptID string) (ComfyResult, error) {
+func resumeComfyGeneration(ctx context.Context, cfg Config, workflowName, promptID, jobID string) (ComfyResult, error) {
 	wc := cfg.Workflows[workflowName]
 	baseURL := cfg.Comfy.BaseURL
 
@@ -438,7 +525,7 @@ func resumeComfyGeneration(ctx context.Context, cfg Config, workflowName, prompt
 		return result, nil
 	}
 
-	return monitorComfyGeneration(ctx, cfg, workflowName, promptID)
+	return monitorComfyGeneration(ctx, cfg, workflowName, promptID, jobID)
 }
 
 func checkComfyOutput(ctx context.Context, cfg Config, wc WorkflowConfig, baseURL, promptID string) (ComfyResult, bool) {

@@ -15,7 +15,10 @@ path = "data/img-mcp.db"
 [comfy]
 # ComfyUI server URL
 baseurl = "http://localhost:8188"
-# Timeout in seconds for ComfyUI requests
+# Timeout in seconds for ComfyUI requests. Workflow timeouts inherit this by
+# default; the generation-monitor budget starts when monitoring begins, so
+# with queue.max_workers > 1 it also absorbs the time a prompt waits inside
+# ComfyUI's queue behind another worker's generation.
 timeout = 90
 # Default workflow name (must match one of the [workflow.*] sections below)
 default_workflow = "zimage"
@@ -30,8 +33,10 @@ default_workflow = "zimage"
 url = "https://img.example.com"
 
 [queue]
-# Maximum number of concurrent image generation workers
-max_workers = 1
+# Maximum number of concurrent image generation workers. Values above 1 let
+# the next job's enhancement/upload overlap with the current job's ComfyUI
+# wait; GPU work stays serialized by ComfyUI's own internal queue.
+max_workers = 2
 # Maximum queue depth (number of pending jobs)
 max_depth = 100
 # How long to keep job results in memory (e.g., "1h", "30m", "24h")
@@ -104,7 +109,9 @@ responses_api = false
 description = "Z Image Turbo. Fast generation with lower quality."
 # Path to the workflow JSON file (relative to config file location)
 workflow_path = "workflows/z_image_turbo.json"
-# Client ID to use for ComfyUI
+# Client ID to use for ComfyUI. Used as a base prefix: each job appends
+# "-<job_id>" at submit and monitor time so concurrent monitors get their
+# own websocket push stream (ComfyUI evicts same-clientId reconnects).
 clientid = "img-mcp"
 # Node IDs from the workflow (these depend on your specific ComfyUI workflow)
 output_node = "28"

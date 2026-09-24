@@ -319,11 +319,21 @@ func (q *JobQueue) Cancel(jobID string) bool {
 			cancelFn()
 		}
 		if comfyPromptID != "" {
+			// Two calls because ComfyUI splits the states: /api/interrupt
+			// only fires when this prompt is the one currently executing,
+			// and /queue delete only removes pending items. A cancel must
+			// cover both — with max_workers > 1 the cancelled job's prompt
+			// is routinely still pending behind another worker's prompt.
 			interruptCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			if err := interruptComfyPrompt(interruptCtx, q.getConfig(), comfyPromptID); err != nil {
 				loggerQueue.Warn("failed to interrupt comfy prompt", "prompt_id", comfyPromptID, "job_id", jobID, "error", err)
 			}
 			cancel()
+			deleteCtx, cancelDelete := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := deleteComfyQueuedPrompt(deleteCtx, q.getConfig(), comfyPromptID); err != nil {
+				loggerQueue.Warn("failed to delete queued comfy prompt", "prompt_id", comfyPromptID, "job_id", jobID, "error", err)
+			}
+			cancelDelete()
 		}
 	}
 
@@ -641,6 +651,10 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 
 	prompt := job.Input.Prompt
 	negativePrompt := job.Input.NegativePrompt
+	// enhancementReasoning carries the enhancement LLM's reasoning summary
+	// (Responses API path) into the workflow's prompt note node. Plumbed
+	// from the enhancePrompt result below; "" for plain generate jobs.
+	enhancementReasoning := ""
 
 	loggerQueue.Info("processing job",
 		"job_id", job.ID,
@@ -668,12 +682,13 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 			"negative_prompt", result.NegativePrompt,
 		)
 		prompt = result.EnhancedPrompt
+		enhancementReasoning = result.Reasoning
 		if negativePrompt == "" {
 			negativePrompt = result.NegativePrompt
 		}
 	}
 
-	promptNote, err := buildPromptNote(job)
+	promptNote, err := buildPromptNote(job, enhancementReasoning)
 	if err != nil {
 		q.failJob(job, fmt.Sprintf("workflow preparation failed: %v", err))
 		return
@@ -692,7 +707,7 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 		"negative_prompt", negativePrompt,
 	)
 
-	promptID, err := submitComfyPrompt(jobCtx, cfg, job.Workflow, workflow)
+	promptID, err := submitComfyPrompt(jobCtx, cfg, job.Workflow, workflow, job.ID)
 	if err != nil {
 		if jobCtx.Err() != nil {
 			return
@@ -715,7 +730,7 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 		}
 	}
 
-	comfyResult, err := monitorComfyGeneration(jobCtx, cfg, job.Workflow, promptID)
+	comfyResult, err := monitorComfyGeneration(jobCtx, cfg, job.Workflow, promptID, job.ID)
 	if err != nil {
 		// jobCtx cancellation means Cancel() is flipping this job to
 		// cancelled (it cancels the context before setting the status);
@@ -1020,7 +1035,7 @@ func (q *JobQueue) recoverRunningJob(_ context.Context, job *Job, comfyPromptID 
 	job.cancelCtx = recoverCancel
 	q.mu.Unlock()
 
-	comfyResult, err := resumeComfyGeneration(recoverCtx, cfg, job.Workflow, comfyPromptID)
+	comfyResult, err := resumeComfyGeneration(recoverCtx, cfg, job.Workflow, comfyPromptID, job.ID)
 	if err != nil {
 		// A Cancel() that raced us cancels recoverCtx (wired above) — the
 		// error is a symptom of the cancellation, not a real failure, and

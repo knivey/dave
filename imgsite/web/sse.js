@@ -8,12 +8,21 @@
 // What this wrapper adds:
 //   - last-seen-id tracking. A FRESH EventSource object starts with no
 //     id and no way to set headers, so when WE reopen the stream
-//     (visibilitychange, fatal-error backoff) the id rides the URL as
-//     ?since=N instead — the server's other replay entry point.
+//     (visibilitychange, bfcache restore, fatal-error backoff) the id
+//     rides the URL as ?since=N instead — the server's other replay
+//     entry point.
 //   - visibilitychange: close when the tab hides, reopen when it
 //     becomes visible. Frozen background tabs keep timers and sockets
 //     alive only unpredictably; a deterministic close/reopen plus the
 //     replay bridge is the documented approach.
+//   - bfcache handling (pageshow/pagehide): clicking into an image
+//     page and pressing back does NOT reload this page — the browser
+//     freezes it into the back/forward cache and tears the
+//     EventSource's socket down while frozen, with no error event and
+//     usually no visibilitychange on restore (the tab may have stayed
+//     visible the whole time). Without the pageshow hook the stream
+//     would stay dead silently and every later image-new would be
+//     missed — the classic "gallery stopped updating" bug.
 //   - the "reset" event hook: the server sends it when this client's
 //     buffer overflowed or its replay gap exceeded the ring —
 //     full-state-refetch semantics, so the default handler reloads.
@@ -96,6 +105,27 @@ export function connect(handlers) {
 		} else if (!es || es.readyState === EventSource.CLOSED) {
 			open(); // ?since=lastId asks the ring to bridge the gap
 		}
+	});
+
+	// Entering bfcache (or navigating away): release the server's per-IP
+	// slot deterministically. The browser would tear the socket down
+	// while frozen anyway; the explicit close also lands readyState in
+	// CLOSED, which the visibilitychange handler above relies on when
+	// deciding whether a visible tab needs a reopen.
+	window.addEventListener("pagehide", () => {
+		if (closed) return;
+		if (es) es.close();
+	});
+
+	// Leaving bfcache: pageshow with persisted=true. Always reopen —
+	// open() closes whatever connection state is left first, and the
+	// ?since=lastId bridge replays anything published during the
+	// freeze, so this is lossless even if the browser somehow kept the
+	// old stream half-alive. Non-persisted pageshow is a normal load:
+	// boot's open() already ran and this must not double-connect.
+	window.addEventListener("pageshow", (e) => {
+		if (closed || !e.persisted) return;
+		open();
 	});
 
 	open();

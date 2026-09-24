@@ -619,3 +619,25 @@ func TestBuildOGDescription(t *testing.T) {
 		})
 	}
 }
+
+func TestDetailsPageSearchForm(t *testing.T) {
+	app := newTestApp(t, testConfig())
+	ts := newTestServer(t, app)
+	insertImageWithFile(t, app, "frm0001", pngBytes("f"), func(img *dbImage) {
+		img.OriginalPrompt = "form test"
+	})
+
+	resp, err := http.Get(ts.URL + "/frm0001")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	html := string(body)
+
+	// The topnav search bar: a plain GET form to /search — Enter
+	// navigates to the server-rendered search page, no JS involved.
+	assert.Contains(t, html, `<form action="/search" method="get" role="search">`)
+	assert.Contains(t, html, `type="search"`, "the CSS keys on type=search — a type= text refactor must not pass silently")
+	assert.Contains(t, html, `name="q"`)
+	assert.Contains(t, html, `aria-label="Search prompts"`)
+}

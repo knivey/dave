@@ -50,6 +50,7 @@ a { color: #7ab0ff; text-decoration: none; }
 a:hover { text-decoration: underline; }
 .topnav { display: flex; gap: 1rem; align-items: center; padding: 0.6rem 1rem; background: #1d1d21; border-bottom: 1px solid #2c2c31; }
 .topnav .spacer { flex: 1; }
+.topnav input[type="search"] { background: #141416; color: #ddd; border: 1px solid #3c3c44; border-radius: 6px; padding: 0.25rem 0.7rem; font: inherit; min-width: min(14rem, 40vw); }
 button { background: #2a2a30; color: #ddd; border: 1px solid #3c3c44; border-radius: 6px; padding: 0.25rem 0.7rem; cursor: pointer; font: inherit; }
 button:hover { background: #35353d; }
 .viewer { position: relative; display: flex; justify-content: center; background: #0d0d0f; }
@@ -75,6 +76,13 @@ table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
 <nav class="topnav">
 <a href="/">&larr; gallery</a>
 <span class="spacer"></span>
+{{/* Plain GET form: Enter navigates to the server-rendered /search
+     page. No JS module boots a search layer on the image page, so this
+     stays a pure form submit — the keyboard nav in image.js ignores
+     keystrokes originating from inputs. */}}
+<form action="/search" method="get" role="search">
+<input type="search" name="q" placeholder="search prompts…" autocomplete="off" aria-label="Search prompts">
+</form>
 <button data-copy="{{.AbsOrigURL}}" title="copy direct link">copy link</button>
 <a href="{{.OrigURL}}" download>download</a>
 </nav>

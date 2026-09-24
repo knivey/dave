@@ -415,6 +415,14 @@ data: {"id":"aQ3f9xK"}
 
 Client behaviors:
 
+- **Connection lifecycle** (sse.js): visibilitychange (close hidden /
+  reopen visible via `?since=`); **bfcache** — pagehide closes the
+  stream and `pageshow` with `persisted=true` reopens it (clicking into
+  an image page and pressing back freezes the gallery into the
+  back/forward cache; the browser tears the EventSource socket down
+  with no error event and usually no visibilitychange on restore, so
+  without the pageshow hook every later arrival is silently missed);
+  fatal-error (429) backoff retry; server `reset` event → full reload.
 - **Gallery**: every query (gallery, keyset pages, `/<id>` pages, neighbors)
   filters `hidden = 0`. On `image-new`, prepend card — unless a search filter
   is active, in which case arrivals buffer into a "+N new" pill (clicking
@@ -457,6 +465,10 @@ Client behaviors:
   keyboard arrows + `n`/`p` keys; neighbor URLs server-rendered for
   no-JS users; live next-button per SSE above.
 - Copy-link button (copies `/orig/` direct URL), download link.
+- **Search bar** in the topnav: a plain GET form (`action="/search"`,
+  `name=q`) — Enter navigates to the server-rendered search page. No JS
+  module runs a search layer here; image.js's keyboard nav ignores
+  keystrokes originating from inputs.
 - OpenGraph tags: `og:image` = display thumb, `og:title` = original prompt,
   `og:description` = params summary — pasted links embed nicely in
   Discord/clients that unfurl.

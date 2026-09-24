@@ -25,5 +25,6 @@ todo.md
 mcps/brave-mcp/brave-mcp
 mcps/fetch-mcp/fetch-mcp
 imgsite/imgsite
+imgsite/config.toml
 imgsite/data/*
 .worktrees/

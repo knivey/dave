@@ -385,11 +385,25 @@ records which side(s) contributed.
   gallery falls back to the original URL as `src` — worst case slower, never
   broken. Decode guarded by `max_dimension`.
 - On completion: update row, publish `thumb-ready` SSE.
+- JPEG has no alpha and the stdlib encoder drops the channel, compositing
+  transparency onto black. Deliberate: every image context on the site is
+  itself near-black (`#0d0d0f` card/viewer backgrounds), so a flattened
+  thumbnail is visually identical to the original rendered in place, and
+  production inputs are opaque regardless (lossy VP8 webp decodes to
+  `*image.YCbCr`).
 - Gallery renders pending thumbs as a shimmer placeholder; `gallery.js`
-  swaps shimmer→thumb on the `thumb-ready` SSE event. Missed events (dead
-  conn, tab asleep past the replay ring) are covered by the card image's
-  error-listener retry: one refetch ~1.5s after the pending-thumb 404,
-  then fallback to the original bytes.
+  swaps shimmer→thumb on the `thumb-ready` SSE event, and any successful
+  load clears the shimmer (covers replayed cards and retries that land
+  after the event). Pending-thumb 404s drive an error-listener retry
+  loop: server-rendered cards (which carry `data-orig`) retry once
+  (~1.5s) then fall back to the original bytes; SSE-prepended cards have
+  no orig URL in the event payload, so they stay shimmer and keep
+  retrying with capped exponential backoff (1.5s → 30s) until the thumb
+  appears. (The earlier policy — stop retrying, drop the src, keep the
+  card non-pending — rendered a dead near-black box that the
+  `thumb-ready` swap, which targets `img.pending`, could never heal
+  whenever generation outlasted the single retry window; observed in
+  production Sep 2026.)
 
 ## Live updates (events.go — SSE)
 

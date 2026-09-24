@@ -258,6 +258,19 @@ func decodeImage(data []byte, maxDimension int) (src image.Image, err error) {
 // resizeToWidth downscales with CatmullRom to the target width,
 // preserving aspect. Never upscales: smaller originals pass through at
 // natural size (the derivative is then just a JPEG re-encode).
+//
+// DESIGN NOTE (alpha flattening): JPEG has no alpha channel and the
+// stdlib encoder drops it, which composites any transparency onto
+// black. That is deliberately left as-is: every context the site
+// renders an image in is itself near-black (`.card img` and `.viewer`
+// both sit on #0d0d0f = rgb(13,13,15)), so a flattened thumbnail is
+// visually identical to the original composited by the browser in
+// place — worst-case channel delta is 15/255 (blue; 13/255 red/green),
+// and production inputs never carry alpha anyway — ComfyUI's lossy VP8
+// webp decodes to opaque *image.YCbCr (verified against the testdata
+// fixtures). Alpha only reaches this pipeline through accepted but
+// unused upload types (transparent PNG), where flatten-to-black is the
+// faithful rendering.
 func resizeToWidth(src image.Image, targetWidth int) image.Image {
 	b := src.Bounds()
 	w, h := b.Dx(), b.Dy()

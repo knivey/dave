@@ -228,6 +228,13 @@ export function boot() {
 		for (const card of detached) frag.appendChild(card);
 		grid.prepend(frag);
 		detached = [];
+		// Re-arm pending thumbs whose retry timer was dropped while the
+		// card was detached (the timer guard skips disconnected imgs):
+		// without this a restored card would shimmer until a thumb-ready
+		// event happened to arrive while it is attached again.
+		for (const img of grid.querySelectorAll("img.pending")) {
+			if (!img.getAttribute("src") && img.dataset.thumb) img.src = img.dataset.thumb;
+		}
 		window.scrollTo(0, prevTop + (doc.scrollHeight - prevHeight));
 	}
 
@@ -242,31 +249,58 @@ export function boot() {
 	);
 
 	// Pending thumbs 404 (no-cache) until the worker flips them ready.
-	// 'error' does not bubble, so listen in capture phase; retry once
-	// after a short delay, then fall back to the original bytes.
-	// SSE-prepended cards carry no data-orig (the event payload has no
-	// filename, so the orig URL can't be built client-side): their
-	// final fallback just stops the shimmer and leaves the alt text —
-	// the details page still serves the original either way.
+	// 'error' does not bubble, so listen in capture phase. Cards that
+	// carry a data-orig fallback (server-rendered) retry once and then
+	// switch to the original bytes. Cards WITHOUT one (SSE-prepended:
+	// the image-new payload has no filename, so the orig URL can't be
+	// built client-side) have no better end state than "still waiting",
+	// so they STAY .pending and keep retrying with capped exponential
+	// backoff. Dropping the pending class here (the old behavior) left
+	// a dead near-black box (the card img's #0d0d0f background) that
+	// the later thumb-ready swap — which targets img.pending — could
+	// never heal; generation regularly outlasts the first retry window.
+	//
+	// While waiting between attempts the src attribute is removed and
+	// the intended thumb URL stashed in data-thumb: a src-less
+	// .pending img renders as the pure shimmer placeholder (no
+	// broken-image glyph), and the stash lets both the retry timer and
+	// the thumb-ready swap restore the fetch.
 	grid.addEventListener(
 		"error",
 		(e) => {
 			const img = e.target;
 			if (!(img instanceof HTMLImageElement) || !img.classList.contains("pending")) return;
-			if (img.dataset.retried) {
-				const orig = img.dataset.orig;
+			const retries = Number(img.dataset.retries || 0);
+			if (img.dataset.orig && retries >= 1) {
+				// One retry already failed: fall back to the original bytes.
 				img.classList.remove("pending");
-				if (orig) {
-					img.src = orig;
-				} else {
-					img.removeAttribute("src");
-				}
+				img.src = img.dataset.orig;
 				return;
 			}
-			img.dataset.retried = "1";
+			img.dataset.retries = String(retries + 1);
+			if (!img.dataset.thumb) img.dataset.thumb = img.src;
+			img.removeAttribute("src"); // clean shimmer while waiting
 			setTimeout(() => {
-				img.src = img.src; // no-cache 404s refetch
-			}, 1500);
+				if (img.classList.contains("pending") && img.isConnected) {
+					img.src = img.dataset.thumb; // no-cache 404s refetch
+				}
+			}, Math.min(1500 * 2 ** retries, 30000));
+		},
+		true
+	);
+
+	// A successful fetch of any kind (initial load, retry, thumb-ready
+	// swap) clears the shimmer. 'load' does not bubble either, so this
+	// also captures. Without it, a card whose thumb arrived between
+	// retries — or a replayed image-new for an image that was already
+	// ready — kept the shimmer class forever over a loaded image.
+	grid.addEventListener(
+		"load",
+		(e) => {
+			const img = e.target;
+			if (img instanceof HTMLImageElement && img.classList.contains("pending")) {
+				img.classList.remove("pending");
+			}
 		},
 		true
 	);
@@ -388,9 +422,11 @@ function onThumbReady(ev) {
 	const img = card.querySelector("img.pending");
 	if (!img) return; // already swapped or already failed
 	img.classList.remove("pending");
-	// The 404 the placeholder got was no-cache; reassigning src (same
-	// URL) refetches — the same trick the retry path relies on.
-	img.src = img.src;
+	// The 404 the placeholder got was no-cache; reassigning the src
+	// refetches. A card mid-retry-wait has no src attribute at all
+	// (removed for a clean shimmer), so restore from the stashed
+	// data-thumb instead of re-reading img.src.
+	img.src = img.dataset.thumb || img.src;
 }
 
 // onImageHidden drops a soft-deleted image's card (SSE image-hidden,

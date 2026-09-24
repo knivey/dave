@@ -72,7 +72,7 @@ table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
 .provenance { color: #999; font-size: 0.9rem; }
 </style>
 </head>
-<body data-page="image" data-image-id="{{.ID}}"{{if .AtEnd}} data-at-end="true"{{end}}>
+<body data-page="image" data-image-id="{{.ID}}"{{if .AtEnd}} data-at-end="true"{{end}}{{if .LastEvent}} data-last-event="{{.LastEvent}}"{{end}}>
 <nav class="topnav">
 <a href="/">&larr; gallery</a>
 <span class="spacer"></span>
@@ -190,7 +190,10 @@ const cardsPartialSrc = `{{define "cards"}}{{range .Cards}}<article class="card"
 // galleryPageSrc is the full gallery page (the root template of the
 // gallery set). The header carries the search box: a plain GET form to
 // /search so searching works with no JS at all (search.js only adds
-// debounced fragment-swapping on top).
+// debounced fragment-swapping on top). body[data-last-event] (rendered
+// whenever a hub exists — see handleGalleryPage) is the page's SSE
+// cursor: the client's FIRST /events connect replays from it, closing
+// the render→subscribe gap.
 const galleryPageSrc = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -201,7 +204,7 @@ const galleryPageSrc = `<!DOCTYPE html>
 {{template "head-extras" .}}<link rel="stylesheet" href="/static/style.css">
 <script type="module" src="/static/app.js"></script>
 </head>
-<body data-page="gallery" data-gallery-title="{{.Title}}">
+<body data-page="gallery" data-gallery-title="{{.Title}}"{{if .LastEvent}} data-last-event="{{.LastEvent}}"{{end}}>
 <header class="site">
 <div class="head-row">
 <div>
@@ -227,7 +230,10 @@ const galleryPageSrc = `<!DOCTYPE html>
 // query prefilled into the search box and the URL shareable as
 // /search?q=…. data-page stays "gallery" deliberately — the search
 // page IS the gallery in results mode as far as the JS modules are
-// concerned (infinite scroll, SSE pill, thumb swap all run here).
+// concerned (infinite scroll, SSE pill, thumb swap all run here). It
+// carries body[data-last-event] for the same reason as the gallery
+// page: arrivals in the render→subscribe gap must reach the "+N new"
+// pill, not vanish until a manual refresh.
 const searchPageSrc = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -238,7 +244,7 @@ const searchPageSrc = `<!DOCTYPE html>
 {{template "head-extras" .}}<link rel="stylesheet" href="/static/style.css">
 <script type="module" src="/static/app.js"></script>
 </head>
-<body data-page="gallery" data-gallery-title="{{.SiteTitle}}">
+<body data-page="gallery" data-gallery-title="{{.SiteTitle}}"{{if .LastEvent}} data-last-event="{{.LastEvent}}"{{end}}>
 <header class="site">
 <div class="head-row">
 <div>
@@ -300,6 +306,15 @@ type galleryView struct {
 	HasMore      bool
 	NextCursor   string
 
+	// LastEvent is the SSE stream position captured at render time —
+	// the page's replay cursor (body[data-last-event]). nil = no hub
+	// attached; a non-nil pointer to 0 is meaningful (replay everything
+	// published since the render). Set ONLY by the full-page handlers;
+	// fragment renders leave it nil (fragments are swapped into a page
+	// whose SSE stream already exists — the cursor belongs to the page,
+	// not the fragment).
+	LastEvent *uint64
+
 	// OGTitle/OGDescription feed the shared head-extras partial
 	// (favicon + basic og tags): the site title/description on the
 	// gallery, "search: q — site" + site description on search pages.
@@ -314,6 +329,16 @@ const galleryPageSize = 48
 // handleGalleryPage renders GET / — the full gallery page (first page of
 // cards, no-JS complete; infinite scroll is progressive enhancement).
 func (a *App) handleGalleryPage(w http.ResponseWriter, r *http.Request) {
+	// SSE cursor capture — MUST happen BEFORE the gallery query below.
+	// Ordering rationale: the page HTML is a DB snapshot and the
+	// embedded cursor is an event-stream snapshot; an event published
+	// between capture and query lands in BOTH the page and the replay
+	// window (harmless — the client's prependCard dedups by data-id
+	// against the live DOM and the detached set), while an event
+	// published between query and capture would land in NEITHER — the
+	// exact render→subscribe race this cursor exists to close.
+	// Overlap-safe, gap-unsafe: capture first.
+	lastEvent, hasHub := a.renderEventCursor()
 	cfg := a.getConfig()
 	rows, err := dbGetGalleryPage(a.db, "", "", galleryPageSize+1)
 	if err != nil {
@@ -322,6 +347,9 @@ func (a *App) handleGalleryPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	view := buildGalleryView(cfg, rows)
+	if hasHub {
+		view.LastEvent = &lastEvent
+	}
 	// Server-rendered empty state (M7): a fresh site with no uploads
 	// still gets a friendly page. Set here, not in buildGalleryView,
 	// because the same builder serves the /gallery fragment — an empty
@@ -520,6 +548,13 @@ type imageView struct {
 	PrevID  string
 	HasNext bool
 	NextID  string
+
+	// LastEvent is the SSE stream position captured at render time —
+	// same replay-cursor contract as galleryView.LastEvent (nil = no
+	// hub). Matters on this page for the live next-button: an image-new
+	// published in the render→subscribe gap would otherwise never
+	// reveal the chevron (image.js only reacts to events it receives).
+	LastEvent *uint64
 
 	// OpenGraph (M7): og:title is the clamped original prompt (filename
 	// fallback), og:description the params summary, og:image an
@@ -730,6 +765,12 @@ func (a *App) handleImagePage(w http.ResponseWriter, r *http.Request, id string)
 		http.NotFound(w, r)
 		return
 	}
+	// SSE cursor capture — BEFORE every DB read (row lookup and the
+	// neighbor queries below), same overlap-safe/gap-unsafe ordering as
+	// handleGalleryPage: an event between capture and query can double
+	// up (page + replay, deduped or simply re-revealing the chevron),
+	// one between query and capture would be lost to both.
+	lastEvent, hasHub := a.renderEventCursor()
 	img, ok := a.lookupImage(w, r, id)
 	if !ok {
 		return
@@ -754,6 +795,9 @@ func (a *App) handleImagePage(w http.ResponseWriter, r *http.Request, id string)
 	}
 
 	view := buildImageView(a.getConfig(), img, prev, next, a.absBaseFromRequest(r))
+	if hasHub {
+		view.LastEvent = &lastEvent
+	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// HTML stays no-cache for liveness (the live next-button arrives with

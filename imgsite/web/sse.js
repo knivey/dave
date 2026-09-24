@@ -11,6 +11,14 @@
 //     (visibilitychange, bfcache restore, fatal-error backoff) the id
 //     rides the URL as ?since=N instead — the server's other replay
 //     entry point.
+//   - first-connect replay from the page's embedded cursor. Pages that
+//     carry body[data-last-event] (rendered whenever the server has an
+//     event hub) pass it as opts.since; the FIRST open then connects
+//     with ?since=<embedded> instead of live-only, replaying anything
+//     published between the page's DB snapshot and this connect — the
+//     render→subscribe gap that live-only first connects miss. Pages
+//     without the attribute (nil-hub renders, or any page that never
+//     embedded one) keep the plain live-only first connect.
 //   - visibilitychange: close when the tab hides, reopen when it
 //     becomes visible. Frozen background tabs keep timers and sockets
 //     alive only unpredictably; a deterministic close/reopen plus the
@@ -26,20 +34,55 @@
 //   - the "reset" event hook: the server sends it when this client's
 //     buffer overflowed or its replay gap exceeded the ring —
 //     full-state-refetch semantics, so the default handler reloads.
-export function connect(handlers) {
+//
+// opts.since (optional): the page's embedded render cursor — see the
+// boot code in gallery.js / image.js for where it comes from.
+export function connect(handlers, opts) {
 	const names = Object.keys(handlers).filter((n) => n !== "onReset" && n !== "hello");
 	let es = null;
 	let lastId = 0;
 	let closed = false;
 	let reopenTimer = null;
+
+	// First-connect replay cursor, parsed once from opts.since. null =
+	// absent (the page carries no body[data-last-event]); any
+	// non-negative integer — 0 included — is a valid cursor meaning
+	// "replay everything published since the render".
+	let firstSince = null;
+	if (opts && opts.since !== undefined && opts.since !== null && opts.since !== "") {
+		const n = Number(opts.since);
+		if (Number.isFinite(n) && n >= 0) firstSince = n;
+	}
+	// Seed the tracked id from the embedded cursor so hello and every
+	// later reopen stay consistent with it (hello still takes the max:
+	// a server that has moved further ahead wins).
+	if (firstSince !== null) lastId = firstSince;
+
 	// Has open() run at least once? The FIRST connect of a page must
-	// NOT ask for replay (the server just rendered the page's state;
-	// replaying the whole ring — or triggering a reset-reload loop on a
-	// busy hub — would be wrong). Every LATER open (visibility, bfcache
-	// restore, 429 backoff) is resuming a STALE snapshot and must bridge
-	// via ?since= — including since=0 when no event was ever received:
-	// the server then replays the entire ring (or resets, correctly,
-	// when even that can't reconstruct the page's gap).
+	// NOT ask for replay — UNLESS the page carried an embedded cursor
+	// (the server rendered that page's state as of that id, so replay
+	// from it is bridging, not duplicating). Every LATER open
+	// (visibility, bfcache restore, 429 backoff) is resuming a STALE
+	// snapshot and must bridge via ?since= — including since=0 when no
+	// event was ever received: the server then replays the entire ring
+	// (or resets, correctly, when even that can't reconstruct the
+	// page's gap).
+	//
+	// Reset-loop bound: a stale embedded cursor whose gap exceeds the
+	// ring yields reset → location.reload() → the reload re-renders the
+	// page with a FRESH cursor (capture happens at render time, so the
+	// new gap is ~zero) — in practice at most one reload per stale
+	// page: a repeat would need the ring (>128 events) to overflow
+	// within the reload's own sub-second render→subscribe window, far
+	// beyond this site's traffic, but not logically impossible.
+	// Contrast: unconditionally replaying since=0 on every fresh load
+	// WOULD loop on a busy hub — each reload would still ask for the
+	// whole ring and could reset again while traffic keeps flowing.
+	// That is why the no-attribute fallback stays live-only, and why
+	// the cursor is the render-time id rather than a constant.
+	// Hub-restart-shrunk ids (since > the server's newest) hit the
+	// same reset → reload path — pre-existing semantics, fine for the
+	// same in-practice reason.
 	let openedOnce = false;
 
 	function trackId(e) {
@@ -62,9 +105,14 @@ export function connect(handlers) {
 		if (es) es.close();
 		const first = !openedOnce;
 		openedOnce = true;
-		// Reopen always carries since= (0 included: replay the whole
-		// ring from the beginning of the page's stale snapshot).
-		const url = first ? "/events" : "/events?since=" + lastId;
+		// First open WITH an embedded cursor asks the ring to bridge
+		// the render→subscribe gap (lastId is still the seeded cursor:
+		// nothing can have advanced it before this synchronous first
+		// open). First open WITHOUT one is live-only — the page render
+		// is the state. Reopens always carry since= (0 included: replay
+		// the whole ring from the beginning of the page's stale
+		// snapshot).
+		const url = first && firstSince === null ? "/events" : "/events?since=" + lastId;
 		const src = new EventSource(url);
 		es = src;
 		// hello is wrapper-internal bookkeeping (the server's

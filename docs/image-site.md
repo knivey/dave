@@ -435,22 +435,51 @@ data: {"id":"aQ3f9xK"}
 
 Client behaviors:
 
-- **Connection lifecycle** (sse.js): the FIRST connect of a page loads
-  live-only (the page was just server-rendered); every LATER open
-  (visibilitychange, bfcache restore, 429 backoff) resumes with
-  `?since=<lastId>` — including `since=0` when no event was ever
-  received, which replays the entire ring (or resets, correctly, when
-  even that can't reconstruct the gap). The server sends a connect-time
-  `hello` bookkeeping event (`{"last_id":N}`) on EVERY subscription so
-  a client always knows the stream's current position, even before its
-  first real event — that seed is what makes the zero-event reopen
-  lossless. Fatal-error (429) backoff retry; server `reset` event →
-  full reload. **bfcache** — pagehide closes the stream and `pageshow`
-  with `persisted=true` reopens it (clicking into an image page and
-  pressing back freezes the gallery into the back/forward cache; the
-  browser tears the EventSource socket down with no error event and
-  usually no visibilitychange on restore, so without the pageshow hook
-  every later arrival is silently missed).
+- **Connection lifecycle** (sse.js): pages render with an embedded SSE
+  cursor — `body[data-last-event]` carries the hub's event id captured
+  BEFORE the page's DB query (overlap-safe, gap-unsafe ordering: an
+  event between capture and query can land in both the page and the
+  replay window, where the client's data-id dedup absorbs it; one
+  between query and capture would land in neither — the render→subscribe
+  race). The FIRST connect of a page that carries the cursor uses
+  `?since=<embedded>`, so the existing replay ring bridges everything
+  published between the render and the subscribe; 0 is a meaningful
+  cursor (hub present, nothing published yet — replay it all). Pages
+  without the attribute (nil-hub renders) keep a live-only first
+  connect. The embedded value also seeds the tracked last-seen id, so
+  hello (which still takes the max) and every later open stay
+  consistent. Every LATER open (visibilitychange, bfcache restore,
+  429 backoff) resumes with `?since=<lastId>` — including `since=0`
+  when no event was ever received, which replays the entire ring (or
+  resets, correctly, when even that can't reconstruct the gap). The
+  server sends a connect-time `hello` bookkeeping event
+  (`{"last_id":N}`) on EVERY subscription so a client always knows the
+  stream's current position, even before its first real event — that
+  seed is what makes the zero-event reopen lossless. **Reset-loop
+  bound**: a stale embedded cursor whose gap exceeds the ring yields
+  `reset` → `location.reload()` → the reload re-renders with a FRESH
+  cursor (capture is at render time, so the new gap is ~zero) — in
+  practice at most one reload per stale page: a repeat would need the
+  ring (>128 events) to overflow within the reload's own sub-second
+  render→subscribe window, far beyond this site's traffic, but it is
+  not logically impossible. Unconditional `since=0` on fresh
+  loads would instead loop forever on a busy hub — which is why the
+  no-attribute fallback stays live-only. Fatal-error (429) backoff
+  retry; server `reset` event → full reload. **bfcache** — pagehide
+  closes the stream and `pageshow` with `persisted=true` reopens it
+  (clicking into an image page and pressing back freezes the gallery
+  into the back/forward cache; the browser tears the EventSource
+  socket down with no error event and usually no visibilitychange on
+  restore, so without the pageshow hook every later arrival is
+  silently missed).
+- **Cursor coverage**: all three full-page templates embed
+  `body[data-last-event]` — the gallery, the `/search?q=` results page
+  (its replayed arrivals buffer behind the "+N new" pill exactly like
+  live arrivals during a filter), and the image details page (where a
+  gap event would otherwise never reveal the live next-chevron).
+  Fragments (`/gallery?after=`, `/search-fragment`) deliberately carry
+  no cursor: they are swapped into a page whose SSE stream already
+  exists — the cursor belongs to the page body, not the fragment.
 - **Gallery**: every query (gallery, keyset pages, `/<id>` pages, neighbors)
   filters `hidden = 0`. On `image-new`, prepend card — unless a search filter
   is active, in which case arrivals buffer into a "+N new" pill (clicking

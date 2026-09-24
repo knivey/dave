@@ -284,6 +284,16 @@ func (h *sseHub) unsubscribe(sub *subscriber) {
 	h.mu.Unlock()
 }
 
+// lastEventID returns the hub's newest issued event id (0 when nothing
+// has been published yet) — the stream position a page render embeds
+// as its SSE cursor. Read under the same mutex publish increments
+// nextID under, so the value is a consistent snapshot.
+func (h *sseHub) lastEventID() uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.nextID
+}
+
 // resetEvent builds the connect-time reset (replay gap beyond the
 // ring) carrying the current last id.
 func (h *sseHub) resetEvent() event {
@@ -564,6 +574,20 @@ func toRFC3339(ts string) string {
 // explicitly; publishes are nil-hub-safe no-ops otherwise.
 func (a *App) setEventHub(h *sseHub) {
 	a.events = h
+}
+
+// renderEventCursor returns the SSE stream position a server-rendered
+// page should embed as its replay cursor (body[data-last-event]). The
+// bool is false when no hub is attached (tests that never wire one) —
+// callers then omit the attribute entirely and the client falls back to
+// live-only first connects. 0 is a meaningful cursor: it means "a hub
+// exists and nothing has been published yet", and embedding it lets a
+// client replay everything published since the render.
+func (a *App) renderEventCursor() (uint64, bool) {
+	if a.events == nil {
+		return 0, false
+	}
+	return a.events.lastEventID(), true
 }
 
 // publishImageNew fans out image-new for a freshly inserted row. Call

@@ -123,14 +123,23 @@ func nextSSEEvent(t *testing.T, frames <-chan sseFrame) sseFrame {
 	}
 }
 
-// drainSSEFrames consumes everything currently buffered, keeping only
-// frames that carry a real event (non-empty name). Heartbeat comments
-// are written directly to the wire and can land in the drain window
-// under a -race stall (same reasoning as nextSSEEvent), which would
-// otherwise trip the "no further replay frames" Empty assertion.
+// drainSSEFrames consumes frames until the stream has been quiet for a
+// short bounded window (or ends), keeping only frames that carry a
+// real event (non-empty name). Heartbeat comments are written directly
+// to the wire and can land in the drain window under a -race stall
+// (same reasoning as nextSSEEvent), which would otherwise trip the
+// "no further replay frames" Empty assertion. The quiet window (not an
+// instant non-blocking drain) is load-bearing: replayed events are
+// flushed AFTER the hello frame in a separate flush, so a drain that
+// returns the moment the channel looks empty can race the replay's
+// arrival and report zero frames on a slow/contended host — observed
+// as a one-off flake of TestEventsSinceZeroReplaysAll.
 func drainSSEFrames(t *testing.T, frames <-chan sseFrame) []sseFrame {
 	t.Helper()
+	const quiet = 250 * time.Millisecond
 	var out []sseFrame
+	timer := time.NewTimer(quiet)
+	defer timer.Stop()
 	for {
 		select {
 		case f, ok := <-frames:
@@ -140,7 +149,8 @@ func drainSSEFrames(t *testing.T, frames <-chan sseFrame) []sseFrame {
 			if f.name != "" && f.name != "hello" {
 				out = append(out, f)
 			}
-		default:
+			timer.Reset(quiet)
+		case <-timer.C:
 			return out
 		}
 	}

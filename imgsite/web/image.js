@@ -50,16 +50,26 @@ export function boot() {
 	let fetchTimer = null;
 	let revealed = false;
 
-	connect({
-		"image-new": () => {
-			if (revealed) return;
-			// Bursts (multi-image jobs) debounce into one fetch.
-			if (fetchTimer) clearTimeout(fetchTimer);
-			fetchTimer = setTimeout(fetchNeighbors, NEIGHBORS_DEBOUNCE_MS);
+	// First-connect replay cursor: body[data-last-event] (present
+	// whenever a hub exists) is the event id this page's neighbors were
+	// rendered at. An image-new in the render→subscribe gap would
+	// otherwise never fire the reveal — connect() replays it via
+	// ?since=<id>, and the debounced neighbors fetch reveals the
+	// chevron exactly as a live arrival would. Absent attribute →
+	// undefined → live-only first connect.
+	connect(
+		{
+			"image-new": () => {
+				if (revealed) return;
+				// Bursts (multi-image jobs) debounce into one fetch.
+				if (fetchTimer) clearTimeout(fetchTimer);
+				fetchTimer = setTimeout(fetchNeighbors, NEIGHBORS_DEBOUNCE_MS);
+			},
+			// Overflow / replay-gap recovery: full refetch is always correct.
+			onReset: () => location.reload(),
 		},
-		// Overflow / replay-gap recovery: full refetch is always correct.
-		onReset: () => location.reload(),
-	});
+		{ since: document.body.dataset.lastEvent }
+	);
 
 	async function fetchNeighbors() {
 		fetchTimer = null;

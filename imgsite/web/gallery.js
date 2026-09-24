@@ -475,11 +475,26 @@ function setupLiveUpdates() {
 	window.imgsite = window.imgsite || {};
 	window.imgsite.gallery = { setFilterActive, registerFilterClear };
 
-	connect({
-		"image-new": onImageNew,
-		"thumb-ready": onThumbReady,
-		"image-hidden": onImageHidden,
-		// Overflow / replay-gap recovery: full refetch is always correct.
-		onReset: () => location.reload(),
-	});
+	// First-connect replay cursor: the server embedded the event id it
+	// rendered this page's snapshot at (body[data-last-event], present
+	// whenever a hub exists — 0 is meaningful). connect() turns it into
+	// ?since=<id> on the FIRST open, replaying the render→subscribe gap
+	// (an upload committed after the page's DB query but before the
+	// EventSource connected); prependCard's data-id dedup absorbs the
+	// harmless overlap of an image that made it into both the page and
+	// the replay. On this page that covers both entry templates — the
+	// gallery and the server-rendered /search?q= results page (whose
+	// replayed arrivals buffer behind the pill like any live arrival
+	// during a filter). Absent attribute → undefined → live-only, the
+	// nil-hub / no-cursor fallback.
+	connect(
+		{
+			"image-new": onImageNew,
+			"thumb-ready": onThumbReady,
+			"image-hidden": onImageHidden,
+			// Overflow / replay-gap recovery: full refetch is always correct.
+			onReset: () => location.reload(),
+		},
+		{ since: document.body.dataset.lastEvent }
+	);
 }

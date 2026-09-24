@@ -641,3 +641,72 @@ func TestDetailsPageSearchForm(t *testing.T) {
 	assert.Contains(t, html, `name="q"`)
 	assert.Contains(t, html, `aria-label="Search prompts"`)
 }
+
+// ---------------------------------------------------------------------------
+// Render-time SSE cursor (body[data-last-event])
+// ---------------------------------------------------------------------------
+
+// TestPagesEmbedRenderEventCursor pins the render→subscribe race fix's
+// server half: every full page that boots a live-updating snapshot —
+// gallery, search results (live via the "+N new" pill), and the image
+// details page (live next-button) — embeds the hub's current event id
+// as body[data-last-event], and the embedded value tracks the hub as
+// events are published. 0 is a meaningful cursor (a hub with no events
+// yet: replay everything published since the render) and must render,
+// not be dropped as a zero value.
+func TestPagesEmbedRenderEventCursor(t *testing.T) {
+	app := newTestApp(t, testConfig())
+	hub := newSSEHub()
+	app.setEventHub(hub)
+	ts := newTestServer(t, app)
+	insertImage(t, app, "curt001", "2026-09-24 03:12:00")
+
+	// Fresh hub: cursor 0 renders (nil-pointer-free meaningful zero).
+	_, body := getPage(t, ts.URL, "/")
+	assert.Contains(t, body, `data-last-event="0"`, "gallery embeds the zero cursor")
+
+	hub.publish(eventImageNew, imageNewEvent{ID: "curt001"})
+	hub.publish(eventThumbReady, thumbReadyEvent{ID: "curt001"})
+
+	_, body = getPage(t, ts.URL, "/")
+	assert.Contains(t, body, `data-last-event="2"`, "gallery cursor tracks the hub id at render time")
+
+	_, body = getPage(t, ts.URL, "/search?q=prompt")
+	assert.Contains(t, body, `data-last-event="2"`, "search results page carries the cursor (pill updates)")
+
+	_, body = getPage(t, ts.URL, "/curt001")
+	assert.Contains(t, body, `data-last-event="2"`, "details page carries the cursor (live next-button)")
+
+	// One more publish and a re-render proves the value is live, not a
+	// stale constant baked at startup.
+	hub.publish(eventImageHidden, imageHiddenEvent{ID: "curt001"})
+	_, body = getPage(t, ts.URL, "/")
+	assert.Contains(t, body, `data-last-event="3"`)
+
+	// Fragments omit the cursor even WITH a hub wired: they render only
+	// the "cards" partial (no body tag) — they are swapped into a page
+	// whose SSE stream already exists, so the cursor belongs to the
+	// page body, not the fragment. Pins the field comment's contract.
+	for _, path := range []string{"/gallery", "/search-fragment?q=prompt"} {
+		_, frag := getPage(t, ts.URL, path)
+		assert.NotContains(t, frag, "data-last-event", "fragment %s must never carry the cursor", path)
+	}
+}
+
+// TestPagesWithoutHubOmitEventCursor pins the nil-hub fallback: pages
+// rendered without an attached hub (every test app that never wires
+// one; production always does before serving) omit the attribute
+// entirely — the client's first connect then stays live-only — and
+// nothing panics. Fragments never carry it: they are swapped into a
+// page whose SSE stream already exists, so the cursor belongs to the
+// page body, not the fragment.
+func TestPagesWithoutHubOmitEventCursor(t *testing.T) {
+	app := newTestApp(t, testConfig())
+	ts := newTestServer(t, app)
+	insertImage(t, app, "curn001", "2026-09-24 03:12:00")
+
+	for _, path := range []string{"/", "/search?q=prompt", "/curn001", "/gallery"} {
+		_, body := getPage(t, ts.URL, path)
+		assert.NotContains(t, body, "data-last-event", "path %s must omit the cursor without a hub (fragments always)", path)
+	}
+}

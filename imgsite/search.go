@@ -572,6 +572,12 @@ func searchCursorFromRequest(r *http.Request) (searchCursor, bool) {
 // the "GET /" catch-all whose id dispatcher would 404 "search" (6
 // chars, not a valid image id) — same precedence reasoning as /gallery.
 func (a *App) handleSearchPage(w http.ResponseWriter, r *http.Request) {
+	// SSE cursor capture — BEFORE runSearch's DB reads, same
+	// overlap-safe/gap-unsafe ordering as handleGalleryPage. On this
+	// page the replayed arrivals buffer behind the "+N new" pill (the
+	// filter is active from boot), which is exactly how a live arrival
+	// during a search already presents.
+	lastEvent, hasHub := a.renderEventCursor()
 	cur, ok := searchCursorFromRequest(r)
 	if !ok {
 		http.Error(w, "malformed cursor", http.StatusBadRequest)
@@ -586,9 +592,14 @@ func (a *App) handleSearchPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	view := buildSearchView(cfg, q, res)
+	if hasHub {
+		view.LastEvent = &lastEvent
+	}
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
-	if err := searchTemplates.Execute(w, buildSearchView(cfg, q, res)); err != nil {
+	if err := searchTemplates.Execute(w, view); err != nil {
 		logger.Error("rendering search page", "q", q, "error", err)
 	}
 }

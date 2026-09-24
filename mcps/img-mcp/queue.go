@@ -49,6 +49,49 @@ type Job struct {
 	closeOnce sync.Once
 }
 
+// JobSnapshot is an immutable point-in-time copy of a Job's read-facing
+// fields. All Job lifecycle/terminal mutations are synchronized on
+// JobQueue.mu (see failJob/Cancel/processJob), so readers outside queue.go
+// must never touch a live *Job: Get/WaitForJob/ListJobs hand out snapshots
+// copied under the queue lock instead. QueuedIndex is deliberately absent —
+// it is written under orderMu (not q.mu) during Submit, so copying it here
+// would reintroduce a cross-lock race; nothing outside queue.go reads it.
+type JobSnapshot struct {
+	ID            string
+	Type          JobType
+	Status        JobStatus
+	Workflow      string
+	Input         JobInput
+	Result        *JobResult
+	Error         string
+	ComfyPromptID string
+	CreatedAt     time.Time
+	StartedAt     *time.Time
+	CompletedAt   *time.Time
+}
+
+// snapshotJob copies job's read-facing fields. The caller must already hold
+// q.mu (or otherwise be synchronized with the last writer — e.g. a fresh
+// object built from the DB); this function takes no locks so Get/ListJobs
+// can fold the copy into their existing critical section. Result is a shared
+// pointer: it is written exactly once before Status flips to completed and
+// never mutated afterwards, so sharing it is safe.
+func snapshotJob(job *Job) JobSnapshot {
+	return JobSnapshot{
+		ID:            job.ID,
+		Type:          job.Type,
+		Status:        job.Status,
+		Workflow:      job.Workflow,
+		Input:         job.Input,
+		Result:        job.Result,
+		Error:         job.Error,
+		ComfyPromptID: job.ComfyPromptID,
+		CreatedAt:     job.CreatedAt,
+		StartedAt:     job.StartedAt,
+		CompletedAt:   job.CompletedAt,
+	}
+}
+
 type JobInput struct {
 	Prompt         string
 	NegativePrompt string
@@ -193,19 +236,26 @@ func (q *JobQueue) Submit(jobType JobType, workflow string, input JobInput) (*Jo
 	}
 }
 
-func (q *JobQueue) Get(jobID string) (*Job, bool) {
+// Get returns a snapshot of the job's read-facing state, never the live
+// *Job — terminal mutations are synchronized on q.mu and tool handlers read
+// the returned value without any lock.
+func (q *JobQueue) Get(jobID string) (JobSnapshot, bool) {
 	q.mu.RLock()
 	job, ok := q.results[jobID]
+	var snap JobSnapshot
+	if ok {
+		snap = snapshotJob(job)
+	}
 	q.mu.RUnlock()
 
 	if ok {
-		return job, true
+		return snap, true
 	}
 
 	if q.db != nil {
 		dbJob, err := dbGetJob(q.db, jobID)
 		if err != nil {
-			return nil, false
+			return JobSnapshot{}, false
 		}
 		recovered := jobFromDBJob(dbJob)
 		if recovered.Status == StatusCompleted {
@@ -215,10 +265,12 @@ func (q *JobQueue) Get(jobID string) (*Job, bool) {
 				_ = comfyImgs
 			}
 		}
-		return recovered, true
+		// recovered is a fresh object no other goroutine can reach, so no
+		// lock is needed to copy it.
+		return snapshotJob(recovered), true
 	}
 
-	return nil, false
+	return JobSnapshot{}, false
 }
 
 func (q *JobQueue) Cancel(jobID string) bool {
@@ -275,31 +327,35 @@ func (q *JobQueue) Cancel(jobID string) bool {
 		}
 	}
 
-	now := time.Now().UTC()
-	q.mu.Lock()
-	// Re-validate under the lock: the status was snapshotted before the
-	// (potentially seconds-long) interrupt call, and the job may have
-	// completed or failed in between — cancelling a finished job would
-	// overwrite its result and flip the DB row after dbCompleteJob.
-	if isTerminalStatus(job.Status) {
-		q.mu.Unlock()
+	// First-write-wins against failJob/completeJob: whichever terminal
+	// writer grabs the state first (here, via transitionTerminal's
+	// re-validation under q.mu) wins in memory AND in the DB — the losers
+	// skip their flips and their DB writes entirely.
+	if !q.transitionTerminal(job, StatusCancelled, "", nil) {
+		// Re-validation lost: the job completed or failed while we were
+		// interrupting it — its terminal write won, in memory and the DB.
 		return false
 	}
-	job.Status = StatusCancelled
-	job.CompletedAt = &now
-	job.closeOnce.Do(func() { close(job.done) })
-	q.mu.Unlock()
 
 	if q.db != nil {
 		if err := dbCancelJob(q.db, jobID); err != nil {
-			loggerQueue.Error("error cancelling job in DB", "job_id", jobID, "error", err)
+			if errors.Is(err, errJobAlreadyTerminal) {
+				loggerQueue.Warn("DB cancel skipped: job row already terminal (lost race to another terminal write)",
+					"job_id", jobID, "error", err)
+			} else {
+				loggerQueue.Error("error cancelling job in DB", "job_id", jobID, "error", err)
+			}
 		}
 	}
 
 	return true
 }
 
-func (q *JobQueue) WaitForJob(jobID string, timeout time.Duration) *Job {
+// WaitForJob blocks until the job reaches a terminal state, the timeout
+// elapses, or the job is unknown (nil). It returns a snapshot, not the live
+// *Job: on the timeout branch the job may still be mid-flight, and even on
+// the done branch a uniform snapshot-under-lock keeps every reader safe.
+func (q *JobQueue) WaitForJob(jobID string, timeout time.Duration) *JobSnapshot {
 	q.mu.RLock()
 	job, ok := q.results[jobID]
 	q.mu.RUnlock()
@@ -320,7 +376,9 @@ func (q *JobQueue) WaitForJob(jobID string, timeout time.Duration) *Job {
 							recovered.Result = result
 						}
 					}
-					return recovered
+					// recovered is fresh and unshared — no lock needed.
+					snap := snapshotJob(recovered)
+					return &snap
 				}
 			}
 		}
@@ -331,30 +389,41 @@ func (q *JobQueue) WaitForJob(jobID string, timeout time.Duration) *Job {
 	terminal := isTerminalStatus(job.Status)
 	q.mu.RUnlock()
 	if terminal {
-		return job
+		return q.snapshot(job)
 	}
 
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
+	// The select must watch the LIVE job's done channel (the close is the
+	// wakeup signal); only the returned value is a snapshot.
 	select {
 	case <-job.done:
-		return job
 	case <-timer.C:
-		return job
 	}
+	return q.snapshot(job)
 }
 
-func (q *JobQueue) ListJobs(statusFilter string, limit int) []*Job {
+// snapshot copies job's read-facing fields under q.mu.RLock.
+func (q *JobQueue) snapshot(job *Job) *JobSnapshot {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	snap := snapshotJob(job)
+	return &snap
+}
+
+// ListJobs returns snapshots taken under q.mu — callers read the returned
+// values without holding any lock.
+func (q *JobQueue) ListJobs(statusFilter string, limit int) []JobSnapshot {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
 
-	jobs := make([]*Job, 0, len(q.results))
+	jobs := make([]JobSnapshot, 0, len(q.results))
 	for _, job := range q.results {
 		if statusFilter != "" && string(job.Status) != statusFilter {
 			continue
 		}
-		jobs = append(jobs, job)
+		jobs = append(jobs, snapshotJob(job))
 	}
 
 	if len(jobs) > limit {
@@ -524,38 +593,50 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 
 	now := time.Now().UTC()
 	q.mu.Lock()
+	if job.Status != StatusQueued {
+		// Cancelled between the worker's dequeue check and here — Cancel()'s
+		// channel send is non-blocking and is dropped unless the worker is
+		// parked exactly at its check. Cancel already performed the full
+		// terminal transition; flipping to running would resurrect the
+		// user's cancel in memory, and the (now fenced) dbUpdateJobRunning
+		// below would resurrect it in the DB too.
+		q.mu.Unlock()
+		loggerQueue.Info("job cancelled before start, aborting", "job_id", job.ID)
+		return
+	}
 	job.Status = StatusRunning
 	job.StartedAt = &now
 	q.mu.Unlock()
 
 	if q.db != nil {
 		if err := dbUpdateJobRunning(q.db, job.ID); err != nil {
+			if errors.Is(err, errJobAlreadyTerminal) {
+				// Cancel's DB write won even though memory still said queued
+				// when we checked (the memory flip and the DB write are only
+				// loosely ordered). Memory is cancelled by now — abort.
+				loggerQueue.Warn("job cancelled concurrently in DB before start, aborting",
+					"job_id", job.ID)
+				return
+			}
 			loggerQueue.Error("error updating job to running in DB", "job_id", job.ID, "error", err)
 		}
 	}
 
 	defer func() {
-		// Terminal job state is shared with Cancel(), which may be flipping
-		// this job to cancelled concurrently (it cancels the job context
-		// before taking this lock) — synchronize on q.mu like recoverRunningJob.
+		// Terminal bookkeeping (CompletedAt, done close, stats) happens
+		// inside transitionTerminal — reached via failJob/completeJob on the
+		// error/success paths, or by Cancel winning a race. What remains
+		// here is the shutdown case: the job is still running because jobCtx
+		// was cancelled by q.Stop() rather than by a terminal writer — close
+		// done so waiters wake; recovery re-runs the job on the next start.
 		q.mu.Lock()
 		defer q.mu.Unlock()
 
-		if job.Status == StatusCancelled {
+		if isTerminalStatus(job.Status) {
 			return
 		}
 		job.CompletedAt = ptrTime(time.Now().UTC())
 		job.closeOnce.Do(func() { close(job.done) })
-
-		if job.Status == StatusFailed {
-			q.statsMu.Lock()
-			q.failedCount++
-			q.statsMu.Unlock()
-		} else if job.Status == StatusCompleted {
-			q.statsMu.Lock()
-			q.completedCount++
-			q.statsMu.Unlock()
-		}
 	}()
 
 	prompt := job.Input.Prompt
@@ -696,29 +777,91 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 		jobResult.Images = append(jobResult.Images, imgData)
 	}
 
-	q.mu.Lock()
-	job.Result = jobResult
-	job.Status = StatusCompleted
-	q.mu.Unlock()
-
-	if q.db != nil {
-		if err := dbCompleteJob(q.db, job.ID, jobResult, comfyImgs); err != nil {
-			loggerQueue.Error("error completing job in DB", "job_id", job.ID, "error", err)
-		}
-	}
+	q.completeJob(job, jobResult, comfyImgs)
 }
 
-// failJob marks a job terminally failed. Callers must NOT hold q.mu — it
-// takes the lock itself (terminal job state is synchronized on q.mu, like
-// every other terminal mutation in this file).
-func (q *JobQueue) failJob(job *Job, errMsg string) {
+// transitionTerminal flips a job to the given terminal state with
+// first-write-wins semantics: if another writer already reached a terminal
+// state, nothing changes and it returns false. On a win it performs the
+// complete terminal bookkeeping exactly once — status, error/result
+// payloads, CompletedAt, and the done-channel close that wakes waiters —
+// all under q.mu, then bumps the queue stats. DB persistence stays with
+// the callers (failJob/completeJob/Cancel), which skip it when they lose,
+// so the same transition wins in memory and in the DB.
+func (q *JobQueue) transitionTerminal(job *Job, status JobStatus, errMsg string, result *JobResult) bool {
 	q.mu.Lock()
-	job.Status = StatusFailed
-	job.Error = errMsg
+	if isTerminalStatus(job.Status) {
+		q.mu.Unlock()
+		return false
+	}
+	now := time.Now().UTC()
+	job.Status = status
+	if errMsg != "" {
+		job.Error = errMsg
+	}
+	if result != nil {
+		job.Result = result
+	}
+	job.CompletedAt = &now
+	job.closeOnce.Do(func() { close(job.done) })
 	q.mu.Unlock()
+
+	switch status {
+	case StatusCompleted:
+		q.statsMu.Lock()
+		q.completedCount++
+		q.statsMu.Unlock()
+	case StatusFailed:
+		q.statsMu.Lock()
+		q.failedCount++
+		q.statsMu.Unlock()
+	}
+	return true
+}
+
+// completeJob marks a job terminally completed and persists the result.
+// Like failJob it is first-write-wins: a job cancelled (or failed)
+// concurrently stays in that state, in memory and in the DB.
+func (q *JobQueue) completeJob(job *Job, result *JobResult, comfyImages []ComfyImage) bool {
+	if !q.transitionTerminal(job, StatusCompleted, "", result) {
+		loggerQueue.Info("complete skipped: job already terminal (first terminal write wins)",
+			"job_id", job.ID)
+		return false
+	}
+	if q.db != nil {
+		if err := dbCompleteJob(q.db, job.ID, result, comfyImages); err != nil {
+			if errors.Is(err, errJobAlreadyTerminal) {
+				loggerQueue.Warn("DB complete skipped: job row already terminal (lost race to another terminal write)",
+					"job_id", job.ID, "error", err)
+			} else {
+				loggerQueue.Error("error completing job in DB", "job_id", job.ID, "error", err)
+			}
+		}
+	}
+	return true
+}
+
+// failJob marks a job terminally failed. Callers must NOT hold q.mu —
+// transitionTerminal takes the lock itself. First-write-wins: a job that
+// was cancelled (or completed) concurrently keeps that state — the losing
+// failure is dropped entirely, including its DB write, so memory and the
+// DB row can never disagree about which transition won. (Pre-fix this
+// overwrote memory to failed while the fenced DB write lost — a restart
+// would resurface the job with the wrong terminal status.)
+func (q *JobQueue) failJob(job *Job, errMsg string) {
+	if !q.transitionTerminal(job, StatusFailed, errMsg, nil) {
+		loggerQueue.Info("fail skipped: job already terminal (first terminal write wins)",
+			"job_id", job.ID, "intended_error", errMsg)
+		return
+	}
 	if q.db != nil {
 		if err := dbFailJob(q.db, job.ID, errMsg); err != nil {
-			loggerQueue.Error("error failing job in DB", "job_id", job.ID, "error", err)
+			if errors.Is(err, errJobAlreadyTerminal) {
+				loggerQueue.Warn("DB fail skipped: job row already terminal (lost race to another terminal write)",
+					"job_id", job.ID, "error", err)
+			} else {
+				loggerQueue.Error("error failing job in DB", "job_id", job.ID, "error", err)
+			}
 		}
 	}
 }
@@ -798,10 +941,6 @@ func (q *JobQueue) recoverJobs(ctx context.Context) {
 			default:
 				loggerQueue.Warn("queue full during recovery, dropping job", "job_id", job.ID)
 				q.failJob(job, "queue full during recovery")
-				q.mu.Lock()
-				job.CompletedAt = ptrTime(time.Now().UTC())
-				job.closeOnce.Do(func() { close(job.done) })
-				q.mu.Unlock()
 			}
 
 		case StatusRunning:
@@ -824,10 +963,6 @@ func (q *JobQueue) recoverJobs(ctx context.Context) {
 				default:
 					loggerQueue.Warn("queue full during recovery, dropping job", "job_id", job.ID)
 					q.failJob(job, "queue full during recovery")
-					q.mu.Lock()
-					job.CompletedAt = ptrTime(time.Now().UTC())
-					job.closeOnce.Do(func() { close(job.done) })
-					q.mu.Unlock()
 				}
 				q.orderMu.Lock()
 				job.QueuedIndex = len(q.queuedOrder)
@@ -877,17 +1012,30 @@ func (q *JobQueue) recoverRunningJob(_ context.Context, job *Job, comfyPromptID 
 	recoverCtx, recoverCancel := context.WithTimeout(context.Background(), time.Duration(cfg.Comfy.Timeout)*time.Second)
 	defer recoverCancel()
 
+	// Wire the recovery context into the job so Cancel() can abort the
+	// resume monitor promptly — without this, a cancelled job's recovery
+	// ground on for the full Comfy.Timeout before failing (and its failJob
+	// then fought the cancel). Set under q.mu like processJob does.
+	q.mu.Lock()
+	job.cancelCtx = recoverCancel
+	q.mu.Unlock()
+
 	comfyResult, err := resumeComfyGeneration(recoverCtx, cfg, job.Workflow, comfyPromptID)
 	if err != nil {
+		// A Cancel() that raced us cancels recoverCtx (wired above) — the
+		// error is a symptom of the cancellation, not a real failure, and
+		// failJob would fight Cancel's own terminal write (mirrors the
+		// cancelled-check in processJob's monitor path). Either check alone
+		// can lose the race window, so check both.
+		q.mu.RLock()
+		cancelled := job.Status == StatusCancelled
+		q.mu.RUnlock()
+		if cancelled || errors.Is(err, context.Canceled) {
+			loggerQueue.Info("recovery aborted by cancel", "job_id", job.ID, "error", err)
+			return
+		}
 		loggerQueue.Error("failed to recover job", "job_id", job.ID, "error", err)
 		q.failJob(job, fmt.Sprintf("recovery failed: %v", err))
-		q.mu.Lock()
-		job.CompletedAt = ptrTime(time.Now().UTC())
-		job.closeOnce.Do(func() { close(job.done) })
-		q.mu.Unlock()
-		q.statsMu.Lock()
-		q.failedCount++
-		q.statsMu.Unlock()
 		return
 	}
 
@@ -930,24 +1078,9 @@ func (q *JobQueue) recoverRunningJob(_ context.Context, job *Job, comfyPromptID 
 		jobResult.Images = append(jobResult.Images, imgData)
 	}
 
-	q.mu.Lock()
-	job.Result = jobResult
-	job.Status = StatusCompleted
-	job.CompletedAt = ptrTime(time.Now().UTC())
-	job.closeOnce.Do(func() { close(job.done) })
-	q.mu.Unlock()
-
-	q.statsMu.Lock()
-	q.completedCount++
-	q.statsMu.Unlock()
-
-	if q.db != nil {
-		if err := dbCompleteJob(q.db, job.ID, jobResult, comfyImgs); err != nil {
-			loggerQueue.Error("error completing recovered job in DB", "job_id", job.ID, "error", err)
-		}
+	if q.completeJob(job, jobResult, comfyImgs) {
+		loggerQueue.Info("successfully recovered job", "job_id", job.ID)
 	}
-
-	loggerQueue.Info("successfully recovered job", "job_id", job.ID)
 }
 
 func isTerminalStatus(status JobStatus) bool {

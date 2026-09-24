@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -97,6 +99,94 @@ func TestCallGenerationToolsWithoutInjectFields(t *testing.T) {
 			require.False(t, res.IsError, "tool call should not return an error result: %s", strings.Join(texts, "; "))
 		})
 	}
+}
+
+// TestJobReadersRaceFreeWhileCompleting pins the fix for unlocked job-field
+// readers in the tool handlers: job_status / list_jobs / wait_for_job must
+// observe the job through a snapshot taken under JobQueue.mu, never through
+// the live *Job that Get/WaitForJob/ListJobs used to hand out. The writer
+// below mimics processJob's lifecycle writes (same fields, same q.mu
+// discipline) while readers poll the tool handlers; under -race the pre-fix
+// code is flagged because jobToStatusOutput / handleWaitForJob read
+// Status/Result/StartedAt/CompletedAt with no lock at all.
+func TestJobReadersRaceFreeWhileCompleting(t *testing.T) {
+	cfg := testConfig("http://127.0.0.1:0")
+	q := queuedTestQueue(t) // no workers: the job stays put while we flip its state
+	h := NewToolHandlers(cfg, q)
+
+	job := submitTestJob(t, q)
+
+	ctx := context.Background()
+	stop := make(chan struct{})
+	var readers sync.WaitGroup
+
+	poll := func(f func()) {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				f()
+			}
+		}()
+	}
+
+	poll(func() { _, _, _ = h.handleJobStatus(ctx, nil, JobStatusInput{JobID: job.ID}) })
+	poll(func() { _, _, _ = h.handleListJobs(ctx, nil, ListJobsInput{}) })
+	// Timeout is in whole seconds; during non-terminal phases this poller
+	// blocks in WaitForJob, but every completed phase returns immediately
+	// through the terminal fast path — which is exactly the read that used
+	// to race (live *Job returned to the handler).
+	poll(func() { _, _, _ = h.handleWaitForJob(ctx, nil, WaitForJobInput{JobID: job.ID, Timeout: 1}) })
+
+	// Writer: cycle queued→running→completed exactly like processJob does —
+	// every mutation under q.mu, terminal writes last. done is never closed
+	// on purpose: readers must be safe regardless of waiter wakeups.
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		now := time.Now().UTC()
+
+		q.mu.Lock()
+		job.Status = StatusRunning
+		job.StartedAt = &now
+		q.mu.Unlock()
+
+		q.mu.Lock()
+		job.Result = &JobResult{Images: []ImageData{{MIMEType: "image/png", Base64: "eA=="}}}
+		job.Status = StatusCompleted
+		job.CompletedAt = &now
+		q.mu.Unlock()
+
+		// Back to a non-terminal state so the next iteration exercises the
+		// queued/running reader paths (including WaitForJob's timeout
+		// branch) as well.
+		q.mu.Lock()
+		job.Status = StatusQueued
+		job.Result = nil
+		job.CompletedAt = nil
+		q.mu.Unlock()
+	}
+
+	// Leave the job terminally completed; after the readers stop, a final
+	// read must agree with the in-memory state.
+	q.mu.Lock()
+	now := time.Now().UTC()
+	job.Status = StatusCompleted
+	job.CompletedAt = &now
+	job.Result = &JobResult{}
+	q.mu.Unlock()
+
+	close(stop)
+	readers.Wait()
+
+	_, out, err := h.handleJobStatus(ctx, nil, JobStatusInput{JobID: job.ID})
+	require.NoError(t, err)
+	assert.Equal(t, string(StatusCompleted), out.Status)
+	assert.Equal(t, job.ID, out.JobID)
 }
 
 func TestToolHandlersConfigSwap(t *testing.T) {

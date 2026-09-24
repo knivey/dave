@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,15 @@ import (
 	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 )
+
+// errJobAlreadyTerminal is returned by the fenced updates below
+// (dbCompleteJob/dbFailJob/dbCancelJob/dbUpdateJobRunning) when their
+// guarded UPDATE matched no row: another write already won the race (or
+// the row is gone). In-memory job state stays authoritative — callers log
+// the skip and move on; terminal rows keep the FIRST terminal transition
+// so a restart mid-race can't resurface the job with the wrong terminal
+// status.
+var errJobAlreadyTerminal = errors.New("job already reached a terminal status")
 
 //go:embed migrations/*.sql
 var embedMigrations embed.FS
@@ -96,12 +106,23 @@ func dbInsertJob(db *sqlx.DB, job *Job) error {
 	return err
 }
 
+// dbUpdateJobRunning is fenced like the terminal updates: only a queued row
+// may become running. A cancelled row must stay cancelled — an unconditional
+// update here would resurrect the row into the terminal guard set, letting a
+// later dbCompleteJob legitimately overwrite the user's cancel.
 func dbUpdateJobRunning(db *sqlx.DB, jobID string) error {
-	_, err := db.Exec(
-		`UPDATE jobs SET status = ?, started_at = CURRENT_TIMESTAMP WHERE job_id = ?`,
+	res, err := db.Exec(
+		`UPDATE jobs SET status = ?, started_at = CURRENT_TIMESTAMP
+		 WHERE job_id = ? AND status = 'queued'`,
 		string(StatusRunning), jobID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errJobAlreadyTerminal
+	}
+	return nil
 }
 
 func dbUpdateJobComfyPromptID(db *sqlx.DB, jobID, comfyPromptID string) error {
@@ -112,6 +133,11 @@ func dbUpdateJobComfyPromptID(db *sqlx.DB, jobID, comfyPromptID string) error {
 	return err
 }
 
+// dbUpdateJobStatus is deliberately UNfenced: it is only used by
+// recoverJobs' running→queued requeue, which runs synchronously inside
+// NewJobQueue before MCP serving starts, so no Cancel/terminal write can
+// race it. If recovery ever moves off the startup path, fence it like its
+// siblings first.
 func dbUpdateJobStatus(db *sqlx.DB, jobID string, status JobStatus) error {
 	_, err := db.Exec(
 		`UPDATE jobs SET status = ? WHERE job_id = ?`,
@@ -131,12 +157,22 @@ func dbCompleteJob(db *sqlx.DB, jobID string, result *JobResult, comfyImages []C
 		return fmt.Errorf("result is nil for job %s", jobID)
 	}
 
-	_, err = tx.Exec(
-		`UPDATE jobs SET status = ?, completed_at = CURRENT_TIMESTAMP WHERE job_id = ?`,
+	// Terminal-update fence: only flip a row that is still queued/running.
+	// Concurrent terminal writes (e.g. Cancel racing processJob) run outside
+	// q.mu and could otherwise land in either order, leaving the DB
+	// disagreeing with the in-memory winner. Rows-affected tells the loser
+	// to skip — including the image inserts below, which the deferred
+	// rollback then discards.
+	res, err := tx.Exec(
+		`UPDATE jobs SET status = ?, completed_at = CURRENT_TIMESTAMP
+		 WHERE job_id = ? AND status IN ('queued', 'running')`,
 		string(StatusCompleted), jobID,
 	)
 	if err != nil {
 		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errJobAlreadyTerminal
 	}
 
 	for i, img := range result.Images {
@@ -160,19 +196,37 @@ func dbCompleteJob(db *sqlx.DB, jobID string, result *JobResult, comfyImages []C
 }
 
 func dbFailJob(db *sqlx.DB, jobID, jobError string) error {
-	_, err := db.Exec(
-		`UPDATE jobs SET status = ?, error = ?, completed_at = CURRENT_TIMESTAMP WHERE job_id = ?`,
+	// Terminal-update fence: see dbCompleteJob. The error string rides the
+	// same guarded statement so a cancel that wins the race can never end
+	// up with "generation failed: context canceled" stamped on its row.
+	res, err := db.Exec(
+		`UPDATE jobs SET status = ?, error = ?, completed_at = CURRENT_TIMESTAMP
+		 WHERE job_id = ? AND status IN ('queued', 'running')`,
 		string(StatusFailed), jobError, jobID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errJobAlreadyTerminal
+	}
+	return nil
 }
 
 func dbCancelJob(db *sqlx.DB, jobID string) error {
-	_, err := db.Exec(
-		`UPDATE jobs SET status = ?, completed_at = CURRENT_TIMESTAMP WHERE job_id = ?`,
+	// Terminal-update fence: see dbCompleteJob.
+	res, err := db.Exec(
+		`UPDATE jobs SET status = ?, completed_at = CURRENT_TIMESTAMP
+		 WHERE job_id = ? AND status IN ('queued', 'running')`,
 		string(StatusCancelled), jobID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errJobAlreadyTerminal
+	}
+	return nil
 }
 
 func dbLoadRecoverableJobs(db *sqlx.DB) ([]dbJob, error) {

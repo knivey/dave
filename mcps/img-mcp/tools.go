@@ -575,7 +575,7 @@ func (h *ToolHandlers) handleServerStatus(ctx context.Context, req *mcp.CallTool
 	return nil, ServerStatusOutput{Ready: ready}, nil
 }
 
-func jobToStatusOutput(job *Job) JobStatusOutput {
+func jobToStatusOutput(job JobSnapshot) JobStatusOutput {
 	out := JobStatusOutput{
 		JobID:     job.ID,
 		Status:    string(job.Status),

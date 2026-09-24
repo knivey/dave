@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -422,4 +424,247 @@ func TestCancelDuringMonitorKeepsJobCancelled(t *testing.T) {
 	assert.Equal(t, StatusCancelled, job.Status, "final status should be cancelled")
 	assert.Empty(t, job.Error, "cancelled job must not carry a generation-failure error")
 	assert.Equal(t, 0, q.Status().Failed, "cancelled job must not count as failed")
+}
+
+// manualQueueLiteral builds a zero-worker JobQueue for tests that drive
+// processJob/recoverRunningJob directly. The real worker would race the
+// manual invocation for the same job.
+func manualQueueLiteral(t *testing.T, cfg Config) *JobQueue {
+	t.Helper()
+	db := setupTestDB(t)
+	_, cancel := context.WithCancel(context.Background())
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
+	q := &JobQueue{
+		cfg:            cfg,
+		db:             db,
+		pending:        make(chan *Job, cfg.Queue.MaxDepth),
+		results:        make(map[string]*Job),
+		cancel:         cancel,
+		shutdownCtx:    shutdownCtx,
+		shutdownCancel: shutdownCancel,
+	}
+	t.Cleanup(func() { q.Stop() })
+	return q
+}
+
+// markRunningInMemoryAndDB flips a freshly submitted job to the running
+// state in memory and in the DB, mimicking what recovery finds on restart.
+func markRunningInMemoryAndDB(t *testing.T, q *JobQueue, job *Job, comfyPromptID string) {
+	t.Helper()
+	require.NoError(t, dbUpdateJobRunning(q.db, job.ID), "dbUpdateJobRunning")
+	q.mu.Lock()
+	now := time.Now().UTC()
+	job.Status = StatusRunning
+	job.StartedAt = &now
+	job.ComfyPromptID = comfyPromptID
+	q.mu.Unlock()
+}
+
+// TestFailJobDoesNotOverwriteCancelled pins memory-side first-write-wins
+// for failures: Cancel() flips the job to cancelled under q.mu, and a
+// failJob that lost the race (e.g. the monitor errored out just as the
+// user cancelled) must leave both the in-memory state and the DB row
+// untouched. Pre-fix, memory said failed while the fenced DB row said
+// cancelled — exactly the divergence a restart would surface.
+func TestFailJobDoesNotOverwriteCancelled(t *testing.T) {
+	cfg := testConfig("http://127.0.0.1:0")
+	cfg.Queue.MaxWorkers = 0
+	q := manualQueueLiteral(t, cfg)
+
+	job := submitTestJob(t, q)
+	require.True(t, q.Cancel(job.ID), "Cancel")
+
+	q.failJob(job, "boom")
+
+	assertJobStatus(t, q, job.ID, StatusCancelled)
+	q.mu.RLock()
+	jobErr := job.Error
+	q.mu.RUnlock()
+	assert.Empty(t, jobErr, "losing failJob must not stamp its error on a cancelled job")
+	assert.Equal(t, string(StatusCancelled), dbJobStatus(t, q.db, job.ID), "DB status")
+}
+
+// TestProcessJobAbortsWhenCancelledBeforeStart covers the dequeue race:
+// Cancel()'s channel send is non-blocking and is dropped unless the worker
+// is parked exactly at its check, so a job can be cancelled in memory and
+// the DB while the worker is already inside processJob. The queued->running
+// flip must re-validate and abort instead of resurrecting the cancel (in
+// memory via the unconditional flip, in the DB via the unconditional
+// dbUpdateJobRunning + a subsequent dbCompleteJob that would then win the
+// terminal fence against a re-opened row).
+func TestProcessJobAbortsWhenCancelledBeforeStart(t *testing.T) {
+	mockComfy := newMockComfyFlowServer(t)
+	cfg := testConfig(mockComfy.URL())
+	wc := cfg.Workflows["test"]
+	wc.WorkflowPath = mustWriteWorkflow(t, t.TempDir())
+	cfg.Workflows["test"] = wc
+	cfg.Queue.MaxWorkers = 0
+	q := manualQueueLiteral(t, cfg)
+
+	job := submitTestJob(t, q)
+	require.True(t, q.Cancel(job.ID), "Cancel")
+
+	// The worker already pulled the job past its cancel-channel check when
+	// Cancel landed — run the processing path directly.
+	q.processJob(context.Background(), job)
+
+	assertJobStatus(t, q, job.ID, StatusCancelled)
+	assert.Equal(t, string(StatusCancelled), dbJobStatus(t, q.db, job.ID), "DB status")
+	assert.Empty(t, mockComfy.submittedPrompts(), "cancelled job must never reach comfy")
+	waitForJobDone(t, job, time.Second) // Cancel must have closed done already
+}
+
+// blockingUploadServer mimics the upload wire protocol but parks each
+// /updo request until released, giving tests a deterministic window where
+// processJob sits between monitor completion and its terminal transition.
+type blockingUploadServer struct {
+	server  *httptest.Server
+	arrived chan struct{}
+	release chan struct{}
+}
+
+func newBlockingUploadServer(t *testing.T) *blockingUploadServer {
+	t.Helper()
+	b := &blockingUploadServer{
+		arrived: make(chan struct{}, 16),
+		release: make(chan struct{}),
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/updo", func(w http.ResponseWriter, r *http.Request) {
+		b.arrived <- struct{}{}
+		<-b.release
+		w.Header().Set("Location", "/4F4/_test-image")
+		w.WriteHeader(http.StatusSeeOther)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "/file/abc123/test-image.png")
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	})
+	b.server = httptest.NewServer(mux)
+	t.Cleanup(b.server.Close)
+	return b
+}
+
+// TestCancelDuringUploadKeepsJobCancelled pins memory-side first-write-wins
+// for the success path: cancel lands while processJob is uploading the
+// finished image (uploadImage takes no job context). The completion must
+// not overwrite the cancel in memory or count as completed.
+func TestCancelDuringUploadKeepsJobCancelled(t *testing.T) {
+	mockComfy := newMockComfyFlowServer(t)
+	up := newBlockingUploadServer(t)
+
+	cfg := testConfig(mockComfy.URL())
+	wc := cfg.Workflows["test"]
+	wc.WorkflowPath = mustWriteWorkflow(t, t.TempDir())
+	cfg.Workflows["test"] = wc
+	cfg.Upload.URL = up.server.URL
+
+	q, cleanup := setupTestQueue(t, cfg) // single real worker
+	defer cleanup()
+
+	job, err := q.Submit(JobTypeGenerate, "test", JobInput{Prompt: "a cat", OutputFormat: "url"})
+	require.NoError(t, err, "Submit")
+
+	select {
+	case <-up.arrived:
+	case <-time.After(15 * time.Second):
+		t.Fatal("upload never started — monitor did not complete")
+	}
+
+	require.True(t, q.Cancel(job.ID), "Cancel while the worker is mid-upload")
+
+	// Drain the parked upload, then prove the worker finished job's
+	// processing by completing a canary behind it (one worker ⇒ serial).
+	close(up.release)
+	canary, err := q.Submit(JobTypeGenerate, "test", JobInput{Prompt: "a dog", OutputFormat: "base64"})
+	require.NoError(t, err, "Submit canary")
+	waitForJobDone(t, canary, 15*time.Second)
+	assertJobStatus(t, q, canary.ID, StatusCompleted)
+
+	assertJobStatus(t, q, job.ID, StatusCancelled)
+	q.mu.RLock()
+	result := job.Result
+	jobErr := job.Error
+	q.mu.RUnlock()
+	assert.Nil(t, result, "cancelled job must not gain a result from the losing completion")
+	assert.Empty(t, jobErr, "cancelled job must not carry the losing completion's state")
+	assert.Equal(t, string(StatusCancelled), dbJobStatus(t, q.db, job.ID), "DB status")
+	assert.Equal(t, 0, jobImageCount(t, q.db, job.ID), "no images may be persisted for the cancelled job")
+	assert.Equal(t, 1, q.Status().Completed, "only the canary may count as completed")
+	assert.Equal(t, 0, q.Status().Failed, "cancelled job must not count as failed")
+}
+
+// TestRecoverRunningJobUploadFailureClosesDone pins the waiter hang on the
+// recovery upload-failure path: it called failJob and returned without the
+// terminal bookkeeping, so done stayed open and wait_for_job / sync tools
+// blocked until their full timeout.
+func TestRecoverRunningJobUploadFailureClosesDone(t *testing.T) {
+	mockComfy := newMockComfyFlowServer(t)
+	failingUpload := newFakeUploadServer(t)
+	failingUpload.updoStatus = http.StatusInternalServerError
+
+	cfg := testConfig(mockComfy.URL())
+	cfg.Upload.URL = failingUpload.server.URL
+	cfg.Queue.MaxWorkers = 0
+	q := manualQueueLiteral(t, cfg)
+
+	job := submitTestJob(t, q) // OutputFormat "" -> url -> upload fails
+	markRunningInMemoryAndDB(t, q, job, "test-prompt-1")
+
+	q.wg.Add(1)
+	go q.recoverRunningJob(context.Background(), job, "test-prompt-1")
+
+	waitForJobDone(t, job, 10*time.Second)
+
+	assertJobStatus(t, q, job.ID, StatusFailed)
+	q.mu.RLock()
+	jobErr := job.Error
+	q.mu.RUnlock()
+	assert.Contains(t, jobErr, "upload failed during recovery")
+	assert.Equal(t, string(StatusFailed), dbJobStatus(t, q.db, job.ID), "DB status")
+}
+
+// TestCancelAbortsRecoveryPromptly covers Cancel() racing a
+// recoverRunningJob: recovery never wired job.cancelCtx, so a cancel could
+// not stop the resume monitor — the recovery ground on for the full
+// Comfy.Timeout and its failJob then overwrote the cancel. The recovery
+// context must be wired so Cancel aborts the monitor promptly, and the
+// failure must not overwrite the cancelled state.
+func TestCancelAbortsRecoveryPromptly(t *testing.T) {
+	silent := newSilentComfyServer(t, 0) // history never becomes ready
+	cfg := testConfig(silent.server.URL)
+	cfg.Comfy.Timeout = 5
+	cfg.Queue.MaxWorkers = 0
+	q := manualQueueLiteral(t, cfg)
+
+	job := submitTestJob(t, q)
+	markRunningInMemoryAndDB(t, q, job, "test-prompt-1")
+
+	finished := make(chan struct{})
+	q.wg.Add(1)
+	go func() {
+		defer close(finished)
+		q.recoverRunningJob(context.Background(), job, "test-prompt-1")
+	}()
+
+	select {
+	case <-silent.wsConnected:
+	case <-time.After(10 * time.Second):
+		t.Fatal("recovery never connected to the monitor websocket")
+	}
+
+	require.True(t, q.Cancel(job.ID), "Cancel")
+
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("recovery must abandon promptly once the job is cancelled (cancelCtx must be wired)")
+	}
+
+	assertJobStatus(t, q, job.ID, StatusCancelled)
+	q.mu.RLock()
+	jobErr := job.Error
+	q.mu.RUnlock()
+	assert.Empty(t, jobErr, "cancelled job must not be overwritten by the recovery failure")
+	assert.Equal(t, string(StatusCancelled), dbJobStatus(t, q.db, job.ID), "DB status")
 }

@@ -277,6 +277,56 @@ func nullStr(s string) *string {
 	return &s
 }
 
+// dbGetImagesWithWorkflow returns every row carrying an embedded workflow
+// graph (hidden rows included — re-extraction is metadata-only and must not
+// resurrect or alter visibility state).
+func dbGetImagesWithWorkflow(db *sqlx.DB) ([]dbImage, error) {
+	var rows []dbImage
+	err := db.Select(&rows,
+		`SELECT * FROM images WHERE workflow_json IS NOT NULL AND workflow_json != '' ORDER BY id ASC`)
+	return rows, err
+}
+
+// dbUpdateImageMetadata rewrites exactly the metadata columns the upload
+// INSERT writes — never thumb_status, hidden, sha256, filename, mime_type,
+// size_bytes, or created_at. Updating original_prompt/enhanced_prompt fires
+// the FTS 'delete' dance via the images_fts_au trigger, so search stays in
+// sync with the rewritten prompts. width/height use COALESCE — fresh graph
+// dims win when present, but a graph with no recognizable latent source
+// must not NULL out dimensions the thumb worker backfilled from the decoded
+// image (that ownership rule mirrors dbUpdateThumbReady's own
+// fill-only-when-NULL COALESCE).
+func dbUpdateImageMetadata(db *sqlx.DB, img *dbImage) error {
+	_, err := db.NamedExec(
+		`UPDATE images SET
+			original_prompt = :original_prompt,
+			enhanced_prompt = :enhanced_prompt,
+			negative_prompt = :negative_prompt,
+			reasoning = :reasoning,
+			job_id = :job_id,
+			llm_generated = :llm_generated,
+			network = :network,
+			channel = :channel,
+			nick = :nick,
+			workflow_name = :workflow_name,
+			seed = :seed,
+			steps = :steps,
+			cfg = :cfg,
+			denoise = :denoise,
+			sampler = :sampler,
+			scheduler = :scheduler,
+			model_unet = :model_unet,
+			model_clip = :model_clip,
+			model_vae = :model_vae,
+			loras = :loras,
+			workflow_json = :workflow_json,
+			width = COALESCE(:width, width),
+			height = COALESCE(:height, height),
+			meta_source = :meta_source
+		 WHERE id = :id`, img)
+	return err
+}
+
 func ptrValue[T any](p *T) T {
 	if p == nil {
 		var zero T

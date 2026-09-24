@@ -790,3 +790,93 @@ func TestDeletedImageExcludedEverywhere(t *testing.T) {
 		assert.Contains(t, body, "no results for needle", "empty state after the only hit vanished")
 	})
 }
+
+func TestAdminReextractHealsGGUFRows(t *testing.T) {
+	app := newTestApp(t, testConfig())
+	ts := newTestServer(t, app)
+
+	// A row in the exact state the production bug left behind: the GGUF
+	// workflow parsed at upload, but the loader exact-match dropped the
+	// unet/clip while VAE (core class) and provenance survived.
+	insertImageWithFile(t, app, "gguf0001", pngBytes("gguf"),
+		func(img *dbImage) {
+			img.WorkflowJSON = ggufGraph()
+			// Deliberately WRONG stored prompt: the re-extract must heal
+			// it from the note node AND keep FTS in sync through the
+			// images_fts_au trigger dance (first prompt UPDATE in the
+			// codebase — pinned here).
+			img.OriginalPrompt = "wrong prompt stored"
+			img.JobID = ptrStr("gguf0001")
+			network, channel, nick := "libera", "#dave", "knivey"
+			img.Network, img.Channel, img.Nick = &network, &channel, &nick
+			img.WorkflowName = ptrStr("qwenHD")
+			img.ModelVae = ptrStr("qwen_image_vae.safetensors")
+			img.MetaSource = "upload+exif"
+		},
+		func(img *dbImage) { img.CreatedAt = "2026-09-24 16:10:00" },
+	)
+	// A row whose stored workflow_json no longer parses must be skipped
+	// with its stored metadata intact.
+	insertImageWithFile(t, app, "broken01", pngBytes("broken"),
+		func(img *dbImage) {
+			img.WorkflowJSON = "{not json"
+			img.OriginalPrompt = "keep me"
+		},
+	)
+
+	// Auth required.
+	resp, err := http.Post(ts.URL+"/admin/reextract", "application/json", nil)
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/admin/reextract", nil)
+	req.Header.Set("X-API-Key", testAPIKey)
+	resp, err = http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	var out struct {
+		Considered int `json:"considered"`
+		Updated    int `json:"updated"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+	assert.Equal(t, 2, out.Considered)
+	assert.Equal(t, 1, out.Updated, "unparseable row is skipped, not counted")
+
+	healed, err := dbGetImageByID(app.db, "gguf0001")
+	require.NoError(t, err)
+	assert.Equal(t, "qwen-image-2512-Q8_0.gguf", ptrValue(healed.ModelUnet),
+		"re-extract must heal the GGUF unet — the production bug")
+	assert.Equal(t, "Qwen2.5-VL-7B-Instruct-UD-Q8_K_XL.gguf", ptrValue(healed.ModelClip))
+	assert.Equal(t, "qwen_image_vae.safetensors", ptrValue(healed.ModelVae))
+	assert.Equal(t, "libera", ptrValue(healed.Network), "provenance round-trips")
+	assert.Equal(t, "#dave", ptrValue(healed.Channel))
+	assert.Equal(t, "knivey", ptrValue(healed.Nick))
+	assert.Equal(t, "qwenHD", ptrValue(healed.WorkflowName))
+	assert.Equal(t, "a shrew on main street", healed.OriginalPrompt, "note-node prompt preserved")
+	require.NotNil(t, healed.Width)
+	assert.Equal(t, 1920, *healed.Width)
+	assert.False(t, healed.Hidden, "visibility untouched")
+
+	skipped, err := dbGetImageByID(app.db, "broken01")
+	require.NoError(t, err)
+	assert.Equal(t, "keep me", skipped.OriginalPrompt, "unparseable row keeps stored metadata")
+
+	// FTS stayed in sync through the prompt rewrite: the healed prompt
+	// matches, the stale one doesn't.
+	sresp, err := http.Get(ts.URL + "/search-fragment?q=shrew")
+	require.NoError(t, err)
+	sbody, err := io.ReadAll(sresp.Body)
+	sresp.Body.Close()
+	require.NoError(t, err)
+	assert.Contains(t, string(sbody), "gguf0001", "healed prompt must be searchable")
+	sresp, err = http.Get(ts.URL + "/search-fragment?q=wrong")
+	require.NoError(t, err)
+	sbody, err = io.ReadAll(sresp.Body)
+	sresp.Body.Close()
+	require.NoError(t, err)
+	assert.NotContains(t, string(sbody), "gguf0001", "stale pre-heal tokens must be gone from the index")
+}
+
+func ptrStr(s string) *string { return &s }

@@ -213,38 +213,15 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	img := dbImage{
-		ID:             id,
-		SHA256:         hashHex,
-		Filename:       filename,
-		MimeType:       mimeType,
-		SizeBytes:      int64(len(data)),
-		CreatedAt:      time.Now().UTC().Format(dbTimeFormat),
-		ThumbStatus:    thumbStatusPending,
-		OriginalPrompt: merged.OriginalPrompt,
-		EnhancedPrompt: merged.EnhancedPrompt,
-		NegativePrompt: merged.NegativePrompt,
-		Reasoning:      merged.Reasoning,
-		JobID:          nullStr(merged.JobID),
-		LLMGenerated:   merged.LLMGenerated,
-		Network:        nullStr(merged.Network),
-		Channel:        nullStr(merged.Channel),
-		Nick:           nullStr(merged.Nick),
-		WorkflowName:   nullStr(merged.WorkflowName),
-		Seed:           merged.Seed,
-		Steps:          merged.Steps,
-		Cfg:            merged.Cfg,
-		Denoise:        merged.Denoise,
-		Sampler:        nullStr(merged.Sampler),
-		Scheduler:      nullStr(merged.Scheduler),
-		ModelUnet:      nullStr(merged.ModelUnet),
-		ModelClip:      nullStr(merged.ModelClip),
-		ModelVae:       nullStr(merged.ModelVae),
-		Loras:          nullStr(merged.LorasJSON),
-		WorkflowJSON:   merged.WorkflowJSON,
-		Width:          merged.Width,
-		Height:         merged.Height,
-		MetaSource:     merged.MetaSource,
+		ID:          id,
+		SHA256:      hashHex,
+		Filename:    filename,
+		MimeType:    mimeType,
+		SizeBytes:   int64(len(data)),
+		CreatedAt:   time.Now().UTC().Format(dbTimeFormat),
+		ThumbStatus: thumbStatusPending,
 	}
+	applyMergedMetadata(&img, merged)
 	if err := dbInsertImage(a.db, &img); err != nil {
 		loggerUpload.Error("db insert failed", "id", id, "error", err)
 		http.Error(w, "storage failure", http.StatusInternalServerError)
@@ -394,6 +371,65 @@ func mergeUploadMetadata(meta UploadMeta, md extractedMetadata, exifOK bool) mer
 		m.MetaSource = metaSourceUpload
 	}
 	return m
+}
+
+// applyMergedMetadata writes a merge result into a row's metadata columns.
+// Shared by the upload INSERT and the admin re-extract so both paths map
+// identical fields with identical NULL semantics.
+func applyMergedMetadata(img *dbImage, merged mergedUploadMetadata) {
+	img.OriginalPrompt = merged.OriginalPrompt
+	img.EnhancedPrompt = merged.EnhancedPrompt
+	img.NegativePrompt = merged.NegativePrompt
+	img.Reasoning = merged.Reasoning
+	img.JobID = nullStr(merged.JobID)
+	img.LLMGenerated = merged.LLMGenerated
+	img.Network = nullStr(merged.Network)
+	img.Channel = nullStr(merged.Channel)
+	img.Nick = nullStr(merged.Nick)
+	img.WorkflowName = nullStr(merged.WorkflowName)
+	img.Seed = merged.Seed
+	img.Steps = merged.Steps
+	img.Cfg = merged.Cfg
+	img.Denoise = merged.Denoise
+	img.Sampler = nullStr(merged.Sampler)
+	img.Scheduler = nullStr(merged.Scheduler)
+	img.ModelUnet = nullStr(merged.ModelUnet)
+	img.ModelClip = nullStr(merged.ModelClip)
+	img.ModelVae = nullStr(merged.ModelVae)
+	img.Loras = nullStr(merged.LorasJSON)
+	img.WorkflowJSON = merged.WorkflowJSON
+	img.Width = merged.Width
+	img.Height = merged.Height
+	img.MetaSource = merged.MetaSource
+}
+
+// rowToUploadMeta rebuilds the meta side of the merge from a row's stored
+// values. Used by re-extraction: the stored prompt/quartet fields (which
+// originally came from EXIF at upload time) are fed back as "meta" so the
+// cross-check compares fresh-EXIF vs stored-EXIF — a mismatch means the
+// extraction rules changed the answer, and the fresh EXIF side wins.
+// Provenance columns (which came from the original upload meta) round-trip
+// untouched. LLMGenerated is always non-nil here: the stored value is the
+// best known answer. Side effect: the non-nil pointer makes the merge see
+// "meta contributed", so every re-extracted row's meta_source normalizes
+// to "upload+exif" — even rows originally uploaded EXIF-only ("exif").
+// meta_source is informational only (nothing reads it at runtime), and
+// distinguishing heal-generations from upload-generations isn't worth the
+// plumbing; documented here so the normalization is a choice, not a bug.
+func rowToUploadMeta(img *dbImage) UploadMeta {
+	llm := img.LLMGenerated
+	return UploadMeta{
+		JobID:          ptrValue(img.JobID),
+		OriginalPrompt: img.OriginalPrompt,
+		EnhancedPrompt: img.EnhancedPrompt,
+		NegativePrompt: img.NegativePrompt,
+		Reasoning:      img.Reasoning,
+		LLMGenerated:   &llm,
+		WorkflowName:   ptrValue(img.WorkflowName),
+		Network:        ptrValue(img.Network),
+		Channel:        ptrValue(img.Channel),
+		Nick:           ptrValue(img.Nick),
+	}
 }
 
 // uploadMetaPresent reports whether the form meta carried any information

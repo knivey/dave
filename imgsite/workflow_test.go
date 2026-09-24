@@ -253,3 +253,92 @@ func TestParsePromptPayload(t *testing.T) {
 		assert.False(t, ok)
 	})
 }
+
+// ggufGraph mirrors the production qwenHD workflow (i.shrews.xyz/Xr8HDUL,
+// Sep 2026) whose models were silently dropped by the original exact-match
+// loader rules: the ComfyUI-GGUF pack registers "UnetLoaderGGUF" (lowercase
+// "net", unlike core UNETLoader) and "CLIPLoaderGGUF", while VAELoader is
+// the core class. The LoRA chains between the GGUF unet and the sampler.
+func ggufGraph() string {
+	graph := map[string]any{
+		"256": map[string]any{"class_type": "CLIPTextEncode", "inputs": map[string]any{"text": "enhanced text"}},
+		"257": map[string]any{"class_type": "EmptyLatentImage", "inputs": map[string]any{"width": 1920, "height": 1088}},
+		"258": map[string]any{"class_type": "UnetLoaderGGUF", "inputs": map[string]any{"unet_name": "qwen-image-2512-Q8_0.gguf"}},
+		"259": map[string]any{"class_type": "VAELoader", "inputs": map[string]any{"vae_name": "qwen_image_vae.safetensors"}},
+		"260": map[string]any{"class_type": "KSampler", "inputs": map[string]any{
+			"seed": 7, "steps": 4, "cfg": 1.0, "denoise": 1.0,
+			"sampler_name": "euler", "scheduler": "simple",
+			"positive": []any{"256", 0}, "negative": []any{"261", 0},
+			"model": []any{"269", 0},
+		}},
+		"261": map[string]any{"class_type": "CLIPLoaderGGUF", "inputs": map[string]any{
+			"clip_name": "Qwen2.5-VL-7B-Instruct-UD-Q8_K_XL.gguf", "type": "qwen_image"}},
+		"262": map[string]any{"class_type": "ConditioningZeroOut", "inputs": map[string]any{"conditioning": []any{"256", 0}}},
+		"269": map[string]any{"class_type": "LoraLoaderModelOnly", "inputs": map[string]any{
+			"lora_name":      "Qwen-Image-2512-Lightning-4steps-V1.0-bf16.safetensors",
+			"strength_model": 1.0, "model": []any{"258", 0}}},
+		"dave_original_prompt": map[string]any{"class_type": "CLIPTextEncode", "inputs": map[string]any{
+			"text": `{"prompt":"a shrew on main street","llm_generated":false,"job_id":"gguf0001"}`}},
+	}
+	b, _ := json.Marshal(graph)
+	return string(b)
+}
+
+func TestExtractMetadataGGUFLoaders(t *testing.T) {
+	md, ok := ExtractMetadata(ggufGraph())
+	require.True(t, ok)
+	assert.Equal(t, "qwen-image-2512-Q8_0.gguf", md.ModelUnet,
+		"UnetLoaderGGUF (lowercase net) must parse — this is the production bug")
+	assert.Equal(t, "Qwen2.5-VL-7B-Instruct-UD-Q8_K_XL.gguf", md.ModelClip,
+		"CLIPLoaderGGUF must parse")
+	assert.Equal(t, "qwen_image_vae.safetensors", md.ModelVae)
+	require.NotNil(t, md.Width)
+	assert.Equal(t, 1920, *md.Width)
+	var loras []loraEntry
+	require.NoError(t, json.Unmarshal([]byte(md.LorasJSON), &loras))
+	require.Len(t, loras, 1)
+	assert.Equal(t, "Qwen-Image-2512-Lightning-4steps-V1.0-bf16.safetensors", loras[0].Name)
+}
+
+func TestExtractMetadataLoaderCasingAndVariants(t *testing.T) {
+	t.Run("CoreClassesStillParse", func(t *testing.T) {
+		md, ok := ExtractMetadata(syntheticGraph("ConditioningZeroOut", ""))
+		require.True(t, ok)
+		assert.Equal(t, "u.safetensors", md.ModelUnet)
+		assert.Equal(t, "v.safetensors", md.ModelVae)
+	})
+	t.Run("UppercaseGGUFVariant", func(t *testing.T) {
+		md, ok := ExtractMetadata(syntheticGraphWithLoaders("UNETLoaderGGUF", "CLIPLoaderGGUF"))
+		require.True(t, ok)
+		assert.Equal(t, "u.safetensors", md.ModelUnet)
+		assert.Equal(t, "c.safetensors", md.ModelClip)
+	})
+	t.Run("DualCLIPLoaderUsesDualFieldName", func(t *testing.T) {
+		md, ok := ExtractMetadata(syntheticGraphWithLoaders("UNETLoader", "DualCLIPLoader"))
+		require.True(t, ok)
+		assert.Equal(t, "dual.safetensors", md.ModelClip, "dual_clip_name fallback")
+	})
+}
+
+// syntheticGraphWithLoaders builds a minimal graph with configurable loader
+// classes; the CLIP variant gets dual_clip_name when class is DualCLIPLoader.
+func syntheticGraphWithLoaders(unetClass, clipClass string) string {
+	clipInputs := map[string]any{"clip_name": "c.safetensors"}
+	if clipClass == "DualCLIPLoader" {
+		clipInputs = map[string]any{"dual_clip_name": "dual.safetensors"}
+	}
+	graph := map[string]any{
+		"10": map[string]any{"class_type": clipClass, "inputs": clipInputs},
+		"11": map[string]any{"class_type": unetClass, "inputs": map[string]any{"unet_name": "u.safetensors"}},
+		"12": map[string]any{"class_type": "VAELoader", "inputs": map[string]any{"vae_name": "v.safetensors"}},
+		"13": map[string]any{"class_type": "EmptySD3LatentImage", "inputs": map[string]any{"width": 10, "height": 10}},
+		"14": map[string]any{"class_type": "CLIPTextEncode", "inputs": map[string]any{"text": "pos"}},
+		"15": map[string]any{"class_type": "ConditioningZeroOut", "inputs": map[string]any{"conditioning": []any{"14", 0}}},
+		"16": map[string]any{"class_type": "KSampler", "inputs": map[string]any{
+			"seed": 1, "steps": 2, "cfg": 1.0, "denoise": 1.0,
+			"sampler_name": "euler", "scheduler": "simple",
+			"positive": []any{"14", 0}, "negative": []any{"15", 0}}},
+	}
+	b, _ := json.Marshal(graph)
+	return string(b)
+}

@@ -192,6 +192,61 @@ func (a *App) handleAdminReload(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleAdminReextract re-runs workflow-graph extraction for every stored
+// workflow_json using the CURRENT extraction rules. This exists because
+// extraction is code that improves: e.g. the GGUF loader variants
+// (UnetLoaderGGUF/CLIPLoaderGGUF) were missed by the original exact-match
+// rules (production: i.shrews.xyz/Xr8HDUL, Sep 2026) — re-extract heals
+// existing rows without re-uploading. The merge policy is reused verbatim:
+// fresh-EXIF wins graph-derived fields, stored provenance round-trips, and
+// prompt-field mismatches WARN + prefer the fresh side. Only metadata
+// columns are rewritten (visibility, thumbs, file identity, and timestamps
+// are untouched); no SSE is published (cards change under the user on next
+// load, which is acceptable for an admin-triggered maintenance action).
+func (a *App) handleAdminReextract(w http.ResponseWriter, r *http.Request) {
+	if !checkAPIKey(a.getConfig().Auth.APIKey, r.Header.Get(apiKeyHeader)) {
+		logger.Warn("admin re-extract rejected: bad or missing api key", "remote_addr", r.RemoteAddr)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	rows, err := dbGetImagesWithWorkflow(a.db)
+	if err != nil {
+		logger.Error("re-extract: loading rows failed", "error", err)
+		http.Error(w, "database error", http.StatusInternalServerError)
+		return
+	}
+
+	updated := 0
+	for i := range rows {
+		img := &rows[i]
+		md, exifOK := ExtractMetadata(img.WorkflowJSON)
+		if !exifOK {
+			// Should not happen (these rows parsed at upload time), but a
+			// workflow_json that no longer parses must not destroy stored
+			// metadata: skip it and leave the row as-is.
+			logger.Warn("re-extract: stored workflow_json no longer parses; skipping", "id", img.ID)
+			continue
+		}
+		merged := mergeUploadMetadata(rowToUploadMeta(img), md, true)
+		applyMergedMetadata(img, merged)
+		if err := dbUpdateImageMetadata(a.db, img); err != nil {
+			logger.Error("re-extract: update failed", "id", img.ID, "error", err)
+			continue
+		}
+		updated++
+	}
+
+	logger.Info("re-extract complete", "considered", len(rows), "updated", updated)
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]int{
+		"considered": len(rows),
+		"updated":    updated,
+	}); err != nil {
+		logger.Error("writing admin re-extract response", "error", err)
+	}
+}
+
 // handleOrigFile serves the original bytes DIRECTLY from the content
 // address — no redirect hops. Unknown id or filename mismatch is a 404.
 // Ids are never reused and the content behind a row never changes, so the
@@ -521,6 +576,7 @@ func (a *App) buildHandler() http.Handler {
 	mux.HandleFunc("GET /events", a.handleEvents)
 	mux.HandleFunc("POST /updo", a.handleUpload)
 	mux.HandleFunc("POST /admin/reload", a.handleAdminReload)
+	mux.HandleFunc("POST /admin/reextract", a.handleAdminReextract)
 	mux.HandleFunc("GET /api/images/{id}/neighbors", a.handleNeighbors)
 	mux.HandleFunc("DELETE /api/images/{id}", a.handleDeleteImage)
 	mux.HandleFunc("GET /static/", staticHandler().ServeHTTP)

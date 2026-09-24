@@ -107,3 +107,9 @@ direct link to IRC.
 - Delete an image: `curl -X DELETE -H "X-API-Key: <key>" https://…/api/images/<id>`
   — soft delete (`hidden=1`, files retained, galleries/search exclude it,
   connected browsers drop the card live). A second delete returns 410.
+- Re-extract metadata: if workflow parsing improves (it has — e.g. GGUF
+  loader variants were initially missed), heal existing rows without
+  re-uploading: `curl -X POST -H "X-API-Key: <key>" https://…/admin/reextract`
+  → `{"considered":N,"updated":M}`. Re-runs extraction from each row's
+  stored `workflow_json` with the current rules; provenance and visibility
+  are preserved, unparseable rows are skipped.

@@ -253,6 +253,7 @@ not an afterthought. Cursor wire format: `?after=YYYY-MM-DD%20HH%3AMM%3ASS~<id>`
 | `GET /events` | SSE stream | no-cache |
 | `POST /updo` | upload (X-API-Key) | — |
 | `POST /admin/reload` | hot reload (X-API-Key) | — |
+| `POST /admin/reextract` | re-run workflow extraction from stored `workflow_json` under current rules (X-API-Key) — heals rows when extraction improves; preserves provenance/visibility, skips unparseable rows | — |
 | `DELETE /api/images/<id>` | soft-delete → `hidden=1` (X-API-Key) | — |
 
 Routes serve bytes directly — no redirect hops. We control both ends of
@@ -354,7 +355,15 @@ records which side(s) contributed.
    - `dave_original_prompt` node → JSON payload → original prompt, llm_generated, job_id, reasoning
    - sampler classes `KSampler`, `KSamplerAdvanced` (+ future additions) → seed/steps/cfg/sampler/scheduler/denoise; follow `positive`/`negative` edge refs (2-tuples `[nodeID, slot]`)
    - negative endpoint `ConditioningZeroOut`/`ConditioningCombine` ⇒ no text; `CLIPTextEncode.text` ⇒ negative text
-   - loader classes by exact `class_type` (`UNETLoader`, `CLIPLoader`, `VAELoader`, `LoraLoader*`) → model names, LoRA strengths
+   - loader classes by case-insensitive PREFIX on `class_type`
+     (`unetloader*`, `cliploader*` + `DualCLIPLoader`, `vaeloader*`,
+     `loraloader*`) → model names, LoRA strengths. Prefix, not exact,
+     because custom packs register variants — the ComfyUI-GGUF pack ships
+     `UnetLoaderGGUF` (lowercase "net") and `CLIPLoaderGGUF` alongside the
+     core classes, and exact matching silently dropped both qwen GGUF
+     models in production. DualCLIPLoader names its field
+     `dual_clip_name`; TripleCLIPLoader is deliberately unmatched (its
+     clip_name1/2/3 don't map to one display field).
    - latent sources (`EmptyLatentImage`, `EmptySD3LatentImage`, …) → width/height; fallback: decoded image bounds
 4. Everything unknown is preserved verbatim in `workflow_json` for the page's raw viewer. Extraction failure of any single field degrades to blank — never fails the upload.
 

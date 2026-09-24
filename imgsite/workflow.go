@@ -155,15 +155,32 @@ func extractFromGraph(wf map[string]workflowNode) extractedMetadata {
 	for _, id := range ids {
 		node := wf[id]
 		ct := node.ClassType
+		// Loaders: prefix-match, case-insensitively, so custom-node variants
+		// are caught. Production (i.shrews.xyz, Sep 2026) carries BOTH
+		// spellings: core "UNETLoader" and the ComfyUI-GGUF pack's
+		// "UnetLoaderGGUF" (lowercase "net") plus "CLIPLoaderGGUF" — the
+		// original exact-match rules silently dropped both qwen GGUF models
+		// while the core VAELoader parsed fine. DualCLIPLoader (SDXL-era)
+		// names its field dual_clip_name, so try that as a fallback.
+		// Unknown loader-ish classes degrade to blank per the extraction
+		// policy.
+		lowerCT := strings.ToLower(ct)
 		switch {
-		case ct == "UNETLoader" && md.ModelUnet == "":
+		case strings.HasPrefix(lowerCT, "unetloader") && md.ModelUnet == "":
 			md.ModelUnet, _ = strInput(node, "unet_name")
-		case ct == "CLIPLoader" && md.ModelClip == "":
-			md.ModelClip, _ = strInput(node, "clip_name")
-		case ct == "VAELoader" && md.ModelVae == "":
+		case (strings.HasPrefix(lowerCT, "cliploader") || lowerCT == "dualcliploader") && md.ModelClip == "":
+			// TripleCLIPLoader is deliberately NOT matched: its inputs
+			// are clip_name1/2/3, and picking or joining three models
+			// for one display field is ambiguous — blank is honest.
+			if v, ok := strInput(node, "clip_name"); ok {
+				md.ModelClip = v
+			} else {
+				md.ModelClip, _ = strInput(node, "dual_clip_name")
+			}
+		case strings.HasPrefix(lowerCT, "vaeloader") && md.ModelVae == "":
 			md.ModelVae, _ = strInput(node, "vae_name")
 		}
-		if strings.HasPrefix(ct, "LoraLoader") {
+		if strings.HasPrefix(lowerCT, "loraloader") {
 			if name, ok := strInput(node, "lora_name"); ok {
 				entry := loraEntry{Name: name}
 				// LoraLoaderModelOnly carries strength_model; full

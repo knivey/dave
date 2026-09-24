@@ -336,6 +336,17 @@ func monitorComfyGeneration(ctx context.Context, cfg Config, workflowName, promp
 		}
 	}()
 
+	// Poll aggregation: websocket messages and the 1s ticker both trigger
+	// history checks (~2/s during an active generation), and on a VPN-path
+	// ComfyUI even healthy checks can exceed any fixed slowness threshold —
+	// so per-check logging is spam (43 DBG lines for one 20s production
+	// generation before this was learned). Instead the monitor counts checks
+	// and keeps the slowest one; detected() reports both on the summary line.
+	// Caveats: check_ms_max includes the detecting check's image download
+	// (download_ms is reported separately); the finalCheck fallback paths do
+	// not count their own 5s-bounded check.
+	var polls, checkMSMax int64
+
 	// detected logs the observability summary — detection source (push vs
 	// poll vs final-check fallback), total monitor elapsed time, websocket
 	// message count, and ComfyUI's own execution duration when the history
@@ -347,6 +358,8 @@ func monitorComfyGeneration(ctx context.Context, cfg Config, workflowName, promp
 			"source", source,
 			"elapsed_ms", time.Since(start).Milliseconds(),
 			"ws_messages", wsMessages.Load(),
+			"polls", polls,
+			"check_ms_max", checkMSMax,
 		}
 		if result.ExecStartedAt != nil && result.ExecSuccessAt != nil {
 			args = append(args, "exec_ms", *result.ExecSuccessAt-*result.ExecStartedAt)
@@ -368,6 +381,13 @@ func monitorComfyGeneration(ctx context.Context, cfg Config, workflowName, promp
 		checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
 		return checkComfyOutput(checkCtx, cfg, wc, baseURL, promptID)
+	}
+
+	countCheck := func(checkStart time.Time) {
+		polls++
+		if ms := time.Since(checkStart).Milliseconds(); ms > checkMSMax {
+			checkMSMax = ms
+		}
 	}
 
 	ticker := time.NewTicker(comfyPollInterval)
@@ -398,7 +418,10 @@ func monitorComfyGeneration(ctx context.Context, cfg Config, workflowName, promp
 			return ComfyResult{}, fmt.Errorf("generation timed out after %s (prompt_id %s)", timeout, promptID)
 		}
 
-		if result, found := checkComfyOutput(ctx, cfg, wc, baseURL, promptID); found {
+		checkStart := time.Now()
+		result, found := checkComfyOutput(ctx, cfg, wc, baseURL, promptID)
+		countCheck(checkStart)
+		if found {
 			return detected(wakeSource, result), nil
 		}
 	}
@@ -496,7 +519,7 @@ func checkComfyOutput(ctx context.Context, cfg Config, wc WorkflowConfig, baseUR
 
 func getComfyHistory(ctx context.Context, baseURL, promptID string) (ComfyHistoryResponse, error) {
 	// Trace the connection lifecycle so the poll loop has connection-cost
-	// visibility: see the comment where the slow-poll line is logged below.
+	// visibility: see the comment where the fresh-connection line is logged below.
 	var connectStart, connectDone time.Time
 	var reusedConn bool
 	trace := &httptrace.ClientTrace{
@@ -532,22 +555,25 @@ func getComfyHistory(ctx context.Context, baseURL, promptID string) (ComfyHistor
 		return nil, err
 	}
 
-	// Steady-state polls reuse a pooled connection and finish in single-digit
-	// milliseconds, so only log when something interesting happened: a fresh
-	// TCP dial (idle pool expired between generations — expected occasionally;
-	// every poll would mean pooling is broken) or a slow round trip. This
-	// keeps production logs quiet while still exposing connect cost.
-	elapsed := time.Since(start)
-	if !reusedConn || elapsed > comfySlowHistoryThreshold {
+	// Connection-cost visibility without the noise. Log ONLY when this poll
+	// dialed a fresh TCP connection: occasional fresh dials are normal (idle
+	// pool expiry between generations), while every-poll-fresh would mean
+	// keep-alive pooling is broken. Per-poll slow round trips are NOT logged
+	// — on a VPN-path ComfyUI the degraded baseline exceeds any fixed
+	// threshold (130-160ms observed in production), which turned per-poll
+	// logging into ~2 lines/second for the whole monitor window. Slow checks
+	// are aggregated instead: monitorComfyGeneration reports polls and
+	// check_ms_max on its "generation detected" line.
+	if !reusedConn {
+		elapsed := time.Since(start)
 		connectMS := int64(0)
 		if !connectStart.IsZero() && connectDone.After(connectStart) {
 			connectMS = connectDone.Sub(connectStart).Milliseconds()
 		}
-		loggerComfy.Debug("history poll",
+		loggerComfy.Debug("history poll fresh connection",
 			"prompt_id", promptID,
 			"history_ms", elapsed.Milliseconds(),
 			"connect_ms", connectMS,
-			"fresh_connect", !reusedConn,
 		)
 	}
 	return history, nil
@@ -576,11 +602,6 @@ type ImageDLStats struct {
 // had no deadline and no context: a stalled /view response could wedge the
 // worker forever, and job cancellation could not interrupt it.
 const comfyDownloadTimeout = 30 * time.Second
-
-// comfySlowHistoryThreshold is the point at which a history poll is worth
-// logging despite being successful: steady polls against a warm connection
-// are single-digit milliseconds.
-const comfySlowHistoryThreshold = 100 * time.Millisecond
 
 func downloadComfyImage(ctx context.Context, baseURL string, img ComfyImage) ([]byte, ImageDLStats, error) {
 	var stats ImageDLStats

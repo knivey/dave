@@ -43,9 +43,15 @@ type ComfyServiceConfig struct {
 }
 
 type UploadConfig struct {
-	// URL is the photo site's base URL (e.g. "https://img.zkpq.ca");
-	// the /updo and /<id>/orig/<file> paths are derived from it.
+	// URL is the imgsite base URL (e.g. "https://img.example.com"); the
+	// /updo upload endpoint and the image URLs it returns derive from it.
 	URL string `toml:"url"`
+	// APIKey authenticates uploads to imgsite (X-API-Key header); it must
+	// match auth.api_key in imgsite's config. Hot-reloadable (read per
+	// upload call, like url). Empty is allowed at startup so a missing key
+	// degrades to per-upload 401 errors with a clear log rather than
+	// killing generation entirely.
+	APIKey string `toml:"api_key"`
 }
 
 type QueueConfig struct {

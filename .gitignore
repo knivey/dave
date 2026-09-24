@@ -24,4 +24,6 @@ tools/migrate-sqlite-to-pgsql/migrate-sqlite-to-pgsql
 todo.md
 mcps/brave-mcp/brave-mcp
 mcps/fetch-mcp/fetch-mcp
+imgsite/imgsite
+imgsite/data/*
 .worktrees/

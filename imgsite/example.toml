@@ -1,0 +1,126 @@
+# imgsite configuration — reference
+#
+# [server]
+#   name     = (string) server identification                     default: "imgsite"
+#   addr     = (string) HTTP listen address                       default: ":8081"
+#   base_url = (string) external base URL for the absolute links in
+#              upload responses (url/page); empty = derive from the
+#              request (scheme from TLS/X-Forwarded-Proto + Host).
+#              Must be set correctly in prod: dave pastes `url` to IRC
+#              verbatim.                                            default: ""
+#
+# [database]
+#   path     = (string) SQLite database path (WAL mode), relative
+#              to the binary directory                        default: "data/imgsite.db"
+#
+# [storage]
+#   path        = (string) originals directory, content-addressed:
+#                 <path>/<sha256[:2]>/<sha256>                  default: "data/images"
+#   thumbs_path = (string) thumbnails directory:
+#                 <path>/<sha256[:2]>/<sha256>-<size>.jpg       default: "data/thumbs"
+#
+# [auth]
+#   api_key  = (string) REQUIRED shared secret. Uploads and admin routes
+#              must send it as the X-API-Key header (constant-time
+#              compared). Not reloadable. The example placeholder
+#              (CHANGE_ME...) is rejected at startup.            no default
+#
+# [thumbnails]
+#   small_width   = (int) gallery-card thumbnail width (px)       default: 480
+#   display_width = (int) details-page / og:image width (px)      default: 1280
+#   jpeg_quality  = (int) JPEG encode quality, 1-100              default: 78
+#   workers       = (int) thumbnail worker pool size (restart to
+#                   change; not reloadable)                       default: 2
+#   max_dimension = (int) refuse decodes larger than this (px)    default: 8192
+#
+# [upload]
+#   max_bytes       = (int) request body cap; larger uploads get
+#                     413                                 default: 33554432 (32 MiB)
+#   rate_per_minute = (int) token-bucket refill rate, uploads per
+#                     minute (burst = one full minute)            default: 30
+#
+# [search]
+#   snippet_chars = (int) prompt snippet clamp length             default: 160
+#   prefix_min    = (int) minimum chars before prefix token
+#                   matching kicks in                             default: 2
+#
+# [site]
+#   title       = (string) site title                      default: "dave's image dump"
+#   description = (string) site description                 default: "generations from IRC"
+#
+# Reloadable via SIGHUP or POST /admin/reload (X-API-Key):
+#   site.*, thumbnails.* (except workers), search.*, upload.rate_per_minute
+# Everything else requires a restart.
+
+# ---------------------------------------------------------------------------
+# Example block — uncomment, adjust, copy-paste.
+
+# [server]
+# name = "imgsite"
+# addr = ":8081"
+# base_url = ""
+#
+# [database]
+# path = "data/imgsite.db"
+#
+# [storage]
+# path = "data/images"
+# thumbs_path = "data/thumbs"
+#
+# [auth]
+# api_key = "CHANGE_ME_TO_A_STRONG_RANDOM_SECRET"
+#
+# [thumbnails]
+# small_width = 480
+# display_width = 1280
+# jpeg_quality = 78
+# workers = 2
+# max_dimension = 8192
+#
+# [upload]
+# max_bytes = 33554432
+# rate_per_minute = 30
+#
+# [search]
+# snippet_chars = 160
+# prefix_min = 2
+#
+# [site]
+# title = "dave's image dump"
+# description = "generations from IRC"
+
+# ---- live configuration ---------------------------------------------------
+
+[server]
+name = "imgsite"
+addr = ":8081"
+base_url = ""
+
+[database]
+path = "data/imgsite.db"
+
+[storage]
+path = "data/images"
+thumbs_path = "data/thumbs"
+
+[auth]
+api_key = "CHANGE_ME_TO_A_STRONG_RANDOM_SECRET"
+
+[thumbnails]
+small_width = 480
+display_width = 1280
+jpeg_quality = 78
+workers = 2
+max_dimension = 8192
+
+[upload]
+max_bytes = 33554432
+rate_per_minute = 30
+
+[search]
+snippet_chars = 160
+prefix_min = 2
+
+[site]
+title = "dave's image dump"
+description = "generations from IRC"

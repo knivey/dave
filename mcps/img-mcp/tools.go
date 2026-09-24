@@ -31,6 +31,8 @@ type GenerateImageAsyncInput struct {
 	Seed           *int64 `json:"seed,omitempty" jsonschema:"optional fixed seed for reproducibility"`
 	OutputFormat   string `json:"output_format,omitempty" jsonschema:"output format: url (default), base64, or both"`
 	Network        string `json:"_dave_inject_network,omitempty"`
+	Channel        string `json:"_dave_inject_channel,omitempty"`
+	Nick           string `json:"_dave_inject_nick,omitempty"`
 	// LLMGenerated is injected by dave (true) when this call originates from
 	// an LLM tool call; absent for direct user tool commands. Recorded in the
 	// workflow's prompt note metadata for image provenance.
@@ -53,6 +55,8 @@ type GenerateImageInput struct {
 	OutputFormat   string `json:"output_format,omitempty" jsonschema:"output format: url (default), base64, or both"`
 	Timeout        int    `json:"timeout,omitempty" jsonschema:"max seconds to wait for generation (default: 300)"`
 	Network        string `json:"_dave_inject_network,omitempty"`
+	Channel        string `json:"_dave_inject_channel,omitempty"`
+	Nick           string `json:"_dave_inject_nick,omitempty"`
 	// LLMGenerated is injected by dave (true) when this call originates from
 	// an LLM tool call; absent for direct user tool commands. Recorded in the
 	// workflow's prompt note metadata for image provenance.
@@ -75,6 +79,8 @@ type EnhanceAndGenerateAsyncInput struct {
 	Workflow     string `json:"workflow,omitempty" jsonschema:"name of the workflow config to use (empty or 'default' uses the default workflow)"`
 	OutputFormat string `json:"output_format,omitempty" jsonschema:"output format: url (default), base64, or both"`
 	Network      string `json:"_dave_inject_network,omitempty"`
+	Channel      string `json:"_dave_inject_channel,omitempty"`
+	Nick         string `json:"_dave_inject_nick,omitempty"`
 	// LLMGenerated is injected by dave (true) when this call originates from
 	// an LLM tool call; absent for direct user tool commands. Recorded in the
 	// workflow's prompt note metadata for image provenance.
@@ -96,6 +102,8 @@ type EnhanceAndGenerateInput struct {
 	OutputFormat string `json:"output_format,omitempty" jsonschema:"output format: url (default), base64, or both"`
 	Timeout      int    `json:"timeout,omitempty" jsonschema:"max seconds to wait for generation (default: 300)"`
 	Network      string `json:"_dave_inject_network,omitempty"`
+	Channel      string `json:"_dave_inject_channel,omitempty"`
+	Nick         string `json:"_dave_inject_nick,omitempty"`
 	// LLMGenerated is injected by dave (true) when this call originates from
 	// an LLM tool call; absent for direct user tool commands. Recorded in the
 	// workflow's prompt note metadata for image provenance.
@@ -322,6 +330,9 @@ func (h *ToolHandlers) handleGenerateImageAsync(ctx context.Context, req *mcp.Ca
 		Seed:           input.Seed,
 		OutputFormat:   input.OutputFormat,
 		LLMGenerated:   input.LLMGenerated,
+		Network:        input.Network,
+		Channel:        input.Channel,
+		Nick:           input.Nick,
 	})
 	if err != nil {
 		return nil, GenerateImageAsyncOutput{}, err
@@ -342,6 +353,9 @@ func (h *ToolHandlers) handleEnhanceAndGenerateAsync(ctx context.Context, req *m
 		Enhancement:  enhancement,
 		OutputFormat: input.OutputFormat,
 		LLMGenerated: input.LLMGenerated,
+		Network:      input.Network,
+		Channel:      input.Channel,
+		Nick:         input.Nick,
 	})
 	if err != nil {
 		return nil, EnhanceAndGenerateAsyncOutput{}, err
@@ -364,6 +378,9 @@ func (h *ToolHandlers) handleGenerateImage(ctx context.Context, req *mcp.CallToo
 		Seed:           input.Seed,
 		OutputFormat:   input.OutputFormat,
 		LLMGenerated:   input.LLMGenerated,
+		Network:        input.Network,
+		Channel:        input.Channel,
+		Nick:           input.Nick,
 	})
 	if err != nil {
 		return nil, GenerateImageOutput{}, err
@@ -400,6 +417,9 @@ func (h *ToolHandlers) handleEnhanceAndGenerate(ctx context.Context, req *mcp.Ca
 		Enhancement:  enhancement,
 		OutputFormat: input.OutputFormat,
 		LLMGenerated: input.LLMGenerated,
+		Network:      input.Network,
+		Channel:      input.Channel,
+		Nick:         input.Nick,
 	})
 	if err != nil {
 		return nil, EnhanceAndGenerateOutput{}, err
@@ -564,7 +584,11 @@ func (h *ToolHandlers) handleUploadImage(ctx context.Context, req *mcp.CallToolR
 
 	loggerTools.Info("tool: upload_image", "filename", input.Filename, "size", len(data), "mime_type", input.MIMEType)
 
-	url, err := uploadImage(h.getConfig(), data, input.Filename)
+	// Thinner meta than the generation path: upload_image has no
+	// _dave_inject_* fields (nothing on this path knows the job's IRC
+	// provenance) and no enhancement happened, so the payload is empty and
+	// imgsite relies entirely on EXIF extraction.
+	url, err := uploadImage(h.getConfig(), data, input.Filename, UploadMeta{})
 	if err != nil {
 		return nil, UploadImageOutput{}, err
 	}

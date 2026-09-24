@@ -24,13 +24,15 @@ timeout = 90
 default_workflow = "zimage"
 
 [upload]
-# Photo site base URL for hosting generated images (required).
-# The upload endpoint and image URLs are derived from it:
-#   POST <url>/updo  (multipart "file" + toirc=0) -> 303 to the photo page
-#   <url>/<id>/orig/<filename>                     -> original image
-# Uploads are permanent gallery entries; toirc=0 suppresses the site's
-# own IRC announcement so only dave posts the link.
+# imgsite base URL for hosting generated images (required).
+#   POST <url>/updo  (X-API-Key, multipart "file" + "meta") -> 201 + {id,url,...}
+# The response's "url" is the permanent direct link, pasted to IRC verbatim.
 url = "https://img.example.com"
+# API key authenticating uploads to imgsite (X-API-Key header); must match
+# auth.api_key in imgsite's config. Hot-reloadable (read per upload call).
+# Empty is allowed at startup, but every upload will be rejected with 401
+# until it is set.
+api_key = "CHANGE_ME_TO_MATCH_IMGSITE_AUTH_API_KEY"
 
 [queue]
 # Maximum number of concurrent image generation workers. Values above 1 let

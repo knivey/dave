@@ -103,6 +103,14 @@ type JobInput struct {
 	// versus typed directly by the IRC user. Persisted so restart-recovered
 	// jobs still carry it into the workflow's prompt note node.
 	LLMGenerated bool
+	// Network/Channel/Nick are dave-injected IRC provenance
+	// (_dave_inject_network/_dave_inject_channel/_dave_inject_nick).
+	// Network additionally feeds applyNetworkPolicy; all three are persisted
+	// (migration 003) so restart-recovered jobs still carry them into the
+	// imgsite upload meta.
+	Network string
+	Channel string
+	Nick    string
 }
 
 type JobResult struct {
@@ -113,6 +121,31 @@ type ImageData struct {
 	URL      string `json:"url,omitempty"`
 	Base64   string `json:"base64,omitempty"`
 	MIMEType string `json:"mime_type"`
+}
+
+// buildUploadMeta assembles the imgsite upload meta payload for a job.
+//
+// finalPrompt/finalNegative/reasoning are the post-enhancement values from
+// processJob's locals: for enhanced jobs finalPrompt is the enhanced prompt
+// and reasoning the enhancement LLM's summary; for plain generate jobs
+// finalPrompt equals job.Input.Prompt (sent as-is — it IS the prompt the
+// image was generated with, and imgsite's EXIF merge is the source of truth
+// anyway). The recovery path passes empty enhancement values: it never
+// re-runs enhancement, so the enhanced prompt/reasoning live only in the
+// image's EXIF and provenance is all meta can honestly contribute.
+func buildUploadMeta(job *Job, finalPrompt, finalNegative, reasoning string) UploadMeta {
+	return UploadMeta{
+		JobID:          job.ID,
+		OriginalPrompt: job.Input.Prompt,
+		EnhancedPrompt: finalPrompt,
+		NegativePrompt: finalNegative,
+		Reasoning:      reasoning,
+		LLMGenerated:   job.Input.LLMGenerated,
+		WorkflowName:   job.Workflow,
+		Network:        job.Input.Network,
+		Channel:        job.Input.Channel,
+		Nick:           job.Input.Nick,
+	}
 }
 
 type JobQueue struct {
@@ -767,6 +800,7 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 
 	jobResult := &JobResult{}
 	var comfyImgs []ComfyImage
+	uploadMeta := buildUploadMeta(job, prompt, negativePrompt, enhancementReasoning)
 	for i, img := range comfyResult.Images {
 		imgData := ImageData{
 			MIMEType: guessMIMEType(img.Filename, "image/png"),
@@ -778,7 +812,7 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 
 		switch outputFormat {
 		case "url":
-			url, err := uploadImage(cfg, img.Data, img.Filename)
+			url, err := uploadImage(cfg, img.Data, img.Filename, uploadMeta)
 			if err != nil {
 				q.failJob(job, fmt.Sprintf("upload failed: %v", err))
 				return
@@ -787,7 +821,7 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 		case "base64":
 			imgData.Base64 = encodeBase64(img.Data)
 		case "both":
-			url, err := uploadImage(cfg, img.Data, img.Filename)
+			url, err := uploadImage(cfg, img.Data, img.Filename, uploadMeta)
 			if err != nil {
 				q.failJob(job, fmt.Sprintf("upload failed: %v", err))
 				return
@@ -1068,6 +1102,12 @@ func (q *JobQueue) recoverRunningJob(_ context.Context, job *Job, comfyPromptID 
 
 	jobResult := &JobResult{}
 	var comfyImgs []ComfyImage
+	// Thinner meta than processJob: recovery never re-runs enhancement, so
+	// the enhanced prompt/negative/reasoning exist only inside the image's
+	// EXIF (imgsite's merge policy prefers EXIF for those fields anyway —
+	// see docs/image-site.md). Meta contributes provenance + the original
+	// prompt; the empty enhancement args drop out via omitempty.
+	uploadMeta := buildUploadMeta(job, "", "", "")
 	for i, img := range comfyResult.Images {
 		imgData := ImageData{
 			MIMEType: guessMIMEType(img.Filename, "image/png"),
@@ -1079,7 +1119,7 @@ func (q *JobQueue) recoverRunningJob(_ context.Context, job *Job, comfyPromptID 
 
 		switch outputFormat {
 		case "url":
-			url, err := uploadImage(cfg, img.Data, img.Filename)
+			url, err := uploadImage(cfg, img.Data, img.Filename, uploadMeta)
 			if err != nil {
 				q.failJob(job, fmt.Sprintf("upload failed during recovery: %v", err))
 				return
@@ -1088,7 +1128,7 @@ func (q *JobQueue) recoverRunningJob(_ context.Context, job *Job, comfyPromptID 
 		case "base64":
 			imgData.Base64 = encodeBase64(img.Data)
 		case "both":
-			url, err := uploadImage(cfg, img.Data, img.Filename)
+			url, err := uploadImage(cfg, img.Data, img.Filename, uploadMeta)
 			if err != nil {
 				q.failJob(job, fmt.Sprintf("upload failed during recovery: %v", err))
 				return

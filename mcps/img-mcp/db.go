@@ -27,22 +27,28 @@ var errJobAlreadyTerminal = errors.New("job already reached a terminal status")
 var embedMigrations embed.FS
 
 type dbJob struct {
-	ID             int64   `db:"id"`
-	JobID          string  `db:"job_id"`
-	Type           string  `db:"type"`
-	Status         string  `db:"status"`
-	Workflow       string  `db:"workflow"`
-	Prompt         string  `db:"prompt"`
-	NegativePrompt string  `db:"negative_prompt"`
-	Enhancement    string  `db:"enhancement"`
-	Seed           *int64  `db:"seed"`
-	OutputFormat   string  `db:"output_format"`
-	LLMGenerated   bool    `db:"llm_generated"`
-	Error          *string `db:"error"`
-	ComfyPromptID  *string `db:"comfy_prompt_id"`
-	CreatedAt      string  `db:"created_at"`
-	StartedAt      *string `db:"started_at"`
-	CompletedAt    *string `db:"completed_at"`
+	ID             int64  `db:"id"`
+	JobID          string `db:"job_id"`
+	Type           string `db:"type"`
+	Status         string `db:"status"`
+	Workflow       string `db:"workflow"`
+	Prompt         string `db:"prompt"`
+	NegativePrompt string `db:"negative_prompt"`
+	Enhancement    string `db:"enhancement"`
+	Seed           *int64 `db:"seed"`
+	OutputFormat   string `db:"output_format"`
+	LLMGenerated   bool   `db:"llm_generated"`
+	// Network/Channel/Nick are IRC provenance for the imgsite upload meta.
+	// Insert/recovery-only columns: no terminal UPDATE statement touches
+	// them, so they cannot interfere with the terminal-update fencing.
+	Network       string  `db:"network"`
+	Channel       string  `db:"channel"`
+	Nick          string  `db:"nick"`
+	Error         *string `db:"error"`
+	ComfyPromptID *string `db:"comfy_prompt_id"`
+	CreatedAt     string  `db:"created_at"`
+	StartedAt     *string `db:"started_at"`
+	CompletedAt   *string `db:"completed_at"`
 }
 
 type dbJobImage struct {
@@ -97,11 +103,12 @@ func closeDB(db *sqlx.DB) {
 
 func dbInsertJob(db *sqlx.DB, job *Job) error {
 	_, err := db.Exec(
-		`INSERT INTO jobs (job_id, type, status, workflow, prompt, negative_prompt, enhancement, seed, output_format, llm_generated)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO jobs (job_id, type, status, workflow, prompt, negative_prompt, enhancement, seed, output_format, llm_generated, network, channel, nick)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		job.ID, string(job.Type), string(job.Status), job.Workflow,
 		job.Input.Prompt, job.Input.NegativePrompt, job.Input.Enhancement,
 		job.Input.Seed, job.Input.OutputFormat, job.Input.LLMGenerated,
+		job.Input.Network, job.Input.Channel, job.Input.Nick,
 	)
 	return err
 }
@@ -295,6 +302,9 @@ func jobFromDBJob(dbj *dbJob) *Job {
 			Seed:           dbj.Seed,
 			OutputFormat:   dbj.OutputFormat,
 			LLMGenerated:   dbj.LLMGenerated,
+			Network:        dbj.Network,
+			Channel:        dbj.Channel,
+			Nick:           dbj.Nick,
 		},
 		Error: ptrStr(dbj.Error),
 	}

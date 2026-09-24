@@ -22,7 +22,9 @@ import (
 // breaks every non-LLM caller with
 // "validating root: required: missing properties".
 // The same applies to _dave_inject_network (pre-existing instance of the
-// same bug, caught by the in-memory round-trip test below).
+// same bug, caught by the in-memory round-trip test below) and to the
+// _dave_inject_channel/_dave_inject_nick pair added with the imgsite
+// provenance plumbing — this exact bug has shipped twice already.
 func TestInjectLLMGeneratedNotRequired(t *testing.T) {
 	schemas := map[string]*jsonschema.Schema{}
 	for name, infer := range map[string]func() (*jsonschema.Schema, error){
@@ -44,6 +46,15 @@ func TestInjectLLMGeneratedNotRequired(t *testing.T) {
 		"EnhanceAndGenerateAsyncInput": true,
 		"EnhancePromptInput":           false,
 	}
+	// channel/nick provenance rides the same 4 generation inputs as
+	// llm_generated; enhance_prompt only ever had network.
+	expectChannelNick := map[string]bool{
+		"GenerateImageInput":           true,
+		"GenerateImageAsyncInput":      true,
+		"EnhanceAndGenerateInput":      true,
+		"EnhanceAndGenerateAsyncInput": true,
+		"EnhancePromptInput":           false,
+	}
 	for name, s := range schemas {
 		for _, req := range s.Required {
 			assert.False(t, strings.HasPrefix(req, "_dave_inject_"),
@@ -55,6 +66,12 @@ func TestInjectLLMGeneratedNotRequired(t *testing.T) {
 		_, hasGen := s.Properties["_dave_inject_llm_generated"]
 		assert.Equal(t, expectLLMGenerated[name], hasGen,
 			"%s: unexpected presence of _dave_inject_llm_generated property", name)
+		_, hasChan := s.Properties["_dave_inject_channel"]
+		assert.Equal(t, expectChannelNick[name], hasChan,
+			"%s: unexpected presence of _dave_inject_channel property", name)
+		_, hasNick := s.Properties["_dave_inject_nick"]
+		assert.Equal(t, expectChannelNick[name], hasNick,
+			"%s: unexpected presence of _dave_inject_nick property", name)
 	}
 }
 
@@ -187,6 +204,105 @@ func TestJobReadersRaceFreeWhileCompleting(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, string(StatusCompleted), out.Status)
 	assert.Equal(t, job.ID, out.JobID)
+}
+
+// TestGenerateToolsPassProvenance mirrors TestGenerateToolsPassLLMGeneratedFlag
+// for the imgsite provenance trio: network/channel/nick from the dave-injected
+// tool fields must reach JobInput (and from there the DB and the upload meta).
+func TestGenerateToolsPassProvenance(t *testing.T) {
+	tests := []struct {
+		name   string
+		submit func(t *testing.T, h *ToolHandlers) (string, error)
+	}{
+		{
+			name: "generate_image_async",
+			submit: func(t *testing.T, h *ToolHandlers) (string, error) {
+				_, out, err := h.handleGenerateImageAsync(context.Background(), nil,
+					GenerateImageAsyncInput{Prompt: "a cat", Network: "libera", Channel: "#dave", Nick: "knivey"})
+				return out.JobID, err
+			},
+		},
+		{
+			name: "enhance_and_generate_async",
+			submit: func(t *testing.T, h *ToolHandlers) (string, error) {
+				_, out, err := h.handleEnhanceAndGenerateAsync(context.Background(), nil,
+					EnhanceAndGenerateAsyncInput{Prompt: "a cat", Network: "libera", Channel: "#dave", Nick: "knivey"})
+				return out.JobID, err
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := NewToolHandlers(testConfig("http://127.0.0.1:0"), queuedTestQueue(t))
+
+			jobID, err := tt.submit(t, h)
+			require.NoError(t, err, "tool handler")
+
+			job, ok := h.queue.Get(jobID)
+			require.True(t, ok, "job should be findable in queue")
+			assert.Equal(t, "libera", job.Input.Network, "Network from tool input should reach JobInput")
+			assert.Equal(t, "#dave", job.Input.Channel, "Channel from tool input should reach JobInput")
+			assert.Equal(t, "knivey", job.Input.Nick, "Nick from tool input should reach JobInput")
+		})
+	}
+}
+
+// TestGenerateToolsSyncPassProvenance runs the blocking tool handlers
+// end-to-end against a mock ComfyUI and asserts provenance survives the
+// full Submit → processJob path (including the DB write on Submit).
+func TestGenerateToolsSyncPassProvenance(t *testing.T) {
+	mockComfy := newMockComfyFlowServer(t)
+
+	tests := []struct {
+		name string
+		call func(t *testing.T, h *ToolHandlers) error
+	}{
+		{
+			name: "generate_image",
+			call: func(t *testing.T, h *ToolHandlers) error {
+				_, out, err := h.handleGenerateImage(context.Background(), nil,
+					GenerateImageInput{Prompt: "a cat", Network: "libera", Channel: "#dave", Nick: "knivey", OutputFormat: "base64"})
+				assert.Equal(t, "completed", out.Status)
+				return err
+			},
+		},
+		{
+			name: "enhance_and_generate",
+			call: func(t *testing.T, h *ToolHandlers) error {
+				_, out, err := h.handleEnhanceAndGenerate(context.Background(), nil,
+					EnhanceAndGenerateInput{Prompt: "a cat", Network: "libera", Channel: "#dave", Nick: "knivey", OutputFormat: "base64"})
+				assert.Equal(t, "completed", out.Status)
+				return err
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := testConfig(mockComfy.URL())
+			wc := cfg.Workflows["test"]
+			wc.WorkflowPath = mustWriteWorkflow(t, t.TempDir())
+			cfg.Workflows["test"] = wc
+			cfg.Enhancements = map[string]EnhancementConfig{
+				"default": {
+					BaseURL:      newMockEnhanceServer(t).URL,
+					Key:          "test-key",
+					Model:        "enhancer",
+					SystemPrompt: "enhance",
+				},
+			}
+			q, cleanup := setupTestQueue(t, cfg)
+			defer cleanup()
+			h := NewToolHandlers(cfg, q)
+
+			require.NoError(t, tt.call(t, h), "tool handler")
+
+			jobs := q.ListJobs("", 10)
+			require.NotEmpty(t, jobs, "job should be in queue")
+			assert.Equal(t, "libera", jobs[0].Input.Network, "Network should survive the sync path")
+			assert.Equal(t, "#dave", jobs[0].Input.Channel, "Channel should survive the sync path")
+			assert.Equal(t, "knivey", jobs[0].Input.Nick, "Nick should survive the sync path")
+		})
+	}
 }
 
 func TestToolHandlersConfigSwap(t *testing.T) {

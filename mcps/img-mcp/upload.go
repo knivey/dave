@@ -5,49 +5,86 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptrace"
-	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
-// uploadHTTPClient never follows redirects: the upload site answers
-// POST /updo with a 303 to the new photo's page, and GET /<id>/orig/<file>
-// with a 307 to the backing file. Both Location headers are data we need
-// to read, not hops to follow.
+// uploadHTTPClient is a plain client with a sane timeout: the imgsite
+// upload answers 201 + JSON on the same request, so there are no redirect
+// hops to intercept (the old photo site's 303/307 dance is gone).
 var uploadHTTPClient = &http.Client{
-	CheckRedirect: func(req *http.Request, via []*http.Request) error {
-		return http.ErrUseLastResponse
-	},
 	Timeout: 2 * time.Minute,
 }
 
-// uploadImage POSTs the image to the photo site's /updo endpoint and
-// returns the photo's /orig/ URL (e.g. https://img.zkpq.ca/4F4/orig/x.png),
-// which serves the original bytes via a 307 to /file/<hash>/<name>.
+// UploadMeta is the provenance payload img-mcp sends alongside the image
+// bytes to imgsite's /updo endpoint. Every field is omitempty so empty
+// values drop out of the JSON entirely; the site treats absent fields as
+// "not provided" and falls back to EXIF extraction (see the merge policy in
+// docs/image-site.md).
+type UploadMeta struct {
+	JobID          string `json:"job_id,omitempty"`
+	OriginalPrompt string `json:"original_prompt,omitempty"`
+	EnhancedPrompt string `json:"enhanced_prompt,omitempty"`
+	NegativePrompt string `json:"negative_prompt,omitempty"`
+	Reasoning      string `json:"reasoning,omitempty"`
+	LLMGenerated   bool   `json:"llm_generated,omitempty"`
+	WorkflowName   string `json:"workflow_name,omitempty"`
+	Network        string `json:"network,omitempty"`
+	Channel        string `json:"channel,omitempty"`
+	Nick           string `json:"nick,omitempty"`
+}
+
+// uploadResponse is the JSON body of imgsite's 201 answer.
+type uploadResponse struct {
+	ID       string `json:"id"`
+	URL      string `json:"url"`
+	Page     string `json:"page"`
+	Filename string `json:"filename"`
+}
+
+// uploadImage POSTs the image to imgsite's /updo endpoint and returns the
+// permanent direct link for the uploaded bytes.
 //
-// Wire protocol (verified live against img.zkpq.ca):
+// Wire protocol (docs/image-site.md, "Upload protocol"):
 //
-//	POST <base>/updo              multipart: file, toirc=0 -> 303 + Location: /<id>/<slug>
-//	GET  <base>/<id>/orig/<file>                            -> 307 + Location: /file/...
+//	POST <base>/updo  X-API-Key, multipart: file, meta=<JSON> -> 201 + {id,url,page,filename}
 //
-// DESIGN NOTE: toirc=0 must be sent explicitly on every upload. The
-// field defaults to ON when absent, and the site then announces each
-// upload to IRC itself — a duplicate of the notice dave posts, so we
-// suppress it. The GET on the /orig/ URL is a validation hop: the URL
-// is derived from the 303's photo ID plus the filename we chose, so a
-// server-side filename mismatch would surface as a non-redirect here
-// instead of as a dead link pasted to IRC.
-func uploadImage(cfg Config, data []byte, filename string) (string, error) {
+// DESIGN NOTE: the returned url is handed to IRC verbatim — no client-side
+// derivation, no verification GET. Both ends of this protocol are ours
+// (imgsite builds url/page from its configured server.base_url), so a second
+// hop would only re-ask the server what it just told us. The old photo-site
+// contract (303 + Location parsing, /orig/ URL derivation, redirect-check
+// verification, toirc=0 to silence its IRC announcer) was deleted wholesale
+// when imgsite replaced it.
+//
+// A 401 means the key didn't match: the error names upload.api_key so the
+// admin knows exactly which config knob is wrong. An empty api_key is
+// allowed at startup (imgsite is the only consumer and the bot may run with
+// generation temporarily broken) but is logged here, per call, so the
+// failure mode is discoverable from the logs.
+func uploadImage(cfg Config, data []byte, filename string, meta UploadMeta) (string, error) {
 	filename = sanitizeUploadFilename(filename)
 	base := strings.TrimRight(cfg.Upload.URL, "/")
 	logger.Info("uploading image", "filename", filename, "size", len(data), "url", base)
+
+	if cfg.Upload.APIKey == "" {
+		logger.Warn("upload.api_key is not configured; imgsite will reject this upload with 401",
+			"filename", filename)
+	}
+
+	metaJSON, err := json.Marshal(meta)
+	if err != nil {
+		return "", fmt.Errorf("marshaling upload meta: %w", err)
+	}
 
 	body := &bytes.Buffer{}
 	wr := multipart.NewWriter(body)
@@ -61,7 +98,7 @@ func uploadImage(cfg Config, data []byte, filename string) (string, error) {
 		return "", fmt.Errorf("writing form data: %w", err)
 	}
 
-	wr.WriteField("toirc", "0")
+	wr.WriteField("meta", string(metaJSON))
 
 	if err := wr.Close(); err != nil {
 		return "", fmt.Errorf("closing multipart writer: %w", err)
@@ -98,6 +135,9 @@ func uploadImage(cfg Config, data []byte, filename string) (string, error) {
 		return "", fmt.Errorf("creating upload request: %w", err)
 	}
 	req.Header.Set("Content-Type", wr.FormDataContentType())
+	if cfg.Upload.APIKey != "" {
+		req.Header.Set("X-API-Key", cfg.Upload.APIKey)
+	}
 	resp, err := uploadHTTPClient.Do(req)
 	postDur := time.Since(postStart)
 	if err != nil {
@@ -105,44 +145,31 @@ func uploadImage(cfg Config, data []byte, filename string) (string, error) {
 		return "", fmt.Errorf("uploading: %w", err)
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
+	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 
-	if resp.StatusCode != http.StatusSeeOther {
+	if resp.StatusCode == http.StatusUnauthorized {
+		logger.Error("upload rejected: unauthorized", "filename", filename, "status", resp.StatusCode)
+		return "", fmt.Errorf("upload rejected with 401 unauthorized: check upload.api_key in the img-mcp config (it must match imgsite's auth.api_key)")
+	}
+	if resp.StatusCode != http.StatusCreated {
 		logger.Error("upload returned unexpected status", "filename", filename, "status", resp.StatusCode)
-		return "", fmt.Errorf("unexpected status from upload: %d", resp.StatusCode)
+		return "", fmt.Errorf("unexpected status from upload: %d: %s", resp.StatusCode, snippet(string(respBody), 200))
 	}
 
-	loc := resp.Header.Get("Location")
-	if loc == "" {
-		return "", fmt.Errorf("upload response missing Location header")
+	// Status came from the response headers, so the status checks above stay
+	// authoritative; but a 201 whose body died mid-read must not fall
+	// through to json.Unmarshal — a truncated body only produces a
+	// confusing parse error. Surface the transport failure instead.
+	if readErr != nil {
+		logger.Error("reading upload response body failed", "filename", filename, "error", readErr)
+		return "", fmt.Errorf("reading upload response: %w", readErr)
 	}
-	locURL, err := url.Parse(loc)
-	if err != nil {
-		return "", fmt.Errorf("parsing upload Location %q: %w", loc, err)
+	var parsed uploadResponse
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return "", fmt.Errorf("parsing upload response: %w", err)
 	}
-	segments := strings.Split(strings.Trim(locURL.Path, "/"), "/")
-	if len(segments) == 0 || segments[0] == "" {
-		return "", fmt.Errorf("upload Location %q has no photo id", loc)
-	}
-
-	origURL := base + "/" + url.PathEscape(segments[0]) + "/orig/" + url.PathEscape(filename)
-
-	verifyStart := time.Now()
-	vresp, err := uploadHTTPClient.Get(origURL)
-	verifyDur := time.Since(verifyStart)
-	if err != nil {
-		logger.Error("verifying upload failed", "filename", filename, "url", origURL, "error", err)
-		return "", fmt.Errorf("verifying upload: %w", err)
-	}
-	defer vresp.Body.Close()
-	io.Copy(io.Discard, vresp.Body)
-
-	if vresp.StatusCode < 300 || vresp.StatusCode > 399 {
-		logger.Error("upload verification returned unexpected status", "filename", filename, "url", origURL, "status", vresp.StatusCode)
-		return "", fmt.Errorf("verifying %s: unexpected status %d", origURL, vresp.StatusCode)
-	}
-	if vresp.Header.Get("Location") == "" {
-		return "", fmt.Errorf("verifying %s: redirect missing Location header", origURL)
+	if parsed.URL == "" {
+		return "", fmt.Errorf("upload response missing url")
 	}
 
 	// Stage boundaries for the log; stages that never fired (reused
@@ -155,14 +182,15 @@ func uploadImage(cfg Config, data []byte, filename string) (string, error) {
 		connReady = tlsDone
 	}
 
-	logger.Info("upload complete", "filename", filename, "url", origURL,
-		"post_ms", postDur.Milliseconds(), "verify_ms", verifyDur.Milliseconds(),
+	logger.Info("upload complete", "filename", filename, "url", parsed.URL,
+		"image_id", parsed.ID,
+		"post_ms", postDur.Milliseconds(),
 		"conn_reused", connReused,
 		"dial_ms", elapsedMs(postStart, connectDone),
 		"tls_ms", elapsedMs(connectDone, tlsDone),
 		"send_ms", elapsedMs(connReady, wroteReq),
 		"srv_ms", elapsedMs(wroteReq, firstByte))
-	return origURL, nil
+	return parsed.URL, nil
 }
 
 // elapsedMs reports the milliseconds between two httptrace timestamps,
@@ -174,16 +202,46 @@ func elapsedMs(from, to time.Time) int64 {
 	return to.Sub(from).Milliseconds()
 }
 
-// sanitizeUploadFilename keeps the /orig/ URL derivable: the URL path is
-// <base>/<id>/orig/<filename>, so directory components would break it,
-// and an empty name (possible from the upload_image tool's caller)
-// needs a default the site will echo back in its redirect target.
-// Anything that could corrupt the multipart part header (control
-// characters), smuggle a path past filepath.Base (Windows separators —
-// Base does not split them on Linux), traverse paths (".."), or render
-// oddly in the URL (non-printable-ASCII) falls back to "image.png";
-// callers reach this with ComfyUI-generated names or LLM-chosen ones,
-// neither of which is trusted.
+// snippet clamps s to at most max runes for embedding in an error string
+// (the upload site's bodies are short human strings, but the client must
+// not trust that). Truncation happens on rune boundaries so a multi-byte
+// character straddling the cut is never split into invalid UTF-8 — these
+// strings end up in logs and pasted to IRC.
+func snippet(s string, max int) string {
+	// Fast path for the common short body: within the byte budget and
+	// valid UTF-8 means at most max runes, so there is nothing to slice.
+	if len(s) <= max && utf8.ValidString(s) {
+		return s
+	}
+	// Walk runes until the budget is spent, slicing only at boundaries.
+	// Invalid bytes decode as one-byte runes (RuneError, size 1) and pass
+	// through untouched, so garbage bodies keep their bytes — just never
+	// cut through the middle of a valid multi-byte sequence.
+	cut := 0
+	for runes := 0; runes < max; runes++ {
+		_, size := utf8.DecodeRuneInString(s[cut:])
+		if size == 0 { // decoded to the end: max runes or fewer
+			return s
+		}
+		cut += size
+	}
+	if cut == len(s) {
+		return s // exactly max runes — fits whole
+	}
+	return s[:cut] + "…"
+}
+
+// sanitizeUploadFilename keeps the /orig/ URL valid: imgsite builds the
+// public direct link as <base>/<id>/orig/<filename>, so directory
+// components would break it, and an empty name (possible from the
+// upload_image tool's caller) needs a default the site will echo back in
+// its response. Anything that could corrupt the multipart part header
+// (control characters), smuggle a path past filepath.Base (Windows
+// separators — Base does not split them on Linux), traverse paths (".."),
+// or render oddly in the URL (non-printable-ASCII) falls back to
+// "image.png"; callers reach this with ComfyUI-generated names or
+// LLM-chosen ones, neither of which is trusted. imgsite carries a port of
+// this function — keep the rules in sync.
 func sanitizeUploadFilename(filename string) string {
 	filename = filepath.Base(filename)
 	if filename == "" || filename == "." || filename == ".." ||

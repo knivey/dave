@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -344,6 +345,161 @@ func TestJobQueue_LLMGeneratedPersists(t *testing.T) {
 		"llm_generated should default to false when never set")
 }
 
+// TestJobQueue_ProvenancePersists mirrors TestJobQueue_LLMGeneratedPersists
+// for the imgsite provenance trio: Submit persists them (dbInsertJob) and a
+// recovered job carries them — the same path restart recovery uses.
+func TestJobQueue_ProvenancePersists(t *testing.T) {
+	cfg := testConfig("http://127.0.0.1:0")
+	cfg.Queue.MaxWorkers = 0
+	db := setupTestDB(t)
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	q := &JobQueue{
+		cfg:     cfg,
+		db:      db,
+		pending: make(chan *Job, cfg.Queue.MaxDepth),
+		results: make(map[string]*Job),
+		cancel:  cancel,
+	}
+
+	job, err := q.Submit(JobTypeGenerate, "test", JobInput{
+		Prompt: "a cat", Network: "libera", Channel: "#dave", Nick: "knivey",
+	})
+	require.NoError(t, err, "Submit")
+
+	dbj, err := dbGetJob(db, job.ID)
+	require.NoError(t, err, "dbGetJob")
+	recovered := jobFromDBJob(dbj)
+	assert.Equal(t, "libera", recovered.Input.Network, "network should persist through Submit")
+	assert.Equal(t, "#dave", recovered.Input.Channel, "channel should persist through Submit")
+	assert.Equal(t, "knivey", recovered.Input.Nick, "nick should persist through Submit")
+}
+
+// TestBuildUploadMeta covers the meta payload img-mcp hands imgsite per
+// upload: the plain path sends the final generation prompt as
+// enhanced_prompt (equal to the original — it IS what the image ran with),
+// the enhanced path carries the LLM's prompt/negative/reasoning, and the
+// recovery path (empty enhancement args) omits those and lets EXIF supply
+// them server-side.
+func TestBuildUploadMeta(t *testing.T) {
+	plainJob := &Job{
+		ID:       "plainjob",
+		Type:     JobTypeGenerate,
+		Workflow: "zimage",
+		Input: JobInput{
+			Prompt:       "a cat",
+			LLMGenerated: false,
+			Network:      "libera",
+			Channel:      "#dave",
+			Nick:         "knivey",
+		},
+	}
+	enhancedJob := &Job{
+		ID:       "enhjob",
+		Type:     JobTypeEnhanceGenerate,
+		Workflow: "zimage",
+		Input: JobInput{
+			Prompt:       "a cat",
+			LLMGenerated: true,
+			Network:      "libera",
+			Channel:      "#dave",
+			Nick:         "knivey",
+		},
+	}
+
+	tests := []struct {
+		name string
+		job  *Job
+		// processJob locals at upload time
+		finalPrompt  string
+		finalNeg     string
+		reasoning    string
+		expect       UploadMeta
+		expectJSONEq string
+	}{
+		{
+			name:        "plain generate: final prompt equals original",
+			job:         plainJob,
+			finalPrompt: "a cat",
+			finalNeg:    "",
+			reasoning:   "",
+			expect: UploadMeta{
+				JobID:          "plainjob",
+				OriginalPrompt: "a cat",
+				EnhancedPrompt: "a cat",
+				WorkflowName:   "zimage",
+				Network:        "libera",
+				Channel:        "#dave",
+				Nick:           "knivey",
+			},
+			expectJSONEq: `{"job_id":"plainjob","original_prompt":"a cat","enhanced_prompt":"a cat",
+				"workflow_name":"zimage","network":"libera","channel":"#dave","nick":"knivey"}`,
+		},
+		{
+			name:        "enhanced: LLM prompt, negative, reasoning all carried",
+			job:         enhancedJob,
+			finalPrompt: "a fluffy cat, cinematic lighting",
+			finalNeg:    "blurry, extra limbs",
+			reasoning:   "the user asked for a cat",
+			expect: UploadMeta{
+				JobID:          "enhjob",
+				OriginalPrompt: "a cat",
+				EnhancedPrompt: "a fluffy cat, cinematic lighting",
+				NegativePrompt: "blurry, extra limbs",
+				Reasoning:      "the user asked for a cat",
+				LLMGenerated:   true,
+				WorkflowName:   "zimage",
+				Network:        "libera",
+				Channel:        "#dave",
+				Nick:           "knivey",
+			},
+			expectJSONEq: `{"job_id":"enhjob","original_prompt":"a cat","enhanced_prompt":"a fluffy cat, cinematic lighting",
+				"negative_prompt":"blurry, extra limbs","reasoning":"the user asked for a cat","llm_generated":true,
+				"workflow_name":"zimage","network":"libera","channel":"#dave","nick":"knivey"}`,
+		},
+		{
+			name:        "recovery: empty enhancement args drop out, EXIF supplies them",
+			job:         enhancedJob,
+			finalPrompt: "",
+			finalNeg:    "",
+			reasoning:   "",
+			expect: UploadMeta{
+				JobID:          "enhjob",
+				OriginalPrompt: "a cat",
+				LLMGenerated:   true,
+				WorkflowName:   "zimage",
+				Network:        "libera",
+				Channel:        "#dave",
+				Nick:           "knivey",
+			},
+			expectJSONEq: `{"job_id":"enhjob","original_prompt":"a cat","llm_generated":true,
+				"workflow_name":"zimage","network":"libera","channel":"#dave","nick":"knivey"}`,
+		},
+		{
+			name:        "no provenance: direct tool command without inject fields",
+			job:         &Job{ID: "barejob", Type: JobTypeGenerate, Workflow: "zimage", Input: JobInput{Prompt: "a cat"}},
+			finalPrompt: "a cat",
+			expect: UploadMeta{
+				JobID:          "barejob",
+				OriginalPrompt: "a cat",
+				EnhancedPrompt: "a cat",
+				WorkflowName:   "zimage",
+			},
+			expectJSONEq: `{"job_id":"barejob","original_prompt":"a cat","enhanced_prompt":"a cat","workflow_name":"zimage"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			meta := buildUploadMeta(tt.job, tt.finalPrompt, tt.finalNeg, tt.reasoning)
+			assert.Equal(t, tt.expect, meta)
+
+			data, err := json.Marshal(meta)
+			require.NoError(t, err)
+			assert.JSONEq(t, tt.expectJSONEq, string(data))
+		})
+	}
+}
+
 func TestJobQueue_IsReady_WithDB(t *testing.T) {
 	cfg := testConfig("http://127.0.0.1:0")
 	cfg.Queue.MaxWorkers = 0
@@ -523,9 +679,10 @@ func TestProcessJobAbortsWhenCancelledBeforeStart(t *testing.T) {
 	waitForJobDone(t, job, time.Second) // Cancel must have closed done already
 }
 
-// blockingUploadServer mimics the upload wire protocol but parks each
-// /updo request until released, giving tests a deterministic window where
-// processJob sits between monitor completion and its terminal transition.
+// blockingUploadServer mimics the imgsite upload wire protocol but parks
+// each /updo request until released, giving tests a deterministic window
+// where processJob sits between monitor completion and its terminal
+// transition.
 type blockingUploadServer struct {
 	server  *httptest.Server
 	arrived chan struct{}
@@ -542,12 +699,14 @@ func newBlockingUploadServer(t *testing.T) *blockingUploadServer {
 	mux.HandleFunc("/updo", func(w http.ResponseWriter, r *http.Request) {
 		b.arrived <- struct{}{}
 		<-b.release
-		w.Header().Set("Location", "/4F4/_test-image")
-		w.WriteHeader(http.StatusSeeOther)
-	})
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Location", "/file/abc123/test-image.png")
-		w.WriteHeader(http.StatusTemporaryRedirect)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]string{
+			"id":       "aQ3f9xK",
+			"url":      b.server.URL + "/aQ3f9xK/orig/test-image.png",
+			"page":     b.server.URL + "/aQ3f9xK",
+			"filename": "test-image.png",
+		})
 	})
 	b.server = httptest.NewServer(mux)
 	t.Cleanup(b.server.Close)

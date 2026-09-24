@@ -475,7 +475,7 @@ Just reply to the bot's nick:
 
 ```
 <knivey> -qwen a sunset over mountains
-<dave>   https://img.zkpq.ca/4F4/orig/ComfyUI_00001_.png
+<dave>   https://img.example.com/aQ3f9xK/orig/ComfyUI_00001_.webp
 <dave>   All done ;)
 ```
 
@@ -552,7 +552,7 @@ Shows your queue position/status and any background async jobs.
 <knivey> -qwen cyberpunk city
          at night, neon rain
 <dave>   🔧 Generating image...
-<dave>   https://img.zkpq.ca/4F5/orig/ComfyUI_00002_.png
+<dave>   https://img.example.com/aQ3f9xK/orig/ComfyUI_00002_.webp
 <dave>   All done ;)
 ```
 
@@ -652,9 +652,16 @@ baseurl = "http://localhost:8188"
 default_workflow = "zimage"
 
 [upload]
-# Photo site base URL (required) — upload endpoint and image URLs are
-# derived from it; uploads are permanent gallery entries
-url = "https://img.zkpq.ca"
+# imgsite base URL for hosting generated images (required).
+#   POST <url>/updo  (X-API-Key, multipart "file" + "meta" provenance JSON)
+#   -> 201 + {id,url,page,filename}
+# The response's "url" is the permanent direct link, pasted to IRC verbatim.
+url = "https://img.example.com"
+# API key authenticating uploads to imgsite (X-API-Key header); must match
+# auth.api_key in imgsite's config. Hot-reloadable (read per upload call).
+# Empty is allowed at startup, but every upload will be rejected with 401
+# until it is set.
+api_key = "CHANGE_ME_TO_MATCH_IMGSITE_AUTH_API_KEY"
 
 [enhancement.default]
 baseurl = "https://api.x.ai/v1/"

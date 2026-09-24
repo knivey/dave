@@ -23,6 +23,80 @@ func insertTerminalTestJob(t *testing.T, db *sqlx.DB, jobID, status string) {
 	require.NoError(t, dbInsertJob(db, job), "dbInsertJob")
 }
 
+// TestJobProvenanceRoundTrip covers migration 003 + the insert/recovery
+// plumbing for the imgsite provenance columns: dbInsertJob must persist
+// network/channel/nick, and jobFromDBJob (restart recovery's Job rebuild)
+// must hand them back into JobInput. setupTestDB runs goose migrations, so
+// the columns existing at all here proves 003 applies cleanly.
+func TestJobProvenanceRoundTrip(t *testing.T) {
+	db := setupTestDB(t)
+
+	job := &Job{
+		ID:       "provjob",
+		Type:     JobTypeGenerate,
+		Status:   StatusQueued,
+		Workflow: "test",
+		Input: JobInput{
+			Prompt:  "a cat",
+			Network: "libera",
+			Channel: "#dave",
+			Nick:    "knivey",
+		},
+	}
+	require.NoError(t, dbInsertJob(db, job), "dbInsertJob")
+
+	// Raw columns: dbInsertJob must actually include them in the INSERT.
+	var net, chan_, nick string
+	require.NoError(t, db.Get(&net, "SELECT network FROM jobs WHERE job_id = ?", job.ID), "network column")
+	require.NoError(t, db.Get(&chan_, "SELECT channel FROM jobs WHERE job_id = ?", job.ID), "channel column")
+	require.NoError(t, db.Get(&nick, "SELECT nick FROM jobs WHERE job_id = ?", job.ID), "nick column")
+	assert.Equal(t, "libera", net)
+	assert.Equal(t, "#dave", chan_)
+	assert.Equal(t, "knivey", nick)
+
+	// Recovery round-trip through the recoverable-jobs query jobFromDBJob
+	// serves in production.
+	recoverable, err := dbLoadRecoverableJobs(db)
+	require.NoError(t, err, "dbLoadRecoverableJobs")
+	require.Len(t, recoverable, 1)
+	recovered := jobFromDBJob(&recoverable[0])
+	assert.Equal(t, "libera", recovered.Input.Network, "network should round-trip through the DB")
+	assert.Equal(t, "#dave", recovered.Input.Channel, "channel should round-trip through the DB")
+	assert.Equal(t, "knivey", recovered.Input.Nick, "nick should round-trip through the DB")
+
+	// Direct dbGetJob path (used by Get/WaitForJob for unknown jobs).
+	dbj, err := dbGetJob(db, job.ID)
+	require.NoError(t, err, "dbGetJob")
+	direct := jobFromDBJob(dbj)
+	assert.Equal(t, "libera", direct.Input.Network)
+	assert.Equal(t, "#dave", direct.Input.Channel)
+	assert.Equal(t, "knivey", direct.Input.Nick)
+}
+
+// TestJobProvenanceEmptyDefaults pins the NOT NULL DEFAULT ” side of
+// migration 003: a job submitted with no provenance (dave's direct
+// tools.toml commands never send inject fields) round-trips to empty
+// strings, not NULLs or errors.
+func TestJobProvenanceEmptyDefaults(t *testing.T) {
+	db := setupTestDB(t)
+
+	job := &Job{
+		ID:       "plainjob",
+		Type:     JobTypeGenerate,
+		Status:   StatusQueued,
+		Workflow: "test",
+		Input:    JobInput{Prompt: "a cat"},
+	}
+	require.NoError(t, dbInsertJob(db, job), "dbInsertJob")
+
+	dbj, err := dbGetJob(db, job.ID)
+	require.NoError(t, err, "dbGetJob")
+	recovered := jobFromDBJob(dbj)
+	assert.Empty(t, recovered.Input.Network)
+	assert.Empty(t, recovered.Input.Channel)
+	assert.Empty(t, recovered.Input.Nick)
+}
+
 func completeCall(db *sqlx.DB, jobID string) error {
 	return dbCompleteJob(db, jobID, &JobResult{Images: []ImageData{{MIMEType: "image/png", URL: "https://x/img.png"}}}, nil)
 }

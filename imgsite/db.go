@@ -1,0 +1,286 @@
+package main
+
+import (
+	"database/sql"
+	"embed"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/jmoiron/sqlx"
+	"github.com/pressly/goose/v3"
+	_ "modernc.org/sqlite"
+)
+
+//go:embed migrations/*.sql
+var embedMigrations embed.FS
+
+// Timestamp format used for created_at: matches SQLite CURRENT_TIMESTAMP
+// (UTC, second resolution, lexicographically sortable) but is generated in
+// Go so uploads never depend on the server's clock configuration. The
+// id DESC tiebreaker makes second resolution safe for multi-image jobs.
+const dbTimeFormat = "2006-01-02 15:04:05"
+
+const (
+	thumbStatusPending = "pending"
+	thumbStatusReady   = "ready"
+	thumbStatusFailed  = "failed"
+	// meta_source values recording which side contributed metadata:
+	// "exif" (EXIF/workflow only), "upload" (form meta only),
+	// "upload+exif" (both).
+	metaSourceEXIF          = "exif"
+	metaSourceUpload        = "upload"
+	metaSourceUploadAndEXIF = "upload+exif"
+)
+
+// dbImage mirrors the images table. Graph-derived columns are populated by
+// the extraction milestone; until then they ride along as zero values.
+type dbImage struct {
+	ID          string `db:"id"`
+	SHA256      string `db:"sha256"`
+	Filename    string `db:"filename"`
+	MimeType    string `db:"mime_type"`
+	SizeBytes   int64  `db:"size_bytes"`
+	Width       *int   `db:"width"`
+	Height      *int   `db:"height"`
+	CreatedAt   string `db:"created_at"`
+	ThumbStatus string `db:"thumb_status"`
+	Hidden      bool   `db:"hidden"`
+
+	OriginalPrompt string  `db:"original_prompt"`
+	EnhancedPrompt string  `db:"enhanced_prompt"`
+	NegativePrompt string  `db:"negative_prompt"`
+	Reasoning      string  `db:"reasoning"`
+	JobID          *string `db:"job_id"`
+	LLMGenerated   bool    `db:"llm_generated"`
+	Network        *string `db:"network"`
+	Channel        *string `db:"channel"`
+	Nick           *string `db:"nick"`
+	WorkflowName   *string `db:"workflow_name"`
+
+	Seed      *int64   `db:"seed"`
+	Steps     *int     `db:"steps"`
+	Cfg       *float64 `db:"cfg"`
+	Denoise   *float64 `db:"denoise"`
+	Sampler   *string  `db:"sampler"`
+	Scheduler *string  `db:"scheduler"`
+	ModelUnet *string  `db:"model_unet"`
+	ModelClip *string  `db:"model_clip"`
+	ModelVae  *string  `db:"model_vae"`
+	Loras     *string  `db:"loras"`
+
+	WorkflowJSON string `db:"workflow_json"`
+	MetaSource   string `db:"meta_source"`
+}
+
+func initDB(dbPath string) (*sqlx.DB, error) {
+	dir := filepath.Dir(dbPath)
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return nil, fmt.Errorf("creating database directory %s: %w", dir, err)
+		}
+	}
+
+	sqldb, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	if err != nil {
+		return nil, fmt.Errorf("opening database %s: %w", dbPath, err)
+	}
+
+	sqldb.SetMaxOpenConns(1)
+
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		sqldb.Close()
+		return nil, fmt.Errorf("setting goose dialect: %w", err)
+	}
+
+	goose.SetBaseFS(embedMigrations)
+
+	if err := goose.Up(sqldb, "migrations"); err != nil {
+		sqldb.Close()
+		return nil, fmt.Errorf("running migrations: %w", err)
+	}
+
+	db := sqlx.NewDb(sqldb, "sqlite")
+
+	loggerDB.Info("Database initialized", "path", dbPath)
+	return db, nil
+}
+
+func closeDB(db *sqlx.DB) {
+	if db != nil {
+		db.Close()
+	}
+}
+
+func dbInsertImage(db *sqlx.DB, img *dbImage) error {
+	_, err := db.NamedExec(
+		`INSERT INTO images (
+			id, sha256, filename, mime_type, size_bytes, width, height,
+			created_at, thumb_status, hidden,
+			original_prompt, enhanced_prompt, negative_prompt, reasoning,
+			job_id, llm_generated, network, channel, nick, workflow_name,
+			seed, steps, cfg, denoise, sampler, scheduler,
+			model_unet, model_clip, model_vae, loras,
+			workflow_json, meta_source
+		) VALUES (
+			:id, :sha256, :filename, :mime_type, :size_bytes, :width, :height,
+			:created_at, :thumb_status, :hidden,
+			:original_prompt, :enhanced_prompt, :negative_prompt, :reasoning,
+			:job_id, :llm_generated, :network, :channel, :nick, :workflow_name,
+			:seed, :steps, :cfg, :denoise, :sampler, :scheduler,
+			:model_unet, :model_clip, :model_vae, :loras,
+			:workflow_json, :meta_source
+		)`, img)
+	return err
+}
+
+// dbGetImageByID fetches one row including hidden ones (callers distinguish
+// 404 from 410). Returns sql.ErrNoRows when the id is unknown.
+func dbGetImageByID(db *sqlx.DB, id string) (*dbImage, error) {
+	var img dbImage
+	err := db.Get(&img, `SELECT * FROM images WHERE id = ?`, id)
+	if err != nil {
+		return nil, err
+	}
+	return &img, nil
+}
+
+func dbImageIDExists(db *sqlx.DB, id string) (bool, error) {
+	var exists bool
+	err := db.Get(&exists, `SELECT EXISTS(SELECT 1 FROM images WHERE id = ?)`, id)
+	return exists, err
+}
+
+// dbGetNewerImage returns the image immediately NEWER than the keyset
+// cursor (created_at DESC, id DESC ordering — "newer" sorts before the
+// cursor), filtering hidden rows. It is the details page's prev link and
+// half of the neighbors API. sql.ErrNoRows maps to (nil, nil): no newer
+// image exists, which is the normal end-of-gallery case.
+//
+// The row-value form `(created_at, id) > (?, ?)` lets SQLite range-seek
+// idx_images_created directly; the equivalent OR-shaped predicate plans
+// as MULTI-INDEX OR + temp b-tree (guarded by TestKeysetQueriesUseIndex-
+// Seek in db_test.go).
+func dbGetNewerImage(db *sqlx.DB, createdAt, id string) (*dbImage, error) {
+	var img dbImage
+	err := db.Get(&img, `
+		SELECT * FROM images
+		WHERE hidden = 0
+		  AND (created_at, id) > (?, ?)
+		ORDER BY created_at ASC, id ASC
+		LIMIT 1`, createdAt, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &img, nil
+}
+
+// dbGetOlderImage is dbGetNewerImage's mirror: the image immediately
+// OLDER than the cursor (the next link / gallery paging direction).
+func dbGetOlderImage(db *sqlx.DB, createdAt, id string) (*dbImage, error) {
+	var img dbImage
+	err := db.Get(&img, `
+		SELECT * FROM images
+		WHERE hidden = 0
+		  AND (created_at, id) < (?, ?)
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1`, createdAt, id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &img, nil
+}
+
+// dbGetPendingThumbIDs returns every row still awaiting thumbnails; the
+// worker's startup re-scan enqueues them so a crash between INSERT and
+// generation never strands placeholders forever.
+func dbGetPendingThumbIDs(db *sqlx.DB) ([]string, error) {
+	var ids []string
+	err := db.Select(&ids, `SELECT id FROM images WHERE thumb_status = ? ORDER BY created_at DESC, id DESC`, thumbStatusPending)
+	return ids, err
+}
+
+// dbUpdateThumbStatus flips thumb_status (terminal 'failed' today; a
+// future admin action may reset to 'pending' for a retry).
+func dbUpdateThumbStatus(db *sqlx.DB, id, status string) error {
+	_, err := db.Exec(`UPDATE images SET thumb_status = ? WHERE id = ?`, status, id)
+	return err
+}
+
+// dbUpdateThumbReady marks the row ready and backfills the decoded bounds
+// ONLY where the columns are NULL — extraction owns them when the graph
+// had a latent node; decoding is the fallback, not an overwrite.
+func dbUpdateThumbReady(db *sqlx.DB, id string, width, height int) error {
+	_, err := db.Exec(
+		`UPDATE images SET thumb_status = ?, width = COALESCE(width, ?), height = COALESCE(height, ?) WHERE id = ?`,
+		thumbStatusReady, width, height, id)
+	return err
+}
+
+// dbGetGalleryPage returns one keyset page (created_at DESC, id DESC),
+// hidden-filtered. Empty after* yields the first page. Callers fetch
+// limit+1 rows to detect has-more.
+func dbGetGalleryPage(db *sqlx.DB, afterCreatedAt, afterID string, limit int) ([]dbImage, error) {
+	var rows []dbImage
+	var err error
+	if afterCreatedAt == "" {
+		err = db.Select(&rows,
+			`SELECT * FROM images WHERE hidden = 0 ORDER BY created_at DESC, id DESC LIMIT ?`, limit)
+	} else {
+		err = db.Select(&rows,
+			`SELECT * FROM images WHERE hidden = 0 AND (created_at, id) < (?, ?)
+			 ORDER BY created_at DESC, id DESC LIMIT ?`, afterCreatedAt, afterID, limit)
+	}
+	return rows, err
+}
+
+// dbHideImage soft-deletes a row: hidden=1, nothing else. DESIGN NOTE
+// — soft delete only, never byte deletion: the store is content
+// addressed and dedupe means N rows can share one stored file, so
+// removing bytes from disk would pull the ground out from under sibling
+// rows; and hidden routes answer 410 forever, which is the honest
+// response for a URL that was already pasted into IRC. The UPDATE is
+// guarded with `hidden = 0` and reports rows-affected so two racing
+// DELETEs elect exactly one winner — the loser sees false (→ HTTP
+// 410 from the handler) instead of re-publishing the image-hidden
+// event for a row that is already gone.
+//
+// FTS note: the images_fts_au trigger only fires for UPDATEs of the
+// prompt columns, so hiding deliberately leaves the row's tokens in the
+// index — every search path joins back to images and filters
+// hidden = 0 (covered in search_test.go).
+func dbHideImage(db *sqlx.DB, id string) (bool, error) {
+	res, err := db.Exec(`UPDATE images SET hidden = 1 WHERE id = ? AND hidden = 0`, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// nullStr maps "" to SQL NULL for the display-only provenance columns, so
+// later queries can distinguish "not provided" from "empty".
+func nullStr(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+func ptrValue[T any](p *T) T {
+	if p == nil {
+		var zero T
+		return zero
+	}
+	return *p
+}

@@ -59,7 +59,7 @@ const (
 )
 
 // imageNewEvent is the image-new payload. created_at is RFC3339 UTC
-// (APIs/SSE convention; the stored format is second-resolution text).
+// (APIs/SSE convention; the stored format is ms-precision text).
 // page_url is the site-relative details-page link.
 type imageNewEvent struct {
 	ID             string `json:"id"`
@@ -231,7 +231,14 @@ func (h *sseHub) ringAppendLocked(ev event) {
 // nor delivered live. covered=false means the gap can't be covered by
 // the ring — the caller sends a reset instead (the subscriber is still
 // registered: after the reset, live delivery continues).
-func (h *sseHub) subscribe(since uint64, sinceProvided bool) (*subscriber, []event, bool) {
+//
+// lastID is the hub's newest event id at subscribe time (0 when nothing
+// has been published yet). The caller sends it as a "hello" event so
+// every client learns the stream's current position immediately — even
+// one that never receives a real event this visit. Without it, a page
+// that connected, saw zero events, froze (bfcache), and revived would
+// hold lastId=0 and have nothing to resume from.
+func (h *sseHub) subscribe(since uint64, sinceProvided bool) (*subscriber, []event, bool, uint64) {
 	sub := &subscriber{ch: make(chan event, sseSubChannelCap)}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -241,7 +248,11 @@ func (h *sseHub) subscribe(since uint64, sinceProvided bool) (*subscriber, []eve
 		replay, covered = h.replaySinceLocked(since)
 	}
 	h.subs[sub] = struct{}{}
-	return sub, replay, covered
+	// nextID is the newest issued id (0 when nothing has been
+	// published) — the same convention resetEvent stamps and
+	// replaySinceLocked compares against (since >= nextID means "caught
+	// up"). hello reports it verbatim.
+	return sub, replay, covered, h.nextID
 }
 
 // replaySinceLocked returns the ring events with ID > since, or
@@ -432,8 +443,26 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	since, sinceProvided := parseSince(r)
-	sub, replay, covered := hub.subscribe(since, sinceProvided)
+	sub, replay, covered, lastID := hub.subscribe(since, sinceProvided)
 	defer hub.unsubscribe(sub)
+
+	// Hello first, before any replay: seeds the client's last-seen id
+	// with the stream's current position. The client treats it as
+	// bookkeeping only (no page handler fires for it). id: carries the
+	// same value for native-reconnect Last-Event-ID; the data payload
+	// doubles it for clients that read JSON more readily than
+	// lastEventId. TrackId on the client takes the max, so ordering
+	// against replayed events is irrelevant. Must flush: on a fresh
+	// no-replay connect this is the LAST write before the loop parks on
+	// the 20s heartbeat ticker — without a flush the frame sits in the
+	// response buffer for a full heartbeat interval.
+	helloData, _ := json.Marshal(map[string]uint64{"last_id": lastID})
+	if err := writeSSEEvent(w, event{ID: lastID, Name: "hello", Data: string(helloData)}); err != nil {
+		return
+	}
+	if err := rc.Flush(); err != nil {
+		return
+	}
 
 	if !covered {
 		if err := writeSSEEvent(w, hub.resetEvent()); err != nil {
@@ -518,11 +547,12 @@ func writeSSEEvent(w io.Writer, ev event) error {
 	return err
 }
 
-// toRFC3339 renders the stored second-resolution UTC timestamp as
-// RFC3339 (API/SSE convention), passing the raw value through when
-// parsing fails so a bad row degrades instead of vanishing.
+// toRFC3339 renders the stored UTC timestamp (ms or legacy seconds
+// precision — see dbTimeFormat) as RFC3339 (API/SSE convention),
+// passing the raw value through when parsing fails so a bad row
+// degrades instead of vanishing.
 func toRFC3339(ts string) string {
-	if t, err := time.Parse(dbTimeFormat, ts); err == nil {
+	if t, ok := parseDBTime(ts); ok {
 		return t.UTC().Format(time.RFC3339)
 	}
 	return ts

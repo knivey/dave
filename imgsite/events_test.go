@@ -110,12 +110,14 @@ func nextSSEFrame(t *testing.T, frames <-chan sseFrame) sseFrame {
 // frame can interleave AHEAD of a concurrently published event and
 // derail a name assertion. Deliberate comment/retry assertions
 // (TestEventsHeartbeatComment, the connect-probe barriers) keep using
-// nextSSEFrame.
+// nextSSEFrame. The connect-time "hello" bookkeeping frame (id seeding,
+// no page semantics — see subscribe) is skipped the same way: tests
+// that care about it assert it explicitly via nextSSEFrame.
 func nextSSEEvent(t *testing.T, frames <-chan sseFrame) sseFrame {
 	t.Helper()
 	for {
 		f := nextSSEFrame(t, frames)
-		if f.name != "" {
+		if f.name != "" && f.name != "hello" {
 			return f
 		}
 	}
@@ -135,7 +137,7 @@ func drainSSEFrames(t *testing.T, frames <-chan sseFrame) []sseFrame {
 			if !ok {
 				return out
 			}
-			if f.name != "" {
+			if f.name != "" && f.name != "hello" {
 				out = append(out, f)
 			}
 		default:
@@ -159,9 +161,10 @@ func TestHubFanOutToSubscribers(t *testing.T) {
 	h := newSSEHub()
 	subs := make([]*subscriber, 3)
 	for i := range subs {
-		s, replay, covered := h.subscribe(0, false)
+		s, replay, covered, lastID := h.subscribe(0, false)
 		require.True(t, covered)
 		require.Empty(t, replay)
+		require.Equal(t, uint64(0), lastID, "empty hub hello id")
 		subs[i] = s
 	}
 
@@ -182,11 +185,11 @@ func TestHubFanOutToSubscribers(t *testing.T) {
 
 func TestHubNonSubscriberIsolation(t *testing.T) {
 	h := newSSEHub()
-	early, _, _ := h.subscribe(0, false)
+	early, _, _, _ := h.subscribe(0, false)
 	h.publish(eventImageNew, imageNewEvent{ID: "aaaa001"})
 	h.unsubscribe(early) // disconnects must not affect later subscribers
 
-	late, replay, covered := h.subscribe(0, false)
+	late, replay, covered, _ := h.subscribe(0, false)
 	require.True(t, covered)
 	require.Empty(t, replay, "fresh connect replays nothing")
 
@@ -214,7 +217,7 @@ func TestHubNonSubscriberIsolation(t *testing.T) {
 // normally once the sentinel is stamped.
 func TestHubOverflowResetsSlowConsumer(t *testing.T) {
 	h := newSSEHub()
-	slow, _, _ := h.subscribe(0, false)
+	slow, _, _, _ := h.subscribe(0, false)
 
 	const burst = sseSubChannelCap + 8
 	for i := 0; i < burst; i++ {
@@ -258,7 +261,7 @@ func TestHubReplayFromSince(t *testing.T) {
 		h.publish(eventImageNew, imageNewEvent{ID: fmt.Sprintf("e%02d", i)})
 	}
 
-	sub, replay, covered := h.subscribe(k-5, true)
+	sub, replay, covered, _ := h.subscribe(k-5, true)
 	require.True(t, covered)
 	require.Len(t, replay, 5)
 	for i, ev := range replay {
@@ -285,21 +288,21 @@ func TestHubReplayGapBeyondRingResets(t *testing.T) {
 	}
 
 	// Gap wider than the retained ring: reset, not a partial replay.
-	_, replay, covered := h.subscribe(3, true)
+	_, replay, covered, _ := h.subscribe(3, true)
 	assert.False(t, covered, "gap beyond the ring must reset")
 	assert.Nil(t, replay)
 
 	// Ids this server never issued (client from before a restart): reset.
-	_, _, covered = h.subscribe(total+100, true)
+	_, _, covered, _ = h.subscribe(total+100, true)
 	assert.False(t, covered, "since beyond nextID must reset")
 
 	// Exactly current: covered, nothing to replay.
-	_, replay, covered = h.subscribe(total, true)
+	_, replay, covered, _ = h.subscribe(total, true)
 	assert.True(t, covered)
 	assert.Empty(t, replay)
 
 	// Exact ring boundary: gap == ring length is still covered.
-	_, replay, covered = h.subscribe(uint64(total-sseRingCap), true)
+	_, replay, covered, _ = h.subscribe(uint64(total-sseRingCap), true)
 	assert.True(t, covered, "gap exactly the ring length must replay")
 	assert.Len(t, replay, sseRingCap)
 }
@@ -309,19 +312,19 @@ func TestHubFreshConnectNeverReplays(t *testing.T) {
 	h.publish(eventImageNew, imageNewEvent{ID: "aaaa001"})
 	// sinceProvided=false is the no-header/no-param first visit: the
 	// page render is the state; replaying at it would duplicate cards.
-	_, replay, covered := h.subscribe(0, false)
+	_, replay, covered, _ := h.subscribe(0, false)
 	require.True(t, covered)
 	assert.Empty(t, replay)
 
 	// An explicit ?since=0, by contrast, asks for everything retained.
-	_, replay, covered = h.subscribe(0, true)
+	_, replay, covered, _ = h.subscribe(0, true)
 	require.True(t, covered)
 	assert.Len(t, replay, 1)
 }
 
 func TestHubShutdownIdempotentAndStopsPublish(t *testing.T) {
 	h := newSSEHub()
-	sub, _, _ := h.subscribe(0, false)
+	sub, _, _, _ := h.subscribe(0, false)
 
 	h.shutdown()
 	h.shutdown() // must not panic (double close)
@@ -341,7 +344,7 @@ func TestHubShutdownIdempotentAndStopsPublish(t *testing.T) {
 
 func TestPublishImageHiddenPayloadShape(t *testing.T) {
 	h := newSSEHub()
-	sub, _, _ := h.subscribe(0, false)
+	sub, _, _, _ := h.subscribe(0, false)
 
 	id := h.publish(eventImageHidden, imageHiddenEvent{ID: "zzzz999"})
 	require.Equal(t, uint64(1), id)
@@ -466,6 +469,12 @@ func TestEventsHeartbeatComment(t *testing.T) {
 	retry := nextSSEFrame(t, frames)
 	assert.Equal(t, strconv.Itoa(sseRetryMs), retry.retry)
 
+	// The connect-time hello bookkeeping frame precedes the first
+	// heartbeat tick (subscribe happens before the ticker starts).
+	hello := nextSSEFrame(t, frames)
+	assert.Equal(t, "hello", hello.name)
+	assert.Contains(t, hello.data, `"last_id":0`)
+
 	hb := nextSSEFrame(t, frames)
 	assert.Equal(t, "hb", hb.comment, "heartbeat is an SSE comment")
 	assert.Empty(t, hb.name, "comments are not events")
@@ -585,6 +594,7 @@ func TestEventsConnectionClosesOnHubShutdown(t *testing.T) {
 
 	frames, _, _ := openEvents(t, ts, nil, "")
 	nextSSEFrame(t, frames) // retry hint: connection fully established
+	nextSSEFrame(t, frames) // connect-time hello bookkeeping frame
 
 	hub.shutdown()
 
@@ -781,7 +791,7 @@ func TestConcurrentPublishAndDeliver(t *testing.T) {
 	const subsN = 4
 	subs := make([]*subscriber, subsN)
 	for i := range subs {
-		s, _, _ := h.subscribe(0, false)
+		s, _, _, _ := h.subscribe(0, false)
 		subs[i] = s
 	}
 
@@ -824,4 +834,62 @@ func TestConcurrentPublishAndDeliver(t *testing.T) {
 		close(s.ch)
 	}
 	readers.Wait()
+}
+
+// TestEventsHelloSeedsLastID pins the connect-time bookkeeping frame:
+// hello carries the hub's current last id so a client that never sees
+// a real event still knows the stream's position — and a since=0
+// reconnect can replay the entire ring for it.
+func TestEventsHelloSeedsLastID(t *testing.T) {
+	app := newTestApp(t, testConfig())
+	hub := newSSEHub()
+	app.setEventHub(hub)
+	ts := newTestServer(t, app)
+
+	// Fresh hub: hello reports last_id 0.
+	frames, _, _ := openEvents(t, ts, nil, "")
+	nextSSEFrame(t, frames) // retry hint
+	f1 := nextSSEFrame(t, frames)
+	require.Equal(t, "hello", f1.name)
+	require.JSONEq(t, `{"last_id":0}`, f1.data)
+
+	hub.publish(eventImageNew, imageNewEvent{ID: "aaaa001"})
+	hub.publish(eventImageNew, imageNewEvent{ID: "aaaa002"})
+
+	// A later fresh connect (no since): hello now reports 2, and no
+	// replay happens — a freshly rendered page wants live-only.
+	frames2, _, _ := openEvents(t, ts, nil, "")
+	nextSSEFrame(t, frames2) // retry hint
+	f2 := nextSSEFrame(t, frames2)
+	require.Equal(t, "hello", f2.name)
+	require.Equal(t, uint64(2), f2.id)
+	require.JSONEq(t, `{"last_id":2}`, f2.data)
+	assert.Empty(t, drainSSEFrames(t, frames2), "fresh connect replays nothing")
+}
+
+// TestEventsSinceZeroReplaysAll pins the zero-event freeze corner's
+// server half: a client that reopens with since=0 (it never received
+// any event, so its lastId is 0) gets the WHOLE ring replayed.
+func TestEventsSinceZeroReplaysAll(t *testing.T) {
+	app := newTestApp(t, testConfig())
+	hub := newSSEHub()
+	app.setEventHub(hub)
+	ts := newTestServer(t, app)
+
+	hub.publish(eventImageNew, imageNewEvent{ID: "aaaa001"})
+	hub.publish(eventImageNew, imageNewEvent{ID: "aaaa002"})
+
+	frames, _, _ := openEvents(t, ts, nil, "?since=0")
+	nextSSEFrame(t, frames) // retry hint
+	hello := nextSSEFrame(t, frames)
+	require.Equal(t, "hello", hello.name)
+	require.Equal(t, uint64(2), hello.id)
+
+	var ids []string
+	for _, f := range drainSSEFrames(t, frames) {
+		ids = append(ids, f.data)
+	}
+	require.Len(t, ids, 2, "since=0 must replay the entire ring")
+	assert.Contains(t, ids[0], "aaaa001")
+	assert.Contains(t, ids[1], "aaaa002")
 }

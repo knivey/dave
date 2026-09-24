@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/pressly/goose/v3"
@@ -16,11 +17,33 @@ import (
 //go:embed migrations/*.sql
 var embedMigrations embed.FS
 
-// Timestamp format used for created_at: matches SQLite CURRENT_TIMESTAMP
-// (UTC, second resolution, lexicographically sortable) but is generated in
-// Go so uploads never depend on the server's clock configuration. The
-// id DESC tiebreaker makes second resolution safe for multi-image jobs.
-const dbTimeFormat = "2006-01-02 15:04:05"
+// dbTimeFormat is the storage format for created_at: UTC with
+// MILLISECOND precision, generated in Go so uploads never depend on the
+// server's clock configuration. Seconds are not enough — the keyset
+// ordering is (created_at DESC, id DESC) and ids are random, so two
+// images completing inside the same second would order arbitrarily;
+// with max_workers > 1 that genuinely happens (Sep 2026 production:
+// generations finishing back-to-back). Fixed-width ms strings keep
+// lexicographic == chronological among new rows. Legacy rows written
+// at second precision sort BEFORE any ms row in the same second
+// (string prefix comparison) — at most a one-second inversion for
+// pre-migration data, accepted.
+const dbTimeFormat = "2006-01-02 15:04:05.000"
+
+// dbTimeFormatLegacy is the pre-millisecond format. parseDBTime
+// accepts both so old rows and old-format cursors keep working.
+const dbTimeFormatLegacy = "2006-01-02 15:04:05"
+
+// parseDBTime parses a stored created_at in either precision.
+func parseDBTime(s string) (time.Time, bool) {
+	if t, err := time.Parse(dbTimeFormat, s); err == nil {
+		return t, true
+	}
+	if t, err := time.Parse(dbTimeFormatLegacy, s); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
+}
 
 const (
 	thumbStatusPending = "pending"

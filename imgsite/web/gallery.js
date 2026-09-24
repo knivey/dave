@@ -335,15 +335,18 @@ function buildCard(ev) {
 
 function prependCard(ev) {
 	if (!grid) return;
-	// Replay after visibility-reopen can redeliver an event whose card
-	// is already in the live DOM — this dedup is live-DOM only. Cards
-	// sitting in the detached set can NOT be replayed: sse.js's lastId
-	// tracks every delivered event id (including ones whose cards were
-	// later trimmed out of the DOM), and the replay bridge
-	// (Last-Event-ID / ?since=) only ever delivers ids strictly
-	// greater than that, so a trimmed card's event is never re-sent.
-	// That is why the detached array is deliberately not searched here.
+	// Dedup covers the live DOM AND the detached set. Live DOM: replay
+	// after visibility-reopen can redeliver an event whose card is
+	// attached. Detached set: since=0 full-ring replays (the
+	// zero-event reopen path) re-deliver image-new for images whose
+	// cards were fragment-rendered and later trimmed — prepending a
+	// fresh twin while the original sits detached would duplicate the
+	// card on restore(). Dropping the detached twin (the fresh prepend
+	// carries the same data) matches onImageHidden's sweep pattern.
 	if (grid.querySelector('article.card[data-id="' + CSS.escape(ev.id) + '"]')) return;
+	for (let i = detached.length - 1; i >= 0; i--) {
+		if (detached[i].dataset.id === ev.id) detached.splice(i, 1);
+	}
 	grid.prepend(buildCard(ev));
 	// Deliberately NOT trim()-ming here: trim detaches the TOP cards,
 	// which during a live prepend are exactly the ones the user is

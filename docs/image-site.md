@@ -229,12 +229,15 @@ gives ~3.5 trillion space — collisions are a non-event in practice. Job IDs
 
 Neighbors, gallery paging, and search paging key on `(created_at DESC, id
 DESC)` — never OFFSET — so live prepends can't shift pages under the user.
-`created_at` is stored as SQLite `CURRENT_TIMESTAMP` UTC (`YYYY-MM-DD HH:MM:SS`,
-second resolution); Go parses/formats it and renders RFC3339 in APIs/SSE.
-Second resolution makes the `id DESC` tiebreaker load-bearing for
-multi-image jobs completing in the same second — it's part of the cursor,
-not an afterthought. Cursor wire format: `?after=YYYY-MM-DD%20HH%3AMM%3ASS~<id>`
-(`~` separator; the timestamp is URL-encoded as one component).
+`created_at` is stored as UTC text with **millisecond precision**
+(`YYYY-MM-DD HH:MM:SS.mmm`): seconds are not enough — ids are random, so
+same-second completions (real with `max_workers > 1`) would order
+arbitrarily. Legacy second-precision rows (and their cursors) still parse
+(dual-layout `parseDBTime`) and sort before ms rows in the same second —
+at most a one-second inversion for pre-migration data. Go renders RFC3339
+for APIs/SSE. The `id DESC` tiebreak remains for exact-duplicate
+timestamps. Cursor wire format: `?after=YYYY-MM-DD%20HH%3AMM%3ASS.mmm~<id>`
+(ms included, `~` separator; the timestamp is URL-encoded as one component).
 
 ## HTTP surface
 
@@ -402,6 +405,9 @@ One hub; every `GET /events` connection gets a buffered channel (cap 32).
 Events (JSON payloads):
 
 ```
+event: hello                (connect-time bookkeeping — seeds the client's
+data: {"last_id":42}         last-seen id; no page handler fires for it)
+
 event: image-new
 data: {"id":"aQ3f9xK","created_at":"2026-09-24T03:12:00Z","original_prompt":"shrew…",
        "thumb_status":"pending","page_url":"/aQ3f9xK"}
@@ -415,14 +421,22 @@ data: {"id":"aQ3f9xK"}
 
 Client behaviors:
 
-- **Connection lifecycle** (sse.js): visibilitychange (close hidden /
-  reopen visible via `?since=`); **bfcache** — pagehide closes the
-  stream and `pageshow` with `persisted=true` reopens it (clicking into
-  an image page and pressing back freezes the gallery into the
-  back/forward cache; the browser tears the EventSource socket down
-  with no error event and usually no visibilitychange on restore, so
-  without the pageshow hook every later arrival is silently missed);
-  fatal-error (429) backoff retry; server `reset` event → full reload.
+- **Connection lifecycle** (sse.js): the FIRST connect of a page loads
+  live-only (the page was just server-rendered); every LATER open
+  (visibilitychange, bfcache restore, 429 backoff) resumes with
+  `?since=<lastId>` — including `since=0` when no event was ever
+  received, which replays the entire ring (or resets, correctly, when
+  even that can't reconstruct the gap). The server sends a connect-time
+  `hello` bookkeeping event (`{"last_id":N}`) on EVERY subscription so
+  a client always knows the stream's current position, even before its
+  first real event — that seed is what makes the zero-event reopen
+  lossless. Fatal-error (429) backoff retry; server `reset` event →
+  full reload. **bfcache** — pagehide closes the stream and `pageshow`
+  with `persisted=true` reopens it (clicking into an image page and
+  pressing back freezes the gallery into the back/forward cache; the
+  browser tears the EventSource socket down with no error event and
+  usually no visibilitychange on restore, so without the pageshow hook
+  every later arrival is silently missed).
 - **Gallery**: every query (gallery, keyset pages, `/<id>` pages, neighbors)
   filters `hidden = 0`. On `image-new`, prepend card — unless a search filter
   is active, in which case arrivals buffer into a "+N new" pill (clicking

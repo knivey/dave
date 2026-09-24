@@ -346,11 +346,11 @@ func (a *App) handleNeighbors(w http.ResponseWriter, r *http.Request) {
 }
 
 // summarizeNeighbor renders RFC3339 created_at (APIs/SSE convention; the
-// stored format is second-resolution UTC text) and falls back to the raw
-// stored string if parsing ever fails.
+// stored format is UTC text, ms or legacy-seconds precision) and falls
+// back to the raw stored string if parsing ever fails.
 func summarizeNeighbor(img *dbImage) *neighborSummary {
 	created := img.CreatedAt
-	if t, err := time.Parse(dbTimeFormat, created); err == nil {
+	if t, ok := parseDBTime(created); ok {
 		created = t.UTC().Format(time.RFC3339)
 	}
 	return &neighborSummary{

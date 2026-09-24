@@ -378,7 +378,7 @@ func TestGalleryPageRendersCards(t *testing.T) {
 	assert.Contains(t, html, `src="/dddd005/t/small"`, "cards use the small thumb")
 	assert.Contains(t, html, `href="/dddd004"`)
 	assert.NotContains(t, html, "dddd003", "hidden image filtered from the gallery")
-	assert.Contains(t, html, "2026-09-24 00:05:00 UTC", "server-rendered timestamp fallback")
+	assert.Contains(t, html, "2026-09-24 00:05:00.000 UTC", "server-rendered timestamp fallback (ms-precision fixture)")
 	assert.Contains(t, html, `data-ts="2026-09-24T00:05:00Z"`, "RFC3339 hook for JS localization")
 	assert.NotContains(t, html, `class="sentinel"`, "no sentinel without a full page")
 }

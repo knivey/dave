@@ -396,7 +396,7 @@ func buildGalleryView(cfg Config, rows []dbImage) galleryView {
 func galleryCardFromImage(cfg Config, img *dbImage) galleryCard {
 	created := img.CreatedAt
 	rfc3339 := created
-	if t, err := time.Parse(dbTimeFormat, created); err == nil {
+	if t, ok := parseDBTime(created); ok {
 		rfc3339 = t.UTC().Format(time.RFC3339)
 	}
 	return galleryCard{
@@ -425,7 +425,7 @@ func parseKeysetCursor(s string) (createdAt, id string, ok bool) {
 		return "", "", false
 	}
 	createdAt, id = s[:i], s[i+1:]
-	if _, err := time.Parse(dbTimeFormat, createdAt); err != nil {
+	if _, ok := parseDBTime(createdAt); !ok {
 		return "", "", false
 	}
 	if !validImageID(id) {

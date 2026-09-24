@@ -27,11 +27,20 @@
 //     buffer overflowed or its replay gap exceeded the ring —
 //     full-state-refetch semantics, so the default handler reloads.
 export function connect(handlers) {
-	const names = Object.keys(handlers).filter((n) => n !== "onReset");
+	const names = Object.keys(handlers).filter((n) => n !== "onReset" && n !== "hello");
 	let es = null;
 	let lastId = 0;
 	let closed = false;
 	let reopenTimer = null;
+	// Has open() run at least once? The FIRST connect of a page must
+	// NOT ask for replay (the server just rendered the page's state;
+	// replaying the whole ring — or triggering a reset-reload loop on a
+	// busy hub — would be wrong). Every LATER open (visibility, bfcache
+	// restore, 429 backoff) is resuming a STALE snapshot and must bridge
+	// via ?since= — including since=0 when no event was ever received:
+	// the server then replays the entire ring (or resets, correctly,
+	// when even that can't reconstruct the page's gap).
+	let openedOnce = false;
 
 	function trackId(e) {
 		const id = Number(e.lastEventId);
@@ -51,9 +60,24 @@ export function connect(handlers) {
 			reopenTimer = null;
 		}
 		if (es) es.close();
-		const url = lastId > 0 ? "/events?since=" + lastId : "/events";
+		const first = !openedOnce;
+		openedOnce = true;
+		// Reopen always carries since= (0 included: replay the whole
+		// ring from the beginning of the page's stale snapshot).
+		const url = first ? "/events" : "/events?since=" + lastId;
 		const src = new EventSource(url);
 		es = src;
+		// hello is wrapper-internal bookkeeping (the server's
+		// connect-time "you are at id N" frame), never a page handler.
+		src.addEventListener("hello", (e) => {
+			trackId(e);
+			try {
+				const d = JSON.parse(e.data);
+				if (Number.isFinite(d.last_id) && d.last_id > lastId) lastId = d.last_id;
+			} catch {
+				/* data malformed: the id: line already seeded us */
+			}
+		});
 		for (const name of names) {
 			src.addEventListener(name, (e) => {
 				trackId(e);

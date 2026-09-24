@@ -6,14 +6,18 @@ header.site { padding: 1rem 1rem 0; }
 header.site h1 { font-size: 1.3rem; margin: 0; }
 header.site p { color: #999; margin: 0.25rem 0 0; }
 
-#grid { column-count: 4; column-gap: 1rem; padding: 1rem; }
-@media (max-width: 1400px) { #grid { column-count: 3; } }
-@media (max-width: 1000px) { #grid { column-count: 2; } }
-@media (max-width: 640px)  { #grid { column-count: 1; } }
+/* Grid, NOT CSS columns: multi-column layout fills column 1 top-to-
+   bottom, then column 2 — DOM order (newest first) reads correctly
+   only VERTICALLY, so a row shows mixed ages ("ordering by columns").
+   Grid auto-flow (row) fills left-to-right, top-to-bottom: reading
+   order == DOM order == newest→oldest. auto-fill makes it responsive
+   without media queries. Cards crop to a uniform aspect so rows stay
+   tidy; the details page shows the true image. */
+#grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 1rem; padding: 1rem; align-items: start; }
 
-.card { break-inside: avoid; margin: 0 0 1rem; background: #1d1d21; border: 1px solid #2c2c31; border-radius: 8px; overflow: hidden; display: inline-block; width: 100%; }
+.card { background: #1d1d21; border: 1px solid #2c2c31; border-radius: 8px; overflow: hidden; }
 .card a.card-link { color: inherit; display: block; }
-.card img { display: block; width: 100%; height: auto; background: #0d0d0f; min-height: 120px; }
+.card img { display: block; width: 100%; height: auto; aspect-ratio: 16 / 10; object-fit: cover; background: #0d0d0f; min-height: 120px; }
 .card img.pending {
 	background: linear-gradient(100deg, #1d1d21 40%, #26262c 50%, #1d1d21 60%);
 	background-size: 200% 100%;
@@ -27,7 +31,7 @@ header.site p { color: #999; margin: 0.25rem 0 0; }
 .card .prompt { margin: 0.5rem 0.75rem 0.25rem; font-size: 0.85rem; overflow-wrap: anywhere; }
 .card .prompt mark { background: #5b4a12; color: #ffe9a8; border-radius: 3px; padding: 0 1px; }
 .card time { display: block; margin: 0 0.75rem 0.75rem; color: #999; font-size: 0.75rem; }
-.sentinel { width: 100%; height: 1px; }
+.sentinel { width: 100%; height: 1px; grid-column: 1 / -1; }
 
 /* Search box (gallery header form). No-JS search is a plain GET to
    /search; JS adds debounced fragment swapping on top. */
@@ -47,7 +51,7 @@ header.site .head-row > div:first-child { flex: 1; min-width: 0; }
 
 /* Search empty state — spans the CSS columns so it reads as a page
    note, not one column's card. */
-.no-results { color: #999; padding: 2.5rem 1rem; text-align: center; column-span: all; }
+.no-results { color: #999; padding: 2.5rem 1rem; text-align: center; grid-column: 1 / -1; }
 
 /* "+N new" pill: shown while a search filter (M5) holds live arrivals
    back so the filtered view never lies; click clears the filter and

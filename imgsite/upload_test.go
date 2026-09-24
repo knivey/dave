@@ -70,7 +70,7 @@ func TestUploadHappyPath(t *testing.T) {
 	assert.Nil(t, img.Height)
 	assert.Equal(t, "shrew walkin down main street", img.OriginalPrompt)
 	assert.Equal(t, "ed974b6d", ptrValue(img.JobID))
-	assert.Regexp(t, `^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$`, img.CreatedAt, "sortable UTC timestamp format")
+	assert.Regexp(t, `^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$`, img.CreatedAt, "sortable UTC timestamp format (ms precision — seconds order randomly within a second)")
 
 	// File landed at the content address.
 	_, err = os.Stat(app.store.OriginalPath(img.SHA256))

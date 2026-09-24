@@ -282,3 +282,45 @@ func TestDbHideImageConcurrentSingleWinner(t *testing.T) {
 		assert.True(t, hidden, "round %d: row must end hidden regardless of arrival order", i)
 	}
 }
+
+// TestGalleryOrdersMillisecondPrecise pins why created_at carries
+// millisecond precision: two images completing inside the same second
+// must order by their actual completion time, not by the random base62
+// id tiebreak (which made a later image sort before an earlier one).
+func TestGalleryOrdersMillisecondPrecise(t *testing.T) {
+	app := newTestApp(t, testConfig())
+
+	// Same second. The LATER image carries the lexically SMALLER id:
+	// under the old second-precision format the id DESC tiebreak would
+	// have sorted the EARLIER image first (wrong) — this fixture makes
+	// the test discriminate between the two behaviors.
+	insertImageWithFile(t, app, "aaalate0", pngBytes("late"), func(img *dbImage) {
+		img.CreatedAt = "2026-09-24 10:00:00.900"
+	})
+	insertImageWithFile(t, app, "zzzearly", pngBytes("early"), func(img *dbImage) {
+		img.CreatedAt = "2026-09-24 10:00:00.100"
+	})
+
+	rows, err := dbGetGalleryPage(app.db, "", "", 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	assert.Equal(t, "aaalate0", rows[0].ID, "later completion sorts first despite lexically smaller id")
+	assert.Equal(t, "zzzearly", rows[1].ID)
+}
+
+// TestParseDBTimeLegacyRows pins the dual-precision parser: legacy
+// second-format rows and cursors keep parsing after the ms migration.
+func TestParseDBTimeLegacyRows(t *testing.T) {
+	for _, s := range []string{"2026-09-24 10:00:00.123", "2026-09-24 10:00:00"} {
+		_, ok := parseDBTime(s)
+		assert.True(t, ok, "parse %q", s)
+	}
+	_, ok := parseDBTime("not a time")
+	assert.False(t, ok)
+
+	// Legacy cursors still validate.
+	_, _, ok = parseKeysetCursor("2026-09-24 10:00:00~abc0123")
+	assert.True(t, ok, "legacy-format cursor accepted")
+	_, _, ok = parseKeysetCursor("2026-09-24 10:00:00.123~abc0123")
+	assert.True(t, ok, "ms-format cursor accepted")
+}

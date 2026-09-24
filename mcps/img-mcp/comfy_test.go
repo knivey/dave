@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -187,6 +188,106 @@ func TestMonitorReturnsComfyExecutionTimestamps(t *testing.T) {
 	require.NotNil(t, result.ExecSuccessAt, "ExecSuccessAt should be parsed from history status")
 	assert.EqualValues(t, 1790200000000, *result.ExecStartedAt, "execution_start timestamp (ms)")
 	assert.EqualValues(t, 1790200015000, *result.ExecSuccessAt, "execution_success timestamp (ms)")
+}
+
+// TestDownloadComfyImageStats pins the download metrics contract: sizes are
+// reported exactly, the first request to a host opens a fresh connection and
+// the second reuses the pooled one (the keep-alive assumption — if this flips,
+// every request is paying TCP setup and the "slow connecting" theory is live).
+func TestDownloadComfyImageStats(t *testing.T) {
+	payload := bytes.Repeat([]byte{0xAB}, 2<<20) // 2 MiB
+	mux := http.NewServeMux()
+	mux.HandleFunc("/view", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/webp")
+		_, _ = w.Write(payload)
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	img := ComfyImage{Filename: "img_00001.png", Subfolder: "", Type: "output"}
+
+	data, st, err := downloadComfyImage(context.Background(), server.URL, img)
+	require.NoError(t, err, "first download")
+	assert.Len(t, data, len(payload), "downloaded bytes")
+	assert.EqualValues(t, len(payload), st.SizeBytes, "SizeBytes")
+	assert.True(t, st.FreshConnect, "first request to this host must open a connection")
+	assert.GreaterOrEqual(t, st.ConnectMS, int64(0), "ConnectMS")
+	assert.GreaterOrEqual(t, st.TotalMS, st.TTFBMS, "total must include time to first byte")
+	assert.GreaterOrEqual(t, st.TransferMS, int64(0), "TransferMS")
+
+	_, st2, err := downloadComfyImage(context.Background(), server.URL, img)
+	require.NoError(t, err, "second download")
+	assert.False(t, st2.FreshConnect, "second request must reuse the pooled connection")
+	assert.Zero(t, st2.ConnectMS, "no connect should happen on a reused connection")
+}
+
+// TestDownloadComfyImageRespectsContextCancel pins the hang fix: the download
+// must abort when its context is cancelled. The old http.Get had no context
+// at all — a stalled /view response blocked the worker forever and ignored
+// job cancellation.
+func TestDownloadComfyImageRespectsContextCancel(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/view", func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done() // stall until the client gives up
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := downloadComfyImage(ctx, server.URL, ComfyImage{Filename: "x.png", Type: "output"})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		require.Error(t, err, "cancelled download must return an error")
+	case <-time.After(3 * time.Second):
+		t.Fatal("download ignored context cancellation (hung)")
+	}
+}
+
+func TestHumanBytes(t *testing.T) {
+	tests := []struct {
+		name string
+		in   int64
+		want string
+	}{
+		{name: "zero", in: 0, want: "0B"},
+		{name: "bytes", in: 512, want: "512B"},
+		{name: "kibibytes", in: 2048, want: "2.0KB"},
+		{name: "mebibytes", in: 2<<20 + 300<<10, want: "2.3MB"},
+		{name: "gibibytes", in: 3 << 30, want: "3.0GB"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, humanBytes(tt.in))
+		})
+	}
+}
+
+func TestMBPerSecond(t *testing.T) {
+	tests := []struct {
+		name  string
+		bytes int64
+		ms    int64
+		want  float64
+	}{
+		{name: "2MiB in half a second", bytes: 2 << 20, ms: 500, want: 4.0},
+		{name: "zero ms clamps to 1ms", bytes: 1 << 20, ms: 0, want: 1000},
+		{name: "negative ms clamps to 1ms", bytes: 1 << 20, ms: -5, want: 1000},
+		{name: "no bytes", bytes: 0, ms: 100, want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.InDelta(t, tt.want, mbPerSecond(tt.bytes, tt.ms), 0.0001)
+		})
+	}
 }
 
 // TestCheckComfyOutputStatusMessageRobustness pins the history decode against

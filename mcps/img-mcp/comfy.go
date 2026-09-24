@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"math/rand"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"regexp"
 	"sync/atomic"
@@ -79,6 +81,11 @@ type ComfyResult struct {
 	// completion detection. Nil on ComfyUI versions without status messages.
 	ExecStartedAt *int64
 	ExecSuccessAt *int64
+	// DownloadMS / DownloadBytes aggregate the /view image-download phase
+	// (summed across images) so the "generation detected" line can show what
+	// downloading cost without needing the per-image lines.
+	DownloadMS    int64
+	DownloadBytes int64
 }
 
 type ComfyImageData struct {
@@ -344,6 +351,12 @@ func monitorComfyGeneration(ctx context.Context, cfg Config, workflowName, promp
 		if result.ExecStartedAt != nil && result.ExecSuccessAt != nil {
 			args = append(args, "exec_ms", *result.ExecSuccessAt-*result.ExecStartedAt)
 		}
+		if result.DownloadBytes > 0 {
+			args = append(args,
+				"download_ms", result.DownloadMS,
+				"dl_mb_s", math.Round(mbPerSecond(result.DownloadBytes, result.DownloadMS)*100)/100,
+			)
+		}
 		loggerComfy.Info("generation detected", args...)
 		return result
 	}
@@ -424,16 +437,29 @@ func checkComfyOutput(ctx context.Context, cfg Config, wc WorkflowConfig, baseUR
 
 	var result ComfyResult
 	for _, img := range output.Images {
-		data, err := downloadComfyImage(baseURL, img)
+		data, st, err := downloadComfyImage(ctx, baseURL, img)
 		if err != nil {
 			loggerComfy.Warn("failed to download comfyui image", "filename", img.Filename, "error", err)
 			continue
 		}
+		loggerComfy.Info("image downloaded",
+			"filename", st.Filename,
+			"size_bytes", st.SizeBytes,
+			"size", humanBytes(st.SizeBytes),
+			"fresh_connect", st.FreshConnect,
+			"connect_ms", st.ConnectMS,
+			"ttfb_ms", st.TTFBMS,
+			"transfer_ms", st.TransferMS,
+			"total_ms", st.TotalMS,
+			"mb_per_s", math.Round(mbPerSecond(st.SizeBytes, st.TotalMS)*100)/100,
+		)
 		result.Images = append(result.Images, ComfyImageData{
 			Data:     data,
 			Filename: img.Filename,
 		})
 		result.ComfyImages = append(result.ComfyImages, img)
+		result.DownloadMS += st.TotalMS
+		result.DownloadBytes += st.SizeBytes
 	}
 
 	if len(result.Images) == 0 {
@@ -469,10 +495,28 @@ func checkComfyOutput(ctx context.Context, cfg Config, wc WorkflowConfig, baseUR
 }
 
 func getComfyHistory(ctx context.Context, baseURL, promptID string) (ComfyHistoryResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", baseURL+"/history/"+promptID, nil)
+	// Trace the connection lifecycle so the poll loop has connection-cost
+	// visibility: see the comment where the slow-poll line is logged below.
+	var connectStart, connectDone time.Time
+	var reusedConn bool
+	trace := &httptrace.ClientTrace{
+		ConnectStart: func(_, _ string) {
+			if connectStart.IsZero() {
+				connectStart = time.Now()
+			}
+		},
+		ConnectDone: func(_, _ string, err error) {
+			connectDone = time.Now()
+		},
+		GotConn: func(info httptrace.GotConnInfo) {
+			reusedConn = info.Reused
+		},
+	}
+	req, err := http.NewRequestWithContext(httptrace.WithClientTrace(ctx, trace), "GET", baseURL+"/history/"+promptID, nil)
 	if err != nil {
 		return nil, err
 	}
+	start := time.Now()
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
@@ -487,19 +531,148 @@ func getComfyHistory(ctx context.Context, baseURL, promptID string) (ComfyHistor
 	if err := json.NewDecoder(resp.Body).Decode(&history); err != nil {
 		return nil, err
 	}
+
+	// Steady-state polls reuse a pooled connection and finish in single-digit
+	// milliseconds, so only log when something interesting happened: a fresh
+	// TCP dial (idle pool expired between generations — expected occasionally;
+	// every poll would mean pooling is broken) or a slow round trip. This
+	// keeps production logs quiet while still exposing connect cost.
+	elapsed := time.Since(start)
+	if !reusedConn || elapsed > comfySlowHistoryThreshold {
+		connectMS := int64(0)
+		if !connectStart.IsZero() && connectDone.After(connectStart) {
+			connectMS = connectDone.Sub(connectStart).Milliseconds()
+		}
+		loggerComfy.Debug("history poll",
+			"prompt_id", promptID,
+			"history_ms", elapsed.Milliseconds(),
+			"connect_ms", connectMS,
+			"fresh_connect", !reusedConn,
+		)
+	}
 	return history, nil
 }
 
-func downloadComfyImage(baseURL string, img ComfyImage) ([]byte, error) {
+// ImageDLStats captures per-image download diagnostics for a /view fetch:
+// where the wall time went (TCP connect vs server response vs body transfer)
+// and whether the connection was pooled. ConnectMS is 0 and FreshConnect is
+// false when an idle keep-alive connection was reused — which is exactly what
+// distinguishes "slow to connect" from "slow to transfer".
+//
+// The fields are NOT additive: TTFBMS is measured from request start, so it
+// includes ConnectMS (broken out separately — do not add it to TTFBMS);
+// TransferMS = TotalMS - TTFBMS.
+type ImageDLStats struct {
+	Filename     string
+	SizeBytes    int64
+	FreshConnect bool
+	ConnectMS    int64
+	TTFBMS       int64
+	TransferMS   int64
+	TotalMS      int64
+}
+
+// comfyDownloadTimeout bounds a single image download. The old bare http.Get
+// had no deadline and no context: a stalled /view response could wedge the
+// worker forever, and job cancellation could not interrupt it.
+const comfyDownloadTimeout = 30 * time.Second
+
+// comfySlowHistoryThreshold is the point at which a history poll is worth
+// logging despite being successful: steady polls against a warm connection
+// are single-digit milliseconds.
+const comfySlowHistoryThreshold = 100 * time.Millisecond
+
+func downloadComfyImage(ctx context.Context, baseURL string, img ComfyImage) ([]byte, ImageDLStats, error) {
+	var stats ImageDLStats
+	stats.Filename = img.Filename
+
+	// httptrace callbacks fire on transport goroutines, not the caller's: the
+	// dial runs via a dedicated goroutine with a cancellation-detached context,
+	// so after a cancelled Do returns its error, ConnectDone can still fire
+	// (abandoned dial). The reads below are safe ONLY on the success path —
+	// delivery via the transport's result channel happens-before Do returns.
+	// Do NOT read connectStart/connectDone on error paths. ConnectStart may
+	// fire for multiple resolved addresses: keep the first start; ConnectDone
+	// is last-wins (the final attempt), so ConnectMS spans the whole dial
+	// phase including failed address attempts.
+	var connectStart, connectDone, firstByte time.Time
+	trace := &httptrace.ClientTrace{
+		ConnectStart: func(_, _ string) {
+			if connectStart.IsZero() {
+				connectStart = time.Now()
+			}
+		},
+		ConnectDone: func(_, _ string, err error) {
+			connectDone = time.Now()
+		},
+		GotConn: func(info httptrace.GotConnInfo) {
+			stats.FreshConnect = !info.Reused
+		},
+		GotFirstResponseByte: func() {
+			firstByte = time.Now()
+		},
+	}
+
+	dlCtx, cancel := context.WithTimeout(ctx, comfyDownloadTimeout)
+	defer cancel()
+
 	url := fmt.Sprintf("%s/view?filename=%s&subfolder=%s&type=%s",
 		baseURL, img.Filename, img.Subfolder, img.Type)
-	resp, err := http.Get(url)
+	req, err := http.NewRequestWithContext(httptrace.WithClientTrace(dlCtx, trace), http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, stats, err
+	}
+
+	start := time.Now()
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, stats, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("download returned status %d", resp.StatusCode)
+		return nil, stats, fmt.Errorf("download returned status %d", resp.StatusCode)
 	}
-	return io.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, stats, err
+	}
+
+	if !connectStart.IsZero() && connectDone.After(connectStart) {
+		stats.ConnectMS = connectDone.Sub(connectStart).Milliseconds()
+	}
+	if !firstByte.IsZero() {
+		stats.TTFBMS = firstByte.Sub(start).Milliseconds()
+	}
+	stats.TotalMS = time.Since(start).Milliseconds()
+	stats.TransferMS = stats.TotalMS - stats.TTFBMS
+	if stats.TransferMS < 0 {
+		stats.TransferMS = 0
+	}
+	stats.SizeBytes = int64(len(data))
+	return data, stats, nil
+}
+
+// humanBytes renders a byte count as B/KB/MB/GB (binary units, one decimal
+// above 1024) for log readability: 2411824 -> "2.3MB".
+func humanBytes(n int64) string {
+	switch {
+	case n >= 1<<30:
+		return fmt.Sprintf("%.1fGB", float64(n)/(1<<30))
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1fMB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.1fKB", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%dB", n)
+	}
+}
+
+// mbPerSecond converts a transfer of bytes over ms milliseconds into MB/s
+// (binary MB, matching humanBytes). ms is clamped to >=1 so a sub-millisecond
+// transfer reports a large-but-finite rate instead of dividing by zero.
+func mbPerSecond(bytes, ms int64) float64 {
+	if ms < 1 {
+		ms = 1
+	}
+	return float64(bytes) / (1 << 20) / (float64(ms) / 1000)
 }

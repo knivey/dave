@@ -110,7 +110,9 @@ table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
 {{end}}
 
 {{if .Reasoning}}
-<details>
+{{/* Default-expanded per owner preference (still a native collapsible
+     toggle — the open attribute only sets the initial state). */}}
+<details open>
 <summary>Enhancement reasoning</summary>
 <pre>{{.Reasoning}}</pre>
 </details>

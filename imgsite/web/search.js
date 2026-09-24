@@ -9,6 +9,11 @@
 // empties. While a query is active, gallery.setFilterActive(true)
 // buffers SSE arrivals behind the "+N new" pill (M4) — nothing is ever
 // prepended into filtered results.
+//
+// Keystrokes are debounced (DEBOUNCE_MS) so one burst of typing fires
+// one request, and superseded requests are aborted (AbortController) —
+// a slow response landing after a newer query can never render: the
+// modeSeq check in swapGrid drops it even if it somehow resolves.
 "use strict";
 
 import {
@@ -19,7 +24,19 @@ import {
 	rewatchSentinel,
 } from "./gallery.js";
 
-const DEBOUNCE_MS = 150;
+// 300ms: typical inter-key gaps at normal typing speed run 100–300ms,
+// so a 150ms debounce let most keystrokes clear the timer individually
+// — one request + DB query per keystroke. 300ms coalesces mid-word
+// bursts into one request per pause while still feeling instant.
+const DEBOUNCE_MS = 300;
+
+// isAbortError distinguishes "superseded by a newer query" from real
+// fetch failures. Browsers reject an aborted fetch with a DOMException
+// whose name is "AbortError"; it carries no information worth warning
+// about and must not mark the current query as failed.
+function isAbortError(err) {
+	return !!err && err.name === "AbortError";
+}
 
 export function boot() {
 	const form = document.getElementById("search-form");
@@ -46,6 +63,11 @@ export function boot() {
 	// async grid swap validates it is still the LATEST requested mode
 	// before touching the DOM/URL/title.
 	let modeSeq = 0;
+	// AbortController for the in-flight swap. The mode check above
+	// already makes a late stale response harmless; aborting ALSO stops
+	// the superseded fetch itself — the server result stops mattering
+	// and the client stops downloading a response nobody will render.
+	let inflight = null;
 
 	function searchFragmentURL(q, cursor) {
 		let u = "/search-fragment?q=" + encodeURIComponent(q);
@@ -58,15 +80,24 @@ export function boot() {
 	// paging/trim state, and re-arms the scroll observer. mySeq is the
 	// modeSeq captured when the operation started; a mismatch means a
 	// newer query (or restore) superseded it and the swap is dropped.
+	// Starting a new swap aborts the previous in-flight fetch (it has
+	// been superseded — its response can never render).
 	async function swapGrid(url, mySeq) {
-		const resp = await fetch(url);
-		if (!resp.ok) throw new Error("HTTP " + resp.status);
-		const doc = new DOMParser().parseFromString(await resp.text(), "text/html");
-		if (mySeq !== modeSeq) return false;
-		resetPaging();
-		grid.replaceChildren(...doc.body.childNodes);
-		rewatchSentinel();
-		return true;
+		if (inflight) inflight.abort();
+		const ctl = new AbortController();
+		inflight = ctl;
+		try {
+			const resp = await fetch(url, { signal: ctl.signal });
+			if (!resp.ok) throw new Error("HTTP " + resp.status);
+			const doc = new DOMParser().parseFromString(await resp.text(), "text/html");
+			if (mySeq !== modeSeq) return false;
+			resetPaging();
+			grid.replaceChildren(...doc.body.childNodes);
+			rewatchSentinel();
+			return true;
+		} finally {
+			if (inflight === ctl) inflight = null;
+		}
 	}
 
 	async function runSearch(q) {
@@ -77,6 +108,10 @@ export function boot() {
 			history.replaceState(null, "", "/search?q=" + encodeURIComponent(q));
 			document.title = "search: " + q + " — " + siteTitle;
 		} catch (err) {
+			// A superseded fetch rejects with AbortError: the newer
+			// query owns the grid and its own outcome — this is not a
+			// failure and must not arm the identical-query retry hatch.
+			if (isAbortError(err)) return;
 			lastFetchFailed = true;
 			console.warn("search fetch failed", err);
 		}
@@ -87,6 +122,7 @@ export function boot() {
 		try {
 			if (!(await swapGrid("/gallery", mySeq))) return;
 		} catch (err) {
+			if (isAbortError(err)) return; // superseded, not failed
 			lastFetchFailed = true;
 			console.warn("gallery restore failed", err);
 			return; // keep the filter active: results grid is still shown

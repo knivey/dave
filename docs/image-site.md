@@ -502,9 +502,10 @@ Client behaviors:
 - Infinite scroll via `IntersectionObserver` fetching `?after=<keyset>`
   fragments; DOM capped at ~200 cards (furthest trimmed, scroll-up restores
   via same fetch).
-- Search box pinned to header — debounce 150ms → fetch `/search-fragment?q=`
+- Search box pinned to header — debounce 300ms → fetch `/search-fragment?q=`
   fragment (`/search` is the full page + no-JS form target), replace grid,
-  keep SSE wiring live.
+  keep SSE wiring live. Superseded fetches are aborted (AbortController);
+  a stale response can never overwrite a newer swap (mode check).
 
 ### Image details (`/<id>`)
 
@@ -512,7 +513,7 @@ Client behaviors:
 - Details panel:
   - **Original prompt** (prominent — it's what the user actually typed)
   - Enhanced prompt (collapsible, default open when it differs from original)
-  - Enhancement reasoning (collapsible, default collapsed; `<pre>` wrapped)
+  - Enhancement reasoning (collapsible, default expanded; `<pre>` wrapped)
   - Negative prompt (if any)
   - Params table: seed (click-to-copy), steps, cfg, sampler/scheduler,
     denoise, dimensions, file size/format, models (unet/clip/vae), LoRAs
@@ -658,7 +659,7 @@ imgsite/web/
   sse.js             EventSource wrapper w/ since/replay + visibilitychange
   gallery.js         infinite scroll, live prepend, +N pill, thumb swap
   image.js           neighbors prefetch, keyboard nav, live next-button
-  search.js          debounced fetch + history.replaceState
+  search.js          debounced (300ms) fetch + history.replaceState; aborts superseded fetches
 ```
 
 The one hard rule that survives any toolchain choice: **the server renders

@@ -104,6 +104,42 @@ func TestDetailsPageRendersMetadata(t *testing.T) {
 	assert.NotContains(t, body, `id="nav-next"`, "single image has no next")
 }
 
+// TestDetailsPageReasoningExpandedByDefault pins the default-expanded
+// reasoning section: the <details> element carries the open attribute
+// (so it renders expanded on load, no JS involved) while remaining a
+// plain native toggle. The workflow JSON viewer keeps its collapsed
+// default, and rows without reasoning render no reasoning section.
+func TestDetailsPageReasoningExpandedByDefault(t *testing.T) {
+	app := newTestApp(t, testConfig())
+	ts := newTestServer(t, app)
+	insertImage(t, app, "eeee003", "2026-09-24 05:00:00", func(img *dbImage) {
+		img.EnhancedPrompt = "an enhanced version"
+		img.Reasoning = "step one\nstep two"
+	})
+	insertImage(t, app, "eeee004", "2026-09-24 05:01:00")
+
+	t.Run("ReasoningOpenByDefault", func(t *testing.T) {
+		body := getPage2(t, ts, "/eeee003")
+		assert.Contains(t, body,
+			"<details open>\n<summary>Enhancement reasoning</summary>",
+			"reasoning section renders with the open attribute")
+		assert.Contains(t, body, "step one\nstep two", "reasoning content still present")
+		assert.Contains(t, body, "</details>", "still a collapsible details element")
+	})
+
+	t.Run("WorkflowJSONStaysCollapsed", func(t *testing.T) {
+		body := getPage2(t, ts, "/eeee003")
+		assert.Contains(t, body,
+			"<details>\n<summary>Workflow JSON</summary>",
+			"workflow viewer keeps its default-collapsed state")
+	})
+
+	t.Run("NoReasoningRendersNoSection", func(t *testing.T) {
+		body := getPage2(t, ts, "/eeee004")
+		assert.NotContains(t, body, "Enhancement reasoning")
+	})
+}
+
 func TestDetailsPageEscapesUntrustedText(t *testing.T) {
 	app := newTestApp(t, testConfig())
 	ts := newTestServer(t, app)

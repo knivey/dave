@@ -151,7 +151,7 @@ api_key = "…"             # REQUIRED. Uploads must send X-API-Key (constant-ti
 
 [thumbnails]
 small_width = 480         # gallery card thumb
-display_width = 1280      # details-page / og:image size
+display_width = 1280      # og:image width (px)
 jpeg_quality = 78
 workers = 2
 max_dimension = 8192      # refuse absurd decodes
@@ -380,7 +380,8 @@ records which side(s) contributed.
   q78 via stdlib (stdlib has no webp encoder; universal support, zero extra
   deps; originals stay the webp source of truth).
 - Two derivatives per image: `small` (480w — gallery cards) and `display`
-  (1280w — details page `<img>` and `og:image`).
+  (1280w — `og:image`; the details page's main `<img>` serves the original
+  bytes directly since the Sep 2026 zoom change — see "Image details").
 - Failure (corrupt exotic input, decode bomb): mark `thumb_status='failed'`,
   gallery falls back to the original URL as `src` — worst case slower, never
   broken. Decode guarded by `max_dimension`.
@@ -509,7 +510,30 @@ Client behaviors:
 
 ### Image details (`/<id>`)
 
-- Main image at `display` size, click-through to `/orig/` full bytes.
+- Main image = the ORIGINAL bytes (`/<id>/orig/<filename>`), not the
+  display thumb (owner request, Sep 2026 — uploads are already webp and
+  small enough; the display derivative remains `og:image`'s source).
+  Click-to-zoom in place (progressive enhancement, `image.js`):
+  - default state fits the page layout (max-width 100% / max-height
+    85vh, as before);
+  - zoomed: an image larger than the zoom box (either dimension) shows
+    at NATURAL size and pans by PAGE scroll — the zoom class lifts the
+    CSS caps, and the viewer's `justify-content: safe center` start-
+    aligns the overflowing axis only, so every pixel stays reachable by
+    scroll while tall-but-narrow portraits remain centered (no separate
+    pan class; alignment is CSS-owned);
+  - an image SMALLER than the page scales UP to fit (contain) via
+    inline width/height computed at toggle time against the viewer's
+    on-screen box (topnav/scrollbar-aware, not window.inner*; CSS
+    max-* can only shrink), and a `load` listener re-runs the
+    classification for a toggle that happened before the bytes decoded;
+  - click again or Esc returns to the fit state. The toggle is a real
+    `<button>` (`aria-pressed` reflects the state, Enter/Space work
+    natively); without JS the page renders completely — the image
+    displays non-linking and the direct-file anchors above are real.
+  - The main `<img>` carries `width`/`height` attributes from the DB's
+    stored dims (layout-shift guard); they are omitted while those
+    columns are NULL (pre-extraction, pre-thumb-backfill rows).
 - Details panel:
   - **Original prompt** (prominent — it's what the user actually typed)
   - Enhanced prompt (collapsible, default open when it differs from original)
@@ -522,7 +546,10 @@ Client behaviors:
 - **Navigation**: large prev/next chevron zones on image edges + ←/→
   keyboard arrows + `n`/`p` keys; neighbor URLs server-rendered for
   no-JS users; live next-button per SSE above.
-- Copy-link button (copies `/orig/` direct URL), download link.
+- Copy-link button (copies `/orig/` direct URL), download link, and an
+  "open file" anchor (the raw file opened in the browser — kept one
+  click away beside download now that the main image zooms instead of
+  linking through).
 - **Search bar** in the topnav: a plain GET form (`action="/search"`,
   `name=q`) — Enter navigates to the server-rendered search page. No JS
   module runs a search layer here; image.js's keyboard nav ignores

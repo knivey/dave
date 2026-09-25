@@ -27,7 +27,7 @@
 #
 # [thumbnails]
 #   small_width   = (int) gallery-card thumbnail width (px)       default: 480
-#   display_width = (int) details-page / og:image width (px)      default: 1280
+#   display_width = (int) og:image width (px)                     default: 1280
 #   jpeg_quality  = (int) JPEG encode quality, 1-100              default: 78
 #   workers       = (int) thumbnail worker pool size (restart to
 #                   change; not reloadable)                       default: 2

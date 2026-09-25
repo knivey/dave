@@ -361,18 +361,54 @@ func TestDetailsPageDegradesWhenNeighborLookupFails(t *testing.T) {
 	assert.Contains(t, body, "prompt for "+middle, "content unaffected")
 }
 
-func TestDetailsPageUsesDisplayThumbWithFallback(t *testing.T) {
+// TestDetailsPageMainImageServesOriginal pins the owner-requested (Sep
+// 2026) details-page swap: the main <img> loads the ORIGINAL bytes, not
+// the display thumb (which stays an og:image derivative); the img is
+// wrapped in the click-to-zoom toggle BUTTON, not a link to the file;
+// and a real "open file" anchor beside the download button keeps the
+// raw file one click away for no-JS users.
+func TestDetailsPageMainImageServesOriginal(t *testing.T) {
 	app := newTestApp(t, testConfig())
 	ts := newTestServer(t, app)
-	insertImage(t, app, "aaaa001", "2026-09-24 03:12:00")
+	insertImage(t, app, "zooma01", "2026-09-24 03:12:00")
 
-	_, body := getPage(t, ts.URL, "/aaaa001")
+	_, body := getPage(t, ts.URL, "/zooma01")
 
-	assert.Contains(t, body, `src="/aaaa001/t/display"`, "main image uses the display thumb")
-	assert.Contains(t, body, "onerror=", "graceful fallback wired")
-	// html/template JS-escapes the URL inside the handler attribute —
-	// forward slashes arrive as \/ (functionally identical in JS).
-	assert.Contains(t, body, `this.src='\/aaaa001\/orig\/aaaa001.webp'`, "fallback target is the orig URL")
+	assert.Contains(t, body, `src="/zooma01/orig/zooma01.webp"`, "main image uses the original bytes")
+	assert.NotContains(t, body, `t/display`, "display thumb is not the page's main image (og:image only, and this pending row falls back to orig there too)")
+	assert.Contains(t, body, `<button type="button" class="zoom-toggle" id="zoom-toggle" aria-pressed="false"`, "zoom toggle button wraps the main image")
+	assert.Contains(t, body, `justify-content: safe center`, "safe-center alignment ships in the viewer CSS (pan-side reachability without a JS-managed pan class)")
+	assert.NotContains(t, body, `zoomed-pan`, "no separate pan class — alignment is CSS-owned")
+	assert.NotContains(t, body, `<a href="/zooma01/orig/zooma01.webp"><img`, "main image is no longer wrapped in a file link")
+	assert.NotContains(t, body, "onerror=", "no inline onerror fallback — the src IS the orig URL")
+	assert.Contains(t, body, `<a href="/zooma01/orig/zooma01.webp" download>download</a>`, "download anchor intact")
+	assert.Contains(t, body, `<a href="/zooma01/orig/zooma01.webp">open file</a>`, "direct-file anchor beside the download button")
+}
+
+// TestDetailsPageMainImageDimsAttrs pins the layout-shift guard on the
+// main <img>: width/height attributes render as a pair when the row
+// carries dims (graph-extracted at upload or backfilled by the thumb
+// worker) and are omitted entirely while the columns are NULL.
+func TestDetailsPageMainImageDimsAttrs(t *testing.T) {
+	app := newTestApp(t, testConfig())
+	ts := newTestServer(t, app)
+	width, height := 1920, 1080
+	insertImage(t, app, "dimsa01", "2026-09-24 03:12:00", func(img *dbImage) {
+		img.Width, img.Height = &width, &height
+	})
+	// Default insertImage leaves Width/Height NULL (dims arrive from
+	// graph extraction or the thumb worker's decode backfill).
+	insertImage(t, app, "dimsa02", "2026-09-24 03:13:00")
+
+	_, known := getPage(t, ts.URL, "/dimsa01")
+	assert.Contains(t, known, `src="/dimsa01/orig/dimsa01.webp" width="1920" height="1080"`,
+		"known dims render as width/height attrs on the main img")
+
+	_, unknown := getPage(t, ts.URL, "/dimsa02")
+	// Nothing else on the page renders width=" (the viewport meta is
+	// width=device-width, unquoted value) — absence pins the omission.
+	assert.NotContains(t, unknown, `width="`, "NULL dims omit the width attribute entirely")
+	assert.NotContains(t, unknown, `height="`, "NULL dims omit the height attribute entirely")
 }
 
 func TestGalleryCardsEscapePrompts(t *testing.T) {

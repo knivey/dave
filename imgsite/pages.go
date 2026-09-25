@@ -13,9 +13,10 @@ import (
 
 // Milestone-2 details page. All output goes through html/template
 // auto-escaping — prompts, reasoning, and workflow JSON are LLM/user text
-// and must never hit the page raw. The gallery grid, display-size
-// thumbnails, and SSE live-next are later milestones; the main image uses
-// the orig URL for now. Milestone 7 adds the OpenGraph block (see
+// and must never hit the page raw. Since the Sep 2026 owner request the
+// main image serves the ORIGINAL bytes (the display thumb remains an
+// og:image derivative) behind a click-to-zoom toggle — see the viewer
+// markup and image.js. Milestone 7 added the OpenGraph block (see
 // headExtrasSrc).
 
 // headExtrasSrc defines the <head> additions shared by EVERY full-page
@@ -53,8 +54,33 @@ a:hover { text-decoration: underline; }
 .topnav input[type="search"] { background: #141416; color: #ddd; border: 1px solid #3c3c44; border-radius: 6px; padding: 0.25rem 0.7rem; font: inherit; min-width: min(14rem, 40vw); }
 button { background: #2a2a30; color: #ddd; border: 1px solid #3c3c44; border-radius: 6px; padding: 0.25rem 0.7rem; cursor: pointer; font: inherit; }
 button:hover { background: #35353d; }
-.viewer { position: relative; display: flex; justify-content: center; background: #0d0d0f; }
+/* safe center: behaves as plain center whenever the item fits (fit
+   state, scale-up state) and start-aligns the axis that overflows —
+   chosen over a JS-managed pan class because it covers both the flex
+   trap (a centered item wider than its container overflows both sides
+   equally; the left side is unreachable by page scroll) AND the
+   tall-but-narrow portrait that only overflows vertically and deserves
+   to stay centered. The plain "center" line above is the fallback for
+   engines without the safe keyword: those degrade to centered
+   overflow, never to breakage. */
+.viewer { position: relative; display: flex; justify-content: center; justify-content: safe center; background: #0d0d0f; }
 .viewer img { max-width: 100%; max-height: 85vh; display: block; }
+/* Click-to-zoom on the main image (image.js). Default state fits the
+   layout exactly like the pre-zoom markup. Zoomed: the max-width/
+   max-height caps lift so the img renders at natural (or attribute)
+   size and the PAGE scrolls to pan; horizontal alignment in every
+   state is the safe center above, so there is deliberately NO separate
+   pan class — CSS owns alignment, image.js only computes the scale-up
+   sizing for images smaller than the page (CSS max-* can shrink,
+   never enlarge). The toggle is a native <button>: Enter/Space come
+   free and the no-JS page renders identically, just non-interactive. */
+.zoom-toggle { display: block; padding: 0; border: 0; background: none; cursor: zoom-in; max-width: 100%; }
+.zoom-toggle img { display: block; }
+.zoom-toggle:hover img { filter: brightness(1.06); }
+@media (prefers-reduced-motion: no-preference) { .zoom-toggle img { transition: filter 0.15s ease; } }
+.zoom-toggle:focus-visible { outline: 2px solid #7ab0ff; outline-offset: 2px; }
+.viewer.zoomed .zoom-toggle { cursor: zoom-out; max-width: none; }
+.viewer.zoomed .zoom-toggle img { max-width: none; max-height: none; }
 .chevron { position: absolute; top: 0; bottom: 0; width: 18%; display: flex; align-items: center; justify-content: center; font-size: 3rem; color: rgba(255,255,255,0.25); }
 .chevron:hover { background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.6); text-decoration: none; }
 .chevron.left { left: 0; }
@@ -85,10 +111,25 @@ table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
 </form>
 <button data-copy="{{.AbsOrigURL}}" title="copy direct link">copy link</button>
 <a href="{{.OrigURL}}" download>download</a>
+{{/* Open-file keeps the raw file one click away now that the main image
+     no longer links to it (click zooms instead); sits beside download,
+     same destination without the download attribute so it opens in the
+     browser. */}}
+<a href="{{.OrigURL}}">open file</a>
 </nav>
 <div class="viewer">
 {{if .HasPrev}}<a class="chevron left" id="nav-prev" href="/{{.PrevID}}" title="newer (← / p)">&#8249;</a>{{end}}
-<a href="{{.OrigURL}}"><img src="/{{.ID}}/t/display" onerror="this.onerror=null;this.src='{{.OrigURL}}'" alt="{{.OriginalPrompt}}"></a>
+{{/* Main image = ORIGINAL bytes (owner request, Sep 2026): uploads are
+     already webp and small enough that the display thumb buys nothing
+     here — it stays an og:image derivative. Click-to-zoom (image.js) is
+     pure enhancement: without JS the button renders the fit-state image
+     and does nothing, while "open file" above keeps the direct link a
+     real anchor. width/height attrs reserve the aspect ratio when the
+     row carries dims (NULL until graph extraction or the thumb worker's
+     decode backfill fills them). */}}
+<button type="button" class="zoom-toggle" id="zoom-toggle" aria-pressed="false" title="zoom in">
+<img src="{{.OrigURL}}"{{if .ImgWidth}} width="{{.ImgWidth}}" height="{{.ImgHeight}}"{{end}} alt="{{.OriginalPrompt}}">
+</button>
 {{if .HasNext}}<a class="chevron right" id="nav-next" href="/{{.NextID}}" title="older (→ / n)">&#8250;</a>{{end}}
 </div>
 <main>
@@ -546,6 +587,14 @@ type imageView struct {
 
 	WorkflowJSON string
 
+	// ImgWidth/ImgHeight carry the row's stored dims for the main
+	// <img>'s width/height attributes (layout-shift guard before the
+	// original bytes finish loading). Zero = dims unknown (columns NULL
+	// until graph extraction at upload or the thumb worker's decode
+	// backfill fills them) — the template then omits the attributes.
+	ImgWidth  int
+	ImgHeight int
+
 	HasPrev bool
 	PrevID  string
 	HasNext bool
@@ -598,6 +647,12 @@ func buildImageView(cfg Config, img *dbImage, prev, next *dbImage, absBase strin
 		JobID:          ptrValue(img.JobID),
 		WorkflowName:   ptrValue(img.WorkflowName),
 		WorkflowJSON:   clampWorkflowJSON(img.WorkflowJSON),
+	}
+	// Main-image dims: positive only when the row carries BOTH — the
+	// template renders width/height as a pair or not at all (a lone
+	// width attribute would bake a wrong aspect ratio into the layout).
+	if img.Width != nil && img.Height != nil && *img.Width > 0 && *img.Height > 0 {
+		v.ImgWidth, v.ImgHeight = *img.Width, *img.Height
 	}
 	v.EnhancedDiffers = v.EnhancedPrompt != "" && v.EnhancedPrompt != v.OriginalPrompt
 

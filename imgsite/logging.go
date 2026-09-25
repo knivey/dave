@@ -18,6 +18,7 @@ var (
 	loggerThumbs logxi.Logger
 	loggerEvents logxi.Logger
 	loggerImport logxi.Logger
+	loggerDelete logxi.Logger
 
 	logFile *os.File
 )
@@ -67,6 +68,9 @@ func initLogger(exeDir string) {
 
 	loggerImport = logxi.NewLogger(writer, "import")
 	loggerImport.SetLevel(logxi.LevelAll)
+
+	loggerDelete = logxi.NewLogger(writer, "delete")
+	loggerDelete.SetLevel(logxi.LevelAll)
 }
 
 func closeLogger() {

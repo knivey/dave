@@ -80,6 +80,35 @@ the import against a live server risks lock contention.
 Details and design rationale: `docs/image-site.md`, "Importing legacy
 outputs".
 
+## Delete images (admin)
+
+Hide an inappropriate image — soft delete, reversible, no confirmation
+prompt. Two surfaces, one DB path (`dbHideImage`: `hidden=1`, files
+retained):
+
+```bash
+# over HTTP (server running; connected browsers drop the card live)
+curl -X DELETE -H "X-API-Key: <key>" https://…/api/images/<id>
+
+# or offline from the shell (one id or a comma-separated list)
+./imgsite -delete <id>[,<id>…] [config]
+```
+
+Galleries and search exclude hidden rows immediately. The HTTP endpoint
+publishes a live `image-hidden` event; the CLI is offline like
+`-import` — **stop the server first** (or accept that connected pages
+keep the card until their next load).
+
+- Per-id report lines never stop the rest of the list: `hidden <id> —
+  "<prompt snippet>" (files retained)`, `already hidden: <id>` (the
+  HTTP 410 equivalent), `not found: <id>`.
+- Exit status: `0` only when every requested id was hidden by this run;
+  any not-found / already-hidden / per-id error ⇒ `1`. Usage mistakes
+  (empty list, malformed id, `-delete` combined with `-import`) ⇒ `2`.
+- Reversible: restore with `UPDATE images SET hidden=0 WHERE id='<id>'`
+  (the CLI summary prints this reminder after every run). Bytes are
+  never purged — content-addressed storage is shared by dedupe.
+
 ## Deploy behind a reverse proxy
 
 - Terminate TLS at the proxy and pass the scheme through — absolute URLs
@@ -140,6 +169,8 @@ direct link to IRC.
 - Delete an image: `curl -X DELETE -H "X-API-Key: <key>" https://…/api/images/<id>`
   — soft delete (`hidden=1`, files retained, galleries/search exclude it,
   connected browsers drop the card live). A second delete returns 410.
+  Same soft delete offline via `./imgsite -delete <id>[,<id>…]` (see
+  "Delete images (admin)").
 - Re-extract metadata: if workflow parsing improves (it has — e.g. GGUF
   loader variants were initially missed), heal existing rows without
   re-uploading: `curl -X POST -H "X-API-Key: <key>" https://…/admin/reextract`

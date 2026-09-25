@@ -19,10 +19,11 @@ import (
 var (
 	importDirFlag = flag.String("import", "", "import legacy ComfyUI outputs from DIR (recursive webp/PNG walk), then exit")
 	importTZFlag  = flag.String("tz", "", "timezone of -import filename timestamps (IANA name, e.g. America/New_York);\ndefault: this machine's local zone")
+	deleteIDsFlag = flag.String("delete", "", "hide gallery images by public id, comma-separated (soft delete, files retained),\nthen exit")
 )
 
-// usage documents both modes; the flag package prints it on bad flag
-// usage, import/serve-mode misuse prints it explicitly.
+// usage documents all modes; the flag package prints it on bad flag
+// usage, import/delete/serve-mode misuse prints it explicitly.
 func usage() {
 	prog := filepath.Base(os.Args[0])
 	fmt.Fprintf(os.Stderr, `%[1]s — image gallery for dave's generations
@@ -43,6 +44,21 @@ already known to the DB are skipped). Filename timestamps (leading
 %%Y-%%m-%%d-%%H%%M%%S) are interpreted in ZONE (default: the local zone).
 Run with the server stopped. See docs/image-site.md, "Importing legacy
 outputs".
+
+delete mode:
+  %[1]s -delete ID[,ID…] [config]
+
+Hides one or more gallery images by public id (comma-separated). Soft
+delete through the exact same DB path as the HTTP DELETE endpoint: rows
+are marked hidden=1, files are retained, galleries/search exclude the
+row. No confirmation prompt — it is reversible:
+  UPDATE images SET hidden=0 WHERE id='<id>'
+Offline like -import: no live-update events are published, so run with
+the server stopped (or accept that connected pages keep the card until
+their next load). Unknown ids and already-hidden ids are per-id report
+lines that do not stop the rest, but make the exit status 1 (the 404/
+410 equivalents); usage mistakes (empty or malformed id list, -delete
+combined with -import) exit 2; 0 means every id was hidden by this run.
 
 flags:
 `, prog)
@@ -73,9 +89,39 @@ func main() {
 		}
 	}
 
+	// Offline-mode presence (-import / -delete) is detected with
+	// flag.Visit, not plain != "" tests: an explicitly empty
+	// `-import ""` or `-delete ""` is an argument mistake that must
+	// reach the usage errors below, not silently fall into serve mode
+	// the way an unset flag does.
+	importSet := false
+	deleteSet := false
+	flag.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "import":
+			importSet = true
+		case "delete":
+			deleteSet = true
+		}
+	})
+
+	// -import and -delete are both one-shot offline modes over the same
+	// DB; combining them is a usage error, checked BEFORE either branch
+	// so neither mode runs.
+	if importSet && deleteSet {
+		fmt.Fprintf(os.Stderr, "error: -import and -delete are mutually exclusive\n\n")
+		flag.Usage()
+		os.Exit(2)
+	}
+
 	// Import mode: -import DIR runs the legacy-output import and exits.
 	// os.Exit skips main's defers, so closeLogger runs explicitly here.
-	if *importDirFlag != "" {
+	if importSet {
+		if *importDirFlag == "" {
+			fmt.Fprintf(os.Stderr, "error: -import needs a directory to import from\n\n")
+			flag.Usage()
+			os.Exit(2)
+		}
 		code := importMain(exeDir, configPath, *importDirFlag, *importTZFlag)
 		closeLogger()
 		os.Exit(code)
@@ -84,6 +130,22 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: -tz is only meaningful together with -import DIR\n\n")
 		flag.Usage()
 		os.Exit(2)
+	}
+
+	// Delete mode: -delete ID[,ID…] soft-hides images and exits. Bad
+	// arguments are usage errors (exit 2); per-id misses are run-level
+	// outcomes reported by deleteMain (exit 1). Same explicit
+	// closeLogger as import mode.
+	if deleteSet {
+		ids, err := parseDeleteIDs(*deleteIDsFlag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n\n", err)
+			flag.Usage()
+			os.Exit(2)
+		}
+		code := deleteMain(exeDir, configPath, ids)
+		closeLogger()
+		os.Exit(code)
 	}
 
 	cfg, err := loadConfig(configPath)

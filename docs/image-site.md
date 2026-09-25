@@ -2,7 +2,8 @@
 
 Status: implemented (2026-09-24) — milestones 1–7 shipped in `imgsite/` with the
 img-mcp switch-over; each milestone was independently reviewed. Legacy-output
-import (`imgsite -import`) added 2026-09-25 (see "Importing legacy outputs").
+import (`imgsite -import`) added 2026-09-25 (see "Importing legacy outputs"),
+CLI soft-delete (`imgsite -delete`) the same day (see "Admin deletion").
 Grounded in verified production artifacts: two live webp uploads from
 img.zkpq.ca (`526`, `528`) were dissected to pin down the exact EXIF/workflow
 embedding; details in "Input format (verified)".
@@ -260,7 +261,7 @@ timestamps. Cursor wire format: `?after=YYYY-MM-DD%20HH%3AMM%3ASS.mmm~<id>`
 | `POST /updo` | upload (X-API-Key) | — |
 | `POST /admin/reload` | hot reload (X-API-Key) | — |
 | `POST /admin/reextract` | re-run workflow extraction from stored `workflow_json` under current rules (X-API-Key) — heals rows when extraction improves; preserves provenance/visibility, skips unparseable rows | — |
-| `DELETE /api/images/<id>` | soft-delete → `hidden=1` (X-API-Key) | — |
+| `DELETE /api/images/<id>` | soft-delete → `hidden=1` (X-API-Key); CLI equivalent: `imgsite -delete <id>[,<id>…]` (see "Admin deletion") | — |
 
 Routes serve bytes directly — no redirect hops. We control both ends of
 this protocol, so there is nothing to preserve from the old site's
@@ -438,6 +439,45 @@ Behavior:
   is non-zero only for fatal setup errors (bad `-tz`, bad dir, config or
   DB open failure); per-file skips and thumbnail failures never fail the
   run.
+
+## Admin deletion (`DELETE /api/images/<id>` · `imgsite -delete`)
+
+Two surfaces, one DB path: every hide funnels through `dbHideImage`'s
+guarded `UPDATE images SET hidden = 1 WHERE id = ? AND hidden = 0`
+(exactly one winner per row, rows-affected reported), so the CLI can
+never diverge from the wire path's semantics.
+
+- **HTTP** (server running): `DELETE /api/images/<id>` with the same
+  X-API-Key as `/updo`. 200 hidden by this request · 410 already hidden
+  · 404 unknown/malformed id · 401 bad key · 500 DB failure. Publishes
+  `image-hidden` SSE after the UPDATE commits, so connected browsers
+  drop the card live.
+- **CLI** (offline like `-import`): `imgsite -delete <id>[,<id>…]
+  [config]` hides one id or a comma-separated list through the same
+  `dbHideImage` call, with the same 404/410 distinctions as per-id
+  report lines (`not found: <id>` / `already hidden: <id>`), a prompt
+  snippet + "files retained" per success, and a summary with the
+  reversibility note. No confirmation prompt — the operation is a
+  reversible soft hide. No SSE hub runs in CLI mode: run with the
+  server stopped, or accept that connected pages keep the card until
+  their next load. `-delete` is mutually exclusive with `-import`
+  (usage error, exit 2).
+
+Shared semantics:
+
+- Soft delete only — `hidden=1`, files retained forever (content-
+  addressed storage is shared by dedupe, so bytes are never purged);
+  hidden rows answer 410 on every id-keyed route and are filtered from
+  gallery/search via the `hidden = 0` join-back.
+- Reversible: `UPDATE images SET hidden=0 WHERE id='<id>'` (the CLI
+  summary prints this reminder after every run). There is no dedicated
+  unhide endpoint.
+- CLI exit codes: `0` only when every requested id was hidden by this
+  run; any not-found / already-hidden / per-id error ⇒ `1` (mirroring
+  the 404/410 statuses); usage mistakes (empty or malformed id list,
+  `-delete` combined with `-import`) ⇒ `2`. Malformed ids are rejected
+  up front by shape (`^[0-9A-Za-z]{7}$`) — a well-formed but unknown id
+  is the runtime "not found" line instead.
 
 ## Metadata extraction (extract.go / workflow.go)
 

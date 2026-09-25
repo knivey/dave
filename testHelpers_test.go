@@ -77,6 +77,13 @@ func setupTestJobManager(t *testing.T) {
 		if asyncJobMgr.cancel != nil {
 			asyncJobMgr.cancel()
 		}
+		// Drain the job-manager goroutines. Mirrors production shutdown()
+		// ordering (stopJobManager before closeDB): t.Cleanup runs LIFO, so
+		// this happens BEFORE setupTestDB's cleanup closes the test DB. A job
+		// goroutine that outlives the test body would otherwise race the next
+		// test's global swaps (theDB/sessionMgr) and crash on a closed or nil
+		// DB from its completion tail.
+		asyncJobMgr.wg.Wait()
 	})
 }
 

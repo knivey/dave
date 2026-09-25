@@ -911,6 +911,12 @@ func TestRecoverPendingJobs(t *testing.T) {
 	setupTestDB(t)
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
+	// Park the recovered job's goroutine inside wait_for_job so the in-memory
+	// map entry is stably observable. Without this the wait fails instantly
+	// ("unknown MCP tool"), the goroutine removes itself from the map (racing
+	// the assertion below), and its completion tail then touches global DB
+	// state around teardown.
+	setupBlockingWaitMCP(t)
 
 	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sid, "system", "sys")
@@ -927,18 +933,36 @@ func TestRecoverPendingJobs(t *testing.T) {
 	asyncJobMgr.mu.Unlock()
 	assert.True(t, exists, "expected job to be recovered in memory")
 
+	// Cancel, then wait for the goroutine to drain: the blocking MCP call
+	// returns ctx.Canceled, waitForResult takes the cancelled path, and the
+	// goroutine exits without its DB/queue tail. A time.Sleep here left the
+	// goroutine racing test teardown into theDB.
 	asyncJobMgr.cancel()
-	time.Sleep(100 * time.Millisecond)
+	asyncJobMgr.wg.Wait()
 }
 
 func TestRecoverPendingJobs_NoDB(t *testing.T) {
+	// Restore the globals afterward: leaving them nil widens the crash window
+	// for any job goroutine another test leaked (its completion tail
+	// dereferences theDB) and clobbers state later tests assume.
+	oldDB := theDB
+	oldSM := sessionMgr
 	theDB = nil
 	sessionMgr = nil
+	t.Cleanup(func() {
+		theDB = oldDB
+		sessionMgr = oldSM
+	})
 	recoverPendingJobs()
 }
 
 func TestRegisterAsyncJob_Duplicate(t *testing.T) {
 	setupTestJobManager(t)
+	// Park the job goroutine inside wait_for_job. Without this the wait fails
+	// instantly, the goroutine races the cancel below past its ctx check, and
+	// its completion tail (completePendingJob) dereferences a nil theDB —
+	// this test never sets one up — crashing the whole test binary.
+	setupBlockingWaitMCP(t)
 	asyncJobMgr.ctx, asyncJobMgr.cancel = context.WithCancel(context.Background())
 
 	registerAsyncJob("dup-job", 1, "tool", "server", "net", "#chan", "user", 0)
@@ -1324,7 +1348,11 @@ func TestWaitForAsyncJob_CleanupOnCancel(t *testing.T) {
 	assert.False(t, exists, "cancelled job should be removed from asyncJobMgr.jobs")
 }
 
-func setupImmediateResultMCP(t *testing.T, resultText string) {
+// setupImmediateResultMCP registers an in-memory img-mcp whose wait_for_job
+// returns resultText immediately. If release is non-nil, the result is held
+// back until that channel is closed, letting a test arrange its receiver
+// before the job goroutine can race through its send-select.
+func setupImmediateResultMCP(t *testing.T, resultText string, release <-chan struct{}) {
 	t.Helper()
 
 	ctx := context.Background()
@@ -1335,6 +1363,16 @@ func setupImmediateResultMCP(t *testing.T, resultText string) {
 		JobID  string `json:"job_id"`
 		Status string `json:"status"`
 	}, error) {
+		if release != nil {
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return nil, struct {
+					JobID  string `json:"job_id"`
+					Status string `json:"status"`
+				}{}, ctx.Err()
+			}
+		}
 		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: resultText}}}, struct {
 			JobID  string `json:"job_id"`
 			Status string `json:"status"`
@@ -1379,7 +1417,12 @@ func setupImmediateResultMCP(t *testing.T, resultText string) {
 func TestWaitForAsyncJob_InlineDelivery(t *testing.T) {
 	setupTestDB(t)
 	setupTestJobManager(t)
-	setupImmediateResultMCP(t, `{"job_id":"inline-1","status":"completed","result":{"images":[{"url":"http://example.com/img.png"}]}}`)
+	// Gate the MCP result so the job goroutine cannot reach its send-select
+	// until our receiver is parked on inlineResultCh: the send uses
+	// select-with-default, so an unparked receiver makes the goroutine take
+	// the async path and this test times out (a ~1/10 flake under load).
+	release := make(chan struct{})
+	setupImmediateResultMCP(t, `{"job_id":"inline-1","status":"completed","result":{"images":[{"url":"http://example.com/img.png"}]}}`, release)
 
 	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	require.NoError(t, createPendingJob(sid, "inline-1", "generate_image_async", "img-mcp"), "createPendingJob")
@@ -1397,11 +1440,21 @@ func TestWaitForAsyncJob_InlineDelivery(t *testing.T) {
 		}
 	}()
 
+	// Give the receiver time to park while the job is held at the gate, then
+	// let the result through.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+
 	select {
 	case <-received:
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for inline result")
 	}
+
+	// The channel handoff only means the goroutine reached the send; the map
+	// removal and deliverInlinePendingJob DB write happen after it. Wait for
+	// the goroutine to finish before asserting either.
+	asyncJobMgr.wg.Wait()
 
 	assert.Contains(t, inlineResult, "inline-1", "inline result should contain job_id")
 	assert.Contains(t, inlineResult, "completed", "inline result should contain status")
@@ -1420,7 +1473,7 @@ func TestWaitForAsyncJob_InlineDelivery(t *testing.T) {
 func TestWaitForAsyncJob_AsyncDeliveryWhenNotWaiting(t *testing.T) {
 	setupTestDB(t)
 	setupTestJobManager(t)
-	setupImmediateResultMCP(t, `{"job_id":"async-1","status":"completed"}`)
+	setupImmediateResultMCP(t, `{"job_id":"async-1","status":"completed"}`, nil)
 	_ = setupMockDeps(t)
 
 	queueMgr.UpdateServiceLimits(map[string]Service{"testsvc": {Parallel: 1}, "": {Parallel: 1}})

@@ -484,9 +484,9 @@ Behavior:
   load clears the shimmer (covers replayed cards and retries that land
   after the event). Pending-thumb 404s drive an error-listener retry
   loop: server-rendered cards (which carry `data-orig`) retry once
-  (~1.5s) then fall back to the original bytes; SSE-prepended cards have
+  (~2s) then fall back to the original bytes; SSE-prepended cards have
   no orig URL in the event payload, so they stay shimmer and keep
-  retrying with capped exponential backoff (1.5s → 30s) until the thumb
+  retrying with capped exponential backoff (2s → 30s) until the thumb
   appears. (The earlier policy — stop retrying, drop the src, keep the
   card non-pending — rendered a dead near-black box that the
   `thumb-ready` swap, which targets `img.pending`, could never heal

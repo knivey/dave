@@ -106,8 +106,9 @@ button:hover { background: #35353d; }
    size, larger ones shrink to fit. */
 .zoom-toggle.nodims { width: auto; }
 .zoom-toggle.nodims img { width: auto; height: auto; max-width: 100%; max-height: 85vh; }
-.zoom-toggle:hover img { filter: brightness(1.06); }
-@media (prefers-reduced-motion: no-preference) { .zoom-toggle img { transition: filter 0.15s ease; } }
+/* Natural brightness always (owner request, Sep 2026): no :hover
+   brightness filter on the image — the zoom-in cursor and the
+   :focus-visible outline below carry the affordance alone. */
 .zoom-toggle:focus-visible { outline: 2px solid #7ab0ff; outline-offset: 2px; }
 /* Fullscreen zoom overlay (image.js owns the class flips; see the
    markup comment near the overlay element). [hidden] must come FIRST:

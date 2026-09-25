@@ -13,7 +13,7 @@ header.site p { color: #999; margin: 0.25rem 0 0; }
    order == DOM order == newest→oldest. auto-fill makes it responsive
    without media queries. Cards crop to a uniform aspect so rows stay
    tidy; the details page shows the true image. */
-#grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 1rem; padding: 1rem; align-items: start; }
+#grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 1rem; padding: 1rem; align-items: start; }
 
 .card { background: #1d1d21; border: 1px solid #2c2c31; border-radius: 8px; overflow: hidden; }
 .card a.card-link { color: inherit; display: block; }

@@ -265,6 +265,13 @@ export function boot() {
 	// .pending img renders as the pure shimmer placeholder (no
 	// broken-image glyph), and the stash lets both the retry timer and
 	// the thumb-ready swap restore the fetch.
+	//
+	// Retry base is 2s: the thumb-ready SSE event — which heals the
+	// card the instant the worker finishes — is the PRIMARY mechanism,
+	// and retries exist only as the fallback for a missed event. The
+	// hosting box resizes slowly (Intel Atoms), so a 2s first attempt
+	// avoids refetching a worker that is provably still grinding while
+	// keeping the fallback responsive.
 	grid.addEventListener(
 		"error",
 		(e) => {
@@ -284,7 +291,7 @@ export function boot() {
 				if (img.classList.contains("pending") && img.isConnected) {
 					img.src = img.dataset.thumb; // no-cache 404s refetch
 				}
-			}, Math.min(1500 * 2 ** retries, 30000));
+			}, Math.min(2000 * 2 ** retries, 30000));
 		},
 		true
 	);

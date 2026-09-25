@@ -122,9 +122,9 @@ func TestTruncateSearchQuery(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSearchCursorRoundTrip(t *testing.T) {
-	c := searchCursor{tier1: 48, tier2: 0}
+	c := searchCursor{tier1: 48, tier2: 0, tier3: 12}
 	s := formatSearchCursor(c)
-	assert.Equal(t, "1:48|2:0", s)
+	assert.Equal(t, "1:48|2:0|3:12", s)
 	got, ok := parseSearchCursor(s)
 	require.True(t, ok)
 	assert.Equal(t, c, got)
@@ -134,8 +134,9 @@ func TestSearchCursorRoundTrip(t *testing.T) {
 	assert.Equal(t, searchCursor{}, got, "empty cursor = first page")
 
 	for _, bad := range []string{
-		"1:48", "2:0|1:48", "1:-1|2:0", "1:x|2:0", "1:0|2:y",
-		"1:0|2:0|3:0", "garbage", "1:|2:", "0:1|2:3", "1:99999999999|2:0",
+		"1:48", "2:0|1:48", "1:-1|2:0|3:0", "1:x|2:0|3:0", "1:0|2:y|3:0", "1:0|2:0|3:z",
+		"1:0|2:0", "1:0|2:0|3:0|4:0", "garbage", "1:|2:|3:", "0:1|2:3|3:0",
+		"1:99999999999|2:0|3:0", "3:0|1:0|2:0",
 	} {
 		_, ok := parseSearchCursor(bad)
 		assert.False(t, ok, "cursor %q", bad)
@@ -195,7 +196,6 @@ func TestSearchTierSeparation(t *testing.T) {
 	assert.Equal(t, 1, res.Hits[0].tier)
 	assert.Equal(t, "enh0001", res.Hits[1].img.ID, "enhanced-only match second")
 	assert.Equal(t, 2, res.Hits[1].tier)
-	assert.False(t, res.UsedLIKE)
 	assert.False(t, res.HasMore)
 }
 
@@ -247,7 +247,6 @@ func TestSearchMultiTermNoTier1Leak(t *testing.T) {
 	insertSearchRow(t, app, "mis0001", "2026-09-24 03:00:00", "totally unrelated", "nothing here")
 
 	res := runSearchFor(t, app, "shrew cat", searchCursor{}, 48)
-	assert.False(t, res.UsedLIKE)
 
 	pos := map[string]int{}
 	byID := map[string]searchHit{}
@@ -297,8 +296,7 @@ func TestSearchPrefixPorterPhraseMulti(t *testing.T) {
 	})
 	t.Run("MultiTokenMissOne", func(t *testing.T) {
 		res := runSearchFor(t, app, "shrew zebra", searchCursor{}, 48)
-		assert.Empty(t, res.Hits)
-		assert.True(t, res.UsedLIKE, "zero total FTS rows — even a multi-token AND falls back to the substring scan")
+		assert.Empty(t, res.Hits, "no row has both terms in one prompt column — no FTS match, no substring match")
 	})
 	t.Run("PhrasePlusToken", func(t *testing.T) {
 		res := runSearchFor(t, app, `shrew "comin in"`, searchCursor{}, 48)
@@ -342,10 +340,35 @@ func TestSearchOperatorInputsSafe(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// LIKE fallback
+// Tier 3: always-on LIKE substring scan
 // ---------------------------------------------------------------------------
 
-func TestSearchLIKEFallback(t *testing.T) {
+// TestSearchSuffixMatchRanksTier3 is the owner's motivating case:
+// searching "shrew" must find "cowshrew" — a token-final fragment FTS5
+// prefix terms can never match (no suffix operator exists). It also
+// pins strict tier ordering and the id-level dedupe: every row here is
+// LIKE-visible, but the two that tokenize keep their FTS ranks and the
+// suffix-only row appends after both as tier 3.
+func TestSearchSuffixMatchRanksTier3(t *testing.T) {
+	app := newTestApp(t, testConfig())
+	insertSearchRow(t, app, "sfx0001", "2026-09-24 01:00:00", "shrew parade", "")          // tier 1 (also LIKE-visible)
+	insertSearchRow(t, app, "sfx0002", "2026-09-24 02:00:00", "plain", "the shrew dances") // tier 2 (also LIKE-visible)
+	insertSearchRow(t, app, "sfx0003", "2026-09-24 03:00:00", "a cowshrew grazes", "")     // tier 3 only (fused token)
+	insertSearchRow(t, app, "sfx0004", "2026-09-24 04:00:00", "unrelated", "")             // no match in any tier
+
+	res := runSearchFor(t, app, "shrew", searchCursor{}, 48)
+
+	assert.Equal(t, []string{"sfx0001", "sfx0002", "sfx0003"}, hitIDs(res.Hits),
+		"tier 1 > tier 2 > tier 3 strictly; FTS-and-LIKE rows appear once at their FTS rank")
+	assert.Equal(t, []int{1, 2, 3}, []int{res.Hits[0].tier, res.Hits[1].tier, res.Hits[2].tier})
+	assert.False(t, res.HasMore)
+}
+
+// TestSearchLIKETier3 pins the substring tier's own behavior: mid-word
+// fragments FTS cannot tokenize, the original-before-enhanced internal
+// ordering, the per-column multi-token AND, wildcard escaping, and
+// pagination through an all-tier-3 result set.
+func TestSearchLIKETier3(t *testing.T) {
 	app := newTestApp(t, testConfig())
 	// Mid-word substring: no token STARTS with "omcomi", so FTS
 	// (prefix + full tokens) cannot see it; LIKE %omcomi% can.
@@ -353,49 +376,72 @@ func TestSearchLIKEFallback(t *testing.T) {
 	insertSearchRow(t, app, "lik0002", "2026-09-24 02:00:00", "unrelated stuff", "something incomcomimg here")
 	insertSearchRow(t, app, "lik0003", "2026-09-24 03:00:00", "shrew visible", "")
 
-	t.Run("MidWordSubstringTwoTiers", func(t *testing.T) {
+	t.Run("MidWordSubstring", func(t *testing.T) {
 		res := runSearchFor(t, app, "omcomi", searchCursor{}, 48)
-		require.True(t, res.UsedLIKE)
 		require.Len(t, res.Hits, 2)
 		assert.Equal(t, "lik0001", res.Hits[0].img.ID)
-		assert.Equal(t, 1, res.Hits[0].tier, "original substring match = tier 1")
+		assert.Equal(t, 3, res.Hits[0].tier, "original substring match = tier 3")
+		assert.False(t, res.Hits[0].previewEnhanced, "original substring previews the original column")
 		assert.Equal(t, "lik0002", res.Hits[1].img.ID)
-		assert.Equal(t, 2, res.Hits[1].tier, "enhanced substring match = tier 2")
-		assert.Empty(t, res.Hits[0].snippet, "LIKE hits carry no snippet; plain preview is used")
+		assert.Equal(t, 3, res.Hits[1].tier, "enhanced substring match = tier 3 too, after original matches")
+		assert.True(t, res.Hits[1].previewEnhanced, "enhanced-only substring previews the enhanced column")
+		assert.Empty(t, res.Hits[0].snippet, "tier-3 hits carry no snippet; plain preview is used")
 	})
-	t.Run("NoFallbackWhenFTSMatches", func(t *testing.T) {
-		res := runSearchFor(t, app, "shrew", searchCursor{}, 48)
-		assert.False(t, res.UsedLIKE)
+	t.Run("RanksBelowFTSMatches", func(t *testing.T) {
+		// "shre" prefix-matches lik0003's token (tier 1) while the
+		// substring rows stay tier 3 below it — lik0003 is itself
+		// LIKE-visible and must not be duplicated by the scan.
+		res := runSearchFor(t, app, "shre", searchCursor{}, 48)
 		assert.Equal(t, []string{"lik0003"}, hitIDs(res.Hits))
+		assert.Equal(t, 1, res.Hits[0].tier)
 	})
 	t.Run("MultiTokenAND", func(t *testing.T) {
 		// Both tokens are mid-word fragments ("wander"→"ander",
-		// "alone"→"lone"): FTS prefix terms miss both, the fallback
-		// ANDs the substrings.
+		// "alone"→"lone"): FTS prefix terms miss both; tier 3 ANDs the
+		// substrings within one column.
 		res := runSearchFor(t, app, "ander lone", searchCursor{}, 48)
-		require.True(t, res.UsedLIKE)
-		assert.Equal(t, []string{"lik0001"}, hitIDs(res.Hits), "both substrings required")
-	})
-	t.Run("FallbackPaginatesAcrossPages", func(t *testing.T) {
-		// Continuation pages of an all-LIKE result set keep using the
-		// fallback (the FTS query is still empty for this q).
-		res := runSearchFor(t, app, "omcomi", searchCursor{}, 1)
-		require.True(t, res.UsedLIKE)
 		require.Len(t, res.Hits, 1)
+		assert.Equal(t, "lik0001", hitIDs(res.Hits)[0], "both substrings required in one column")
+		assert.Equal(t, 3, res.Hits[0].tier)
+	})
+	t.Run("NoMatchAnywhere", func(t *testing.T) {
+		res := runSearchFor(t, app, "zzzqqqxyzw", searchCursor{}, 48)
+		assert.Empty(t, res.Hits, "a term matching nothing in any tier still returns nothing")
+		assert.False(t, res.HasMore)
+	})
+	t.Run("Tier3PaginatesAcrossPages", func(t *testing.T) {
+		// Continuation pages of an all-tier-3 result set keep walking
+		// the substring scan via the tier-3 cursor offset.
+		res := runSearchFor(t, app, "omcomi", searchCursor{}, 1)
+		require.Len(t, res.Hits, 1)
+		assert.Equal(t, "lik0001", res.Hits[0].img.ID)
 		require.True(t, res.HasMore)
+		assert.Equal(t, searchCursor{tier3: 1}, res.Next)
 		res2 := runSearchFor(t, app, "omcomi", res.Next, 1)
-		require.True(t, res2.UsedLIKE)
 		assert.Equal(t, []string{"lik0002"}, hitIDs(res2.Hits))
 		assert.False(t, res2.HasMore)
 	})
 	t.Run("WildcardsLiteral", func(t *testing.T) {
 		insertSearchRow(t, app, "lik0004", "2026-09-24 04:00:00", "underscore_test thing", "")
 		// "line_t" is no FTS token sequence (unicode61 splits on _),
-		// so this lands in the fallback; the _ must be escaped to a
-		// literal instead of matching any character.
+		// so this lands in tier 3; the _ must be escaped to a literal
+		// instead of matching any character.
 		res := runSearchFor(t, app, "erscore_t", searchCursor{}, 48)
-		require.True(t, res.UsedLIKE)
-		assert.Equal(t, []string{"lik0004"}, hitIDs(res.Hits))
+		require.Len(t, res.Hits, 1)
+		assert.Equal(t, "lik0004", res.Hits[0].img.ID)
+		assert.Equal(t, 3, res.Hits[0].tier)
+	})
+	t.Run("ViewPreviewsMatchedColumn", func(t *testing.T) {
+		// Snippet-less tier-3 cards preview the column that matched:
+		// original for original-substring rows, enhanced for the
+		// enhanced-only row (plain clamp, no <mark> pieces).
+		cfg := testConfig()
+		res := runSearchFor(t, app, "omcomi", searchCursor{}, 48)
+		view := buildSearchView(cfg, "omcomi", res)
+		require.Len(t, view.Cards, 2)
+		assert.Equal(t, clampSnippet("wander randomcomimg alone", cfg.Search.SnippetChars), view.Cards[0].PromptSnippet)
+		assert.Nil(t, view.Cards[0].SnippetParts)
+		assert.Equal(t, clampSnippet("something incomcomimg here", cfg.Search.SnippetChars), view.Cards[1].PromptSnippet)
 	})
 }
 
@@ -413,8 +459,8 @@ func TestSearchHiddenFiltered(t *testing.T) {
 	insertSearchRow(t, app, "hid0002", "2026-09-24 03:00:00", "innocent text", "secret shrew enhanced", func(img *dbImage) {
 		img.Hidden = true
 	})
-	// LIKE-fallback coverage too: hidden rows must not surface when FTS
-	// misses and the substring scan runs.
+	// Tier-3 coverage too: hidden rows must not surface through the
+	// always-on substring scan.
 	insertSearchRow(t, app, "hid0003", "2026-09-24 04:00:00", "xrandomcomimgx", "", func(img *dbImage) {
 		img.Hidden = true
 	})
@@ -565,14 +611,14 @@ func TestSearchPaginationAcrossTierBoundary(t *testing.T) {
 	for _, h := range res1.Hits {
 		assert.Equal(t, 1, h.tier)
 	}
-	assert.Equal(t, searchCursor{tier1: 4, tier2: 0}, res1.Next, "tier 2 offset untouched while tier 1 fills pages")
+	assert.Equal(t, searchCursor{tier1: 4, tier2: 0, tier3: 0}, res1.Next, "tier 2 offset untouched while tier 1 fills pages")
 	assert.True(t, res1.HasMore)
 
 	res2 := runSearchFor(t, app, "zebra", res1.Next, 4)
 	require.Len(t, res2.Hits, 4)
 	assert.Equal(t, []int{1, 1, 2, 2}, []int{res2.Hits[0].tier, res2.Hits[1].tier, res2.Hits[2].tier, res2.Hits[3].tier},
 		"boundary page stitches remaining tier 1 then tier 2")
-	assert.Equal(t, searchCursor{tier1: 6, tier2: 2}, res2.Next)
+	assert.Equal(t, searchCursor{tier1: 6, tier2: 2, tier3: 0}, res2.Next)
 	assert.True(t, res2.HasMore)
 
 	res3 := runSearchFor(t, app, "zebra", res2.Next, 4)
@@ -581,7 +627,75 @@ func TestSearchPaginationAcrossTierBoundary(t *testing.T) {
 		assert.Equal(t, 2, h.tier)
 	}
 	assert.False(t, res3.HasMore)
-	assert.Equal(t, searchCursor{tier1: 6, tier2: 4}, res3.Next, "both tiers fully consumed")
+	assert.Equal(t, searchCursor{tier1: 6, tier2: 4, tier3: 0}, res3.Next, "both tiers fully consumed")
+}
+
+// TestSearchPaginationAcrossThreeTiers walks a result set spanning all
+// three tiers with a page size that straddles BOTH boundaries, pinning
+// no-dupes/no-gaps pagination through tier 3 and the independent
+// per-tier cursor offsets.
+func TestSearchPaginationAcrossThreeTiers(t *testing.T) {
+	app := newTestApp(t, testConfig())
+	// Identical prompts within each tier -> deterministic order
+	// (tier 1/2: identical bm25 scores, rowid tiebreak = insertion
+	// order; tier 3: recency).
+	var wantTier1, wantTier2, wantTier3 []string
+	for i := 1; i <= 3; i++ {
+		id := fmt.Sprintf("tri000%d", i)
+		insertSearchRow(t, app, id, fmt.Sprintf("2026-09-24 %02d:00:00", i), "zebra crossing", "")
+		wantTier1 = append(wantTier1, id)
+	}
+	for i := 4; i <= 6; i++ {
+		id := fmt.Sprintf("tri000%d", i)
+		insertSearchRow(t, app, id, fmt.Sprintf("2026-09-24 %02d:00:00", i), "plain landscape", "zebra crossing")
+		wantTier2 = append(wantTier2, id)
+	}
+	// Suffix-only rows: "cowzebra" never tokenizes to a zebra-prefixed
+	// term, so these are tier 3; recency order is newest first.
+	for i := 7; i <= 9; i++ {
+		id := fmt.Sprintf("tri000%d", i)
+		insertSearchRow(t, app, id, fmt.Sprintf("2026-09-24 %02d:00:00", i), "a cowzebra grazes", "")
+		wantTier3 = append(wantTier3, id)
+	}
+	want := append(append(append([]string{}, wantTier1...), wantTier2...),
+		[]string{"tri0009", "tri0008", "tri0007"}...)
+
+	var got []string
+	cur := searchCursor{}
+	for page := 1; ; page++ {
+		res := runSearchFor(t, app, "zebra", cur, 4)
+		require.NotEmpty(t, res.Hits, "page %d unexpectedly empty", page)
+		got = append(got, hitIDs(res.Hits)...)
+		if !res.HasMore {
+			break
+		}
+		cur = res.Next
+		require.Less(t, page, 5, "pagination did not terminate")
+	}
+
+	assert.Equal(t, want, got, "tier 1 drains, tier 2 follows, tier 3 finishes — no dupes, no gaps, stable order")
+
+	// Page-by-page shape: page 1 drains tier 1 and dips into tier 2;
+	// page 2 finishes tier 2 and dips into tier 3; page 3 finishes
+	// tier 3.
+	res1 := runSearchFor(t, app, "zebra", searchCursor{}, 4)
+	require.Len(t, res1.Hits, 4)
+	assert.Equal(t, []int{1, 1, 1, 2}, []int{res1.Hits[0].tier, res1.Hits[1].tier, res1.Hits[2].tier, res1.Hits[3].tier})
+	assert.Equal(t, searchCursor{tier1: 3, tier2: 1, tier3: 0}, res1.Next)
+	assert.True(t, res1.HasMore)
+
+	res2 := runSearchFor(t, app, "zebra", res1.Next, 4)
+	require.Len(t, res2.Hits, 4)
+	assert.Equal(t, []int{2, 2, 3, 3}, []int{res2.Hits[0].tier, res2.Hits[1].tier, res2.Hits[2].tier, res2.Hits[3].tier},
+		"boundary page stitches remaining tier 2 then tier 3")
+	assert.Equal(t, searchCursor{tier1: 3, tier2: 3, tier3: 2}, res2.Next)
+	assert.True(t, res2.HasMore)
+
+	res3 := runSearchFor(t, app, "zebra", res2.Next, 4)
+	require.Len(t, res3.Hits, 1)
+	assert.Equal(t, 3, res3.Hits[0].tier)
+	assert.False(t, res3.HasMore)
+	assert.Equal(t, searchCursor{tier1: 3, tier2: 3, tier3: 3}, res3.Next, "all three tiers fully consumed")
 }
 
 // ---------------------------------------------------------------------------
@@ -636,7 +750,7 @@ func TestSearchRoutes(t *testing.T) {
 		for i := 1; i <= 3; i++ {
 			insertSearchRow(t, app, fmt.Sprintf("htp000%d", i), fmt.Sprintf("2026-09-24 %02d:30:00", i), "zebra parade", "")
 		}
-		resp := fetchPath(t, ts, "/search-fragment?q=zebra&after="+url.QueryEscape("1:2|2:0"))
+		resp := fetchPath(t, ts, "/search-fragment?q=zebra&after="+url.QueryEscape("1:2|2:0|3:0"))
 		require.Equal(t, http.StatusOK, resp.StatusCode)
 		body := readBody(t, resp)
 		assert.Contains(t, body, `data-id="htp0003"`, "offset cursor consumed 2 tier-1 rows")
@@ -658,9 +772,11 @@ func TestSearchRoutes(t *testing.T) {
 		assert.Contains(t, body, `name="q"`)
 	})
 	t.Run("MalformedCursorIs400", func(t *testing.T) {
-		for _, p := range []string{"/search?q=x&after=garbage", "/search-fragment?q=x&after=1:0"} {
-			resp := fetchPath(t, ts, p)
-			assert.Equal(t, http.StatusBadRequest, resp.StatusCode, p)
+		for _, c := range []string{"garbage", "1:0", "1:0|2:0", "3:0|1:0|2:0"} {
+			resp := fetchPath(t, ts, "/search?q=x&after="+url.QueryEscape(c))
+			assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "cursor %q", c)
+			resp = fetchPath(t, ts, "/search-fragment?q=x&after="+url.QueryEscape(c))
+			assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "cursor %q", c)
 		}
 	})
 	t.Run("PostIs405", func(t *testing.T) {
@@ -678,7 +794,7 @@ func injectSearchFailure(t *testing.T) {
 	failFTS := func(db *sqlx.DB, tier int, expr, tier1Expr string, offset, limit, snippetTokens int) ([]searchHit, error) {
 		return nil, fmt.Errorf("injected fts failure")
 	}
-	failLIKE := func(db *sqlx.DB, tokens []string, tier, offset, limit int) ([]searchHit, error) {
+	failLIKE := func(db *sqlx.DB, tokens []string, ftsExpr string, offset, limit int) ([]searchHit, error) {
 		return nil, fmt.Errorf("injected like failure")
 	}
 	origFTS, origLIKE := dbSearchFTSTierFn, dbSearchLIKETierFn

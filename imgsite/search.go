@@ -1,7 +1,8 @@
 package main
 
-// Milestone 5: FTS5 prompt search with strictly two-tier ranking,
-// snippet highlighting, and a LIKE substring fallback.
+// Milestone 5: FTS5 prompt search with strictly three-tier ranking
+// (two FTS tiers plus an always-on LIKE substring tier), and snippet
+// highlighting.
 //
 // Verified FTS5 semantics (probed empirically against
 // modernc.org/sqlite v1.49.1 — the driver this repo ships; see
@@ -86,7 +87,8 @@ func stripFTSOperators(tok string) string {
 }
 
 // buildFTSQuery converts raw user input into a sanitized FTS5 MATCH
-// expression plus the plain token texts (used by the LIKE fallback).
+// expression plus the plain token texts (used by the always-on tier-3
+// LIKE substring scan).
 //
 // DESIGN NOTE — why every token is quoted: user input must never inject
 // FTS5 query syntax. Bare AND/OR/NOT/NEAR would silently change
@@ -179,12 +181,13 @@ func escapeLike(s string) string {
 // enough for a point-in-time query: unlike the gallery (where live
 // prepends shift pages constantly and keyset is load-bearing), search
 // pages only drift when a NEW upload matches the query mid-scroll, at
-// worst repeating one row at a tier boundary. The two offsets are
-// stitched (tier 1 drains first, tier 2 fills the remainder), so a
-// single page can straddle the tier boundary without dupes or gaps.
+// worst repeating one row at a tier boundary. The three offsets are
+// stitched (tier 1 drains first, then tier 2, then tier 3), so a
+// single page can straddle tier boundaries without dupes or gaps.
 type searchCursor struct {
 	tier1 int
 	tier2 int
+	tier3 int
 }
 
 // maxSearchOffset bounds the accepted offsets: a cursor can only ever
@@ -192,7 +195,7 @@ type searchCursor struct {
 const maxSearchOffset = 1 << 20
 
 func formatSearchCursor(c searchCursor) string {
-	return fmt.Sprintf("1:%d|2:%d", c.tier1, c.tier2)
+	return fmt.Sprintf("1:%d|2:%d|3:%d", c.tier1, c.tier2, c.tier3)
 }
 
 func parseSearchCursor(s string) (searchCursor, bool) {
@@ -200,7 +203,7 @@ func parseSearchCursor(s string) (searchCursor, bool) {
 		return searchCursor{}, true
 	}
 	parts := strings.Split(s, "|")
-	if len(parts) != 2 || !strings.HasPrefix(parts[0], "1:") || !strings.HasPrefix(parts[1], "2:") {
+	if len(parts) != 3 || !strings.HasPrefix(parts[0], "1:") || !strings.HasPrefix(parts[1], "2:") || !strings.HasPrefix(parts[2], "3:") {
 		return searchCursor{}, false
 	}
 	n1, err := strconv.Atoi(parts[0][2:])
@@ -211,7 +214,11 @@ func parseSearchCursor(s string) (searchCursor, bool) {
 	if err != nil || n2 < 0 || n2 > maxSearchOffset {
 		return searchCursor{}, false
 	}
-	return searchCursor{n1, n2}, true
+	n3, err := strconv.Atoi(parts[2][2:])
+	if err != nil || n3 < 0 || n3 > maxSearchOffset {
+		return searchCursor{}, false
+	}
+	return searchCursor{n1, n2, n3}, true
 }
 
 // ---------------------------------------------------------------------------
@@ -315,9 +322,14 @@ const (
 // searchHit is one ranked result row.
 type searchHit struct {
 	img  dbImage
-	tier int // 1 = matched in original_prompt, 2 = enhanced-only
+	tier int // 1 = FTS original-column match, 2 = FTS enhanced-only, 3 = LIKE substring leftover
+	// previewEnhanced reports that this row matched via the enhanced
+	// prompt: every tier-2 row, and tier-3 rows whose substring hit
+	// only the enhanced column. It drives the plain-preview fallback
+	// used when there is no snippet (tier-3 rows never have one).
+	previewEnhanced bool
 	// snippet is snippet()'s raw marker-interleaved output; empty for
-	// LIKE-fallback hits (they render the plain clamped prompt).
+	// tier-3 LIKE hits (they render the plain clamped prompt).
 	snippet string
 }
 
@@ -345,7 +357,8 @@ var (
 // required for stable OFFSET pagination.
 const searchBM25Order = `ORDER BY bm25(images_fts, 8.0, 1.0), images_fts.rowid`
 
-// dbSearchFTSTier runs one tier of the two-tier FTS search.
+// dbSearchFTSTier runs one of the two FTS tiers of the three-tier
+// search.
 //
 //	tier 1: rows whose ORIGINAL prompt column matched
 //	tier 2: rows that matched anywhere EXCEPT tier 1 — via
@@ -387,17 +400,43 @@ func dbSearchFTSTier(db *sqlx.DB, tier int, expr, tier1Expr string, offset, limi
 	}
 	hits := make([]searchHit, 0, len(rows))
 	for i := range rows {
-		hits = append(hits, searchHit{img: rows[i].dbImage, tier: tier, snippet: rows[i].SearchSnippet})
+		hits = append(hits, searchHit{img: rows[i].dbImage, tier: tier, previewEnhanced: tier == 2, snippet: rows[i].SearchSnippet})
 	}
 	return hits, nil
 }
 
-// dbSearchLIKETier is the two-tier substring fallback for queries FTS
-// cannot see (mid-word fragments like "omcomi" inside "randomcomimg").
-// Original-column matches are tier 1; enhanced-only matches tier 2,
-// excluding tier-1 rows by id. Ordered by recency, not relevance —
-// there is no rank to sort by when the match isn't tokenized.
-func dbSearchLIKETier(db *sqlx.DB, tokens []string, tier, offset, limit int) ([]searchHit, error) {
+// likeRow scans a tier-3 row: every images column plus which prompt
+// column the substring hit (drives the plain-preview fallback column
+// for snippet-less hits).
+type likeRow struct {
+	dbImage
+	LikeEnhanced bool `db:"like_enhanced"`
+}
+
+// dbSearchLIKETier is tier 3: a substring scan over both prompt columns
+// for fragments FTS cannot see. FTS5 prefix terms match only
+// token-INITIAL text and the query syntax has no suffix operator, so
+// q=shrew can never find "cowshrew" through the index — only LIKE
+// %shrew% can. This scan therefore ALWAYS runs (it used to fire only
+// when both FTS tiers returned zero rows; promoting it to an always-on
+// tier collapsed that special case into the general path) and its hits
+// append after all FTS results. Dedupe is id-level in SQL: the scan
+// excludes every rowid the overall FTS MATCH returns, and tier 1 ∪
+// tier 2 is exactly that match set, so a row that both tokenizes and
+// substring-matches keeps its FTS rank and appears exactly once.
+//
+// Ordering within tier 3 (documented choice, mirroring the internal
+// ordering the former zero-hit fallback used): rows whose ORIGINAL
+// prompt contains the substring rank above enhanced-only substring
+// matches (the like_enhanced CASE), each group by recency
+// (created_at DESC, id DESC) — there is no relevance rank for a match
+// the tokenizer never saw, and recency is the gallery's native order.
+//
+// A row qualifies when either prompt column contains EVERY token as a
+// substring (per-column AND, matching the FTS tiers' semantics — a row
+// with term1 in the original and term2 in the enhanced is not a match
+// for an AND query).
+func dbSearchLIKETier(db *sqlx.DB, tokens []string, ftsExpr string, offset, limit int) ([]searchHit, error) {
 	origPatterns := make([]string, 0, len(tokens))
 	enhPatterns := make([]string, 0, len(tokens))
 	for _, tok := range tokens {
@@ -407,33 +446,26 @@ func dbSearchLIKETier(db *sqlx.DB, tokens []string, tier, offset, limit int) ([]
 	origAnd := strings.Join(repeatPredicate("original_prompt LIKE ? ESCAPE '\\'", len(tokens)), " AND ")
 	enhAnd := strings.Join(repeatPredicate("enhanced_prompt LIKE ? ESCAPE '\\'", len(tokens)), " AND ")
 
-	var query string
-	var args []interface{}
-	if tier == 1 {
-		query = `SELECT * FROM images
-			WHERE hidden = 0 AND (` + origAnd + `)
-			ORDER BY created_at DESC, id DESC
-			LIMIT ? OFFSET ?`
-		args = append(toAnySlice(origPatterns), limit, offset)
-	} else {
-		query = `SELECT * FROM images
-			WHERE hidden = 0 AND (` + enhAnd + `)
-			  AND id NOT IN (
-			    SELECT id FROM images WHERE hidden = 0 AND (` + origAnd + `)
-			  )
-			ORDER BY created_at DESC, id DESC
-			LIMIT ? OFFSET ?`
-		args = append(toAnySlice(enhPatterns), toAnySlice(origPatterns)...)
-		args = append(args, limit, offset)
-	}
-
-	var imgs []dbImage
-	if err := db.Select(&imgs, query, args...); err != nil {
+	var rows []likeRow
+	query := `SELECT i.*, (CASE WHEN (` + origAnd + `) THEN 0 ELSE 1 END) AS like_enhanced
+		FROM images i
+		WHERE i.hidden = 0 AND ((` + origAnd + `) OR (` + enhAnd + `))
+		  AND i.rowid NOT IN (
+		    SELECT rowid FROM images_fts WHERE images_fts MATCH ?
+		  )
+		ORDER BY like_enhanced, i.created_at DESC, i.id DESC
+		LIMIT ? OFFSET ?`
+	// origAnd appears twice in the text (CASE + WHERE), so its
+	// placeholders bind twice.
+	args := append(toAnySlice(origPatterns), toAnySlice(origPatterns)...)
+	args = append(args, toAnySlice(enhPatterns)...)
+	args = append(args, ftsExpr, limit, offset)
+	if err := db.Select(&rows, query, args...); err != nil {
 		return nil, err
 	}
-	hits := make([]searchHit, 0, len(imgs))
-	for i := range imgs {
-		hits = append(hits, searchHit{img: imgs[i], tier: tier})
+	hits := make([]searchHit, 0, len(rows))
+	for i := range rows {
+		hits = append(hits, searchHit{img: rows[i].dbImage, tier: 3, previewEnhanced: rows[i].LikeEnhanced})
 	}
 	return hits, nil
 }
@@ -460,27 +492,28 @@ func toAnySlice(ss []string) []interface{} {
 
 // searchResult is one stitched results page.
 type searchResult struct {
-	Hits     []searchHit
-	HasMore  bool
-	Next     searchCursor
-	UsedLIKE bool
+	Hits    []searchHit
+	HasMore bool
+	Next    searchCursor
 }
 
-// runSearch executes the two-tier search for one page.
+// runSearch executes the three-tier search for one page.
 //
 // Page assembly (offset-stitch): each tier is fetched with limit+1 rows
-// starting at its cursor offset; tier 1 fills the page first and tier 2
-// fills only the remainder (never consuming tier 2 while tier 1 could
-// still fill the page), so the two offsets advance independently and a
-// page can straddle the tier boundary with no duplicates or gaps.
+// starting at its cursor offset; tier 1 fills the page first, tier 2
+// fills only the remainder, tier 3 what is left after that (a tier is
+// never consumed while an earlier tier could still fill the page), so
+// the three offsets advance independently and a single page can
+// straddle tier boundaries with no duplicates or gaps.
 //
-// The LIKE fallback runs whenever the FTS query produces zero rows —
-// including mid-pagination, because a query with zero FTS matches
-// stays that way only while nothing new matches: a mid-scroll upload
-// whose terms DO tokenize flips the next page from LIKE back to FTS
-// mode, where the carried tier offsets index a different (ranked, not
-// recency-ordered) result set — a possible duplicate or skip at that
-// boundary. Same offset-drift class as documented on searchCursor.
+// Tier 3 (the LIKE substring scan) ALWAYS runs — including
+// mid-pagination — because suffix/mid-word matches (q=shrew inside
+// "cowshrew") are invisible to FTS regardless of how many rows the FTS
+// tiers returned. The scan excludes the FTS match set in SQL, so rows
+// already ranked by tier 1 or tier 2 keep their FTS rank and never
+// duplicate. Standing offset-drift corner (same class as documented on
+// searchCursor): a new upload matching the query mid-scroll shifts
+// later pages by one row.
 func runSearch(db *sqlx.DB, q string, cur searchCursor, limit, prefixMin, snippetTokens int) (searchResult, error) {
 	res := searchResult{Next: cur}
 
@@ -502,34 +535,29 @@ func runSearch(db *sqlx.DB, q string, cur searchCursor, limit, prefixMin, snippe
 	if err != nil {
 		return res, err
 	}
-	if len(t1) == 0 && len(t2) == 0 {
-		l1, err := dbSearchLIKETierFn(db, tokens, 1, cur.tier1, limit+1)
-		if err != nil {
-			return res, err
-		}
-		l2, err := dbSearchLIKETierFn(db, tokens, 2, cur.tier2, limit+1)
-		if err != nil {
-			return res, err
-		}
-		return stitchSearchPage(l1, l2, cur, limit, true), nil
+	t3, err := dbSearchLIKETierFn(db, tokens, expr, cur.tier3, limit+1)
+	if err != nil {
+		return res, err
 	}
-	return stitchSearchPage(t1, t2, cur, limit, false), nil
+	return stitchSearchPage(t1, t2, t3, cur, limit), nil
 }
 
-func stitchSearchPage(t1, t2 []searchHit, cur searchCursor, limit int, usedLIKE bool) searchResult {
+func stitchSearchPage(t1, t2, t3 []searchHit, cur searchCursor, limit int) searchResult {
 	take1 := min(len(t1), limit)
 	remain := limit - take1
 	take2 := min(len(t2), remain)
+	remain -= take2
+	take3 := min(len(t3), remain)
 
-	hits := make([]searchHit, 0, take1+take2)
+	hits := make([]searchHit, 0, take1+take2+take3)
 	hits = append(hits, t1[:take1]...)
 	hits = append(hits, t2[:take2]...)
+	hits = append(hits, t3[:take3]...)
 
 	return searchResult{
-		Hits:     hits,
-		HasMore:  len(t1) > take1 || len(t2) > take2,
-		Next:     searchCursor{tier1: cur.tier1 + take1, tier2: cur.tier2 + take2},
-		UsedLIKE: usedLIKE,
+		Hits:    hits,
+		HasMore: len(t1) > take1 || len(t2) > take2 || len(t3) > take3,
+		Next:    searchCursor{tier1: cur.tier1 + take1, tier2: cur.tier2 + take2, tier3: cur.tier3 + take3},
 	}
 }
 
@@ -650,10 +678,11 @@ func buildSearchView(cfg Config, q string, res searchResult) galleryView {
 	for i := range res.Hits {
 		hit := &res.Hits[i]
 		card := galleryCardFromImage(cfg, &hit.img)
-		if hit.tier == 2 {
-			// Tier-2 rows matched via the enhanced prompt; the plain
-			// preview fallback (used only when there is no snippet,
-			// i.e. LIKE-fallback hits) should preview that column.
+		if hit.previewEnhanced {
+			// Tier-2 rows matched via the enhanced prompt, and tier-3
+			// rows whose substring hit only the enhanced column; the
+			// plain preview fallback (used when there is no snippet,
+			// i.e. tier-3 hits) should preview that column.
 			card.PromptSnippet = clampSnippet(hit.img.EnhancedPrompt, cfg.Search.SnippetChars)
 		}
 		if parts := splitSnippet(hit.snippet); parts != nil {

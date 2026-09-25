@@ -735,10 +735,11 @@ Client behaviors:
   and BM25 column weights all work; a prefix query over 100k rows answered
   in ~2ms. At gallery scale (thousands of rows) this is effectively
   instantaneous and there is no extra service to run.
-- Ranking is **strictly two-tier**, per the requirement ("original prompts,
-  maybe enhanced after that"): every image whose ORIGINAL prompt matches
-  ranks above every image that matched only via the enhanced prompt. The
-  verification also PROVED the blended alternative fails: with
+- Ranking is **strictly three-tier** — two FTS tiers plus an always-on
+  substring tier. Tiers 1–2 implement the original requirement ("original
+  prompts, maybe enhanced after that"): every image whose ORIGINAL prompt
+  matches ranks above every image that matched only via the enhanced
+  prompt. The verification also PROVED the blended alternative fails: with
   `bm25(images_fts, 8.0, 1.0)` alone, a test row whose original prompt said
   "shrew" once but whose enhanced prompt repeated it ten times outranked the
   genuine "shrew comin in hot" original — column weights cannot beat term
@@ -764,13 +765,42 @@ WHERE images_fts MATCH '?'
 ORDER BY bm25(images_fts, 8.0, 1.0), images_fts.rowid;
 ```
 
-  (bm25 still orders WITHIN each tier, so original-heavy phrasing also wins
-  inside tier 1; the rowid tiebreak keeps ordering deterministic for the
-  stitched offset-based paging cursor. Tier stitching pages tier 1 to
-  exhaustion, then tier 2 — an offset-per-tier cursor `1:<n>|2:<m>` —
-  documented on searchCursor in the implementation. True cross-tier keyset
-  would have to round-trip the bm25 float through the cursor, which is
-  unsafe. Standing gotchas: external-content FTS exposes only its own
+  Tier 3 is a **LIKE substring scan that ALWAYS runs** and appends its
+  hits after both FTS tiers. Rationale: FTS5 prefix terms match only
+  token-INITIAL text and the query syntax has no suffix operator, so
+  `shrew` can never find `cowshrew` through the index (a fused token
+  whose only relation to the query is a token-final fragment) — only
+  `LIKE '%shrew%'` can. The scan excludes every rowid the overall MATCH
+  returns (tier 1 ∪ tier 2 is exactly that set), which IS the id-level
+  dedupe: a row that both tokenizes and substring-matches keeps its FTS
+  rank and appears exactly once. Cost note: the scan is a plain table
+  scan over `images` — the exact cost the old zero-hit fallback paid,
+  now on every query — which is fine at gallery scale (thousands of
+  rows, two text columns). Within tier 3, original-column
+  substring matches rank above enhanced-only substring matches, each
+  group by recency — there is no relevance rank for a match the
+  tokenizer never saw:
+
+```sql
+-- tier 3: substring-only leftovers, after all FTS results
+-- (t1..tn are escaped LIKE patterns, one per token, ANDed per column;
+--  a row qualifies when EITHER column contains every token)
+SELECT i.*, (CASE WHEN (original_prompt LIKE t1 ESCAPE '\' AND …)
+                  THEN 0 ELSE 1 END) AS like_enhanced
+FROM images i
+WHERE i.hidden = 0
+  AND ((original_prompt LIKE t1 ESCAPE '\' AND …) OR (enhanced_prompt LIKE t1 ESCAPE '\' AND …))
+  AND i.rowid NOT IN (SELECT rowid FROM images_fts WHERE images_fts MATCH ?)
+ORDER BY like_enhanced, i.created_at DESC, i.id DESC;
+```
+
+  (bm25 still orders WITHIN each FTS tier, so original-heavy phrasing also
+  wins inside tier 1; the rowid tiebreak keeps ordering deterministic for
+  the stitched offset-based paging cursor. Tier stitching pages tier 1 to
+  exhaustion, then tier 2, then tier 3 — an offset-per-tier cursor
+  `1:<n>|2:<m>|3:<k>` — documented on searchCursor in the implementation.
+  True cross-tier keyset would have to round-trip the bm25 float through
+  the cursor, which is unsafe. Standing gotchas: external-content FTS exposes only its own
   columns — always join back to `images` on rowid; auxiliary functions like
   `bm25(images_fts, …)` must reference the table by its un-aliased name;
   `NOT` is a binary operator in FTS5 query syntax, so tier exclusion is a
@@ -778,8 +808,9 @@ ORDER BY bm25(images_fts, 8.0, 1.0), images_fts.rowid;
 - Prefix index (`prefix='2 3 4'`) makes as-you-type token prefixes match
   ("shre" → shrew); porter stemming means "shrews" finds "shrew".
 - Phrase queries via quoted input pass through to FTS5 (`"walkin down"`).
-  Terms with no FTS match fall back to LIKE substring scan (this catches
-  mid-word substrings FTS can't).
+  Substring-only matches (mid-word fragments, suffixes inside fused
+  tokens like "cowshrew") surface via the always-on tier-3 LIKE scan
+  above.
 - With external-content FTS5 the index keeps tokens of soft-deleted rows,
   so search joins back to `images` for `hidden = 0` filtering (and the
   UPDATE/DELETE triggers run the FTS 'delete' dance) — covered explicitly

@@ -544,8 +544,8 @@ func buildGalleryView(cfg Config, rows []dbImage) galleryView {
 }
 
 // galleryCardFromImage builds the shared card shape from one row.
-// Callers layer search-specific presentation (snippet parts, tier-2
-// prompt preview) on top.
+// Callers layer search-specific presentation (snippet parts, the
+// enhanced-column prompt preview for enhanced-matched hits) on top.
 func galleryCardFromImage(cfg Config, img *dbImage) galleryCard {
 	created := img.CreatedAt
 	rfc3339 := created

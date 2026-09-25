@@ -13,11 +13,11 @@ import (
 
 // Milestone-2 details page. All output goes through html/template
 // auto-escaping — prompts, reasoning, and workflow JSON are LLM/user text
-// and must never hit the page raw. Since the Sep 2026 owner request the
+// and must never hit the page raw. Since the Sep 2026 owner requests the
 // main image serves the ORIGINAL bytes (the display thumb remains an
-// og:image derivative) behind a click-to-zoom toggle — see the viewer
-// markup and image.js. Milestone 7 added the OpenGraph block (see
-// headExtrasSrc).
+// og:image derivative) in a container-owned aspect box, with click-to-
+// zoom opening a fullscreen overlay — see the viewer/overlay markup and
+// image.js. Milestone 7 added the OpenGraph block (see headExtrasSrc).
 
 // headExtrasSrc defines the <head> additions shared by EVERY full-page
 // template set: the favicon link and the two universal OpenGraph tags.
@@ -54,37 +54,92 @@ a:hover { text-decoration: underline; }
 .topnav input[type="search"] { background: #141416; color: #ddd; border: 1px solid #3c3c44; border-radius: 6px; padding: 0.25rem 0.7rem; font: inherit; min-width: min(14rem, 40vw); }
 button { background: #2a2a30; color: #ddd; border: 1px solid #3c3c44; border-radius: 6px; padding: 0.25rem 0.7rem; cursor: pointer; font: inherit; }
 button:hover { background: #35353d; }
-/* safe center: behaves as plain center whenever the item fits (fit
-   state, scale-up state) and start-aligns the axis that overflows —
-   chosen over a JS-managed pan class because it covers both the flex
-   trap (a centered item wider than its container overflows both sides
-   equally; the left side is unreachable by page scroll) AND the
-   tall-but-narrow portrait that only overflows vertically and deserves
-   to stay centered. The plain "center" line above is the fallback for
-   engines without the safe keyword: those degrade to centered
-   overflow, never to breakage. */
-.viewer { position: relative; display: flex; justify-content: center; justify-content: safe center; background: #0d0d0f; }
-.viewer img { max-width: 100%; max-height: 85vh; display: block; }
-/* Click-to-zoom on the main image (image.js). Default state fits the
-   layout exactly like the pre-zoom markup. Zoomed: the max-width/
-   max-height caps lift so the img renders at natural (or attribute)
-   size and the PAGE scrolls to pan; horizontal alignment in every
-   state is the safe center above, so there is deliberately NO separate
-   pan class — CSS owns alignment, image.js only computes the scale-up
-   sizing for images smaller than the page (CSS max-* can shrink,
-   never enlarge). The toggle is a native <button>: Enter/Space come
-   free and the no-JS page renders identically, just non-interactive. */
-.zoom-toggle { display: block; padding: 0; border: 0; background: none; cursor: zoom-in; max-width: 100%; }
-.zoom-toggle img { display: block; }
+/* Viewer row: chevrons flank the image OUTSIDE it (flex items, never
+   overlapping the image — the 2fedc24 design absolutely positioned
+   18%-wide strips over the image, which put the chevrons' hit area on
+   the same pixels as the zoom button and made the hover affordance
+   invisible over image content). Slim rails: clamp() shrinks them on
+   narrow viewports instead of ever covering the image; align-self:
+   stretch keeps them the full row height with the glyph centered. */
+.viewer { display: flex; align-items: center; background: #0d0d0f; }
+.chevron { flex: none; width: clamp(2.25rem, 5vw, 3.5rem); align-self: stretch; display: flex; align-items: center; justify-content: center; font-size: 3rem; color: rgba(255,255,255,0.4); text-decoration: none; }
+.chevron:hover { background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.85); text-decoration: none; }
+.stage { flex: 1 1 auto; min-width: 0; display: flex; justify-content: center; }
+/* Fit state — the bulletproof aspect pattern (owner redesign, Sep
+   2026). The BUTTON is the sized box: it carries the image's
+   aspect-ratio (inline style from the DB dims, rendered only when
+   BOTH dims are known) and a SINGLE width cap —
+   max-width: min(100%, <natural px>, calc(85vh * W / H)) — and the
+   img fills it at 100%/100% with object-fit: contain.
+   Why the box cannot lose its ratio: the cap expression itself
+   already encodes the aspect ratio — the calc() term is the width at
+   which the ratio-derived height reaches exactly 85vh — so the used
+   width is always the ratio-correct minimum of the three constraints
+   and aspect-ratio derives the height; max-height never binds on this
+   path. (Browser review of the first cut caught the subtle version of
+   the 2fedc24 bug surviving here: a definite width: 100% plus a
+   separate max-height: 85vh does NOT preserve the box ratio — engines
+   do not transfer a cross-axis max-height violation back into a
+   definite main-axis width — which left a correctly PAINTED image
+   (contain letterboxes) inside a misshapen box: wide invisible
+   click/cursor dead zones beside the letterbox and chevron rails
+   pushed outward.) The original 2fedc24 bug was the same class one
+   level down: width/height ATTRIBUTES on the img — presentational
+   hints, definite sizes — under dual max-* caps that clamped the axes
+   independently and squashed the PAINTED image itself. The attrs are
+   therefore deliberately gone; the dims pair now feeds the container
+   style. contain stays as the second line of defense: if the stored
+   dims drift from the actual bytes (stale row, post-latent upscale),
+   the img letterboxes instead of stretching. Small images cap at
+   natural px so the fit state keeps rendering them 1:1 — scaling up
+   is the overlay's job, not the layout's. There is deliberately NO
+   max-height on the button: the dims path bounds height via the
+   width-cap calc above, and the .nodims img caps its own height. */
+.zoom-toggle { display: block; width: 100%; max-width: 100%; padding: 0; border: 0; background: none; cursor: zoom-in; }
+.zoom-toggle img { display: block; width: 100%; height: 100%; object-fit: contain; }
+/* Dims unknown (columns NULL until graph extraction or the thumb
+   worker's decode backfill): no ratio to reserve, so fall back to the
+   classic auto-dimension dual-cap — safe ONLY because this img ships
+   no width/height attributes (both sizes auto → the layout engine
+   preserves the intrinsic ratio; see the comment above for why the
+   definite-size variant distorts). Small images render at natural
+   size, larger ones shrink to fit. */
+.zoom-toggle.nodims { width: auto; }
+.zoom-toggle.nodims img { width: auto; height: auto; max-width: 100%; max-height: 85vh; }
 .zoom-toggle:hover img { filter: brightness(1.06); }
 @media (prefers-reduced-motion: no-preference) { .zoom-toggle img { transition: filter 0.15s ease; } }
 .zoom-toggle:focus-visible { outline: 2px solid #7ab0ff; outline-offset: 2px; }
-.viewer.zoomed .zoom-toggle { cursor: zoom-out; max-width: none; }
-.viewer.zoomed .zoom-toggle img { max-width: none; max-height: none; }
-.chevron { position: absolute; top: 0; bottom: 0; width: 18%; display: flex; align-items: center; justify-content: center; font-size: 3rem; color: rgba(255,255,255,0.25); }
-.chevron:hover { background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.6); text-decoration: none; }
-.chevron.left { left: 0; }
-.chevron.right { right: 0; }
+/* Fullscreen zoom overlay (image.js owns the class flips; see the
+   markup comment near the overlay element). [hidden] must come FIRST:
+   the author display: flex below otherwise overrides the UA's
+   [hidden] { display: none } and the no-JS page would ship a visible
+   overlay. Visibility is CSS-owned (not display juggling) so both
+   fades run without rAF/timeout bookkeeping — with the crucial
+   asymmetry that visibility transitions 0s (instant) when OPENING and
+   0s-with-0.15s-delay when CLOSING: an animated visibility (0.15s on
+   the way in) keeps computing hidden at progress 0, which silently
+   no-ops closeBtn.focus() even one rAF after the class flip — browser
+   review caught exactly that — so open flips visibility at the style
+   recalc (focusable immediately) while close holds visibility:visible
+   until the opacity fade-out finishes, then hides (inert, out of the
+   a11y tree and tab order). The img reuses the main image's src
+   (browser cache — no second fetch) and its sizing is pure CSS:
+   width/height 100% + object-fit contain means larger-than-screen
+   images shrink, smaller-than-screen images scale UP, both letterbox —
+   zero JS dimension math (the 2fedc24 scale-up measured the viewer
+   box, so small images only ever grew to box size, not screen size).
+   body.zoom-open locks page scroll behind the fixed backdrop. */
+.zoom-overlay[hidden] { display: none; }
+.zoom-overlay { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center; padding: 1rem; background: rgba(8,8,10,0.94); cursor: zoom-out; opacity: 0; visibility: hidden; }
+.zoom-overlay.open { opacity: 1; visibility: visible; }
+@media (prefers-reduced-motion: no-preference) {
+	.zoom-overlay { transition: opacity 0.15s ease, visibility 0s linear 0.15s; }
+	.zoom-overlay.open { transition: opacity 0.15s ease, visibility 0s; }
+}
+.zoom-overlay img { width: 100%; height: 100%; object-fit: contain; }
+.zoom-close { position: absolute; top: 0.75rem; right: 0.75rem; width: 2.4rem; height: 2.4rem; display: flex; align-items: center; justify-content: center; font-size: 1.2rem; cursor: pointer; }
+.zoom-close:focus-visible { outline: 2px solid #7ab0ff; outline-offset: 2px; }
+body.zoom-open { overflow: hidden; }
 main { max-width: 60rem; margin: 0 auto; padding: 1rem; }
 h1 { font-size: 1.15rem; margin: 1rem 0 0.25rem; }
 details { background: #1d1d21; border: 1px solid #2c2c31; border-radius: 8px; padding: 0.5rem 0.9rem; margin: 0.5rem 0; }
@@ -119,17 +174,25 @@ table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
 </nav>
 <div class="viewer">
 {{if .HasPrev}}<a class="chevron left" id="nav-prev" href="/{{.PrevID}}" title="newer (← / p)">&#8249;</a>{{end}}
+<div class="stage">
 {{/* Main image = ORIGINAL bytes (owner request, Sep 2026): uploads are
      already webp and small enough that the display thumb buys nothing
-     here — it stays an og:image derivative. Click-to-zoom (image.js) is
-     pure enhancement: without JS the button renders the fit-state image
-     and does nothing, while "open file" above keeps the direct link a
-     real anchor. width/height attrs reserve the aspect ratio when the
-     row carries dims (NULL until graph extraction or the thumb worker's
-     decode backfill fills them). */}}
-<button type="button" class="zoom-toggle" id="zoom-toggle" aria-pressed="false" title="zoom in">
-<img src="{{.OrigURL}}"{{if .ImgWidth}} width="{{.ImgWidth}}" height="{{.ImgHeight}}"{{end}} alt="{{.OriginalPrompt}}">
+     here — it stays an og:image derivative. Click-to-zoom opens the
+     fullscreen overlay below (pure enhancement: without JS the button
+     renders the fit-state image and does nothing, while "open file"
+     above keeps the direct link a real anchor). The button is the
+     fit-state box: the inline style renders as a pair from the DB
+     dims only when BOTH are known (a lone dim would bake a wrong ratio
+     into the reserved space), and the width cap is a three-way min —
+     available width, natural px, and calc(85vh * W / H) (the width at
+     which the ratio-derived height hits 85vh) so the height cap can
+     never bind and misshape the box (see the CSS comment). NULL dims
+     take the .nodims auto-sizing fallback. Chevrons are flex siblings
+     of the stage — outside the image, never over it. */}}
+<button type="button" class="zoom-toggle{{if not .ImgWidth}} nodims{{end}}" id="zoom-toggle" aria-haspopup="dialog" aria-expanded="false" title="zoom in"{{if .ImgWidth}} style="aspect-ratio: {{.ImgWidth}} / {{.ImgHeight}}; max-width: min(100%, {{.ImgWidth}}px, calc(85vh * {{.ImgWidth}} / {{.ImgHeight}}))"{{end}}>
+<img src="{{.OrigURL}}" alt="{{.OriginalPrompt}}">
 </button>
+</div>
 {{if .HasNext}}<a class="chevron right" id="nav-next" href="/{{.NextID}}" title="older (→ / n)">&#8250;</a>{{end}}
 </div>
 <main>
@@ -184,6 +247,24 @@ table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
 </details>
 {{end}}
 </main>
+{{/* Fullscreen zoom overlay (owner redesign, Sep 2026). Server-rendered
+     hidden — chosen over JS-creating it because this codebase's
+     progressive-enhancement contract keeps every interactive surface in
+     the template (markup logic in JS would duplicate src/alt wiring and
+     ship the design twice); no-JS UAs get display: none via the
+     [hidden] attribute (works even if CSS somehow fails), JS unlocks
+     the class-based visibility at boot. role=dialog + aria-modal mark
+     it as modal while open (it is a11y-excluded entirely while
+     visibility: hidden). The img reuses the main image's src — same
+     URL, browser cache, no refetch. Every click inside (backdrop,
+     image, or the close button — a visible affordance next to the
+     zoom-out cursor) plus Esc closes; there is no focus trap, but
+     focus moves to the close button on open and returns to the toggle
+     on close (see image.js). */}}
+<div class="zoom-overlay" id="zoom-overlay" hidden role="dialog" aria-modal="true" aria-label="zoomed image">
+<button type="button" class="zoom-close" id="zoom-close" title="close (Esc)" aria-label="close zoomed image">&#10005;</button>
+<img src="{{.OrigURL}}" alt="{{.OriginalPrompt}}">
+</div>
 <script>
 (function () {
 	"use strict";
@@ -587,11 +668,12 @@ type imageView struct {
 
 	WorkflowJSON string
 
-	// ImgWidth/ImgHeight carry the row's stored dims for the main
-	// <img>'s width/height attributes (layout-shift guard before the
-	// original bytes finish loading). Zero = dims unknown (columns NULL
-	// until graph extraction at upload or the thumb worker's decode
-	// backfill fills them) — the template then omits the attributes.
+	// ImgWidth/ImgHeight carry the row's stored dims for the fit-state
+	// box's inline style (aspect-ratio + max-width pair — layout-shift
+	// guard before the original bytes finish loading). Zero = dims
+	// unknown (columns NULL until graph extraction at upload or the
+	// thumb worker's decode backfill fills them) — the template then
+	// renders the .nodims auto-sizing fallback instead.
 	ImgWidth  int
 	ImgHeight int
 
@@ -649,8 +731,9 @@ func buildImageView(cfg Config, img *dbImage, prev, next *dbImage, absBase strin
 		WorkflowJSON:   clampWorkflowJSON(img.WorkflowJSON),
 	}
 	// Main-image dims: positive only when the row carries BOTH — the
-	// template renders width/height as a pair or not at all (a lone
-	// width attribute would bake a wrong aspect ratio into the layout).
+	// template renders the aspect-ratio/max-width pair on the fit-state
+	// box or not at all (a lone dim would bake a wrong aspect ratio
+	// into the reserved space).
 	if img.Width != nil && img.Height != nil && *img.Width > 0 && *img.Height > 0 {
 		v.ImgWidth, v.ImgHeight = *img.Width, *img.Height
 	}

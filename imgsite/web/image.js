@@ -1,15 +1,16 @@
-// image.js: click-to-zoom on the main image, live reveal of the
-// arrival-direction chevron, and keyboard navigation on the image
-// details page.
+// image.js: fullscreen click-to-zoom overlay on the main image, live
+// reveal of the arrival-direction chevron, and keyboard navigation on
+// the image details page.
 //
 // The server renders a complete page for no-JS users (fit-state main
-// image, static chevrons, "open file" anchor); this module only ADDS
-// what render time couldn't know: the zoom toggle (class flip + inline
-// scale-up sizing — see the zoom block below) and, when the page was
-// rendered as the newest image (body[data-at-end], i.e. no prev/newer
-// neighbor existed yet), the live chevron — on image-new it fetches
-// /api/images/<id>/neighbors once and fades in the chevron pointing at
-// the newcomer.
+// image in its aspect box, static chevrons OUTSIDE the image, "open
+// file" anchor, and the zoom overlay markup hidden); this module only
+// ADDS what render time couldn't know: opening/closing the overlay
+// (class flips only — the overlay's contain sizing is pure CSS, no
+// dimension math) and, when the page was rendered as the newest image
+// (body[data-at-end], i.e. no prev/newer neighbor existed yet), the
+// live chevron — on image-new it fetches /api/images/<id>/neighbors
+// once and fades in the chevron pointing at the newcomer.
 //
 // Direction note: new arrivals are always NEWER than the current
 // image, and newer is the prev (left) chevron in this site's keyset
@@ -32,12 +33,16 @@ export function boot() {
 	// from the page's M2 inline script: the elements are looked up at
 	// KEYSTROKE time, so a live-revealed chevron's href is picked up —
 	// inline closed-over vars could never see an element created after
-	// parse.
+	// parse. While the zoom overlay is open, arrow/p/n nav is
+	// suppressed (the overlay covers the page; Esc is its dismissal
+	// key) so a stray ← behind the backdrop doesn't navigate away.
 	document.addEventListener("keydown", (e) => {
 		if (e.ctrlKey || e.metaKey || e.altKey) return;
 		const t = e.target;
 		if (t && /INPUT|TEXTAREA|SELECT/.test(t.tagName)) return;
 		if (t && t.isContentEditable) return;
+		const overlay = document.getElementById("zoom-overlay");
+		if (overlay && overlay.classList.contains("open")) return;
 		if (e.key === "ArrowLeft" || e.key === "p") {
 			const prev = document.getElementById("nav-prev");
 			if (prev) window.location.href = prev.href;
@@ -47,108 +52,82 @@ export function boot() {
 		}
 	});
 
-	// ---- Click-to-zoom on the main image (owner request, Sep 2026) ----
-	// The page serves the original bytes as the main <img>; the display
-	// thumb remains an og:image derivative. The toggle is a real
-	// <button>, so Enter/Space activation comes free and the no-JS page
-	// renders the same fit-state image, just non-interactive — the raw
-	// file stays one click away via the "open file" anchor in the topnav.
-	//
-	// Zoomed semantics, per the owner:
-	//   - image larger than the zoom box (either dimension): show it at
-	//     NATURAL size and pan by scrolling the page. The .zoomed class
-	//     lifts the fit-state max-width/max-height caps; horizontal
-	//     alignment is owned entirely by CSS (`justify-content: safe
-	//     center` on .viewer start-aligns the item only when it
-	//     overflows, so the overflowing side stays reachable by page
-	//     scroll while tall-but-narrow portraits stay centered — no
-	//     JS-managed pan class to keep in sync).
-	//   - image smaller than the page: scale UP to fit (contain). Done
-	//     with inline width/height here because CSS max-* caps can only
-	//     shrink, never enlarge — one computed pair per toggle, no
-	//     resize listener (re-toggling after a rotate/resize recomputes).
+	// ---- Fullscreen zoom overlay (owner redesign, Sep 2026) ----
+	// The overlay element is server-rendered and ships with the hidden
+	// attribute (display: none for no-JS UAs — the CSS block's first
+	// rule re-asserts [hidden] because the author display: flex would
+	// otherwise override the UA rule). JS's entire job is class and
+	// attribute flips: .open on the overlay fades it in (opacity does
+	// the animating; visibility flips with 0s duration on open and 0s
+	// delayed-to-fade-end on close — see the CSS comment for why that
+	// asymmetry is load-bearing for the focus below), zoom-open
+	// on <body> locks page scroll behind the fixed backdrop, and
+	// aria-expanded on the toggle mirrors the state. Sizing inside the	// overlay is pure CSS (width/height 100% + object-fit: contain —
+	// large images shrink, small ones scale up, both letterbox); there
+	// is deliberately NO measurement math: the 2fedc24 zoom computed
+	// scale against the viewer's on-screen box, so small images only
+	// ever grew to box size, never screen size, and the whole
+	// natural-size classification apparatus (pan branch, inline
+	// sizing, load-time re-classification) existed only to feed it.
 	const zoomToggle = document.getElementById("zoom-toggle");
-	if (zoomToggle) {
-		const zoomImg = zoomToggle.querySelector("img");
-		const isZoomed = () => viewer.classList.contains("zoomed");
+	const overlay = document.getElementById("zoom-overlay");
+	if (zoomToggle && overlay) {
+		const closeBtn = document.getElementById("zoom-close");
+		// Unlock the CSS state machine: from here on visibility is
+		// class-owned (hidden attr gone), so the fade transition can
+		// run in both directions without display juggling.
+		overlay.removeAttribute("hidden");
 
-		// The zoom box is the viewer's actual on-screen box, NOT
-		// window.inner*: the topnav sits above the viewer and the
-		// scrollbar gutter eats into innerWidth, so window metrics
-		// would "fit" images that then induce a horizontal scrollbar or
-		// hide partly under the fold. Horizontal: clientWidth (content
-		// width — the scrollbar is already excluded by layout).
-		// Vertical: distance from the viewer's top edge to the fold,
-		// with the top clamped at 0 (a zoom triggered while scrolled
-		// past the viewer via keyboard must not enlarge the budget) and
-		// a 1px floor so degenerate measures keep the scale math finite.
-		const zoomBoxWidth = () => viewer.clientWidth;
-		const zoomBoxHeight = () =>
-			Math.max(window.innerHeight - Math.max(viewer.getBoundingClientRect().top, 0), 1);
+		const isOpen = () => overlay.classList.contains("open");
 
-		// Classification reads naturalWidth/naturalHeight, but the
-		// RENDERED "natural size" in the zoomed state is the
-		// width/height ATTRIBUTE size whenever the template shipped
-		// dims (attributes are presentational hints). The two can
-		// diverge — e.g. a post-latent upscale workflow whose saved
-		// file differs from the graph dims stored in the row. Worst
-		// case is a mispicked branch or an inline size that doesn't
-		// exactly match the attrs; safe-center alignment corrects the
-		// overflow side on its own, so panning never breaks.
-		// naturalWidth is 0 until the image decodes: that reads as
-		// "not larger", and the 0-guard in applyZoomSize skips the
-		// scale-up styling — a pre-load toggle only flips the class,
-		// and the load listener below re-runs the classification.
-		const panZoom = () =>
-			!!zoomImg &&
-			(zoomImg.naturalWidth > zoomBoxWidth() ||
-				zoomImg.naturalHeight > zoomBoxHeight());
-
-		function applyZoomSize(on) {
-			if (!zoomImg) return;
-			if (on && !panZoom() && zoomImg.naturalWidth > 0) {
-				const scale = Math.min(
-					zoomBoxWidth() / zoomImg.naturalWidth,
-					zoomBoxHeight() / zoomImg.naturalHeight
-				);
-				zoomImg.style.width = Math.round(zoomImg.naturalWidth * scale) + "px";
-				zoomImg.style.height = Math.round(zoomImg.naturalHeight * scale) + "px";
-				return;
+		function setOpen(on) {
+			overlay.classList.toggle("open", on);
+			document.body.classList.toggle("zoom-open", on);
+			zoomToggle.setAttribute("aria-expanded", on ? "true" : "false");
+			// Focus: into the dialog on open (the close button — the
+			// one tabbable control inside), back to the toggle on
+			// close. The open-path focus waits one rAF because the
+			// class flip and a synchronous focus() share a task —
+			// focusability is checked against computed style, which
+			// has not yet picked up the .open class at that instant.
+			// This is only sound because the CSS transitions
+			// visibility with 0s duration on OPEN (instant flip at the
+			// first recalc): an animated visibility keeps computing
+			// hidden at transition progress 0, and browser review
+			// showed even a rAF callback can land inside that window,
+			// silently dropping the focus under default motion
+			// settings. On close the toggle is focused synchronously
+			// (it never transitions — always visible), so the return
+			// focus lands exactly as designed, and the isOpen() guard
+			// keeps a fast open→close from stealing focus back to a
+			// mid-fade ✕. No full focus trap: Esc, any click, and the
+			// close button all dismiss, which covers keyboard exit.
+			if (on) {
+				if (closeBtn) {
+					requestAnimationFrame(() => {
+						if (isOpen()) closeBtn.focus();
+					});
+				}
+			} else {
+				zoomToggle.focus();
 			}
-			// Fit state and natural-size (pan) state alike: no inline
-			// sizing — the CSS caps (or their absence in .zoomed) own
-			// the size, falling back to the width/height attrs /
-			// intrinsic size.
-			zoomImg.style.width = "";
-			zoomImg.style.height = "";
 		}
 
-		function setZoom(on) {
-			viewer.classList.toggle("zoomed", on);
-			zoomToggle.setAttribute("aria-pressed", on ? "true" : "false");
-			zoomToggle.title = on ? "zoom out (click or Esc)" : "zoom in";
-			applyZoomSize(on);
-		}
+		zoomToggle.addEventListener("click", () => setOpen(!isOpen()));
 
-		zoomToggle.addEventListener("click", () => setZoom(!isZoomed()));
-
-		// Re-classify once the bytes decode: a click before load cannot
-		// see the natural size, so the branch decision (and any scale-up
-		// sizing) would be stale. setZoom(true) re-reads everything and
-		// is idempotent. load does not bubble — the listener lives on
-		// the img itself.
-		if (zoomImg) {
-			zoomImg.addEventListener("load", () => {
-				if (isZoomed()) setZoom(true);
-			});
-		}
+		// Any click inside the overlay closes it: the backdrop, the
+		// image itself, and the close button (the visible affordance —
+		// the whole surface also shows the zoom-out cursor).
+		overlay.addEventListener("click", () => {
+			if (isOpen()) setOpen(false);
+		});
 
 		// Esc exits zoom. Deliberately NOT routed through the nav
-		// listener's input/modifier guards: Esc is an explicit dismissal,
-		// never a typing key, and exiting zoom while focus happens to
-		// sit in the search box costs nothing.
+		// listener's input/modifier guards: Esc is an explicit
+		// dismissal, never a typing key, and exiting zoom while focus
+		// happens to sit in the search box costs nothing.
 		document.addEventListener("keydown", (e) => {
-			if (e.key === "Escape" && isZoomed()) setZoom(false);
+			if (e.key === "Escape" && isOpen()) setOpen(false);
 		});
 	}
 

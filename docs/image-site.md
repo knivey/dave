@@ -600,27 +600,71 @@ Client behaviors:
 - Main image = the ORIGINAL bytes (`/<id>/orig/<filename>`), not the
   display thumb (owner request, Sep 2026 — uploads are already webp and
   small enough; the display derivative remains `og:image`'s source).
-  Click-to-zoom in place (progressive enhancement, `image.js`):
-  - default state fits the page layout (max-width 100% / max-height
-    85vh, as before);
-  - zoomed: an image larger than the zoom box (either dimension) shows
-    at NATURAL size and pans by PAGE scroll — the zoom class lifts the
-    CSS caps, and the viewer's `justify-content: safe center` start-
-    aligns the overflowing axis only, so every pixel stays reachable by
-    scroll while tall-but-narrow portraits remain centered (no separate
-    pan class; alignment is CSS-owned);
-  - an image SMALLER than the page scales UP to fit (contain) via
-    inline width/height computed at toggle time against the viewer's
-    on-screen box (topnav/scrollbar-aware, not window.inner*; CSS
-    max-* can only shrink), and a `load` listener re-runs the
-    classification for a toggle that happened before the bytes decoded;
-  - click again or Esc returns to the fit state. The toggle is a real
-    `<button>` (`aria-pressed` reflects the state, Enter/Space work
-    natively); without JS the page renders completely — the image
-    displays non-linking and the direct-file anchors above are real.
-  - The main `<img>` carries `width`/`height` attributes from the DB's
-    stored dims (layout-shift guard); they are omitted while those
-    columns are NULL (pre-extraction, pre-thumb-backfill rows).
+  Zoom is a **fullscreen overlay** (owner redesign after the in-place
+  2fedc24 zoom shipped three production bugs: a height-squashed fit
+  state, chevron hit-zones stacked over the image, and a "did nothing"
+  zoom for screen-smaller images):
+  - **fit state** — the zoom-toggle `<button>` IS the sized box: inline
+    `aspect-ratio: W / H` + a single width cap
+    `max-width: min(100%, Wpx, calc(85vh * W / H))` (rendered as a
+    pair from the DB dims only when BOTH are known — the layout-shift
+    guard: the box reserves the right shape before the bytes load),
+    with the img filling it at `width/height: 100%;
+    object-fit: contain`. The box cannot lose its ratio because the
+    width-cap expression itself encodes the ratio: the `calc()` term
+    is the width at which the ratio-derived height reaches exactly
+    85vh, so the used width is always the ratio-correct minimum of the
+    three constraints and the height cap never binds on this path (a
+    first cut shipped `width: 100%` + a separate `max-height: 85vh` —
+    engines do not transfer a cross-axis max-height violation back
+    into a definite main-axis width, so the box went misshapen even
+    though contain kept the painted image correct, leaving wide
+    invisible click/cursor dead zones beside the letterbox). The
+    original 2fedc24 bug was the same class one level down:
+    width/height ATTRIBUTES on the img (presentational hints = definite
+    sizes, so the attr-derived ratio had no auto dimension to resolve
+    against) under dual `max-width`/`max-height` caps that clamped the
+    axes independently and squashed the PAINTED image. contain stays as
+    the second line of defense — if stored dims drift from the actual
+    bytes, the img letterboxes instead of stretching. Small images cap
+    at natural px, so the fit state still renders them 1:1. NULL-dims
+    rows take a `.nodims` fallback (img `width/height: auto` + dual
+    caps — safe only because that img ships no attributes).
+  - **zoomed state** — click opens a server-rendered, page-covering
+    overlay (`position: fixed; inset: 0` over the topnav and chevrons;
+    dark backdrop, `role="dialog"` + `aria-modal`, zoom-out cursor, an
+    ✕ close button). The overlay img reuses the main img's src
+    (browser cache — no refetch) and is sized purely by CSS:
+    `width/height: 100%; object-fit: contain`, so larger-than-screen
+    images shrink to fit, smaller-than-screen images scale UP to fill,
+    both letterbox — zero JS dimension math (the deleted 2fedc24
+    scale-up measured the viewer's on-screen box, which is why small
+    images only ever grew to box size). The whole panZoom apparatus —
+    viewer-box measurement, natural-size classification, `.zoomed`
+    classes, load-time re-classification, inline sizing — is gone; the
+    "open file" anchor beside download serves full-resolution 1:1
+    inspection.
+  - **dismiss/close**: any click inside the overlay (backdrop, image,
+    ✕) or Esc. `body.zoom-open` locks page scroll behind the backdrop;
+    ←/→/n/p nav keys are suppressed while open (Esc is the dismissal
+    key); focus moves to the ✕ on open — the CSS transitions
+    `visibility` with **0s duration on open** (instant flip) and 0s
+    **delayed to the fade's end on close**, because an animated
+    visibility keeps computing hidden at transition progress 0 and
+    silently no-ops `focus()` even a frame after the class flip; the
+    focus call itself is deferred one `requestAnimationFrame` so it
+    runs after the style recalc picks up `.open`, and returns to the
+    toggle synchronously on close (the toggle never transitions, so
+    the return focus always lands). The fade is gated behind
+    `prefers-reduced-motion`. No focus trap — Esc/click/focus-return
+    cover keyboard exit. The toggle is a real
+    `<button>` (`aria-haspopup="dialog"` + `aria-expanded`;
+    Enter/Space work natively); the overlay ships `hidden` and its CSS
+    re-asserts `[hidden] { display: none }` because the author
+    `display: flex` would otherwise override the UA rule. Without JS
+    the page renders completely — image displays non-linking in its fit
+    box, the overlay stays hidden, and the direct-file anchors above
+    are real.
 - Details panel:
   - **Original prompt** (prominent — it's what the user actually typed)
   - Enhanced prompt (collapsible, default open when it differs from original)
@@ -630,9 +674,14 @@ Client behaviors:
     denoise, dimensions, file size/format, models (unet/clip/vae), LoRAs
   - Provenance: timestamp, job_id, workflow name, network/#channel/nick (when provided)
   - Raw workflow JSON (collapsed `<details>` with syntax-pretty JSON)
-- **Navigation**: large prev/next chevron zones on image edges + ←/→
-  keyboard arrows + `n`/`p` keys; neighbor URLs server-rendered for
-  no-JS users; live next-button per SSE above.
+- **Navigation**: slim prev/next chevron rails flanking the viewer
+  OUTSIDE the image (flex siblings of the stage, vertically centered,
+  `clamp()`-narrowing on small viewports — never overlapping the image,
+  which is what made the 2fedc24 absolute strips' hover/click zones
+  contest the zoom button's pixels) + ←/→ keyboard arrows + `n`/`p`
+  keys; neighbor URLs server-rendered for no-JS users; live
+  next-button per SSE above. When the zoom overlay is open it simply
+  covers the rails and nav keys are suppressed.
 - Copy-link button (copies `/orig/` direct URL), download link, and an
   "open file" anchor (the raw file opened in the browser — kept one
   click away beside download now that the main image zooms instead of

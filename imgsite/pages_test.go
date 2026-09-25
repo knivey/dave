@@ -362,11 +362,12 @@ func TestDetailsPageDegradesWhenNeighborLookupFails(t *testing.T) {
 }
 
 // TestDetailsPageMainImageServesOriginal pins the owner-requested (Sep
-// 2026) details-page swap: the main <img> loads the ORIGINAL bytes, not
-// the display thumb (which stays an og:image derivative); the img is
-// wrapped in the click-to-zoom toggle BUTTON, not a link to the file;
-// and a real "open file" anchor beside the download button keeps the
-// raw file one click away for no-JS users.
+// 2026) details-page swap plus its redesign: the main <img> loads the
+// ORIGINAL bytes (the display thumb stays an og:image derivative) in a
+// container-owned aspect box (the zoom-toggle BUTTON, sized via inline
+// aspect-ratio — see the dims test), chevrons flank the image as flex
+// siblings instead of absolute strips over it, and the distortion-prone
+// 2fedc24 pattern (img-level dual caps + width/height attrs) is gone.
 func TestDetailsPageMainImageServesOriginal(t *testing.T) {
 	app := newTestApp(t, testConfig())
 	ts := newTestServer(t, app)
@@ -376,20 +377,73 @@ func TestDetailsPageMainImageServesOriginal(t *testing.T) {
 
 	assert.Contains(t, body, `src="/zooma01/orig/zooma01.webp"`, "main image uses the original bytes")
 	assert.NotContains(t, body, `t/display`, "display thumb is not the page's main image (og:image only, and this pending row falls back to orig there too)")
-	assert.Contains(t, body, `<button type="button" class="zoom-toggle" id="zoom-toggle" aria-pressed="false"`, "zoom toggle button wraps the main image")
-	assert.Contains(t, body, `justify-content: safe center`, "safe-center alignment ships in the viewer CSS (pan-side reachability without a JS-managed pan class)")
-	assert.NotContains(t, body, `zoomed-pan`, "no separate pan class — alignment is CSS-owned")
+	assert.Contains(t, body, `<button type="button" class="zoom-toggle`, "zoom toggle button carries the main image")
+	assert.Contains(t, body, `aria-haspopup="dialog" aria-expanded="false"`, "toggle advertises the overlay dialog and its closed state (aria-pressed is gone with the in-place toggle semantics)")
+	assert.NotContains(t, body, `aria-pressed`, "no in-place zoom state to press")
+	assert.Contains(t, body, `<div class="stage">`, "stage wraps the fit-state box between the chevron rails")
+	// The bulletproof fit pattern: the BOX owns the caps and the img
+	// fills it with contain — the img itself no longer carries the
+	// distortion-prone dual max-* caps.
+	assert.Contains(t, body, `.zoom-toggle img { display: block; width: 100%; height: 100%; object-fit: contain; }`,
+		"contain fit pattern ships (ratio lives on the container, contain letterboxes — cannot distort)")
+	assert.NotContains(t, body, `.viewer img {`, "old img-level dual-cap rule is gone (with width/height attrs shipped it clamped both axes independently — the squash bug)")
+	// Chevrons outside the image: slim flex rails, not absolute strips.
+	assert.Contains(t, body, `flex: none; width: clamp(`, "chevron rule is a flex rail that shrinks via clamp(), never overlaps the image")
+	assert.NotContains(t, body, `width: 18%`, "the 18% absolute strip is gone")
+	// Pan-zoom apparatus deleted with the overlay redesign.
+	assert.NotContains(t, body, `justify-content: safe center`, "safe-center (overflow pan alignment) is gone — nothing overflows the fit box anymore")
+	assert.NotContains(t, body, `.viewer.zoomed`, "no in-place zoomed class — zoom is the fullscreen overlay now")
 	assert.NotContains(t, body, `<a href="/zooma01/orig/zooma01.webp"><img`, "main image is no longer wrapped in a file link")
 	assert.NotContains(t, body, "onerror=", "no inline onerror fallback — the src IS the orig URL")
 	assert.Contains(t, body, `<a href="/zooma01/orig/zooma01.webp" download>download</a>`, "download anchor intact")
 	assert.Contains(t, body, `<a href="/zooma01/orig/zooma01.webp">open file</a>`, "direct-file anchor beside the download button")
 }
 
-// TestDetailsPageMainImageDimsAttrs pins the layout-shift guard on the
-// main <img>: width/height attributes render as a pair when the row
-// carries dims (graph-extracted at upload or backfilled by the thumb
-// worker) and are omitted entirely while the columns are NULL.
-func TestDetailsPageMainImageDimsAttrs(t *testing.T) {
+// TestDetailsPageZoomOverlayMarkup pins the fullscreen overlay's
+// server-rendered half: it ships hidden (no-JS = no zoom, and display
+// stays none because the [hidden] rule outranks the author display:
+// flex), it is a dialog (role/aria-modal + the toggle's haspopup pair),
+// its img reuses the orig URL (browser cache — no refetch), its sizing
+// is pure-CSS contain (shrink big / scale up small, letterbox both —
+// no JS dimension math), the fade is gated behind
+// prefers-reduced-motion, and the body scroll-lock rule ships.
+func TestDetailsPageZoomOverlayMarkup(t *testing.T) {
+	app := newTestApp(t, testConfig())
+	ts := newTestServer(t, app)
+	insertImage(t, app, "zoomb01", "2026-09-24 03:12:00")
+
+	_, body := getPage(t, ts.URL, "/zoomb01")
+
+	assert.Contains(t, body, `<div class="zoom-overlay" id="zoom-overlay" hidden role="dialog" aria-modal="true" aria-label="zoomed image">`,
+		"overlay ships server-rendered and hidden")
+	assert.Contains(t, body, `<button type="button" class="zoom-close" id="zoom-close" title="close (Esc)" aria-label="close zoomed image">`,
+		"visible close affordance inside the overlay")
+	assert.Contains(t, body, "<img src=\"/zoomb01/orig/zoomb01.webp\" alt=\"prompt for zoomb01\">\n</div>",
+		"overlay img reuses the orig URL and the row's prompt alt")
+	assert.Contains(t, body, `.zoom-overlay[hidden] { display: none; }`,
+		"hidden rule outranks the author display: flex (otherwise the UA rule is overridden and no-JS ships a visible overlay)")
+	assert.Contains(t, body, `.zoom-overlay.open { opacity: 1; visibility: visible; }`,
+		"class-based open state (visibility keeps the closed overlay out of the a11y tree and tab order)")
+	assert.Contains(t, body, `opacity: 0; visibility: hidden;`, "closed overlay is fully inert")
+	assert.Contains(t, body, `position: fixed; inset: 0; z-index: 100;`, "fixed overlay covers the entire page — topnav, chevrons, everything")
+	assert.Contains(t, body, `.zoom-overlay img { width: 100%; height: 100%; object-fit: contain; }`,
+		"overlay sizing is pure-CSS contain — larger-than-screen shrinks, smaller-than-screen scales up, both letterbox")
+	assert.Contains(t, body, `.zoom-overlay { transition: opacity 0.15s ease, visibility 0s linear 0.15s; }`,
+		"closing transition delays the visibility flip to the fade's end (fade-out stays visible, then inert)")
+	assert.Contains(t, body, `.zoom-overlay.open { transition: opacity 0.15s ease, visibility 0s; }`,
+		"opening transition flips visibility instantly — an animated visibility computes hidden at progress 0 and no-ops the open-path focus even a frame later (browser-review finding)")
+	assert.Contains(t, body, `@media (prefers-reduced-motion: no-preference)`,
+		"fade transitions gated behind prefers-reduced-motion")
+	assert.Contains(t, body, `body.zoom-open { overflow: hidden; }`, "page scroll locks behind the open overlay")
+	assert.Equal(t, 2, strings.Count(body, "object-fit: contain"), "contain pattern on both the fit-state img and the overlay img")
+}
+
+// TestDetailsPageMainImageDimsAspectRatio pins the layout-shift guard
+// on the fit-state box: the inline aspect-ratio + max-width pair
+// renders only when the row carries BOTH dims (graph-extracted at
+// upload or backfilled by the thumb worker); NULL dims fall back to
+// the .nodims auto-sizing variant with no inline style at all.
+func TestDetailsPageMainImageDimsAspectRatio(t *testing.T) {
 	app := newTestApp(t, testConfig())
 	ts := newTestServer(t, app)
 	width, height := 1920, 1080
@@ -401,14 +455,20 @@ func TestDetailsPageMainImageDimsAttrs(t *testing.T) {
 	insertImage(t, app, "dimsa02", "2026-09-24 03:13:00")
 
 	_, known := getPage(t, ts.URL, "/dimsa01")
-	assert.Contains(t, known, `src="/dimsa01/orig/dimsa01.webp" width="1920" height="1080"`,
-		"known dims render as width/height attrs on the main img")
+	assert.Contains(t, known, `<button type="button" class="zoom-toggle" id="zoom-toggle" aria-haspopup="dialog" aria-expanded="false" title="zoom in" style="aspect-ratio: 1920 / 1080; max-width: min(100%, 1920px, calc(85vh * 1920 / 1080))">`,
+		"known dims render the aspect-ratio + three-term width-cap pair on the fit box (pair or nothing — a lone dim would bake a wrong ratio; the calc term is the width at which ratio-height reaches 85vh, so the height cap never binds and the box cannot go misshapen)")
 
 	_, unknown := getPage(t, ts.URL, "/dimsa02")
-	// Nothing else on the page renders width=" (the viewport meta is
-	// width=device-width, unquoted value) — absence pins the omission.
+	// Nothing else on the page renders an inline style or any
+	// width="/height= attribute (the viewport meta is unquoted) —
+	// absence pins the NULL-dims fallback.
+	assert.NotContains(t, unknown, `style="`, "NULL dims ship no inline style")
 	assert.NotContains(t, unknown, `width="`, "NULL dims omit the width attribute entirely")
 	assert.NotContains(t, unknown, `height="`, "NULL dims omit the height attribute entirely")
+	assert.NotContains(t, unknown, `aspect-ratio`, "no ratio reserved while dims are unknown")
+	assert.Contains(t, unknown, `class="zoom-toggle nodims"`, "NULL dims take the auto-sizing fallback class")
+	assert.Contains(t, unknown, `.zoom-toggle.nodims img { width: auto; height: auto; max-width: 100%; max-height: 85vh; }`,
+		"fallback keeps BOTH dimensions auto (safe only because the img carries no attrs — the definite-size variant is the squash bug)")
 }
 
 func TestGalleryCardsEscapePrompts(t *testing.T) {

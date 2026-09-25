@@ -344,6 +344,55 @@ func TestStaticRoute(t *testing.T) {
 	})
 }
 
+// TestGalleryThumbHealInvariant pins the live-card heal contract in the
+// SERVED gallery.js (source-level; the behavioral pin is the browser
+// harness at ~/dev/imgsite-debug/repro-thumb-race.ts):
+//
+//  1. onThumbReady must NEVER strip the `pending` class. The class is the
+//     error listener's retry-arm flag: stripping it while a retry's 404
+//     fetch is still in flight left a dead card (the error listener
+//     early-returns on non-pending imgs, so no retries were ever armed
+//     and the later 404 owned the element). `pending` may be cleared only
+//     by a successful load (capture-phase load listener) or the data-orig
+//     terminal fallback — exactly the two sanctioned sites below.
+//  2. onThumbReady must force a REAL refetch via a cache-busting query.
+//     Assigning an unchanged src is a verified no-op in Chromium (no
+//     refetch, no abort), and removeAttribute+re-assign in the same task
+//     dedupes to the same no-op; the bust is the only verified restart.
+func TestGalleryThumbHealInvariant(t *testing.T) {
+	app := newTestApp(t, testConfig())
+	ts := newTestServer(t, app)
+
+	resp := fetchPath(t, ts, "/static/gallery.js")
+	require.Equal(t, 200, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	js := string(body)
+
+	// Exactly the two sanctioned pending-clearing statements remain (the
+	// error listener's orig fallback + the capture-phase load listener).
+	// Scoped to `img.classList.remove` so prose in comments quoting old
+	// code cannot skew the count.
+	assert.Equal(t, 2, strings.Count(js, `img.classList.remove("pending")`),
+		"pending must be cleared only by the load listener and the data-orig fallback")
+
+	// Extract onThumbReady's body (up to the next top-level function).
+	start := strings.Index(js, "function onThumbReady(")
+	require.NotEqual(t, -1, start, "onThumbReady not found in served gallery.js")
+	rest := js[start:]
+	next := strings.Index(rest[len("function onThumbReady("):], "\nfunction ")
+	end := len(rest)
+	if next != -1 {
+		end = next + len("function onThumbReady(")
+	}
+	handler := rest[:end]
+
+	assert.NotContains(t, handler, "classList.remove",
+		"onThumbReady must not clear pending — that is the retry-arm flag")
+	assert.Contains(t, handler, `"v=" + Date.now()`,
+		"onThumbReady must force a refetch with a cache-busting query (same-URL assign is a verified no-op in Chromium)")
+}
+
 // insertFiveImages seeds rows with distinct timestamps, newest first
 // ordering dddd005 > dddd004 > ... > dddd001, one hidden.
 func insertFiveImages(t *testing.T, app *App) {

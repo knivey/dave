@@ -422,18 +422,57 @@ function onImageNew(ev) {
 	prependCard(ev);
 }
 
+// onThumbReady heals a live card's shimmer when the worker publishes
+// thumb-ready.
+//
+// DESIGN NOTE — heal invariant: the `pending` class is removed ONLY by a
+// successful `load` (the capture-phase load listener) or by the data-orig
+// terminal fallback in the error listener — NEVER here. The old code did
+// `classList.remove("pending"); img.src = img.dataset.thumb || img.src;`
+// and that pair was a production killer (watched tab, slow resize host,
+// Sep 2026): when a retry's 404 fetch was still IN FLIGHT the src
+// attribute already equaled the target, and assigning an unchanged src is
+// a verified no-op in Chromium (no refetch, no abort — the in-flight 404
+// kept ownership of the element). The 404 then landed on a non-pending
+// img, the error listener early-returned on its pending guard, and the
+// card died: failed-load state, no retries armed, shimmer gone (near-black
+// box) — while the server thumb WAS ready.
+//
+// So instead: FORCE a real refetch and let load/error resolve everything,
+// with pending deliberately retained. Mechanism — cache-busting query
+// (`?v=<ms>`): empirically verified in Chromium (playwright-core probe,
+// ~/dev/imgsite-debug/probe-restart.ts) as the ONLY one of the two
+// candidates that restarts the load when the attribute already equals the
+// target URL. The alternative — removeAttribute("src") then re-assign in
+// the same task — is a verified no-op (the final attribute value is
+// unchanged, so Chromium's image-loading update dedupes it; probe case
+// P1). Path routes ignore query strings, and pending 404s are no-cache,
+// so the bust's only cost is one extra immutable cache entry per race
+// event.
+//
+// Self-healing in BOTH orders (this is the exact race that killed the old
+// code):
+//   - forced fetch 200s -> the load listener clears pending (the ONLY
+//     pending-clearing path). A stale error from the superseded in-flight
+//     404, if the engine surfaces one at all, lands on a non-pending img
+//     and the error listener early-returns — harmless.
+//   - forced fetch 404s anyway (event raced the worker flip, or a proxy
+//     served stale) -> pending is still set, so the error listener sees a
+//     retryable pending img and re-arms the capped backoff chain; the
+//     next no-cache retry lands the ready thumb and the load listener
+//     clears pending then.
 function onThumbReady(ev) {
 	if (!grid || !ev || !ev.id) return;
 	const card = grid.querySelector('article.card[data-id="' + CSS.escape(ev.id) + '"]');
 	if (!card) return; // trimmed from DOM, or another page state
 	const img = card.querySelector("img.pending");
 	if (!img) return; // already swapped or already failed
-	img.classList.remove("pending");
-	// The 404 the placeholder got was no-cache; reassigning the src
-	// refetches. A card mid-retry-wait has no src attribute at all
-	// (removed for a clean shimmer), so restore from the stashed
-	// data-thumb instead of re-reading img.src.
-	img.src = img.dataset.thumb || img.src;
+	// Capture the target BEFORE mutating: mid-retry-wait imgs have no src
+	// attribute at all (the error listener removed it for a clean
+	// shimmer), so the stashed data-thumb is the source of truth there.
+	const target = img.dataset.thumb || img.getAttribute("src");
+	if (!target) return;
+	img.src = target + (target.includes("?") ? "&" : "?") + "v=" + Date.now();
 }
 
 // onImageHidden drops a soft-deleted image's card (SSE image-hidden,

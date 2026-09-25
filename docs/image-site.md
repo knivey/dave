@@ -498,6 +498,31 @@ Behavior:
   `thumb-ready` swap, which targets `img.pending`, could never heal
   whenever generation outlasted the single retry window; observed in
   production Sep 2026.)
+- **Thumb-heal invariant** (the `thumb-ready` handler): the `pending`
+  class is the error listener's retry-arm flag and may be cleared ONLY
+  by a successful `load` (capture-phase load listener) or by the
+  `data-orig` terminal fallback — never by `onThumbReady`. The handler
+  instead FORCES a real refetch (cache-busting `?v=` query on the thumb
+  URL) and lets load/error resolution do the rest, retaining `pending`
+  throughout. This is self-healing in both orders: if the forced fetch
+  200s, the load listener clears pending (a late error from a
+  superseded in-flight 404 lands on a non-pending img and is ignored);
+  if it 404s anyway, the error listener still sees a retryable pending
+  img and re-arms the backoff chain. Rationale, engine-verified in
+  Chromium (probe: `~/dev/imgsite-debug/probe-restart.ts`; behavioral
+  harness: `repro-thumb-race.ts`): assigning an unchanged `src` is a
+  no-op (no refetch, no abort — the in-flight request keeps ownership),
+  and `removeAttribute("src")` + re-assign in the same task dedupes to
+  the same no-op; only a URL change reliably restarts the load. The
+  pre-fix handler stripped `pending` and reassigned the same URL — when
+  a retry's 404 was in flight at `thumb-ready` time (watched tab, slow
+  resize host), the 404 then landed on a non-pending img, the error
+  listener early-returned, and the card died unrecoverably (black box,
+  no retries, shimmer gone) even though the server thumb was ready.
+  Query strings are ignored by the path routes and pending 404s are
+  no-cache, so the bust only costs one immutable cache entry per race
+  event. Guarded in-repo by `TestGalleryThumbHealInvariant`
+  (server_test.go) against the served JS source.
 
 ## Live updates (events.go — SSE)
 

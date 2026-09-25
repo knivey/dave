@@ -732,7 +732,9 @@ Client behaviors:
   `LIKE` scan). **Verified empirically** against the exact driver this repo
   uses (`modernc.org/sqlite v1.49.1`, default import, FTS5 compiled in,
   no build tags): prefix queries, porter stemming, phrases, `snippet()`,
-  and BM25 column weights all work; a prefix query over 100k rows answered
+  and BM25 column weights all work, as does the trigram tokenizer
+  (substring phrases with case folding — the tier-3 accelerator below);
+  a prefix query over 100k rows answered
   in ~2ms. At gallery scale (thousands of rows) this is effectively
   instantaneous and there is no extra service to run.
 - Ranking is **strictly three-tier** — two FTS tiers plus an always-on
@@ -773,10 +775,7 @@ ORDER BY bm25(images_fts, 8.0, 1.0), images_fts.rowid;
   `LIKE '%shrew%'` can. The scan excludes every rowid the overall MATCH
   returns (tier 1 ∪ tier 2 is exactly that set), which IS the id-level
   dedupe: a row that both tokenizes and substring-matches keeps its FTS
-  rank and appears exactly once. Cost note: the scan is a plain table
-  scan over `images` — the exact cost the old zero-hit fallback paid,
-  now on every query — which is fine at gallery scale (thousands of
-  rows, two text columns). Within tier 3, original-column
+  rank and appears exactly once. Within tier 3, original-column
   substring matches rank above enhanced-only substring matches, each
   group by recency — there is no relevance rank for a match the
   tokenizer never saw:
@@ -794,6 +793,41 @@ WHERE i.hidden = 0
 ORDER BY like_enhanced, i.created_at DESC, i.id DESC;
 ```
 
+  The LIKE predicates remain the semantic definition (they also drive
+  the `like_enhanced` CASE used for ordering and preview), but the scan
+  is no longer linear at scale: a second external-content FTS5 table,
+  **`images_substring_fts` (migration 002), indexes the same two prompt
+  columns with the trigram tokenizer**, and when EVERY token of the
+  query is at least 3 code points the query adds one more conjunct:
+
+```sql
+  AND i.rowid IN (SELECT rowid FROM images_substring_fts
+                  WHERE images_substring_fts MATCH '"q1" "q2" …')
+```
+
+  In a trigram table a quoted string is a phrase of 3-code-point
+  windows — a substring test — so `"shrew"` matches `cowshrew` exactly
+  like `LIKE '%shrew%'`; quoting also keeps `%`/`_` literal in the MATCH
+  expression (no FTS5 syntax injection from user tokens). This is a
+  semantics-preserving **superset** filter: any row the LIKE patterns
+  accept contains each token as a case-folded substring, which is
+  precisely what the trigram index keys on, so no LIKE-visible row can
+  be missed; a trigram-only match (e.g. a non-ASCII case variant LIKE
+  would reject) simply filters out in the outer query's LIKE conjuncts.
+  Verified via `EXPLAIN QUERY PLAN` against the bundled driver: the
+  accelerated query consults the trigram table through its index
+  (`SCAN images_substring_fts VIRTUAL TABLE INDEX …`) and drives
+  `images` by primary key (`SEARCH i USING INTEGER PRIMARY KEY`)
+  instead of `SCAN i` — pinned by `TestTier3TrigramPrefilterPlan`.
+  If ANY token is shorter than 3 characters (rare: short queries) the
+  trigram table cannot index it — a 1–2-char string has no trigram
+  window — and the query runs the plain scan exactly as before the side
+  table existed. Costs: the trigram index stores every 3-char window,
+  roughly 3–5× the indexed text size (two prompt columns — trivially
+  small next to the image files), and migration 002 rebuilds the table
+  from existing rows once at startup (seconds at gallery scale:
+  hundreds → low thousands of rows).
+
   (bm25 still orders WITHIN each FTS tier, so original-heavy phrasing also
   wins inside tier 1; the rowid tiebreak keeps ordering deterministic for
   the stitched offset-based paging cursor. Tier stitching pages tier 1 to
@@ -810,7 +844,8 @@ ORDER BY like_enhanced, i.created_at DESC, i.id DESC;
 - Phrase queries via quoted input pass through to FTS5 (`"walkin down"`).
   Substring-only matches (mid-word fragments, suffixes inside fused
   tokens like "cowshrew") surface via the always-on tier-3 LIKE scan
-  above.
+  above — trigram-indexed through `images_substring_fts` whenever every
+  token is ≥3 chars, plain scan otherwise.
 - With external-content FTS5 the index keeps tokens of soft-deleted rows,
   so search joins back to `images` for `hidden = 0` filtering (and the
   UPDATE/DELETE triggers run the FTS 'delete' dance) — covered explicitly

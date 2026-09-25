@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/pressly/goose/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -187,6 +188,64 @@ func TestFTSTriggersKeepIndexInSync(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, db.Get(&n, `SELECT COUNT(*) FROM images_fts WHERE images_fts MATCH 'different'`))
 	assert.Equal(t, 0, n, "delete trigger runs the FTS 'delete' dance")
+}
+
+// TestSubstringFTSMigration pins migration 002 (trigram side table for
+// tier-3 acceleration): the table and its trigger trio exist after the
+// full chain runs, the one-time 'rebuild' indexes rows that predate the
+// migration, and the triggers keep the table in sync for inserts,
+// prompt updates, and deletes.
+func TestSubstringFTSMigration(t *testing.T) {
+	db := setupTestDB(t)
+
+	var got string
+	require.NoError(t, db.Get(&got,
+		`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'images_substring_fts'`))
+	for _, name := range []string{"images_substring_fts_ai", "images_substring_fts_ad", "images_substring_fts_au"} {
+		require.NoError(t, db.Get(&got,
+			`SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = ?`, name),
+			"trigger %s must exist", name)
+	}
+
+	// Rebuild path: roll back to v1 (before the side table), insert a
+	// row through 001's triggers only, re-run 002, and assert the
+	// 'rebuild' command picked the pre-existing row up.
+	require.NoError(t, goose.DownTo(db.DB, "migrations", 1))
+	require.NoError(t, dbInsertImage(db, &dbImage{
+		ID: "sub0001", SHA256: strings.Repeat("05", 32), Filename: "x.png",
+		MimeType: "image/png", SizeBytes: 1, CreatedAt: "2026-09-24 00:00:00",
+		ThumbStatus: thumbStatusPending, OriginalPrompt: "a cowshrew grazes",
+		MetaSource: metaSourceUpload,
+	}))
+	require.NoError(t, goose.Up(db.DB, "migrations"))
+
+	var n int
+	require.NoError(t, db.Get(&n,
+		`SELECT COUNT(*) FROM images_substring_fts WHERE images_substring_fts MATCH '"cowshrew"'`))
+	assert.Equal(t, 1, n, "one-time rebuild indexed the pre-migration row")
+
+	// Live sync: rows written after the migration ride the triggers.
+	require.NoError(t, dbInsertImage(db, &dbImage{
+		ID: "sub0002", SHA256: strings.Repeat("06", 32), Filename: "x.png",
+		MimeType: "image/png", SizeBytes: 1, CreatedAt: "2026-09-24 01:00:00",
+		ThumbStatus: thumbStatusPending, OriginalPrompt: "plain words",
+		MetaSource: metaSourceUpload,
+	}))
+	require.NoError(t, db.Get(&n,
+		`SELECT COUNT(*) FROM images_substring_fts WHERE images_substring_fts MATCH '"plain"'`))
+	assert.Equal(t, 1, n, "insert trigger feeds the trigram table")
+
+	_, err := db.Exec(`UPDATE images SET enhanced_prompt = 'totally cowshrew here' WHERE id = ?`, "sub0002")
+	require.NoError(t, err)
+	require.NoError(t, db.Get(&n,
+		`SELECT COUNT(*) FROM images_substring_fts WHERE images_substring_fts MATCH '"cowshrew"'`))
+	assert.Equal(t, 2, n, "update trigger swaps tokens in the trigram table")
+
+	_, err = db.Exec(`DELETE FROM images WHERE id = ?`, "sub0002")
+	require.NoError(t, err)
+	require.NoError(t, db.Get(&n,
+		`SELECT COUNT(*) FROM images_substring_fts WHERE images_substring_fts MATCH '"plain"'`))
+	assert.Equal(t, 0, n, "delete trigger runs the trigram 'delete' dance")
 }
 
 // TestKeysetQueriesUseIndexSeek pins the query plan of the row-value

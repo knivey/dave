@@ -168,6 +168,51 @@ func escapeLike(s string) string {
 	return r.Replace(s)
 }
 
+// trigramMinTokenRunes is the trigram tokenizer's floor: it indexes
+// 3-code-point windows only, so a shorter string can never match
+// through images_substring_fts. Tokens at/above this use the index.
+const trigramMinTokenRunes = 3
+
+// substringFTSTable is the trigram-tokenizer external-content side
+// table (migration 002) that accelerates tier 3.
+const substringFTSTable = "images_substring_fts"
+
+// trigramFilterExpr converts already-sanitized search tokens into an
+// FTS5 MATCH expression for the trigram side table: every token as a
+// quoted AND-term. In a trigram table a quoted string is a phrase of
+// 3-code-point windows — i.e. a substring test — so `"shrew"` matches
+// "cowshrew" exactly the way LIKE '%shrew%' does. Quoting is what makes
+// this safe AND faithful: inside an FTS5 string every byte except '"'
+// is literal, so % and _ stay wildcard characters to LIKE but plain
+// characters here (pinned by the WildcardsLiteral test), and user input
+// can never inject FTS5 syntax (tokens arrive operator-stripped and
+// quote-free from buildFTSQuery).
+//
+// ok=false when ANY token is shorter than trigramMinTokenRunes: a
+// 1–2-char string has no trigram window and would match nothing, so the
+// caller must run the plain scan instead. That is rare (short queries)
+// and costs exactly what tier 3 always cost before the side table.
+//
+// Superset argument (why adding this conjunct cannot change results):
+// every row the LIKE patterns accept contains each token as a substring
+// (ASCII case-folded, which is LIKE's exact folding); the trigram index
+// folds case over the whole text, so any LIKE-accepted row's trigram
+// phrase lookup succeeds. The converse (trigram accepts, LIKE rejects —
+// e.g. non-ASCII case variants) just filters out in the outer query's
+// LIKE conjuncts, which remain the semantic definition.
+func trigramFilterExpr(tokens []string) (expr string, ok bool) {
+	for _, tok := range tokens {
+		if utf8.RuneCountInString(tok) < trigramMinTokenRunes {
+			return "", false
+		}
+	}
+	terms := make([]string, 0, len(tokens))
+	for _, tok := range tokens {
+		terms = append(terms, `"`+tok+`"`)
+	}
+	return strings.Join(terms, " "), true
+}
+
 // ---------------------------------------------------------------------------
 // Search cursor
 // ---------------------------------------------------------------------------
@@ -413,6 +458,58 @@ type likeRow struct {
 	LikeEnhanced bool `db:"like_enhanced"`
 }
 
+// buildLikeTierQuery assembles tier 3's SQL and bound args. When every
+// token is at least trigramMinTokenRunes long it adds the accelerator
+// conjunct — `rowid IN (SELECT rowid FROM images_substring_fts WHERE …
+// MATCH …)` — so the query consults the trigram index and drives images
+// by primary key instead of scanning every row's text (pinned by the
+// EXPLAIN QUERY PLAN test). The LIKE predicates stay in the query either
+// way: they are the semantic definition, they feed the like_enhanced
+// CASE, and they stay authoritative whenever the trigram prefilter is
+// absent (any short token) or merely a superset.
+//
+// Factored out of dbSearchLIKETier so the plan test can EXPLAIN the
+// exact production query text.
+func buildLikeTierQuery(tokens []string, ftsExpr string, limit, offset int) (string, []interface{}) {
+	origPatterns := make([]string, 0, len(tokens))
+	enhPatterns := make([]string, 0, len(tokens))
+	for _, tok := range tokens {
+		origPatterns = append(origPatterns, "%"+escapeLike(tok)+"%")
+		enhPatterns = append(enhPatterns, "%"+escapeLike(tok)+"%")
+	}
+	origAnd := strings.Join(repeatPredicate("original_prompt LIKE ? ESCAPE '\\'", len(tokens)), " AND ")
+	enhAnd := strings.Join(repeatPredicate("enhanced_prompt LIKE ? ESCAPE '\\'", len(tokens)), " AND ")
+
+	var trigramConjunct string
+	var trigramArgs []interface{}
+	if expr, ok := trigramFilterExpr(tokens); ok {
+		trigramConjunct = `
+		  AND i.rowid IN (
+		    SELECT rowid FROM ` + substringFTSTable + ` WHERE ` + substringFTSTable + ` MATCH ?
+		  )`
+		trigramArgs = append(trigramArgs, expr)
+	}
+
+	query := `SELECT i.*, (CASE WHEN (` + origAnd + `) THEN 0 ELSE 1 END) AS like_enhanced
+		FROM images i
+		WHERE i.hidden = 0 AND ((` + origAnd + `) OR (` + enhAnd + `))
+		  AND i.rowid NOT IN (
+		    SELECT rowid FROM images_fts WHERE images_fts MATCH ?
+		  )` + trigramConjunct + `
+		ORDER BY like_enhanced, i.created_at DESC, i.id DESC
+		LIMIT ? OFFSET ?`
+	// origAnd appears twice in the text (CASE + WHERE), so its
+	// placeholders bind twice. The trigram conjunct sits AFTER the
+	// images_fts NOT IN subquery in the text, so ftsExpr binds before
+	// the trigram expression.
+	args := append(toAnySlice(origPatterns), toAnySlice(origPatterns)...)
+	args = append(args, toAnySlice(enhPatterns)...)
+	args = append(args, ftsExpr)
+	args = append(args, trigramArgs...)
+	args = append(args, limit, offset)
+	return query, args
+}
+
 // dbSearchLIKETier is tier 3: a substring scan over both prompt columns
 // for fragments FTS cannot see. FTS5 prefix terms match only
 // token-INITIAL text and the query syntax has no suffix operator, so
@@ -436,30 +533,17 @@ type likeRow struct {
 // substring (per-column AND, matching the FTS tiers' semantics — a row
 // with term1 in the original and term2 in the enhanced is not a match
 // for an AND query).
+//
+// ACCELERATOR: since this scan always runs, it was a linear pass over
+// every row's prompt text on every query. The images_substring_fts
+// side table (migration 002; trigram tokenizer, same two columns) now
+// pre-filters the candidate rowids through an index whenever every
+// token is ≥3 code points — see buildLikeTierQuery and
+// trigramFilterExpr for why that is a semantics-preserving superset.
+// Results, ordering, and dedupe are byte-identical either way.
 func dbSearchLIKETier(db *sqlx.DB, tokens []string, ftsExpr string, offset, limit int) ([]searchHit, error) {
-	origPatterns := make([]string, 0, len(tokens))
-	enhPatterns := make([]string, 0, len(tokens))
-	for _, tok := range tokens {
-		origPatterns = append(origPatterns, "%"+escapeLike(tok)+"%")
-		enhPatterns = append(enhPatterns, "%"+escapeLike(tok)+"%")
-	}
-	origAnd := strings.Join(repeatPredicate("original_prompt LIKE ? ESCAPE '\\'", len(tokens)), " AND ")
-	enhAnd := strings.Join(repeatPredicate("enhanced_prompt LIKE ? ESCAPE '\\'", len(tokens)), " AND ")
-
+	query, args := buildLikeTierQuery(tokens, ftsExpr, limit, offset)
 	var rows []likeRow
-	query := `SELECT i.*, (CASE WHEN (` + origAnd + `) THEN 0 ELSE 1 END) AS like_enhanced
-		FROM images i
-		WHERE i.hidden = 0 AND ((` + origAnd + `) OR (` + enhAnd + `))
-		  AND i.rowid NOT IN (
-		    SELECT rowid FROM images_fts WHERE images_fts MATCH ?
-		  )
-		ORDER BY like_enhanced, i.created_at DESC, i.id DESC
-		LIMIT ? OFFSET ?`
-	// origAnd appears twice in the text (CASE + WHERE), so its
-	// placeholders bind twice.
-	args := append(toAnySlice(origPatterns), toAnySlice(origPatterns)...)
-	args = append(args, toAnySlice(enhPatterns)...)
-	args = append(args, ftsExpr, limit, offset)
 	if err := db.Select(&rows, query, args...); err != nil {
 		return nil, err
 	}

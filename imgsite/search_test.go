@@ -446,6 +446,191 @@ func TestSearchLIKETier3(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Tier 3 trigram acceleration
+// ---------------------------------------------------------------------------
+
+// TestBundledSQLiteTrigramSupport pins the driver capability the
+// accelerator is built on: the bundled modernc.org/sqlite must compile
+// in the FTS5 trigram tokenizer with substring-phrase semantics. If a
+// future driver upgrade ever drops or changes it, this fails before any
+// subtle search regression can.
+func TestBundledSQLiteTrigramSupport(t *testing.T) {
+	db := setupTestDB(t)
+	var version string
+	require.NoError(t, db.Get(&version, `SELECT sqlite_version()`))
+	t.Logf("bundled SQLite %s (modernc.org/sqlite)", version)
+
+	require.NoError(t, dbInsertImage(db, &dbImage{
+		ID: "tri1001", SHA256: strings.Repeat("07", 32), Filename: "x.png",
+		MimeType: "image/png", SizeBytes: 1, CreatedAt: "2026-09-24 00:00:00",
+		ThumbStatus: thumbStatusPending, OriginalPrompt: "a CowShrew grazes 100%",
+		MetaSource: metaSourceUpload,
+	}))
+
+	steps := []struct {
+		match string
+		want  int
+		why   string
+	}{
+		{`"shrew"`, 1, "quoted phrase = substring match, mid-token"},
+		{`"SHREW"`, 1, "default trigram options fold case"},
+		{`"wshre"`, 1, "fragment entirely inside the fused token, crossing its intra-word case boundary (Cow|Shrew)"},
+		{`"rew gr"`, 1, "phrase spanning the SPACE between tokens (…rew|grazes): trigram indexes spaces as ordinary code points"},
+		{`"100%"`, 1, "% is a literal inside a quoted FTS5 string"},
+		{`"graz" "cowsh"`, 1, "consecutive quoted terms are implicit AND"},
+		{`"ab"`, 0, "sub-3-char token finds nothing (trigram floor), error-free"},
+		{`"nope"`, 0, "absent substring matches nothing"},
+	}
+	var n int
+	for _, s := range steps {
+		require.NoError(t, db.Get(&n, `SELECT COUNT(*) FROM images_substring_fts WHERE images_substring_fts MATCH ?`, s.match), s.why)
+		assert.Equal(t, s.want, n, "%s: MATCH %s", s.why, s.match)
+	}
+}
+
+// TestTrigramFilterExpr pins the accelerator's gating and expression
+// shape: every token quoted (FTS5-syntax-injection-proof, wildcards
+// literal), AND-joined, and the whole accelerator disabled when any
+// token is shorter than the trigram floor.
+func TestTrigramFilterExpr(t *testing.T) {
+	expr, ok := trigramFilterExpr([]string{"shrew", "graz"})
+	assert.True(t, ok)
+	assert.Equal(t, `"shrew" "graz"`, expr)
+
+	for _, toks := range [][]string{{"ab"}, {"shrew", "ab"}, {"a", "b", "c"}} {
+		_, ok := trigramFilterExpr(toks)
+		assert.False(t, ok, "tokens %v: any short token disables the accelerator", toks)
+	}
+
+	// Rune count, not bytes: multibyte tokens at/above 3 code points.
+	expr, ok = trigramFilterExpr([]string{"örld"})
+	assert.True(t, ok)
+	assert.Equal(t, `"örld"`, expr)
+
+	// Wildcard-bearing tokens stay literal via quoting.
+	expr, ok = trigramFilterExpr([]string{"100%", "under_score"})
+	assert.True(t, ok)
+	assert.Equal(t, `"100%" "under_score"`, expr)
+}
+
+// TestTier3TrigramPrefilterPlan is the proof the accelerator exists for:
+// EXPLAIN QUERY PLAN of the EXACT production tier-3 query must consult
+// images_substring_fts through its index and must not degenerate into a
+// scan of the images table. Assertions are phrasing-tolerant (table
+// name + per-line scan check) so SQLite plan-text drift doesn't break
+// the pin.
+func TestTier3TrigramPrefilterPlan(t *testing.T) {
+	db := setupTestDB(t)
+
+	query, args := buildLikeTierQuery([]string{"shrew"}, `"shrew"*`, 49, 0)
+	require.Contains(t, query, substringFTSTable, "all-≥3-char tokens take the accelerated shape")
+
+	rows, err := db.Query("EXPLAIN QUERY PLAN "+query, args...)
+	require.NoError(t, err)
+	var plan []string
+	for rows.Next() {
+		var id, parent, notused, detail string
+		require.NoError(t, rows.Scan(&id, &parent, &notused, &detail))
+		plan = append(plan, detail)
+	}
+	require.NoError(t, rows.Err())
+	require.NotEmpty(t, plan, "EQP returned no plan rows")
+
+	joined := strings.Join(plan, " | ")
+	assert.Contains(t, joined, substringFTSTable+" VIRTUAL TABLE INDEX",
+		"the trigram side table must be consulted through its index: %s", joined)
+	for _, line := range plan {
+		assert.NotEqual(t, "SCAN i", line, "accelerated query must not scan images: %s", joined)
+		assert.NotEqual(t, "SCAN images", line, "accelerated query must not scan images: %s", joined)
+	}
+
+	// The <3-char fallback keeps today's plain scan shape.
+	query, args = buildLikeTierQuery([]string{"ab"}, `"ab"`, 49, 0)
+	assert.NotContains(t, query, substringFTSTable, "short-token query takes the plain scan")
+}
+
+// TestTier3ShortTokenFallsBackToScan pins the fallback path end to end:
+// a query with ANY token under 3 runes cannot use the trigram prefilter
+// (its windows cannot index a 1–2-char string) and must still return
+// correct rows through the plain LIKE scan.
+func TestTier3ShortTokenFallsBackToScan(t *testing.T) {
+	app := newTestApp(t, testConfig())
+	insertSearchRow(t, app, "sht0001", "2026-09-24 01:00:00", "grabbing the railing", "")
+	insertSearchRow(t, app, "sht0002", "2026-09-24 02:00:00", "shrew grabbing together", "")
+	insertSearchRow(t, app, "sht0003", "2026-09-24 03:00:00", "unrelated", "")
+
+	res := runSearchFor(t, app, "ab", searchCursor{}, 48)
+	assert.Equal(t, []string{"sht0002", "sht0001"}, hitIDs(res.Hits),
+		"2-char token still substring-matches via the scan path, recency within tier 3")
+	for _, h := range res.Hits {
+		assert.Equal(t, 3, h.tier)
+	}
+
+	// One short token poisons the whole prefilter; the scan still ANDs
+	// both tokens per column.
+	res = runSearchFor(t, app, "ab shrew", searchCursor{}, 48)
+	assert.Equal(t, []string{"sht0002"}, hitIDs(res.Hits),
+		"mixed short+long query falls back to the scan and requires every token in one column")
+}
+
+// TestTier3TrigramCaseFolding pins mixed-case substring matching through
+// the accelerated path: "CowShrew" is found by q=shrew (and q=SHREW).
+// "cowshrew" never tokenizes to a shrew-prefixed term, so the row can
+// only surface via tier 3 — with the accelerator on, that means the
+// trigram's case folding and LIKE's ASCII folding must agree.
+func TestTier3TrigramCaseFolding(t *testing.T) {
+	app := newTestApp(t, testConfig())
+	insertSearchRow(t, app, "cse0001", "2026-09-24 01:00:00", "a CowShrew grazes", "")
+
+	for _, q := range []string{"shrew", "SHREW", "Shrew"} {
+		res := runSearchFor(t, app, q, searchCursor{}, 48)
+		require.Len(t, res.Hits, 1, "query %q", q)
+		assert.Equal(t, "cse0001", res.Hits[0].img.ID, "query %q", q)
+		assert.Equal(t, 3, res.Hits[0].tier, "query %q: fused token is invisible to FTS, substring tier only", q)
+	}
+}
+
+// TestTier3MultibyteSubstring pins the accelerator's superset property
+// on multibyte text: a ≥3-rune non-ASCII fragment rides the trigram
+// prefilter (3 code points = one full window) and must still surface the
+// row — LIKE accepts it, so the trigram index cannot be allowed to miss
+// it. This is the regression class a driver change would silently
+// introduce (dropped tier-3 rows), so it gets its own end-to-end pin.
+func TestTier3MultibyteSubstring(t *testing.T) {
+	app := newTestApp(t, testConfig())
+	insertSearchRow(t, app, "uni0001", "2026-09-24 01:00:00", "höllo wörld", "")
+
+	// "örl" is a 3-rune mid-token fragment: FTS prefix terms can't see
+	// it (the token starts with "w"), so the row can only surface via
+	// the accelerated tier-3 path.
+	res := runSearchFor(t, app, "örl", searchCursor{}, 48)
+	require.Len(t, res.Hits, 1)
+	assert.Equal(t, "uni0001", res.Hits[0].img.ID)
+	assert.Equal(t, 3, res.Hits[0].tier)
+}
+
+// TestTier3QuotedPhraseSubstring pins the quoted-phrase token through
+// the accelerated tier-3 path end to end. A user phrase like "n com"
+// arrives from buildFTSQuery as ONE token containing a space; the FTS
+// tiers read it as an adjacency phrase (token "n" immediately followed
+// by token "com" — nothing matches), while the trigram prefilter and
+// the LIKE conjuncts both read it as a literal substring spanning the
+// space inside "walkin comin". The LIKE conjuncts stay authoritative:
+// a row with the same letters but no space is excluded even though a
+// sloppier matcher could confuse the two.
+func TestTier3QuotedPhraseSubstring(t *testing.T) {
+	app := newTestApp(t, testConfig())
+	insertSearchRow(t, app, "qph0001", "2026-09-24 01:00:00", "walkin comin down the street", "")
+	insertSearchRow(t, app, "qph0002", "2026-09-24 02:00:00", "ncompany tight", "")
+
+	res := runSearchFor(t, app, `"n com"`, searchCursor{}, 48)
+	require.Len(t, res.Hits, 1)
+	assert.Equal(t, "qph0001", res.Hits[0].img.ID, "space-spanning phrase matches as a substring")
+	assert.Equal(t, 3, res.Hits[0].tier, "no FTS tier sees tokens 'n'/'com' — substring tier only")
+	assert.False(t, res.Hits[0].previewEnhanced, "original-column substring previews the original column")
+}
+
+// ---------------------------------------------------------------------------
 // hidden=0 filtering
 // ---------------------------------------------------------------------------
 

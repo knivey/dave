@@ -47,6 +47,39 @@ Reload hot-reloadable settings (`site.*`, `thumbnails.*` minus workers,
 curl -X POST -H "X-API-Key: <key>" http://127.0.0.1:8081/admin/reload
 ```
 
+## Import legacy ComfyUI outputs
+
+One-shot ingestion of an existing ComfyUI `output/` archive (recursive,
+webp/PNG only) into the same database and store the upload path uses.
+**Stop the server first** — WAL tolerates a second writer, but running
+the import against a live server risks lock contention.
+
+```bash
+./imgsite -import /path/to/ComfyUI/output -tz America/New_York
+```
+
+- `-tz` gives the timezone the FILENAME timestamps (`%Y-%m-%d-%H%M%S`
+  prefix, e.g. `2026-09-24-185355__0.webp`) were written in; default is
+  this machine's local zone. A `__N` batch suffix orders same-second
+  files by adding N ms. Non-matching names fall back to file mtime with
+  a per-file warning.
+- Non-destructive: originals are copied into the store, never moved or
+  deleted. Idempotent: re-running skips every hash the DB already knows
+  (including files previously uploaded via dave).
+- Oldest files (no dave original-prompt note in the workflow) import
+  with an empty original prompt and the workflow's final positive prompt
+  as the enhanced prompt — searchable like any enhanced-only match
+  (tier 2). Files with a note import with full fidelity.
+- Thumbnails and missing dims are generated inline at the end of the
+  run; an interrupted import resumes via the normal startup re-scan on
+  the next server start.
+- Per-file skips (no embedded workflow, non-image files) are report
+  lines, never failures: the process exits non-zero only on fatal setup
+  errors (bad dir, bad `-tz`, config/DB problems).
+
+Details and design rationale: `docs/image-site.md`, "Importing legacy
+outputs".
+
 ## Deploy behind a reverse proxy
 
 - Terminate TLS at the proxy and pass the scheme through — absolute URLs

@@ -13,7 +13,44 @@ import (
 	"time"
 )
 
+// Import-mode flags. -import DIR switches the binary from serve mode to
+// a one-shot legacy-output import (see import.go); -tz declares the
+// timezone import filename timestamps were written in.
+var (
+	importDirFlag = flag.String("import", "", "import legacy ComfyUI outputs from DIR (recursive webp/PNG walk), then exit")
+	importTZFlag  = flag.String("tz", "", "timezone of -import filename timestamps (IANA name, e.g. America/New_York);\ndefault: this machine's local zone")
+)
+
+// usage documents both modes; the flag package prints it on bad flag
+// usage, import/serve-mode misuse prints it explicitly.
+func usage() {
+	prog := filepath.Base(os.Args[0])
+	fmt.Fprintf(os.Stderr, `%[1]s — image gallery for dave's generations
+
+usage:
+  %[1]s [flags] [config]
+
+Runs the gallery server. config is a TOML file (default: config.toml next
+to the binary; relative paths resolve against the binary directory).
+
+import mode:
+  %[1]s -import DIR [-tz ZONE] [config]
+
+Walks DIR recursively and imports ComfyUI webp/PNG outputs carrying an
+embedded workflow into the gallery database and store. Non-destructive
+(originals are copied, never moved or deleted) and idempotent (hashes
+already known to the DB are skipped). Filename timestamps (leading
+%%Y-%%m-%%d-%%H%%M%%S) are interpreted in ZONE (default: the local zone).
+Run with the server stopped. See docs/image-site.md, "Importing legacy
+outputs".
+
+flags:
+`, prog)
+	flag.PrintDefaults()
+}
+
 func main() {
+	flag.Usage = usage
 	flag.Parse()
 
 	exePath, err := os.Executable()
@@ -34,6 +71,19 @@ func main() {
 		if !filepath.IsAbs(configPath) {
 			configPath = filepath.Join(exeDir, configPath)
 		}
+	}
+
+	// Import mode: -import DIR runs the legacy-output import and exits.
+	// os.Exit skips main's defers, so closeLogger runs explicitly here.
+	if *importDirFlag != "" {
+		code := importMain(exeDir, configPath, *importDirFlag, *importTZFlag)
+		closeLogger()
+		os.Exit(code)
+	}
+	if *importTZFlag != "" {
+		fmt.Fprintf(os.Stderr, "error: -tz is only meaningful together with -import DIR\n\n")
+		flag.Usage()
+		os.Exit(2)
 	}
 
 	cfg, err := loadConfig(configPath)

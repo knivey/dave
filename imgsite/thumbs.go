@@ -148,16 +148,20 @@ func (tw *thumbWorker) rescanPending() {
 // process runs one id through the pipeline and records the outcome.
 // Failures are terminal (thumb_status='failed') — never retried in a
 // loop; a future re-extract/admin action can reset the row to pending.
-func (tw *thumbWorker) process(id string) {
+// The error is returned (nil on success) so non-worker callers — the
+// import path — can count outcomes; the worker's loop ignores it since
+// every branch is already recorded in the DB.
+func (tw *thumbWorker) process(id string) error {
 	err := tw.runJob(id)
 	if err != nil {
 		loggerThumbs.Warn("thumbnail generation failed", "id", id, "error", err)
 		if uerr := dbUpdateThumbStatus(tw.db, id, thumbStatusFailed); uerr != nil {
 			loggerThumbs.Error("marking thumbnail failed", "id", id, "error", uerr)
 		}
-		return
+		return err
 	}
 	tw.onThumbReady(id)
+	return nil
 }
 
 // runJob is the recover boundary of the worker pool. decodeImage

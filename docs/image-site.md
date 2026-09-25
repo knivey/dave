@@ -1,10 +1,11 @@
 # Image Site (imgsite) — Design & Feature Plan
 
 Status: implemented (2026-09-24) — milestones 1–7 shipped in `imgsite/` with the
-img-mcp switch-over; each milestone was independently reviewed. Grounded in
-verified production artifacts: two live webp uploads from img.zkpq.ca (`526`,
-`528`) were dissected to pin down the exact EXIF/workflow embedding; details
-in "Input format (verified)".
+img-mcp switch-over; each milestone was independently reviewed. Legacy-output
+import (`imgsite -import`) added 2026-09-25 (see "Importing legacy outputs").
+Grounded in verified production artifacts: two live webp uploads from
+img.zkpq.ca (`526`, `528`) were dissected to pin down the exact EXIF/workflow
+embedding; details in "Input format (verified)".
 
 ## Goal
 
@@ -114,6 +115,7 @@ imgsite/
   migrations/        001_init.sql …
   store.go           content-addressed file storage (sha256 fan-out dirs)
   upload.go          POST /updo handler: auth, limits, dedupe, metadata merge
+  import.go          `imgsite -import <dir>`: offline legacy-output ingestion
   extract.go         webp/PNG metadata chunk parsing (verified format above)
   workflow.go        graph traversal → ImageMetadata (class_type-keyed rules)
   thumbs.go          background thumbnailer (worker pool, restart-safe)
@@ -345,6 +347,91 @@ fallback for prompt fields if EXIF parsing ever fails. `original_prompt`,
 `reasoning`, `llm_generated`, `job_id` are cross-checked between both; a
 mismatch (e.g. different job_id) logs a WARN and prefers EXIF. `meta_source`
 records which side(s) contributed.
+
+## Importing legacy outputs (`imgsite -import`)
+
+Offline, one-shot ingestion of an existing ComfyUI `output/` archive into
+the same DB + store the upload path uses:
+
+```bash
+imgsite -import /path/to/ComfyUI/output [-tz America/New_York] [config.toml]
+```
+
+Run it with the **server stopped**. SQLite WAL technically tolerates a
+second writer, but a concurrent import against a live server risks lock
+contention under busy_timeout; the stopped-server recommendation keeps
+the import deterministic. No SSE events are published (the hub is not
+running) — imported images simply appear on the next page load.
+
+Behavior:
+
+- **Recursive walk** (ComfyUI organizes outputs into date subfolders).
+  Only webp and PNG — the two containers the extraction pipeline reads —
+  are considered; everything else is skipped with a one-line notice.
+- **Per file**: extract the embedded workflow via the standard pipeline;
+  no workflow found (or an unparseable graph) ⇒ skip with a report line
+  (visible and reversible — the owner decides what to do with those).
+  Compute sha256 and COPY the bytes into the content-addressed store —
+  the import is non-destructive, originals are never moved or deleted.
+- **Idempotent**: a sha256 already present in the DB (uploaded via dave
+  previously, or a prior import run) is skipped — re-running the import
+  is a report-only no-op. Hidden rows count as present, so a soft-deleted
+  entry cannot resurrect itself. (This differs from the upload path,
+  which deliberately mints a second gallery row for the same bytes: each
+  IRC generation is its own entry, while imports must be idempotent.)
+  The reverse interplay is likewise intended: importing first and having
+  dave later upload identical bytes mints a second gallery row sharing
+  the one stored file — the upload path's pre-existing
+  dedupe-shares-the-file-not-the-row semantics, unchanged by the import
+  feature.
+- **created_at comes from the FILENAME**, not mtime (mtimes change when
+  files are copied/moved). ComfyUI's leading `%Y-%m-%d-%H%M%S`
+  (`2006-01-02-150405`, e.g. `2026-09-24-185355__0.webp`) is parsed and
+  stored as UTC ms-precision text; everything after the time prefix is
+  ignored for parsing. Filename times are the ComfyUI host's local time:
+  `-tz` declares that zone (any IANA/`time.LoadLocation` name), defaulting
+  to the importing machine's local zone. A `__N` batch suffix adds N
+  milliseconds (clamped to 999) so same-second batches keep their file
+  order under the ms-precision keyset ordering. Names that don't match
+  fall back to the file's mtime (UTC) with a per-file warning in the
+  report — never aborting the batch. Files carrying a dave note that
+  also parse a filename time use the filename time (the note has no
+  timestamp; consistent batch ordering wins).
+- **Prompts**: images WITHOUT a dave original-prompt note — the oldest
+  archive material — import with an EMPTY `original_prompt` and the
+  workflow's final positive prompt (the same node extraction uses for
+  the enhanced side) in `enhanced_prompt`. They are therefore searchable
+  exactly like existing enhanced-only matches: FTS tier 2 by design,
+  strictly below any original-prompt hit. Images WITH a note import with
+  full fidelity through the same extraction path (original prompt,
+  reasoning, job_id, llm_generated).
+- **Rows** go through the same merge/insert code as uploads
+  (`mergeUploadMetadata` + `applyMergedMetadata` + `dbInsertImage`), so
+  FTS trigger rows, provenance NULL semantics, and column meanings are
+  identical. Provenance (network/channel/nick) is empty, job_id empty
+  unless a note carries one, `llm_generated` from the note when present
+  else false, `meta_source='exif'`. Width/height come from the graph's
+  latent node when present (upload parity); NULL dims are backfilled by
+  the thumbnail pass below.
+- **Thumbnails + dims without hand-holding**: rows are inserted
+  `thumb_status='pending'`; after every row is committed, the import
+  runs the worker's own per-row pipeline (`thumbWorker.process` —
+  decode → resize → encode → `dbUpdateThumbReady`, which
+  COALESCE-backfills NULL width/height from the decoded bounds) inline.
+  This matters because the startup re-scan's enqueue is non-blocking
+  against a bounded queue (cap 256): relying on "next server start"
+  alone would need several restarts for a large archive. An interrupted
+  import is still safe — unprocessed rows stay pending and the next
+  server start finishes them. Undecodable files get the worker's normal
+  terminal `thumb_status='failed'` (gallery falls back to the original
+  URL); the row and its prompts/searchability survive.
+- **Summary + exit code**: the run prints per-file lines as it goes and
+  a summary at the end — imported / skipped-duplicate /
+  skipped-no-workflow / skipped-other counts, errors, thumbnail
+  outcomes, warnings, and the DB + store paths written to. Exit status
+  is non-zero only for fatal setup errors (bad `-tz`, bad dir, config or
+  DB open failure); per-file skips and thumbnail failures never fail the
+  run.
 
 ## Metadata extraction (extract.go / workflow.go)
 

@@ -175,6 +175,18 @@ func dbImageIDExists(db *sqlx.DB, id string) (bool, error) {
 	return exists, err
 }
 
+// dbImageSHAExists reports whether any row already stores this hash.
+// Hidden rows count as present: their bytes are in the store, and import
+// dedupe must not resurrect a soft-deleted gallery entry. Used by import
+// mode — the upload path deliberately does NOT call this (uploads mint a
+// fresh row per generation even for known hashes; imports must be
+// idempotent instead).
+func dbImageSHAExists(db *sqlx.DB, sha string) (bool, error) {
+	var exists bool
+	err := db.Get(&exists, `SELECT EXISTS(SELECT 1 FROM images WHERE sha256 = ?)`, sha)
+	return exists, err
+}
+
 // dbGetNewerImage returns the image immediately NEWER than the keyset
 // cursor (created_at DESC, id DESC ordering — "newer" sorts before the
 // cursor), filtering hidden rows. It is the details page's prev link and

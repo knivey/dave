@@ -17,6 +17,7 @@ var (
 	loggerUpload logxi.Logger
 	loggerThumbs logxi.Logger
 	loggerEvents logxi.Logger
+	loggerImport logxi.Logger
 
 	logFile *os.File
 )
@@ -63,6 +64,9 @@ func initLogger(exeDir string) {
 
 	loggerEvents = logxi.NewLogger(writer, "events")
 	loggerEvents.SetLevel(logxi.LevelAll)
+
+	loggerImport = logxi.NewLogger(writer, "import")
+	loggerImport.SetLevel(logxi.LevelAll)
 }
 
 func closeLogger() {

@@ -25,8 +25,10 @@ default_workflow = "zimage"
 
 [upload]
 # imgsite base URL for hosting generated images (required).
-#   POST <url>/updo  (X-API-Key, multipart "file" + "meta") -> 201 + {id,url,...}
-# The response's "url" is the permanent direct link, pasted to IRC verbatim.
+#   POST <url>/updo  (X-API-Key, multipart "file" + "meta") -> 201 + {id,url,page,...}
+# The response's "page" (the absolute details-page link) is what gets pasted
+# to IRC verbatim; an empty "page" (older imgsite) falls back to the direct
+# "url" with a WARN.
 url = "https://img.example.com"
 # API key authenticating uploads to imgsite (X-API-Key header); must match
 # auth.api_key in imgsite's config. Hot-reloadable (read per upload call).

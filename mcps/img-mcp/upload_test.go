@@ -84,19 +84,58 @@ func newFakeUploadServer(t *testing.T) *fakeUploadServer {
 	return f
 }
 
-func TestUploadImageReturnsResponseURLVerbatim(t *testing.T) {
+// TestUploadImageReturnsPageVerbatim pins the link contract: the PAGE link
+// (gallery details page) is what dave pastes to IRC, so when the response
+// carries both fields the page wins — returned verbatim, no derivation, no
+// re-encoding.
+func TestUploadImageReturnsPageVerbatim(t *testing.T) {
 	f := newFakeUploadServer(t)
 	cfg := Config{Upload: UploadConfig{URL: f.server.URL, APIKey: "secret-key"}}
 
-	// A deliberately odd URL (different host, query-ish suffix) proves the
-	// value is returned verbatim — no derivation, no re-encoding.
-	verbatim := "https://img.example.com/aQ3f9xK/orig/2026-09-23-234552__0.webp"
-	f.respondBody = `{"id":"aQ3f9xK","url":"` + verbatim + `","page":"https://img.example.com/aQ3f9xK","filename":"2026-09-23-234552__0.webp"}`
+	// A deliberately odd page URL (different host, query-ish suffix)
+	// proves the value is returned verbatim; the differing url proves the
+	// page is preferred over it.
+	page := "https://img.example.com/aQ3f9xK?from=test"
+	direct := "https://img.example.com/aQ3f9xK/orig/2026-09-23-234552__0.webp"
+	f.respondBody = `{"id":"aQ3f9xK","url":"` + direct + `","page":"` + page + `","filename":"2026-09-23-234552__0.webp"}`
 
-	url, err := uploadImage(cfg, []byte("png-bytes"), "test-image.png", UploadMeta{})
+	got, err := uploadImage(cfg, []byte("png-bytes"), "test-image.png", UploadMeta{})
 
 	require.NoError(t, err)
-	assert.Equal(t, verbatim, url)
+	assert.Equal(t, page, got, "page link must be preferred over the direct url")
+}
+
+// TestUploadImageFallsBackToURLWhenPageEmpty covers older imgsite
+// deployments that might answer with an empty page field: the direct url is
+// still usable, so the upload falls back to it (with a WARN in the logs)
+// instead of failing the job.
+func TestUploadImageFallsBackToURLWhenPageEmpty(t *testing.T) {
+	f := newFakeUploadServer(t)
+	cfg := Config{Upload: UploadConfig{URL: f.server.URL, APIKey: "secret-key"}}
+
+	direct := f.server.URL + "/aQ3f9xK/orig/test-image.png"
+	f.respondBody = `{"id":"aQ3f9xK","url":"` + direct + `","page":"","filename":"test-image.png"}`
+
+	got, err := uploadImage(cfg, []byte("png-bytes"), "test-image.png", UploadMeta{})
+
+	require.NoError(t, err)
+	assert.Equal(t, direct, got, "empty page must fall back to the direct url")
+}
+
+// TestUploadImageURLNotRequiredWhenPagePresent: once the page link is the
+// primary contract, a response that omits url entirely (page only) is a
+// success, not an error.
+func TestUploadImageURLNotRequiredWhenPagePresent(t *testing.T) {
+	f := newFakeUploadServer(t)
+	cfg := Config{Upload: UploadConfig{URL: f.server.URL, APIKey: "secret-key"}}
+
+	page := "https://img.example.com/aQ3f9xK"
+	f.respondBody = `{"id":"aQ3f9xK","page":"` + page + `","filename":"f.png"}`
+
+	got, err := uploadImage(cfg, []byte("png-bytes"), "test-image.png", UploadMeta{})
+
+	require.NoError(t, err)
+	assert.Equal(t, page, got)
 }
 
 func TestUploadImageSendsAPIKeyFileAndMeta(t *testing.T) {
@@ -113,7 +152,7 @@ func TestUploadImageSendsAPIKeyFileAndMeta(t *testing.T) {
 	url, err := uploadImage(cfg, []byte("png-bytes"), "test-image.png", meta)
 
 	require.NoError(t, err)
-	assert.Equal(t, f.server.URL+"/aQ3f9xK/orig/test-image.png", url)
+	assert.Equal(t, f.server.URL+"/aQ3f9xK", url, "the page link is the upload result")
 	assert.Equal(t, "secret-key", f.gotAPIKey, "upload must authenticate with X-API-Key")
 	assert.Equal(t, "file", f.gotFileField)
 	assert.Equal(t, "test-image.png", f.gotFileFilename)
@@ -216,10 +255,10 @@ func TestUploadImageErrors(t *testing.T) {
 			errMsg:      "parsing upload response",
 		},
 		{
-			name:        "CreatedButMissingURL",
+			name:        "CreatedButMissingPageAndURL",
 			status:      http.StatusCreated,
-			respondBody: `{"id":"aQ3f9xK","page":"https://x/aQ3f9xK","filename":"f.png"}`,
-			errMsg:      "upload response missing url",
+			respondBody: `{"id":"aQ3f9xK","filename":"f.png"}`,
+			errMsg:      "upload response missing page and url",
 		},
 	}
 	for _, tt := range tests {

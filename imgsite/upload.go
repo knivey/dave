@@ -236,7 +236,11 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 	// Hand off to the background thumbnailer (nil-safe / non-blocking).
 	a.enqueueThumb(img.ID)
 
-	// 6. 201 with the verbatim direct link.
+	// 6. 201 with both links absolute, built from server.base_url (or the
+	// derived request base): `page` (the details-page URL) is what
+	// img-mcp hands to dave for IRC; `url` stays the permanent direct
+	// image link. dave pastes whichever it got verbatim — nothing is
+	// derived client-side on either end.
 	base := strings.TrimRight(cfg.Server.BaseURL, "/")
 	if base == "" {
 		base = deriveBaseURL(r)

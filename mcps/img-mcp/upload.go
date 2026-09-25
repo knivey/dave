@@ -52,19 +52,26 @@ type uploadResponse struct {
 }
 
 // uploadImage POSTs the image to imgsite's /updo endpoint and returns the
-// permanent direct link for the uploaded bytes.
+// permanent PAGE link (the gallery details page) for the uploaded image —
+// the link dave pastes to IRC.
 //
 // Wire protocol (docs/image-site.md, "Upload protocol"):
 //
 //	POST <base>/updo  X-API-Key, multipart: file, meta=<JSON> -> 201 + {id,url,page,filename}
 //
-// DESIGN NOTE: the returned url is handed to IRC verbatim — no client-side
+// DESIGN NOTE: the returned link is handed to IRC verbatim — no client-side
 // derivation, no verification GET. Both ends of this protocol are ours
 // (imgsite builds url/page from its configured server.base_url), so a second
 // hop would only re-ask the server what it just told us. The old photo-site
 // contract (303 + Location parsing, /orig/ URL derivation, redirect-check
 // verification, toirc=0 to silence its IRC announcer) was deleted wholesale
 // when imgsite replaced it.
+//
+// The page field is preferred (the details page is where the prompt,
+// params, and provenance live — pasting it on IRC gives readers context a
+// bare image URL can't). When the response carries an empty page — older
+// imgsite deployments — the direct url is the fallback, with a WARN so the
+// skew is visible in the logs. A response with neither field is an error.
 //
 // A 401 means the key didn't match: the error names upload.api_key so the
 // admin knows exactly which config knob is wrong. An empty api_key is
@@ -168,8 +175,18 @@ func uploadImage(cfg Config, data []byte, filename string, meta UploadMeta) (str
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
 		return "", fmt.Errorf("parsing upload response: %w", err)
 	}
-	if parsed.URL == "" {
-		return "", fmt.Errorf("upload response missing url")
+
+	// Page link first; empty page (older imgsite) falls back to the
+	// direct url so a version skew degrades to the old paste, never to a
+	// failed job.
+	link := parsed.Page
+	if link == "" {
+		logger.Warn("upload response has an empty page field; falling back to the direct url (older imgsite deployment?)",
+			"filename", filename, "image_id", parsed.ID, "url", parsed.URL)
+		link = parsed.URL
+	}
+	if link == "" {
+		return "", fmt.Errorf("upload response missing page and url")
 	}
 
 	// Stage boundaries for the log; stages that never fired (reused
@@ -182,7 +199,7 @@ func uploadImage(cfg Config, data []byte, filename string, meta UploadMeta) (str
 		connReady = tlsDone
 	}
 
-	logger.Info("upload complete", "filename", filename, "url", parsed.URL,
+	logger.Info("upload complete", "filename", filename, "link", link, "url", parsed.URL,
 		"image_id", parsed.ID,
 		"post_ms", postDur.Milliseconds(),
 		"conn_reused", connReused,
@@ -190,7 +207,7 @@ func uploadImage(cfg Config, data []byte, filename string, meta UploadMeta) (str
 		"tls_ms", elapsedMs(connectDone, tlsDone),
 		"send_ms", elapsedMs(connReady, wroteReq),
 		"srv_ms", elapsedMs(wroteReq, firstByte))
-	return parsed.URL, nil
+	return link, nil
 }
 
 // elapsedMs reports the milliseconds between two httptrace timestamps,

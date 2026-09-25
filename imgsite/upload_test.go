@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,6 +90,47 @@ func TestUploadBaseURLFromConfig(t *testing.T) {
 	ur := decodeUploadResponse(t, resp)
 	assert.Equal(t, "https://img.example.com/"+ur.ID, ur.Page, "trailing slash trimmed from configured base_url")
 	assert.Equal(t, "https://img.example.com/"+ur.ID+"/orig/test.png", ur.URL)
+}
+
+// TestUploadResponsePageIsDetailsPage pins the link contract dave consumes:
+// `page` is the ABSOLUTE details-page URL (what img-mcp hands to IRC — the
+// page carries the prompt/params/provenance a bare image URL can't), `url`
+// remains the absolute direct-image link (documented field, meaning
+// unchanged), and GETting the page URL serves the HTML details page.
+func TestUploadResponsePageIsDetailsPage(t *testing.T) {
+	cfg := testConfig()
+	cfg.Server.BaseURL = "https://img.example.com"
+	app := newTestApp(t, cfg)
+	ts := newTestServer(t, app)
+
+	resp := doUpload(t, ts, testAPIKey, uploadParts{hasFile: true, filename: "test.png", data: pngBytes("x")})
+
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	ur := decodeUploadResponse(t, resp)
+
+	assert.Equal(t, "https://img.example.com/"+ur.ID, ur.Page, "page is absolute, built from server.base_url")
+	assert.Equal(t, "https://img.example.com/"+ur.ID+"/orig/test.png", ur.URL, "url is still the absolute direct-image link")
+	assert.NotContains(t, ur.Page, "/orig/", "page points at the details page, not the image bytes")
+	assert.NotEqual(t, ur.Page, ur.URL)
+
+	// GET the returned page URL's path against the test server (the
+	// configured base_url host doesn't resolve here) to prove it serves
+	// the HTML details page, not image bytes.
+	pageURL, err := url.Parse(ur.Page)
+	require.NoError(t, err)
+	tsURL, err := url.Parse(ts.URL)
+	require.NoError(t, err)
+	pageURL.Scheme = tsURL.Scheme
+	pageURL.Host = tsURL.Host
+
+	req, err := http.NewRequest("GET", pageURL.String(), nil)
+	require.NoError(t, err)
+	pres := doReq(t, ts, req)
+	require.Equal(t, http.StatusOK, pres.StatusCode, "the page URL must resolve to the details page")
+	assert.Equal(t, "text/html; charset=utf-8", pres.Header.Get("Content-Type"))
+	pbody, err := io.ReadAll(pres.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(pbody), ur.ID, "details page renders for the uploaded id")
 }
 
 // mergeFixtureWebP embeds a production-shaped graph (note node + sampler +

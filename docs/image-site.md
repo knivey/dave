@@ -12,8 +12,9 @@ embedding; details in "Input format (verified)".
 Replace the third-party photo site (img.zkpq.ca) with a self-hosted gallery
 purpose-built for dave's image generations. The site:
 
-- serves **permanent direct image links** — the upload response hands dave
-  the exact ready-to-paste URL, no client-side derivation or verification,
+- serves **permanent links** — the upload response hands dave the exact
+  ready-to-paste details-page URL (plus the direct image link), no
+  client-side derivation or verification,
 - gives every image a **details page** built from the workflow graph embedded in the file's EXIF,
 - offers a **gallery with background-generated thumbnails** and **live updates** (SSE) when new images land,
 - provides **fast prompt search** — original prompts ranked first, enhanced prompts second,
@@ -318,8 +319,7 @@ Handler sequence (all synchronous, fast — heavy work is deferred):
    and merge with `meta` (policy below). If EXIF parse fails, log WARN and
    proceed on `meta` alone.
 6. INSERT row with `thumb_status='pending'`; publish `image-new` SSE event; enqueue thumb job.
-7. Respond `201 Created` with JSON — the direct link is handed to dave
-   verbatim, nothing derived client-side:
+7. Respond `201 Created` with JSON — nothing derived client-side:
 
 ```json
 {
@@ -330,9 +330,15 @@ Handler sequence (all synchronous, fast — heavy work is deferred):
 }
 ```
 
-   `url` and `page` are absolute, built from `server.base_url` — which
-   therefore must be set correctly in prod config, since dave stores `url`
-   verbatim into the job result and pastes it to IRC.
+   `url` and `page` are both absolute, built from `server.base_url` — which
+   therefore must be set correctly in prod config. `url` is the permanent
+   direct image link; `page` is the details-page link. Since the image pages
+   went live (Sep 2026), dave consumes `page`: img-mcp stores it verbatim
+   into the job result and pastes it to IRC, so a pasted link lands readers
+   on the details page (prompt, params, provenance — plus OpenGraph embeds)
+   instead of bare bytes. img-mcp prefers `page` and falls back to `url`
+   (with a WARN) only for older imgsite deployments that answer with an
+   empty `page`.
 
 Thumbnail generation is NOT in the upload path — an upload answers in the
 time it takes to hash + write the file + one INSERT.
@@ -798,13 +804,16 @@ exist inside img-mcp today, so this milestone is its own task:
    `upload_image` tool handler (tools.go ~567) pass a `meta` built from the
    `Job`; the direct tool path sends a thinner meta (no enhancement fields).
 4. **Response handling simplified** (this is the payoff for owning both
-   ends): `uploadImage` POSTs, parses the `201` JSON, and returns
-   `resp.url` as the image URL — full stop. Deleted outright:
+   ends): `uploadImage` POSTs, parses the `201` JSON, and returns the
+   link verbatim — full stop. Deleted outright:
    the 303/Location parsing, the client-side `/<id>/orig/<filename>`
    derivation, the verification GET with its redirect-check, and
    `uploadHTTPClient`'s no-follow-redirect constraint (a plain client with
    a sane timeout is enough). The DESIGN NOTE in upload.go explaining the
-   verification hop goes away with it.
+   verification hop goes away with it. At switch-over this returned
+   `resp.url`; once the image pages were live it moved to `resp.page`
+   (details-page link, preferred — `resp.url` remains the documented
+   direct link and the fallback when `page` comes back empty).
 5. `upload_test.go` cases extended: meta marshaling, api-key header present,
    401 handling.
 

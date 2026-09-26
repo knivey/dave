@@ -192,8 +192,9 @@ description = "generations from IRC"
 ```
 
 Reloadable via SIGHUP: `site.*`, `safe_site.*`, `thumbnails.*` (except
-worker count), `search.*`, `upload.*` (both `max_bytes` and
-`rate_per_minute` are read per request). Not reloadable
+worker count), `search.*`, `upload.*` (`max_bytes` is read per request;
+`rate_per_minute` is applied when the upload limiter is retuned at
+reload). Not reloadable
 (restart required): `server.*`, `database.*`, `storage.*`, `auth.*`.
 Same pattern as img-mcp.
 

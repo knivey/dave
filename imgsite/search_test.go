@@ -566,7 +566,7 @@ func TestTier3TrigramPrefilterPlan(t *testing.T) {
 func TestTier3TrigramPrefilterPlanSafeSite(t *testing.T) {
 	db := setupTestDB(t)
 
-	query, args := buildLikeTierQuery([]string{"shrew"}, `"shrew"*`, 49, 0, safeSiteCtx())
+	query, args := buildLikeTierQuery([]string{"shrew"}, `"shrew"*`, 49, 0, matrixSafeSiteCtx())
 	require.Contains(t, query, substringFTSTable)
 	require.Contains(t, query, "LOWER(i.network)")
 
@@ -1048,9 +1048,9 @@ func TestSearchDBErrorReturns500(t *testing.T) {
 // Safe-site visibility (task 3): the predicate rides every tier
 // ---------------------------------------------------------------------------
 
-// safeSiteCtx is the matrix rows' site context: safe site, libera the
+// matrixSafeSiteCtx is the matrix rows' site context: safe site, libera the
 // only allowed network (matches safeSiteTestConfig).
-func safeSiteCtx() siteCtx {
+func matrixSafeSiteCtx() siteCtx {
 	return siteCtx{Safe: true, networks: []string{"libera"}}
 }
 
@@ -1066,7 +1066,7 @@ func TestSearchSiteMatrix(t *testing.T) {
 	seedSiteMatrix(t, app)
 
 	t.Run("SafeSiteRunSearch", func(t *testing.T) {
-		res := runSearchForSite(t, app, "gribble", searchCursor{}, 48, safeSiteCtx())
+		res := runSearchForSite(t, app, "gribble", searchCursor{}, 48, matrixSafeSiteCtx())
 		assert.Equal(t, []string{"sit0001", "sit0004", "sit0005"}, hitIDs(res.Hits),
 			"tier order preserved; exactly the safe-visible rows survive in every tier")
 		assert.Equal(t, []int{1, 2, 3}, []int{res.Hits[0].tier, res.Hits[1].tier, res.Hits[2].tier},
@@ -1091,7 +1091,7 @@ func TestSearchSiteMatrix(t *testing.T) {
 		var got []string
 		cur := searchCursor{}
 		for page := 1; ; page++ {
-			res := runSearchForSite(t, app, "gribble", cur, 1, safeSiteCtx())
+			res := runSearchForSite(t, app, "gribble", cur, 1, matrixSafeSiteCtx())
 			require.Less(t, page, 6, "pagination did not terminate")
 			got = append(got, hitIDs(res.Hits)...)
 			if !res.HasMore {
@@ -1138,7 +1138,7 @@ func TestSearchSiteMatrix(t *testing.T) {
 func TestSearchTier3SiteFilteredBothShapes(t *testing.T) {
 	app := newTestApp(t, safeSiteTestConfig())
 	ts := newTestServer(t, app)
-	safe := safeSiteCtx()
+	safe := matrixSafeSiteCtx()
 
 	t.Run("TrigramAccelerated", func(t *testing.T) {
 		// "gribble" (7 runes) engages the accelerator; both rows match
@@ -1197,7 +1197,7 @@ func TestBuildLikeTierQuerySiteFilterShape(t *testing.T) {
 		assert.Len(t, args, 7, "orig×2, enh, ftsExpr, trigramExpr, limit, offset — no site args")
 	})
 	t.Run("SafeSiteFragmentAppendedAfterTrigram", func(t *testing.T) {
-		query, args := buildLikeTierQuery([]string{"gribble"}, `"gribble"*`, 49, 0, safeSiteCtx())
+		query, args := buildLikeTierQuery([]string{"gribble"}, `"gribble"*`, 49, 0, matrixSafeSiteCtx())
 
 		assert.Contains(t, query, substringFTSTable, "accelerated shape intact")
 		assert.Contains(t, query, " AND (LOWER(i.network) IN (?) OR i.safety = 'safe')",

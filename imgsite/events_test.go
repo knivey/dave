@@ -36,11 +36,22 @@ type sseFrame struct {
 	retry   string
 }
 
-// openEvents subscribes to /events on the test server and returns a
-// channel of parsed frames plus the request's cancel func. The stream
-// ends (channel closes) when the caller cancels, the body closes, or
-// the server ends the response.
+// openEvents subscribes to /events on the test server (default site)
+// and returns a channel of parsed frames plus the request's cancel
+// func. The stream ends (channel closes) when the caller cancels, the
+// body closes, or the server ends the response.
 func openEvents(t *testing.T, ts *httptest.Server, header map[string]string, query string) (<-chan sseFrame, *http.Response, context.CancelFunc) {
+	return openEventsHost(t, ts, "", header, query)
+}
+
+// openEventsHost is openEvents with the request Host overridden — the
+// header resolveSite (and therefore /events subscriber tagging) selects
+// the logical site from. Same mechanism as getPageHost: httptest
+// listens on 127.0.0.1, and req.Host (not the URL) carries the chosen
+// Host header to the same listener, which is exactly how the
+// production host split arrives (one process, Host routing at the
+// proxy). An empty host is no override: the default site.
+func openEventsHost(t *testing.T, ts *httptest.Server, host string, header map[string]string, query string) (<-chan sseFrame, *http.Response, context.CancelFunc) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -48,6 +59,9 @@ func openEvents(t *testing.T, ts *httptest.Server, header map[string]string, que
 	require.NoError(t, err)
 	for k, v := range header {
 		req.Header.Set(k, v)
+	}
+	if host != "" {
+		req.Host = host
 	}
 	resp, err := ts.Client().Do(req)
 	require.NoError(t, err)
@@ -171,7 +185,7 @@ func TestHubFanOutToSubscribers(t *testing.T) {
 	h := newSSEHub()
 	subs := make([]*subscriber, 3)
 	for i := range subs {
-		s, replay, covered, lastID := h.subscribe(0, false)
+		s, replay, covered, lastID := h.subscribe(0, false, siteCtx{})
 		require.True(t, covered)
 		require.Empty(t, replay)
 		require.Equal(t, uint64(0), lastID, "empty hub hello id")
@@ -195,11 +209,11 @@ func TestHubFanOutToSubscribers(t *testing.T) {
 
 func TestHubNonSubscriberIsolation(t *testing.T) {
 	h := newSSEHub()
-	early, _, _, _ := h.subscribe(0, false)
+	early, _, _, _ := h.subscribe(0, false, siteCtx{})
 	h.publish(eventImageNew, imageNewEvent{ID: "aaaa001"})
 	h.unsubscribe(early) // disconnects must not affect later subscribers
 
-	late, replay, covered, _ := h.subscribe(0, false)
+	late, replay, covered, _ := h.subscribe(0, false, siteCtx{})
 	require.True(t, covered)
 	require.Empty(t, replay, "fresh connect replays nothing")
 
@@ -227,7 +241,7 @@ func TestHubNonSubscriberIsolation(t *testing.T) {
 // normally once the sentinel is stamped.
 func TestHubOverflowResetsSlowConsumer(t *testing.T) {
 	h := newSSEHub()
-	slow, _, _, _ := h.subscribe(0, false)
+	slow, _, _, _ := h.subscribe(0, false, siteCtx{})
 
 	const burst = sseSubChannelCap + 8
 	for i := 0; i < burst; i++ {
@@ -271,7 +285,7 @@ func TestHubReplayFromSince(t *testing.T) {
 		h.publish(eventImageNew, imageNewEvent{ID: fmt.Sprintf("e%02d", i)})
 	}
 
-	sub, replay, covered, _ := h.subscribe(k-5, true)
+	sub, replay, covered, _ := h.subscribe(k-5, true, siteCtx{})
 	require.True(t, covered)
 	require.Len(t, replay, 5)
 	for i, ev := range replay {
@@ -298,21 +312,21 @@ func TestHubReplayGapBeyondRingResets(t *testing.T) {
 	}
 
 	// Gap wider than the retained ring: reset, not a partial replay.
-	_, replay, covered, _ := h.subscribe(3, true)
+	_, replay, covered, _ := h.subscribe(3, true, siteCtx{})
 	assert.False(t, covered, "gap beyond the ring must reset")
 	assert.Nil(t, replay)
 
 	// Ids this server never issued (client from before a restart): reset.
-	_, _, covered, _ = h.subscribe(total+100, true)
+	_, _, covered, _ = h.subscribe(total+100, true, siteCtx{})
 	assert.False(t, covered, "since beyond nextID must reset")
 
 	// Exactly current: covered, nothing to replay.
-	_, replay, covered, _ = h.subscribe(total, true)
+	_, replay, covered, _ = h.subscribe(total, true, siteCtx{})
 	assert.True(t, covered)
 	assert.Empty(t, replay)
 
 	// Exact ring boundary: gap == ring length is still covered.
-	_, replay, covered, _ = h.subscribe(uint64(total-sseRingCap), true)
+	_, replay, covered, _ = h.subscribe(uint64(total-sseRingCap), true, siteCtx{})
 	assert.True(t, covered, "gap exactly the ring length must replay")
 	assert.Len(t, replay, sseRingCap)
 }
@@ -322,19 +336,19 @@ func TestHubFreshConnectNeverReplays(t *testing.T) {
 	h.publish(eventImageNew, imageNewEvent{ID: "aaaa001"})
 	// sinceProvided=false is the no-header/no-param first visit: the
 	// page render is the state; replaying at it would duplicate cards.
-	_, replay, covered, _ := h.subscribe(0, false)
+	_, replay, covered, _ := h.subscribe(0, false, siteCtx{})
 	require.True(t, covered)
 	assert.Empty(t, replay)
 
 	// An explicit ?since=0, by contrast, asks for everything retained.
-	_, replay, covered, _ = h.subscribe(0, true)
+	_, replay, covered, _ = h.subscribe(0, true, siteCtx{})
 	require.True(t, covered)
 	assert.Len(t, replay, 1)
 }
 
 func TestHubShutdownIdempotentAndStopsPublish(t *testing.T) {
 	h := newSSEHub()
-	sub, _, _, _ := h.subscribe(0, false)
+	sub, _, _, _ := h.subscribe(0, false, siteCtx{})
 
 	h.shutdown()
 	h.shutdown() // must not panic (double close)
@@ -354,7 +368,7 @@ func TestHubShutdownIdempotentAndStopsPublish(t *testing.T) {
 
 func TestPublishImageHiddenPayloadShape(t *testing.T) {
 	h := newSSEHub()
-	sub, _, _, _ := h.subscribe(0, false)
+	sub, _, _, _ := h.subscribe(0, false, siteCtx{})
 
 	id := h.publish(eventImageHidden, imageHiddenEvent{ID: "zzzz999"})
 	require.Equal(t, uint64(1), id)
@@ -801,7 +815,7 @@ func TestConcurrentPublishAndDeliver(t *testing.T) {
 	const subsN = 4
 	subs := make([]*subscriber, subsN)
 	for i := range subs {
-		s, _, _, _ := h.subscribe(0, false)
+		s, _, _, _ := h.subscribe(0, false, siteCtx{})
 		subs[i] = s
 	}
 
@@ -902,4 +916,222 @@ func TestEventsSinceZeroReplaysAll(t *testing.T) {
 	require.Len(t, ids, 2, "since=0 must replay the entire ring")
 	assert.Contains(t, ids[0], "aaaa001")
 	assert.Contains(t, ids[1], "aaaa002")
+}
+
+// --- per-site SSE filtering (safe-site plan, task 5) ---
+
+// TestHubPerSiteFiltering pins the hub's site filter at BOTH delivery
+// paths. Live: image-new/thumb-ready carrying SafeVisible=false are
+// withheld from safe-tagged subscribers and delivered to default ones.
+// Replay: the batch subscribe returns is filtered per subscriber site
+// while the shared ring is never mutated — a default-site subscriber
+// connecting afterwards still replays the full window, proving the
+// filter happened on the copy. image-hidden is unfiltered on both
+// sites (dropping an absent card is a client no-op), and hello/lastID
+// semantics are identical for both tags.
+func TestHubPerSiteFiltering(t *testing.T) {
+	h := newSSEHub()
+	def, _, _, _ := h.subscribe(0, false, siteCtx{})
+	safe, _, _, _ := h.subscribe(0, false, siteCtx{Safe: true, networks: []string{"libera"}})
+
+	// Invisible row (efnet origin, unknown safety): safe site must not
+	// learn it exists — not its arrival, not its thumbnail.
+	h.publishVisible(eventImageNew, imageNewEvent{ID: "invis01"}, false)
+	h.publishVisible(eventThumbReady, thumbReadyEvent{ID: "invis01", ThumbStatus: thumbStatusReady}, false)
+	// Visible row: both sites.
+	h.publishVisible(eventImageNew, imageNewEvent{ID: "visib01"}, true)
+
+	for i, want := range []struct {
+		id   uint64
+		name string
+		data string
+	}{
+		{1, eventImageNew, "invis01"},
+		{2, eventThumbReady, "invis01"},
+		{3, eventImageNew, "visib01"},
+	} {
+		select {
+		case ev := <-def.ch:
+			assert.Equal(t, want.id, ev.ID, "default subscriber event %d", i)
+			assert.Equal(t, want.name, ev.Name)
+			assert.Contains(t, ev.Data, want.data)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("default subscriber missed event %d (%s)", i, want.name)
+		}
+	}
+	select {
+	case ev := <-def.ch:
+		t.Fatalf("default subscriber got an extra frame: %+v", ev)
+	default:
+	}
+
+	select {
+	case ev := <-safe.ch:
+		require.Equal(t, eventImageNew, ev.Name, "safe subscriber sees only visible image events")
+		require.Equal(t, uint64(3), ev.ID)
+		assert.Contains(t, ev.Data, "visib01")
+	case <-time.After(5 * time.Second):
+		t.Fatal("safe subscriber missed the visible event")
+	}
+	select {
+	case ev := <-safe.ch:
+		t.Fatalf("safe subscriber got an extra frame: %+v", ev)
+	default:
+	}
+
+	// image-hidden is deliberately unfiltered: both sites drop cards.
+	h.publish(eventImageHidden, imageHiddenEvent{ID: "invis01"})
+	for _, tag := range []string{"default", "safe"} {
+		ch := def.ch
+		if tag == "safe" {
+			ch = safe.ch
+		}
+		select {
+		case ev := <-ch:
+			assert.Equal(t, eventImageHidden, ev.Name, "%s subscriber", tag)
+			assert.Equal(t, uint64(4), ev.ID)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s subscriber missed image-hidden", tag)
+		}
+	}
+
+	// Replay with a cursor from before everything (?since=0): the safe
+	// batch excludes ids 1-2, the default batch — computed AFTER the
+	// safe one — still contains all four, pining that the filter never
+	// touched the shared ring.
+	_, safeReplay, covered, safeLast := h.subscribe(0, true, siteCtx{Safe: true, networks: []string{"libera"}})
+	require.True(t, covered)
+	require.Len(t, safeReplay, 2, "safe replay: visible image-new + image-hidden only")
+	assert.Equal(t, uint64(3), safeReplay[0].ID)
+	assert.Equal(t, eventImageNew, safeReplay[0].Name)
+	assert.Equal(t, uint64(4), safeReplay[1].ID)
+	assert.Equal(t, eventImageHidden, safeReplay[1].Name)
+
+	_, defReplay, covered, defLast := h.subscribe(0, true, siteCtx{})
+	require.True(t, covered)
+	require.Len(t, defReplay, 4, "default replay is the full ring, unmutated by the safe replay")
+	assert.Equal(t, uint64(1), defReplay[0].ID)
+
+	// hello seeding is site-independent: both report the same position.
+	assert.Equal(t, uint64(4), safeLast)
+	assert.Equal(t, uint64(4), defLast)
+}
+
+// TestEventsPerSiteFiltering drives the real /events handler with the
+// Host header selecting each site, through the real App publish helpers
+// (visibility computed from actual DB rows): invisible rows' image-new
+// and thumb-ready reach the default subscriber only; visible rows'
+// events reach both; image-hidden reaches both; hello is present for
+// both; and a ?since=0 reconnect from before the publishes (the leak
+// case — the events sit in the ring) replays them only on the default
+// host.
+func TestEventsPerSiteFiltering(t *testing.T) {
+	app := newTestApp(t, safeSiteTestConfig())
+	app.setEventHub(newSSEHub())
+	ts := newTestServer(t, app)
+
+	insertImage(t, app, "invis01", "2026-09-26 01:00:00", func(img *dbImage) {
+		img.Network = ptrStr("efnet") // disallowed origin, safety unknown
+	})
+	insertImage(t, app, "visib01", "2026-09-26 02:00:00") // libera origin (insertImage default)
+
+	defFrames, _, _ := openEvents(t, ts, nil, "")
+	nextSSEFrame(t, defFrames) // retry hint
+	safeFrames, _, _ := openEventsHost(t, ts, "safe.example.com", nil, "")
+	nextSSEFrame(t, safeFrames) // retry hint
+
+	// hello is connect bookkeeping, not per-image: present for both.
+	for _, tag := range []struct {
+		name   string
+		frames <-chan sseFrame
+	}{
+		{"default", defFrames}, {"safe", safeFrames},
+	} {
+		hello := nextSSEFrame(t, tag.frames)
+		require.Equal(t, "hello", hello.name, "%s site", tag.name)
+		require.Equal(t, uint64(0), hello.id, "%s site: fresh hub", tag.name)
+	}
+
+	invis, err := dbGetImageByID(app.db, "invis01")
+	require.NoError(t, err)
+	visib, err := dbGetImageByID(app.db, "visib01")
+	require.NoError(t, err)
+
+	// Live, invisible row: default sees arrival and thumbnail; the safe
+	// stream stays quiet (observing the default frame first proves the
+	// publish completed before the drain window opens).
+	app.publishImageNew(invis)
+	f := nextSSEEvent(t, defFrames)
+	require.Equal(t, eventImageNew, f.name)
+	assert.Contains(t, f.data, "invis01")
+	assert.Empty(t, drainSSEFrames(t, safeFrames), "safe site must not learn the invisible image exists")
+
+	app.publishThumbReady("invis01")
+	f = nextSSEEvent(t, defFrames)
+	require.Equal(t, eventThumbReady, f.name)
+	assert.Contains(t, f.data, "invis01")
+	assert.Empty(t, drainSSEFrames(t, safeFrames), "safe site must not learn the invisible thumbnail")
+
+	// Live, visible row: both sites, both event kinds.
+	app.publishImageNew(visib)
+	for _, tag := range []struct {
+		name   string
+		frames <-chan sseFrame
+	}{
+		{"default", defFrames}, {"safe", safeFrames},
+	} {
+		f := nextSSEEvent(t, tag.frames)
+		require.Equal(t, eventImageNew, f.name, "%s site", tag.name)
+		assert.Contains(t, f.data, "visib01")
+	}
+
+	app.publishThumbReady("visib01")
+	for _, tag := range []struct {
+		name   string
+		frames <-chan sseFrame
+	}{
+		{"default", defFrames}, {"safe", safeFrames},
+	} {
+		f := nextSSEEvent(t, tag.frames)
+		require.Equal(t, eventThumbReady, f.name, "%s site", tag.name)
+		assert.Contains(t, f.data, "visib01")
+	}
+
+	// image-hidden: unfiltered, both sites.
+	app.publishImageHidden("invis01")
+	for _, tag := range []struct {
+		name   string
+		frames <-chan sseFrame
+	}{
+		{"default", defFrames}, {"safe", safeFrames},
+	} {
+		f := nextSSEEvent(t, tag.frames)
+		require.Equal(t, eventImageHidden, f.name, "%s site", tag.name)
+		assert.Contains(t, f.data, "invis01")
+	}
+
+	// Replay leak case: fresh connections with a cursor from before
+	// every publish (?since=0). The ring holds all five events; the
+	// default host replays them all, the safe host only the three
+	// visible-row events. A reset frame would surface as a named event
+	// and break the counts, so this also pins covered/not-reset.
+	repDef, _, _ := openEvents(t, ts, nil, "?since=0")
+	defEvents := drainSSEFrames(t, repDef)
+	require.Len(t, defEvents, 5, "default replay carries the full ring")
+	assert.Contains(t, defEvents[0].data, "invis01")
+	assert.Equal(t, eventImageNew, defEvents[0].name)
+
+	repSafe, _, _ := openEventsHost(t, ts, "safe.example.com", nil, "?since=0")
+	safeEvents := drainSSEFrames(t, repSafe)
+	require.Len(t, safeEvents, 3, "safe replay drops the invisible row's two events")
+	names := []string{}
+	for _, f := range safeEvents {
+		names = append(names, f.name)
+		// image-hidden is the one event allowed to name an invisible
+		// id (both sites drop the card); the per-image events must not.
+		if f.name != eventImageHidden {
+			assert.NotContains(t, f.data, "invis01", "%s must never reference the invisible row on the safe site", f.name)
+		}
+	}
+	assert.Equal(t, []string{eventImageNew, eventThumbReady, eventImageHidden}, names)
 }

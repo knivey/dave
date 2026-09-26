@@ -135,14 +135,29 @@ func (a *App) resolveSite(r *http.Request) siteCtx {
 	host := strings.ToLower(hostWithoutPort(r.Host))
 	for _, h := range ss.Hosts {
 		if strings.ToLower(strings.TrimSpace(h)) == host && host != "" {
-			networks := make([]string, len(ss.AllowedNetworks))
-			for i, n := range ss.AllowedNetworks {
-				networks[i] = strings.ToLower(n)
-			}
-			return siteCtx{Safe: true, networks: networks}
+			return safeSiteCtx(ss)
 		}
 	}
 	return siteCtx{}
+}
+
+// safeSiteCtx builds the safe-site siteCtx from a [safe_site] config:
+// allowed_networks lowercased once, in config order. nil yields the
+// default-site ctx — no safe site is configured, so nothing filters.
+// The ONE constructor pairing Safe=true with networks, shared by
+// resolveSite (per request) and the SSE publish path (per event, via
+// publishImageNew/publishThumbReady), so the per-row predicate
+// siteCanSee and the SQL twin siteVisibilityFilter are always fed
+// identically-shaped input.
+func safeSiteCtx(ss *SafeSiteConfig) siteCtx {
+	if ss == nil {
+		return siteCtx{}
+	}
+	networks := make([]string, len(ss.AllowedNetworks))
+	for i, n := range ss.AllowedNetworks {
+		networks[i] = strings.ToLower(n)
+	}
+	return siteCtx{Safe: true, networks: networks}
 }
 
 // hostWithoutPort strips the port from an HTTP Host value, IPv6

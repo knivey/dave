@@ -12,6 +12,15 @@ package main
 // (image-new after the upload INSERT, thumb-ready after the ready
 // flip), so a subscriber acting on an event can immediately re-query
 // and see the row.
+//
+// Per-site delivery (safe-site plan): subscribers are tagged with the
+// site their request's Host selected at subscribe time, and per-image
+// events carry a publish-time SafeVisible flag (siteCanSee on the row)
+// that rides the ring entry — so image-new/thumb-ready for images
+// invisible on the safe site are withheld from safe-site subscribers
+// on BOTH the live fan-out and ?since= replay, with no DB reads and
+// no ring mutation. image-hidden, hello, and reset are unfiltered:
+// every site must drop cards and seed cursors identically.
 
 import (
 	"encoding/json"
@@ -90,15 +99,36 @@ type imageHiddenEvent struct {
 // which the delivery loop stamps with the current id (stampReset)
 // before anything reaches the wire. Reset is strictly per-client and
 // never enters the ring.
+//
+// SafeVisible is the per-site delivery flag (safe-site plan): whether
+// the image this event describes is visible on the safe site, computed
+// ONCE at publish time from the row's network+safety (siteCanSee
+// against the then-current config) by the App publish helpers. It rides
+// the ring entry so replay filters per subscriber site with no DB
+// reads and no config re-read — a reload between publish and replay
+// can no more change an event's visibility than its already-marshaled
+// payload. Events that don't describe an image (image-hidden, reset,
+// hello) leave it false and are exempt from filtering via
+// visibleToSafe's event-name gate.
 type event struct {
-	ID   uint64
-	Name string
-	Data string
+	ID          uint64
+	Name        string
+	Data        string
+	SafeVisible bool
 }
 
 // subscriber is one connected /events client.
 type subscriber struct {
 	ch chan event
+
+	// safe (guarded by hub.mu): this subscriber connected to the safe
+	// site — resolveSite tagged it at subscribe time and the tag is
+	// immutable for the connection's lifetime (a config reload
+	// re-resolves on the NEXT connect, like every other surface). Only
+	// the tag matters at delivery: per-image visibility was folded into
+	// the event's SafeVisible at publish time, so the subscriber needs
+	// no networks of its own.
+	safe bool
 
 	// resetPending (guarded by hub.mu): an overflow dropped this
 	// subscriber's backlog and queued the reset sentinel; further
@@ -142,7 +172,23 @@ func newSSEHub() *sseHub {
 // returns the assigned id, or 0 when the hub is closed or marshaling
 // failed (both drop the event; live updates are best-effort — the next
 // full page load is always correct, so callers don't retry).
+//
+// Events published this way are visible on every site. The per-image
+// events (image-new, thumb-ready) must go through publishVisible,
+// which carries the safe-site visibility computed from the row.
 func (h *sseHub) publish(name string, payload any) uint64 {
+	return h.publishVisible(name, payload, true)
+}
+
+// publishVisible is publish with the event's safe-site visibility: the
+// App publish helpers compute it once from the image row (siteCanSee
+// against the current config's safe-site ctx) and hand it over, after
+// which neither the live fan-out nor the ring replay re-reads anything.
+// safeVisible=false withholds the event from safe-site subscribers on
+// BOTH paths — the flag rides the ring entry precisely so a ?since=
+// reconnect can never leak an invisible image the live path already
+// suppressed.
+func (h *sseHub) publishVisible(name string, payload any, safeVisible bool) uint64 {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		loggerEvents.Error("marshaling SSE payload", "event", name, "error", err)
@@ -154,12 +200,28 @@ func (h *sseHub) publish(name string, payload any) uint64 {
 		return 0
 	}
 	h.nextID++
-	ev := event{ID: h.nextID, Name: name, Data: string(data)}
+	ev := event{ID: h.nextID, Name: name, Data: string(data), SafeVisible: safeVisible}
 	h.ringAppendLocked(ev)
 	for sub := range h.subs {
 		h.deliverLocked(sub, ev)
 	}
 	return h.nextID
+}
+
+// visibleToSafe reports whether ev may be delivered to a safe-site
+// subscriber. Only the per-image events (image-new, thumb-ready) carry
+// row-derived visibility; every other event name is delivered to both
+// sites unfiltered — image-hidden above all: dropping a card that
+// isn't present is a client no-op, while withholding it would strand a
+// stale card on the safe site after an admin hides an image that site
+// could see.
+func visibleToSafe(ev event) bool {
+	switch ev.Name {
+	case eventImageNew, eventThumbReady:
+		return ev.SafeVisible
+	default:
+		return true
+	}
 }
 
 // deliverLocked hands ev to one subscriber or trips the overflow
@@ -168,6 +230,12 @@ func (h *sseHub) deliverLocked(sub *subscriber, ev event) {
 	if sub.resetPending {
 		// A reset is already queued; events behind an undelivered
 		// reset are covered by the full refetch it instructs.
+		return
+	}
+	if sub.safe && !visibleToSafe(ev) {
+		// Invisible on this subscriber's site: skip before the buffer,
+		// so a safe-site stream can't be pressured toward overflow by
+		// traffic that isn't its to carry either.
 		return
 	}
 	select {
@@ -232,20 +300,30 @@ func (h *sseHub) ringAppendLocked(ev event) {
 // the ring — the caller sends a reset instead (the subscriber is still
 // registered: after the reset, live delivery continues).
 //
+// sc tags the subscriber with the site its request's Host selected
+// (the /events handler resolves it): safe-site subscribers get
+// image-new/thumb-ready events whose SafeVisible flag is false
+// withheld from BOTH the live channel and the replay batch, while the
+// default site keeps today's behavior byte-for-byte — no filtering,
+// every event.
+//
 // lastID is the hub's newest event id at subscribe time (0 when nothing
 // has been published yet). The caller sends it as a "hello" event so
 // every client learns the stream's current position immediately — even
 // one that never receives a real event this visit. Without it, a page
 // that connected, saw zero events, froze (bfcache), and revived would
 // hold lastId=0 and have nothing to resume from.
-func (h *sseHub) subscribe(since uint64, sinceProvided bool) (*subscriber, []event, bool, uint64) {
-	sub := &subscriber{ch: make(chan event, sseSubChannelCap)}
+func (h *sseHub) subscribe(since uint64, sinceProvided bool, sc siteCtx) (*subscriber, []event, bool, uint64) {
+	sub := &subscriber{ch: make(chan event, sseSubChannelCap), safe: sc.Safe}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	var replay []event
 	covered := true
 	if sinceProvided {
 		replay, covered = h.replaySinceLocked(since)
+		if covered {
+			replay = filterReplayForSite(replay, sc.Safe)
+		}
 	}
 	h.subs[sub] = struct{}{}
 	// nextID is the newest issued id (0 when nothing has been
@@ -253,6 +331,30 @@ func (h *sseHub) subscribe(since uint64, sinceProvided bool) (*subscriber, []eve
 	// replaySinceLocked compares against (since >= nextID means "caught
 	// up"). hello reports it verbatim.
 	return sub, replay, covered, h.nextID
+}
+
+// filterReplayForSite applies the safe-site delivery filter to a
+// replay batch, dropping invisible image events for safe subscribers.
+// The input must be the subscriber-private copy replaySinceLocked just
+// allocated: it is compacted in place and the shared ring is NEVER
+// mutated — the default site must keep replaying the full retained
+// window. Dropped events leave non-contiguous ids in the batch, which
+// is harmless by construction: hello (written before the replay)
+// already seeded the client's cursor with the hub's current last id
+// and the client tracks the maximum, so the skipped ids are never
+// re-asked for on the next reconnect — the invisible events stay
+// invisible.
+func filterReplayForSite(replay []event, safe bool) []event {
+	if !safe {
+		return replay
+	}
+	out := replay[:0]
+	for _, ev := range replay {
+		if visibleToSafe(ev) {
+			out = append(out, ev)
+		}
+	}
+	return out
 }
 
 // replaySinceLocked returns the ring events with ID > since, or
@@ -453,7 +555,11 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	since, sinceProvided := parseSince(r)
-	sub, replay, covered, lastID := hub.subscribe(since, sinceProvided)
+	// Site tagging: the subscriber carries the site this request's Host
+	// selected for its whole lifetime (safeSiteCtx snapshot semantics —
+	// a reload re-resolves on the next connect, exactly like the page
+	// surfaces).
+	sub, replay, covered, lastID := hub.subscribe(since, sinceProvided, a.resolveSite(r))
 	defer hub.unsubscribe(sub)
 
 	// Hello first, before any replay: seeds the client's last-seen id
@@ -598,19 +704,22 @@ func (a *App) publishImageNew(img *dbImage) {
 	if a.events == nil {
 		return
 	}
+	// One config snapshot feeds both the snippet clamp and the
+	// visibility flag, so the event can't mix two config generations.
+	cfg := a.getConfig()
 	// The payload's prompt is clamped to search.snippet_chars — the
 	// same clamp gallery cards get. The ring retains the last 128
 	// events verbatim, so an unclamped multi-KB prompt would sit in
 	// hub memory 128 times over (and ride every replay); the full
 	// text remains on the row and the details page.
-	snippetChars := a.getConfig().Search.SnippetChars
-	a.events.publish(eventImageNew, imageNewEvent{
+	snippetChars := cfg.Search.SnippetChars
+	a.events.publishVisible(eventImageNew, imageNewEvent{
 		ID:             img.ID,
 		CreatedAt:      toRFC3339(img.CreatedAt),
 		OriginalPrompt: clampSnippet(img.OriginalPrompt, snippetChars),
 		ThumbStatus:    img.ThumbStatus,
 		PageURL:        "/" + img.ID,
-	})
+	}, siteCanSee(safeSiteCtx(cfg.SafeSite), img))
 }
 
 // publishThumbReady fans out thumb-ready. The worker calls this (via
@@ -621,10 +730,23 @@ func (a *App) publishThumbReady(id string) {
 	if a.events == nil {
 		return
 	}
-	a.events.publish(eventThumbReady, thumbReadyEvent{
+	// The worker seam hands over only the id, so the row is re-read
+	// here for the visibility flag: one indexed SELECT per thumbnail
+	// completion, the same order of magnitude as the upload-path
+	// publish it accompanies. On lookup failure the event is withheld
+	// from the safe site only (fail closed — a missed thumb swap
+	// degrades through the client's existing shimmer-retry path, while
+	// a leaked event cannot be unsent); the default site still gets it.
+	safeVisible := false
+	if img, err := dbGetImageByID(a.db, id); err != nil {
+		loggerEvents.Warn("thumb-ready visibility lookup failed; withholding from safe site", "id", id, "error", err)
+	} else {
+		safeVisible = siteCanSee(safeSiteCtx(a.getConfig().SafeSite), img)
+	}
+	a.events.publishVisible(eventThumbReady, thumbReadyEvent{
 		ID:          id,
 		ThumbStatus: thumbStatusReady,
-	})
+	}, safeVisible)
 }
 
 // publishImageHidden fans out image-hidden (soft delete → clients drop

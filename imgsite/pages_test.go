@@ -319,7 +319,7 @@ func TestHiddenImagePageReturns410(t *testing.T) {
 // failing function.
 func injectNeighborFailure(t *testing.T) {
 	t.Helper()
-	fail := func(db *sqlx.DB, createdAt, id string) (*dbImage, error) {
+	fail := func(db *sqlx.DB, createdAt, id string, sc siteCtx) (*dbImage, error) {
 		return nil, fmt.Errorf("injected neighbor lookup failure")
 	}
 	origNewer, origOlder := dbGetNewerImageFn, dbGetOlderImageFn
@@ -555,6 +555,198 @@ func TestDetailsPageWorkflowJSONTruncationMarker(t *testing.T) {
 	assert.Contains(t, body, "…[truncated]", "cut renders the marker")
 	assert.NotContains(t, body, huge, "full workflow JSON never shipped to the page")
 	assert.Less(t, len(body), len(huge), "page is smaller than the raw JSON")
+}
+
+// ---------------------------------------------------------------------------
+// Safe-site surfaces (task 3): gallery page/fragment, details page,
+// neighbors — the HTTP half of the visibility matrix
+// ---------------------------------------------------------------------------
+
+// TestSiteCanSee pins the per-row twin of siteVisibilityFilter's SQL
+// predicate, used by the details page and (next task) asset gating:
+// default site sees everything; the safe site admits allowed-network
+// origins (case-insensitive) and safety='safe' verdicts, default-denies
+// NULL/empty networks with any other verdict, and — mirroring the SQL
+// guard's degenerate case — an empty networks slice means no
+// restriction (config validation makes that shape unreachable; the
+// symmetry is defensive).
+func TestSiteCanSee(t *testing.T) {
+	safe := siteCtx{Safe: true, networks: []string{"libera"}}
+	tests := []struct {
+		name string
+		sc   siteCtx
+		img  dbImage
+		want bool
+	}{
+		{"DefaultSiteSeesEverything", siteCtx{}, dbImage{Network: ptrStr("efnet"), Safety: safetyUnsafe}, true},
+		{"AllowedNetwork", safe, dbImage{Network: ptrStr("libera")}, true},
+		{"AllowedNetworkCaseInsensitive", safe, dbImage{Network: ptrStr("Libera")}, true},
+		{"DisallowedNetworkUnknownSafety", safe, dbImage{Network: ptrStr("efnet")}, false},
+		{"NullNetworkUnknownSafety", safe, dbImage{}, false},
+		{"EmptyNetworkStringUnknownSafety", safe, dbImage{Network: ptrStr("")}, false},
+		{"NullNetworkSafeVerdict", safe, dbImage{Safety: safetySafe}, true},
+		{"VerdictOutranksDisallowedNetwork", safe, dbImage{Network: ptrStr("efnet"), Safety: safetySafe}, true},
+		{"UnsafeVerdictOnAllowedOriginStillVisible", safe, dbImage{Network: ptrStr("libera"), Safety: safetyUnsafe}, true},
+		{"ZeroValueSafetyBehavesAsUnknown", safe, dbImage{Network: ptrStr("efnet"), Safety: ""}, false},
+		{"EmptyNetworksSliceMirrorsSQLGuard", siteCtx{Safe: true}, dbImage{Network: ptrStr("efnet")}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, siteCanSee(tt.sc, &tt.img))
+		})
+	}
+}
+
+// TestGallerySiteMatrix runs the six-row visibility matrix through the
+// gallery page and fragment on both hosts: the safe host lists exactly
+// the allowed-origin ∪ safety='safe' rows in recency order; the default
+// host lists every non-hidden row, unchanged.
+func TestGallerySiteMatrix(t *testing.T) {
+	app := newTestApp(t, safeSiteTestConfig())
+	ts := newTestServer(t, app)
+	seedSiteMatrix(t, app)
+
+	t.Run("SafeHostPage", func(t *testing.T) {
+		status, body := getPageHost(t, ts, "safe.example.com", "/")
+		require.Equal(t, http.StatusOK, status)
+		assertIDsInOrder(t, body, "sit0005", "sit0004", "sit0001")
+		for _, invisible := range []string{"sit0002", "sit0003", "sit0006"} {
+			assert.NotContains(t, body, invisible, "invisible on the safe host")
+		}
+	})
+	t.Run("SafeHostFragment", func(t *testing.T) {
+		status, body := getPageHost(t, ts, "safe.example.com", "/gallery")
+		require.Equal(t, http.StatusOK, status)
+		assertIDsInOrder(t, body, "sit0005", "sit0004", "sit0001")
+		for _, invisible := range []string{"sit0002", "sit0003", "sit0006"} {
+			assert.NotContains(t, body, invisible, "invisible on the safe host")
+		}
+	})
+	t.Run("DefaultHostPage", func(t *testing.T) {
+		status, body := getPage(t, ts.URL, "/")
+		require.Equal(t, http.StatusOK, status)
+		assertIDsInOrder(t, body, "sit0005", "sit0004", "sit0003", "sit0002", "sit0001")
+		assert.NotContains(t, body, "sit0006", "hidden stays hidden on the default host")
+	})
+	t.Run("DefaultHostFragment", func(t *testing.T) {
+		status, body := getPage(t, ts.URL, "/gallery")
+		require.Equal(t, http.StatusOK, status)
+		assertIDsInOrder(t, body, "sit0005", "sit0004", "sit0003", "sit0002", "sit0001")
+		assert.NotContains(t, body, "sit0006")
+	})
+}
+
+// assertIDsInOrder asserts every id appears in the body and that their
+// card positions follow the given order (gallery cards render
+// newest-first; comparing data-id attribute positions avoids matching
+// ids that appear in unrelated markup).
+func assertIDsInOrder(t *testing.T, body string, ids ...string) {
+	t.Helper()
+	last := -1
+	for _, id := range ids {
+		i := strings.Index(body, `data-id="`+id+`"`)
+		require.GreaterOrEqual(t, i, 0, "id %s missing from the rendered cards", id)
+		assert.Greater(t, i, last, "id %s renders out of order", id)
+		last = i
+	}
+}
+
+// TestDetailsPageSiteMatrix pins the details page's safe-host
+// behavior: an invisible id 404s exactly like an unknown id (no hint
+// that it exists), hidden still 410s first on both hosts, and visible
+// ids render normally on both hosts.
+func TestDetailsPageSiteMatrix(t *testing.T) {
+	app := newTestApp(t, safeSiteTestConfig())
+	ts := newTestServer(t, app)
+	seedSiteMatrix(t, app)
+
+	t.Run("InvisibleIDIs404OnSafeHost", func(t *testing.T) {
+		for _, id := range []string{"sit0002", "sit0003"} {
+			status, _ := getPageHost(t, ts, "safe.example.com", "/"+id)
+			assert.Equal(t, http.StatusNotFound, status, "id %s", id)
+		}
+	})
+	t.Run("InvisibleIDServesOnDefaultHost", func(t *testing.T) {
+		for _, id := range []string{"sit0002", "sit0003"} {
+			status, _ := getPage(t, ts.URL, "/"+id)
+			assert.Equal(t, http.StatusOK, status, "id %s", id)
+		}
+	})
+	t.Run("VisibleIDsServeOnSafeHost", func(t *testing.T) {
+		for _, id := range []string{"sit0001", "sit0004", "sit0005"} {
+			status, _ := getPageHost(t, ts, "safe.example.com", "/"+id)
+			assert.Equal(t, http.StatusOK, status, "id %s", id)
+		}
+	})
+	t.Run("HiddenIs410FirstEverywhere", func(t *testing.T) {
+		// The hidden check runs before the site check by design: a
+		// soft-deleted URL answers 410 on both sites regardless of its
+		// would-be site visibility.
+		status, _ := getPageHost(t, ts, "safe.example.com", "/sit0006")
+		assert.Equal(t, http.StatusGone, status)
+		status, _ = getPage(t, ts.URL, "/sit0006")
+		assert.Equal(t, http.StatusGone, status)
+	})
+}
+
+// TestNeighborsSiteMatrix pins both neighbor surfaces (page chevrons
+// and the neighbors API) through the matrix on both hosts: safe-host
+// navigation must step over invisible rows in either direction, and an
+// invisible center id 404s on the safe host like the details page does.
+func TestNeighborsSiteMatrix(t *testing.T) {
+	app := newTestApp(t, safeSiteTestConfig())
+	ts := newTestServer(t, app)
+	seedSiteMatrix(t, app)
+
+	t.Run("SafeHostPageChevronsSkipInvisible", func(t *testing.T) {
+		// From sit0001: prev skips invisible sit0002+sit0003 to sit0004;
+		// no next (oldest row).
+		_, body := getPageHost(t, ts, "safe.example.com", "/sit0001")
+		assert.Contains(t, body, `id="nav-prev" href="/sit0004"`, "prev skips the invisible newer rows")
+		assert.NotContains(t, body, `id="nav-next"`)
+		assert.NotContains(t, body, "sit0002")
+		assert.NotContains(t, body, "sit0003")
+
+		// From sit0004: next skips invisible sit0003 to sit0001.
+		_, body = getPageHost(t, ts, "safe.example.com", "/sit0004")
+		assert.Contains(t, body, `id="nav-prev" href="/sit0005"`)
+		assert.Contains(t, body, `id="nav-next" href="/sit0001"`, "next skips the invisible older row")
+		assert.NotContains(t, body, "sit0003")
+	})
+	t.Run("DefaultHostPageChevronsUnchanged", func(t *testing.T) {
+		_, body := getPage(t, ts.URL, "/sit0001")
+		assert.Contains(t, body, `id="nav-prev" href="/sit0002"`, "default host walks the immediate neighbor")
+		_, body = getPage(t, ts.URL, "/sit0004")
+		assert.Contains(t, body, `id="nav-next" href="/sit0003"`)
+	})
+	t.Run("SafeHostNeighborsAPISkipsInvisible", func(t *testing.T) {
+		status, body := getPageHost(t, ts, "safe.example.com", "/api/images/sit0001/neighbors")
+		require.Equal(t, http.StatusOK, status)
+		m := decodeNeighbors(t, body)
+		require.NotNil(t, m["prev"])
+		assert.Equal(t, "sit0004", m["prev"].(map[string]any)["id"], "prev skips invisible newer rows")
+		assert.Nil(t, m["next"], "sit0001 is the oldest row")
+
+		status, body = getPageHost(t, ts, "safe.example.com", "/api/images/sit0004/neighbors")
+		require.Equal(t, http.StatusOK, status)
+		m = decodeNeighbors(t, body)
+		assert.Equal(t, "sit0001", m["next"].(map[string]any)["id"], "next skips the invisible older row")
+		assert.NotContains(t, body, "sit0003")
+	})
+	t.Run("InvisibleCenterIDIs404OnSafeHost", func(t *testing.T) {
+		status, _ := getPageHost(t, ts, "safe.example.com", "/api/images/sit0002/neighbors")
+		assert.Equal(t, http.StatusNotFound, status)
+		status, _ = getPage(t, ts.URL, "/api/images/sit0002/neighbors")
+		assert.Equal(t, http.StatusOK, status, "default host unchanged")
+	})
+}
+
+// decodeNeighbors parses a neighbors API response body.
+func decodeNeighbors(t *testing.T, body string) map[string]any {
+	t.Helper()
+	var m map[string]any
+	require.NoError(t, json.Unmarshal([]byte(body), &m))
+	return m
 }
 
 func TestParseKeysetCursor(t *testing.T) {

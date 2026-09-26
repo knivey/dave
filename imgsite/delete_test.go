@@ -234,7 +234,7 @@ func TestDeleteExcludedFromGalleryAndSearch(t *testing.T) {
 	app := newTestApp(t, testConfig())
 	insertSearchRow(t, app, "delG006", "2026-09-24 01:00:00", "needle pending cli deletion", "")
 
-	rows, err := dbGetGalleryPage(app.db, "", "", 48)
+	rows, err := dbGetGalleryPage(app.db, "", "", 48, siteCtx{})
 	require.NoError(t, err)
 	require.Len(t, rows, 1, "visible before the delete")
 
@@ -242,7 +242,7 @@ func TestDeleteExcludedFromGalleryAndSearch(t *testing.T) {
 	sum := runDelete(app.db, []string{"delG006"}, &out)
 	require.Equal(t, deleteSummary{Hidden: 1}, sum)
 
-	rows, err = dbGetGalleryPage(app.db, "", "", 48)
+	rows, err = dbGetGalleryPage(app.db, "", "", 48, siteCtx{})
 	require.NoError(t, err)
 	assert.Empty(t, rows, "gallery excludes the hidden row")
 

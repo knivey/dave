@@ -61,6 +61,89 @@ func newTestServer(t *testing.T, app *App) *httptest.Server {
 	return ts
 }
 
+// safeSiteTestConfig is testConfig with the safe site configured: host
+// safe.example.com (the getPageHost override target), allowed network
+// libera. The safe host's base_url is set but irrelevant to the query
+// surfaces (it matters for link building, later tasks).
+func safeSiteTestConfig() Config {
+	cfg := testConfig()
+	cfg.SafeSite = &SafeSiteConfig{
+		Hosts:           []string{"safe.example.com"},
+		BaseURL:         "https://safe.example.com",
+		AllowedNetworks: []string{"libera"},
+	}
+	return cfg
+}
+
+// getPageHost is getPage with the HTTP Host header overridden — the
+// input resolveSite selects the logical site from. httptest servers
+// listen on 127.0.0.1; overriding req.Host (not the URL) sends the
+// request to the same listener with the chosen Host header, which is
+// exactly how the production host split arrives (one process, Host
+// routing at the proxy).
+func getPageHost(t *testing.T, ts *httptest.Server, host, path string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest("GET", ts.URL+path, nil)
+	require.NoError(t, err)
+	req.Host = host
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return resp.StatusCode, string(body)
+}
+
+// seedSiteMatrix seeds the six-row site-visibility matrix from the
+// safe-site plan (task-3 brief). Every row shares the search token
+// "gribble" so /search?q=gribble hits them all; placement per row:
+//
+//	sit0001 libera network, unknown safety — safe-visible by ORIGIN;
+//	         tier 1 (original-prompt token match)
+//	sit0002 efnet network, unknown safety — safe-INVISIBLE;
+//	         tier 1
+//	sit0003 NULL network, unknown safety — safe-INVISIBLE (default-deny
+//	         for rows without provenance); tier 2 (enhanced-only FTS)
+//	sit0004 NULL network, safety='safe' — safe-visible by VERDICT;
+//	         tier 2
+//	sit0005 efnet network, safety='safe' — verdict outranks the
+//	         disallowed origin; tier 3 (substring-only "cowgribble",
+//	         invisible to FTS prefix terms → trigram-accelerated scan)
+//	sit0006 libera network, hidden — invisible on BOTH sites
+//
+// Resulting visibility: safe host sees {sit0001, sit0004, sit0005};
+// default host sees all five non-hidden rows.
+func seedSiteMatrix(t *testing.T, app *App) {
+	t.Helper()
+	insertImage(t, app, "sit0001", "2026-09-26 01:00:00", func(img *dbImage) {
+		img.OriginalPrompt = "gribble parade one"
+	})
+	insertImage(t, app, "sit0002", "2026-09-26 02:00:00", func(img *dbImage) {
+		img.Network = ptrStr("efnet")
+		img.OriginalPrompt = "gribble parade two"
+	})
+	insertImage(t, app, "sit0003", "2026-09-26 03:00:00", func(img *dbImage) {
+		img.Network = nil
+		img.OriginalPrompt = "plain three"
+		img.EnhancedPrompt = "gribble enhanced three"
+	})
+	insertImage(t, app, "sit0004", "2026-09-26 04:00:00", func(img *dbImage) {
+		img.Network = nil
+		img.Safety = safetySafe
+		img.OriginalPrompt = "plain four"
+		img.EnhancedPrompt = "gribble enhanced four"
+	})
+	insertImage(t, app, "sit0005", "2026-09-26 05:00:00", func(img *dbImage) {
+		img.Network = ptrStr("efnet")
+		img.Safety = safetySafe
+		img.OriginalPrompt = "a cowgribble five"
+	})
+	insertImage(t, app, "sit0006", "2026-09-26 06:00:00", func(img *dbImage) {
+		img.Hidden = true
+		img.OriginalPrompt = "gribble hidden six"
+	})
+}
+
 // pngBytes sniffs as image/png via magic bytes.
 func pngBytes(payload string) []byte {
 	return append([]byte("\x89PNG\r\n\x1a\n"), []byte(payload)...)

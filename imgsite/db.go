@@ -212,22 +212,26 @@ func dbImageSHAExists(db *sqlx.DB, sha string) (bool, error) {
 
 // dbGetNewerImage returns the image immediately NEWER than the keyset
 // cursor (created_at DESC, id DESC ordering — "newer" sorts before the
-// cursor), filtering hidden rows. It is the details page's prev link and
-// half of the neighbors API. sql.ErrNoRows maps to (nil, nil): no newer
-// image exists, which is the normal end-of-gallery case.
+// cursor), filtering hidden rows and rows invisible on the requesting
+// site. It is the details page's prev link and half of the neighbors
+// API. sql.ErrNoRows maps to (nil, nil): no newer visible image exists,
+// which is the normal end-of-gallery case.
 //
 // The row-value form `(created_at, id) > (?, ?)` lets SQLite range-seek
 // idx_images_created directly; the equivalent OR-shaped predicate plans
 // as MULTI-INDEX OR + temp b-tree (guarded by TestKeysetQueriesUseIndex-
-// Seek in db_test.go).
-func dbGetNewerImage(db *sqlx.DB, createdAt, id string) (*dbImage, error) {
+// Seek in db_test.go). The site visibility fragment (when sc is a safe
+// site) appends as one more AND conjunct on the images row, so the walk
+// steps over site-invisible rows exactly like it steps over hidden ones.
+func dbGetNewerImage(db *sqlx.DB, createdAt, id string, sc siteCtx) (*dbImage, error) {
+	frag, fargs := siteVisibilityFilter(sc)
 	var img dbImage
 	err := db.Get(&img, `
-		SELECT * FROM images
-		WHERE hidden = 0
-		  AND (created_at, id) > (?, ?)
-		ORDER BY created_at ASC, id ASC
-		LIMIT 1`, createdAt, id)
+		SELECT i.* FROM images i
+		WHERE i.hidden = 0
+		  AND (i.created_at, i.id) > (?, ?)`+frag+`
+		ORDER BY i.created_at ASC, i.id ASC
+		LIMIT 1`, append([]any{createdAt, id}, fargs...)...)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -238,15 +242,17 @@ func dbGetNewerImage(db *sqlx.DB, createdAt, id string) (*dbImage, error) {
 }
 
 // dbGetOlderImage is dbGetNewerImage's mirror: the image immediately
-// OLDER than the cursor (the next link / gallery paging direction).
-func dbGetOlderImage(db *sqlx.DB, createdAt, id string) (*dbImage, error) {
+// OLDER than the cursor (the next link / gallery paging direction),
+// hidden- and site-filtered the same way.
+func dbGetOlderImage(db *sqlx.DB, createdAt, id string, sc siteCtx) (*dbImage, error) {
+	frag, fargs := siteVisibilityFilter(sc)
 	var img dbImage
 	err := db.Get(&img, `
-		SELECT * FROM images
-		WHERE hidden = 0
-		  AND (created_at, id) < (?, ?)
-		ORDER BY created_at DESC, id DESC
-		LIMIT 1`, createdAt, id)
+		SELECT i.* FROM images i
+		WHERE i.hidden = 0
+		  AND (i.created_at, i.id) < (?, ?)`+frag+`
+		ORDER BY i.created_at DESC, i.id DESC
+		LIMIT 1`, append([]any{createdAt, id}, fargs...)...)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
@@ -283,18 +289,24 @@ func dbUpdateThumbReady(db *sqlx.DB, id string, width, height int) error {
 }
 
 // dbGetGalleryPage returns one keyset page (created_at DESC, id DESC),
-// hidden-filtered. Empty after* yields the first page. Callers fetch
-// limit+1 rows to detect has-more.
-func dbGetGalleryPage(db *sqlx.DB, afterCreatedAt, afterID string, limit int) ([]dbImage, error) {
+// hidden-filtered and site-filtered: the safe site's visibility
+// fragment rides the same WHERE as one more AND conjunct on the images
+// row. Empty after* yields the first page. Callers fetch limit+1 rows
+// to detect has-more.
+func dbGetGalleryPage(db *sqlx.DB, afterCreatedAt, afterID string, limit int, sc siteCtx) ([]dbImage, error) {
+	frag, fargs := siteVisibilityFilter(sc)
 	var rows []dbImage
 	var err error
 	if afterCreatedAt == "" {
 		err = db.Select(&rows,
-			`SELECT * FROM images WHERE hidden = 0 ORDER BY created_at DESC, id DESC LIMIT ?`, limit)
+			`SELECT i.* FROM images i WHERE i.hidden = 0`+frag+
+				` ORDER BY i.created_at DESC, i.id DESC LIMIT ?`,
+			append(append([]any{}, fargs...), limit)...)
 	} else {
 		err = db.Select(&rows,
-			`SELECT * FROM images WHERE hidden = 0 AND (created_at, id) < (?, ?)
-			 ORDER BY created_at DESC, id DESC LIMIT ?`, afterCreatedAt, afterID, limit)
+			`SELECT i.* FROM images i WHERE i.hidden = 0 AND (i.created_at, i.id) < (?, ?)`+frag+
+				` ORDER BY i.created_at DESC, i.id DESC LIMIT ?`,
+			append(append([]any{afterCreatedAt, afterID}, fargs...), limit)...)
 	}
 	return rows, err
 }

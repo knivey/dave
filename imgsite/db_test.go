@@ -426,6 +426,89 @@ func TestSafetyUpdatePreservedWhenPayloadEmpty(t *testing.T) {
 	assert.Equal(t, safetyUnsafe, got.Safety, "explicit verdicts update (backfill)")
 }
 
+// TestDbGetGalleryPageSiteFiltered pins the gallery query's site
+// awareness at the DB layer: the safe site's predicate narrows the
+// keyset page to allowed-origin ∪ safety='safe' rows (recency order
+// preserved), the default site is unchanged, and a keyset continuation
+// cursor composes with the filter (the page after a visible row skips
+// invisible rows at the boundary).
+func TestDbGetGalleryPageSiteFiltered(t *testing.T) {
+	app := newTestApp(t, safeSiteTestConfig())
+	seedSiteMatrix(t, app)
+	safe := siteCtx{Safe: true, networks: []string{"libera"}}
+
+	rows, err := dbGetGalleryPage(app.db, "", "", 10, safe)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"sit0005", "sit0004", "sit0001"}, imageIDs(rows),
+		"safe site: newest-first over the visible set only — hidden, efnet-unknown, and NULL-unknown rows absent")
+
+	rows, err = dbGetGalleryPage(app.db, "", "", 10, siteCtx{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"sit0005", "sit0004", "sit0003", "sit0002", "sit0001"}, imageIDs(rows),
+		"default site: every non-hidden row, unchanged behavior")
+
+	// Keyset continuation composes with the filter: page past sit0004
+	// must land on sit0001, skipping the invisible sit0003/sit0002.
+	rows, err = dbGetGalleryPage(app.db, "2026-09-26 04:00:00", "sit0004", 10, safe)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"sit0001"}, imageIDs(rows), "safe-site keyset cursor skips invisible rows")
+}
+
+// imageIDs extracts the ordered id list from gallery rows.
+func imageIDs(rows []dbImage) []string {
+	ids := make([]string, len(rows))
+	for i := range rows {
+		ids[i] = rows[i].ID
+	}
+	return ids
+}
+
+// TestDbNeighborQueriesSiteFiltered pins both keyset neighbor queries'
+// site awareness: on the safe site each direction walks to the nearest
+// VISIBLE row, skipping any invisible ones in between, while the
+// default site keeps today's behavior.
+func TestDbNeighborQueriesSiteFiltered(t *testing.T) {
+	app := newTestApp(t, safeSiteTestConfig())
+	seedSiteMatrix(t, app)
+	safe := siteCtx{Safe: true, networks: []string{"libera"}}
+
+	t.Run("SafeNewerSkipsInvisible", func(t *testing.T) {
+		// From sit0001 the immediately-newer rows are sit0002 (efnet,
+		// unknown) and sit0003 (NULL, unknown) — both invisible on the
+		// safe site; prev must land on sit0004.
+		img, err := dbGetNewerImage(app.db, "2026-09-26 01:00:00", "sit0001", safe)
+		require.NoError(t, err)
+		require.NotNil(t, img)
+		assert.Equal(t, "sit0004", img.ID)
+	})
+	t.Run("SafeOlderSkipsInvisible", func(t *testing.T) {
+		// From sit0004 the immediately-older row is sit0003 (NULL,
+		// unknown, invisible); next must land on sit0001.
+		img, err := dbGetOlderImage(app.db, "2026-09-26 04:00:00", "sit0004", safe)
+		require.NoError(t, err)
+		require.NotNil(t, img)
+		assert.Equal(t, "sit0001", img.ID)
+	})
+	t.Run("SafeNewestVisibleHasNoPrev", func(t *testing.T) {
+		// sit0006 is newer but hidden (skipped by the hidden filter on
+		// both sites); sit0005 is the newest visible row everywhere.
+		img, err := dbGetNewerImage(app.db, "2026-09-26 05:00:00", "sit0005", safe)
+		require.NoError(t, err)
+		assert.Nil(t, img)
+	})
+	t.Run("DefaultUnchanged", func(t *testing.T) {
+		img, err := dbGetNewerImage(app.db, "2026-09-26 01:00:00", "sit0001", siteCtx{})
+		require.NoError(t, err)
+		require.NotNil(t, img)
+		assert.Equal(t, "sit0002", img.ID, "default site sees the efnet row")
+
+		img, err = dbGetOlderImage(app.db, "2026-09-26 04:00:00", "sit0004", siteCtx{})
+		require.NoError(t, err)
+		require.NotNil(t, img)
+		assert.Equal(t, "sit0003", img.ID, "default site sees the NULL-network row")
+	})
+}
+
 // TestGalleryOrdersMillisecondPrecise pins why created_at carries
 // millisecond precision: two images completing inside the same second
 // must order by their actual completion time, not by the random base62
@@ -444,7 +527,7 @@ func TestGalleryOrdersMillisecondPrecise(t *testing.T) {
 		img.CreatedAt = "2026-09-24 10:00:00.100"
 	})
 
-	rows, err := dbGetGalleryPage(app.db, "", "", 10)
+	rows, err := dbGetGalleryPage(app.db, "", "", 10, siteCtx{})
 	require.NoError(t, err)
 	require.Len(t, rows, 2)
 	assert.Equal(t, "aaalate0", rows[0].ID, "later completion sorts first despite lexically smaller id")

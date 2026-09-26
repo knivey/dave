@@ -203,6 +203,37 @@ func siteVisibilityFilter(sc siteCtx) (sqlFrag string, args []any) {
 	return " AND (LOWER(i.network) IN (" + strings.Join(placeholders, ", ") + ") OR i.safety = 'safe')", args
 }
 
+// siteCanSee is the per-row twin of siteVisibilityFilter's SQL
+// predicate: it answers "is this row visible on the site sc selected?"
+// for rows already fetched (the details page's id check here; asset
+// gating in a later task consumes it too). It must stay semantically
+// identical to the WHERE fragment — allowed-network origin
+// (case-insensitive) OR safety='safe', with NULL/empty networks
+// default-denied — so a row can never be navigable in SQL yet 404 at
+// the page (or vice versa). The `len(networks) == 0` guard mirrors the
+// SQL side's degenerate case (no fragment = no restriction); config
+// validation makes that shape unreachable, the symmetry is defensive.
+func siteCanSee(sc siteCtx, img *dbImage) bool {
+	if !sc.Safe || len(sc.networks) == 0 {
+		return true
+	}
+	if img.Safety == safetySafe {
+		return true
+	}
+	if img.Network == nil || *img.Network == "" {
+		// NULL/empty provenance is only reachable via safety='safe'
+		// above — default-deny for imported/legacy/direct-upload rows.
+		return false
+	}
+	ln := strings.ToLower(*img.Network)
+	for _, allowed := range sc.networks {
+		if strings.ToLower(allowed) == ln {
+			return true
+		}
+	}
+	return false
+}
+
 // setThumbWorker attaches the background thumbnailer (main calls this
 // once, before serving). Reads of a.thumbs afterwards are race-free.
 func (a *App) setThumbWorker(tw *thumbWorker) {
@@ -407,8 +438,11 @@ type neighborSummary struct {
 // handleNeighbors serves GET /api/images/<id>/neighbors — the live
 // next-button data source (milestone 4 fetches this once per image-new
 // SSE event). prev is the newer neighbor, next the older one, both keyset
-// (created_at DESC, id DESC) and hidden-filtered; either end is null.
+// (created_at DESC, id DESC), hidden- and site-filtered; either end is
+// null. The center id follows the details page's visibility rules: an
+// id invisible on the requesting site 404s exactly like an unknown id.
 func (a *App) handleNeighbors(w http.ResponseWriter, r *http.Request) {
+	sc := a.resolveSite(r)
 	id := r.PathValue("id")
 	if !validImageID(id) {
 		http.NotFound(w, r)
@@ -422,19 +456,25 @@ func (a *App) handleNeighbors(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "gone", http.StatusGone)
 		return
 	}
+	if !siteCanSee(sc, img) {
+		// Same rule as the details page: no existence hint on the
+		// safe host, normal service on the default host.
+		http.NotFound(w, r)
+		return
+	}
 
 	resp := struct {
 		Prev *neighborSummary `json:"prev"`
 		Next *neighborSummary `json:"next"`
 	}{}
-	if prev, err := dbGetNewerImageFn(a.db, img.CreatedAt, img.ID); err != nil {
+	if prev, err := dbGetNewerImageFn(a.db, img.CreatedAt, img.ID, sc); err != nil {
 		logger.Error("neighbor lookup failed", "id", id, "dir", "prev", "error", err)
 		http.Error(w, "lookup failure", http.StatusInternalServerError)
 		return
 	} else if prev != nil {
 		resp.Prev = summarizeNeighbor(prev)
 	}
-	if next, err := dbGetOlderImageFn(a.db, img.CreatedAt, img.ID); err != nil {
+	if next, err := dbGetOlderImageFn(a.db, img.CreatedAt, img.ID, sc); err != nil {
 		logger.Error("neighbor lookup failed", "id", id, "dir", "next", "error", err)
 		http.Error(w, "lookup failure", http.StatusInternalServerError)
 		return

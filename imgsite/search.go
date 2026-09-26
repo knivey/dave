@@ -414,33 +414,45 @@ const searchBM25Order = `ORDER BY bm25(images_fts, 8.0, 1.0), images_fts.rowid`
 // Both tiers join back to images (external-content FTS exposes only
 // its own columns) for the hidden=0 filter and the card columns, and
 // both request a snippet from the column that defines their tier.
-func dbSearchFTSTier(db *sqlx.DB, tier int, expr, tier1Expr string, offset, limit, snippetTokens int) ([]searchHit, error) {
-	var rows []searchRow
-	var err error
+//
+// Site awareness: the safe site's visibility fragment appends to the
+// OUTER query as one more AND conjunct on the images row — never into
+// the MATCH expression or the NOT IN subquery — so tier semantics and
+// the trigram-superset argument are untouched (the predicate intersects
+// results after retrieval).
+func dbSearchFTSTier(db *sqlx.DB, tier int, expr, tier1Expr string, offset, limit, snippetTokens int, sc siteCtx) ([]searchHit, error) {
+	frag, fargs := siteVisibilityFilter(sc)
+	// Shared arg prefix: the four snippet() parameters, then the
+	// tier's MATCH expressions. The site fragment's args splice AFTER
+	// those (its conjunct sits after them in the SQL text) and BEFORE
+	// limit/offset — placeholder order is positionally load-bearing.
+	args := []any{snippetStartMarker, snippetEndMarker, snippetEllipsis, snippetTokens}
+	var query string
 	if tier == 1 {
-		err = db.Select(&rows, `
-			SELECT i.*, snippet(images_fts, `+strconv.Itoa(ftsColOriginal)+`, ?, ?, ?, ?) AS search_snippet
+		args = append(args, tier1Expr)
+		query = `
+			SELECT i.*, snippet(images_fts, ` + strconv.Itoa(ftsColOriginal) + `, ?, ?, ?, ?) AS search_snippet
 			FROM images_fts JOIN images i ON i.rowid = images_fts.rowid
-			WHERE images_fts MATCH ? AND i.hidden = 0
-			`+searchBM25Order+`
-			LIMIT ? OFFSET ?`,
-			snippetStartMarker, snippetEndMarker, snippetEllipsis, snippetTokens,
-			tier1Expr, limit, offset)
+			WHERE images_fts MATCH ? AND i.hidden = 0` + frag + `
+			` + searchBM25Order + `
+			LIMIT ? OFFSET ?`
 	} else {
-		err = db.Select(&rows, `
-			SELECT i.*, snippet(images_fts, `+strconv.Itoa(ftsColEnhanced)+`, ?, ?, ?, ?) AS search_snippet
+		args = append(args, expr, tier1Expr)
+		query = `
+			SELECT i.*, snippet(images_fts, ` + strconv.Itoa(ftsColEnhanced) + `, ?, ?, ?, ?) AS search_snippet
 			FROM images_fts JOIN images i ON i.rowid = images_fts.rowid
 			WHERE images_fts MATCH ?
 			  AND images_fts.rowid NOT IN (
 			    SELECT rowid FROM images_fts WHERE images_fts MATCH ?
 			  )
-			  AND i.hidden = 0
-			`+searchBM25Order+`
-			LIMIT ? OFFSET ?`,
-			snippetStartMarker, snippetEndMarker, snippetEllipsis, snippetTokens,
-			expr, tier1Expr, limit, offset)
+			  AND i.hidden = 0` + frag + `
+			` + searchBM25Order + `
+			LIMIT ? OFFSET ?`
 	}
-	if err != nil {
+	args = append(args, fargs...)
+	args = append(args, limit, offset)
+	var rows []searchRow
+	if err := db.Select(&rows, query, args...); err != nil {
 		return nil, err
 	}
 	hits := make([]searchHit, 0, len(rows))
@@ -468,9 +480,15 @@ type likeRow struct {
 // CASE, and they stay authoritative whenever the trigram prefilter is
 // absent (any short token) or merely a superset.
 //
+// Site awareness: the safe site's visibility fragment appends AFTER the
+// trigram conjunct as one more outer AND on the images row (its args
+// bind after the trigram expression) — the subqueries and MATCH
+// expressions stay byte-identical, preserving the trigram-superset
+// argument: the predicate intersects results after retrieval.
+//
 // Factored out of dbSearchLIKETier so the plan test can EXPLAIN the
 // exact production query text.
-func buildLikeTierQuery(tokens []string, ftsExpr string, limit, offset int) (string, []interface{}) {
+func buildLikeTierQuery(tokens []string, ftsExpr string, limit, offset int, sc siteCtx) (string, []interface{}) {
 	origPatterns := make([]string, 0, len(tokens))
 	enhPatterns := make([]string, 0, len(tokens))
 	for _, tok := range tokens {
@@ -490,22 +508,31 @@ func buildLikeTierQuery(tokens []string, ftsExpr string, limit, offset int) (str
 		trigramArgs = append(trigramArgs, expr)
 	}
 
+	// Site visibility: ONE outer AND on the images row, appended after
+	// the trigram conjunct (never inside any subquery) — the MATCH
+	// expressions and both NOT-IN/IN prefilters above stay
+	// byte-identical, preserving the trigram-superset argument: the
+	// predicate intersects results after retrieval. Args bind after
+	// trigramArgs and before limit/offset, matching the text order.
+	siteFrag, siteArgs := siteVisibilityFilter(sc)
+
 	query := `SELECT i.*, (CASE WHEN (` + origAnd + `) THEN 0 ELSE 1 END) AS like_enhanced
 		FROM images i
 		WHERE i.hidden = 0 AND ((` + origAnd + `) OR (` + enhAnd + `))
 		  AND i.rowid NOT IN (
 		    SELECT rowid FROM images_fts WHERE images_fts MATCH ?
-		  )` + trigramConjunct + `
+		  )` + trigramConjunct + siteFrag + `
 		ORDER BY like_enhanced, i.created_at DESC, i.id DESC
 		LIMIT ? OFFSET ?`
 	// origAnd appears twice in the text (CASE + WHERE), so its
 	// placeholders bind twice. The trigram conjunct sits AFTER the
 	// images_fts NOT IN subquery in the text, so ftsExpr binds before
-	// the trigram expression.
+	// the trigram expression, and the site fragment after both.
 	args := append(toAnySlice(origPatterns), toAnySlice(origPatterns)...)
 	args = append(args, toAnySlice(enhPatterns)...)
 	args = append(args, ftsExpr)
 	args = append(args, trigramArgs...)
+	args = append(args, siteArgs...)
 	args = append(args, limit, offset)
 	return query, args
 }
@@ -541,8 +568,8 @@ func buildLikeTierQuery(tokens []string, ftsExpr string, limit, offset int) (str
 // token is ≥3 code points — see buildLikeTierQuery and
 // trigramFilterExpr for why that is a semantics-preserving superset.
 // Results, ordering, and dedupe are byte-identical either way.
-func dbSearchLIKETier(db *sqlx.DB, tokens []string, ftsExpr string, offset, limit int) ([]searchHit, error) {
-	query, args := buildLikeTierQuery(tokens, ftsExpr, limit, offset)
+func dbSearchLIKETier(db *sqlx.DB, tokens []string, ftsExpr string, offset, limit int, sc siteCtx) ([]searchHit, error) {
+	query, args := buildLikeTierQuery(tokens, ftsExpr, limit, offset, sc)
 	var rows []likeRow
 	if err := db.Select(&rows, query, args...); err != nil {
 		return nil, err
@@ -581,7 +608,9 @@ type searchResult struct {
 	Next    searchCursor
 }
 
-// runSearch executes the three-tier search for one page.
+// runSearch executes the three-tier search for one page. sc threads the
+// requesting site's visibility context into every tier (see
+// dbSearchFTSTier/buildLikeTierQuery for why it rides the outer query).
 //
 // Page assembly (offset-stitch): each tier is fetched with limit+1 rows
 // starting at its cursor offset; tier 1 fills the page first, tier 2
@@ -598,7 +627,7 @@ type searchResult struct {
 // duplicate. Standing offset-drift corner (same class as documented on
 // searchCursor): a new upload matching the query mid-scroll shifts
 // later pages by one row.
-func runSearch(db *sqlx.DB, q string, cur searchCursor, limit, prefixMin, snippetTokens int) (searchResult, error) {
+func runSearch(db *sqlx.DB, q string, cur searchCursor, limit, prefixMin, snippetTokens int, sc siteCtx) (searchResult, error) {
 	res := searchResult{Next: cur}
 
 	q = truncateSearchQuery(q)
@@ -611,15 +640,15 @@ func runSearch(db *sqlx.DB, q string, cur searchCursor, limit, prefixMin, snippe
 	}
 	tier1Expr := ftsTier1Expr(expr)
 
-	t1, err := dbSearchFTSTierFn(db, 1, expr, tier1Expr, cur.tier1, limit+1, snippetTokens)
+	t1, err := dbSearchFTSTierFn(db, 1, expr, tier1Expr, cur.tier1, limit+1, snippetTokens, sc)
 	if err != nil {
 		return res, err
 	}
-	t2, err := dbSearchFTSTierFn(db, 2, expr, tier1Expr, cur.tier2, limit+1, snippetTokens)
+	t2, err := dbSearchFTSTierFn(db, 2, expr, tier1Expr, cur.tier2, limit+1, snippetTokens, sc)
 	if err != nil {
 		return res, err
 	}
-	t3, err := dbSearchLIKETierFn(db, tokens, expr, cur.tier3, limit+1)
+	t3, err := dbSearchLIKETierFn(db, tokens, expr, cur.tier3, limit+1, sc)
 	if err != nil {
 		return res, err
 	}
@@ -684,6 +713,9 @@ func searchCursorFromRequest(r *http.Request) (searchCursor, bool) {
 // the "GET /" catch-all whose id dispatcher would 404 "search" (6
 // chars, not a valid image id) — same precedence reasoning as /gallery.
 func (a *App) handleSearchPage(w http.ResponseWriter, r *http.Request) {
+	// Site resolution first: every read below (cursor capture, search)
+	// belongs to the site this request's Host selects.
+	sc := a.resolveSite(r)
 	// SSE cursor capture — BEFORE runSearch's DB reads, same
 	// overlap-safe/gap-unsafe ordering as handleGalleryPage. On this
 	// page the replayed arrivals buffer behind the "+N new" pill (the
@@ -697,7 +729,7 @@ func (a *App) handleSearchPage(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg := a.getConfig()
 	q := searchQueryFromRequest(r)
-	res, err := runSearch(a.db, q, cur, galleryPageSize, cfg.Search.PrefixMin, snippetTokenWindow(cfg.Search.SnippetChars))
+	res, err := runSearch(a.db, q, cur, galleryPageSize, cfg.Search.PrefixMin, snippetTokenWindow(cfg.Search.SnippetChars), sc)
 	if err != nil {
 		logger.Error("search query failed", "q", q, "error", err)
 		http.Error(w, "lookup failure", http.StatusInternalServerError)
@@ -721,6 +753,7 @@ func (a *App) handleSearchPage(w http.ResponseWriter, r *http.Request) {
 // uses, consumed by search.js's first swap and gallery.js's infinite
 // scroll (which fetch-URLs through the provider search.js installs).
 func (a *App) handleSearchFragment(w http.ResponseWriter, r *http.Request) {
+	sc := a.resolveSite(r)
 	cur, ok := searchCursorFromRequest(r)
 	if !ok {
 		http.Error(w, "malformed cursor", http.StatusBadRequest)
@@ -728,7 +761,7 @@ func (a *App) handleSearchFragment(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg := a.getConfig()
 	q := searchQueryFromRequest(r)
-	res, err := runSearch(a.db, q, cur, galleryPageSize, cfg.Search.PrefixMin, snippetTokenWindow(cfg.Search.SnippetChars))
+	res, err := runSearch(a.db, q, cur, galleryPageSize, cfg.Search.PrefixMin, snippetTokenWindow(cfg.Search.SnippetChars), sc)
 	if err != nil {
 		logger.Error("search fragment query failed", "q", q, "error", err)
 		http.Error(w, "lookup failure", http.StatusInternalServerError)

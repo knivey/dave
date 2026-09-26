@@ -27,7 +27,15 @@ func insertSearchRow(t *testing.T, app *App, id, createdAt, orig, enh string, mu
 // runSearchFor runs a search with the test-default search settings.
 func runSearchFor(t *testing.T, app *App, q string, cur searchCursor, limit int) searchResult {
 	t.Helper()
-	res, err := runSearch(app.db, q, cur, limit, 2, snippetTokenWindow(160))
+	res, err := runSearch(app.db, q, cur, limit, 2, snippetTokenWindow(160), siteCtx{})
+	require.NoError(t, err, "query %q", q)
+	return res
+}
+
+// runSearchForSite is runSearchFor with an explicit site context.
+func runSearchForSite(t *testing.T, app *App, q string, cur searchCursor, limit int, sc siteCtx) searchResult {
+	t.Helper()
+	res, err := runSearch(app.db, q, cur, limit, 2, snippetTokenWindow(160), sc)
 	require.NoError(t, err, "query %q", q)
 	return res
 }
@@ -522,7 +530,7 @@ func TestTrigramFilterExpr(t *testing.T) {
 func TestTier3TrigramPrefilterPlan(t *testing.T) {
 	db := setupTestDB(t)
 
-	query, args := buildLikeTierQuery([]string{"shrew"}, `"shrew"*`, 49, 0)
+	query, args := buildLikeTierQuery([]string{"shrew"}, `"shrew"*`, 49, 0, siteCtx{})
 	require.Contains(t, query, substringFTSTable, "all-≥3-char tokens take the accelerated shape")
 
 	rows, err := db.Query("EXPLAIN QUERY PLAN "+query, args...)
@@ -545,8 +553,41 @@ func TestTier3TrigramPrefilterPlan(t *testing.T) {
 	}
 
 	// The <3-char fallback keeps today's plain scan shape.
-	query, args = buildLikeTierQuery([]string{"ab"}, `"ab"`, 49, 0)
+	query, args = buildLikeTierQuery([]string{"ab"}, `"ab"`, 49, 0, siteCtx{})
 	assert.NotContains(t, query, substringFTSTable, "short-token query takes the plain scan")
+}
+
+// TestTier3TrigramPrefilterPlanSafeSite proves the safe-site conjunct
+// does not defeat the accelerator: the EXACT production tier-3 query
+// with the visibility fragment appended must still consult
+// images_substring_fts through its index and still drive images by
+// rowid instead of scanning. The site predicate is an outer AND by
+// design (intersect after retrieval), so the plan shape is unchanged.
+func TestTier3TrigramPrefilterPlanSafeSite(t *testing.T) {
+	db := setupTestDB(t)
+
+	query, args := buildLikeTierQuery([]string{"shrew"}, `"shrew"*`, 49, 0, safeSiteCtx())
+	require.Contains(t, query, substringFTSTable)
+	require.Contains(t, query, "LOWER(i.network)")
+
+	rows, err := db.Query("EXPLAIN QUERY PLAN "+query, args...)
+	require.NoError(t, err)
+	var plan []string
+	for rows.Next() {
+		var id, parent, notused, detail string
+		require.NoError(t, rows.Scan(&id, &parent, &notused, &detail))
+		plan = append(plan, detail)
+	}
+	require.NoError(t, rows.Err())
+	require.NotEmpty(t, plan, "EQP returned no plan rows")
+
+	joined := strings.Join(plan, " | ")
+	assert.Contains(t, joined, substringFTSTable+" VIRTUAL TABLE INDEX",
+		"the trigram side table must still be consulted through its index: %s", joined)
+	for _, line := range plan {
+		assert.NotEqual(t, "SCAN i", line, "accelerated query must not scan images: %s", joined)
+		assert.NotEqual(t, "SCAN images", line, "accelerated query must not scan images: %s", joined)
+	}
 }
 
 // TestTier3ShortTokenFallsBackToScan pins the fallback path end to end:
@@ -739,7 +780,7 @@ func TestSearchSnippetCharsConfigHonored(t *testing.T) {
 	insertSearchRow(t, app, "cfg0001", "2026-09-24 01:00:00", prompt, "")
 
 	snipLen := func(chars int) int {
-		res, err := runSearch(app.db, "shrew", searchCursor{}, 10, 2, snippetTokenWindow(chars))
+		res, err := runSearch(app.db, "shrew", searchCursor{}, 10, 2, snippetTokenWindow(chars), siteCtx{})
 		require.NoError(t, err)
 		require.Len(t, res.Hits, 1)
 		n := 0
@@ -976,10 +1017,10 @@ func TestSearchRoutes(t *testing.T) {
 // function.
 func injectSearchFailure(t *testing.T) {
 	t.Helper()
-	failFTS := func(db *sqlx.DB, tier int, expr, tier1Expr string, offset, limit, snippetTokens int) ([]searchHit, error) {
+	failFTS := func(db *sqlx.DB, tier int, expr, tier1Expr string, offset, limit, snippetTokens int, sc siteCtx) ([]searchHit, error) {
 		return nil, fmt.Errorf("injected fts failure")
 	}
-	failLIKE := func(db *sqlx.DB, tokens []string, ftsExpr string, offset, limit int) ([]searchHit, error) {
+	failLIKE := func(db *sqlx.DB, tokens []string, ftsExpr string, offset, limit int, sc siteCtx) ([]searchHit, error) {
 		return nil, fmt.Errorf("injected like failure")
 	}
 	origFTS, origLIKE := dbSearchFTSTierFn, dbSearchLIKETierFn
@@ -1001,6 +1042,190 @@ func TestSearchDBErrorReturns500(t *testing.T) {
 		resp := fetchPath(t, ts, p)
 		assert.Equal(t, http.StatusInternalServerError, resp.StatusCode, p)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Safe-site visibility (task 3): the predicate rides every tier
+// ---------------------------------------------------------------------------
+
+// safeSiteCtx is the matrix rows' site context: safe site, libera the
+// only allowed network (matches safeSiteTestConfig).
+func safeSiteCtx() siteCtx {
+	return siteCtx{Safe: true, networks: []string{"libera"}}
+}
+
+// TestSearchSiteMatrix runs the six-row visibility matrix through
+// runSearch and the HTTP search surfaces on both hosts. The rows are
+// placed one per tier role (see seedSiteMatrix): tier 1 keeps its
+// visible row and drops the invisible one, tier 2 does the same, tier 3
+// (trigram-accelerated here — "gribble" is 7 runes) keeps its
+// safe-visible row. Default site unchanged.
+func TestSearchSiteMatrix(t *testing.T) {
+	app := newTestApp(t, safeSiteTestConfig())
+	ts := newTestServer(t, app)
+	seedSiteMatrix(t, app)
+
+	t.Run("SafeSiteRunSearch", func(t *testing.T) {
+		res := runSearchForSite(t, app, "gribble", searchCursor{}, 48, safeSiteCtx())
+		assert.Equal(t, []string{"sit0001", "sit0004", "sit0005"}, hitIDs(res.Hits),
+			"tier order preserved; exactly the safe-visible rows survive in every tier")
+		assert.Equal(t, []int{1, 2, 3}, []int{res.Hits[0].tier, res.Hits[1].tier, res.Hits[2].tier},
+			"one surviving row per tier keeps each tier's structural position")
+	})
+	t.Run("DefaultSiteRunSearch", func(t *testing.T) {
+		res := runSearchForSite(t, app, "gribble", searchCursor{}, 48, siteCtx{})
+		assert.ElementsMatch(t, []string{"sit0001", "sit0002", "sit0003", "sit0004", "sit0005"}, hitIDs(res.Hits))
+		tiers := map[string]int{}
+		for _, h := range res.Hits {
+			tiers[h.img.ID] = h.tier
+		}
+		assert.Equal(t, 1, tiers["sit0001"])
+		assert.Equal(t, 1, tiers["sit0002"], "default host still sees the efnet-unknown tier-1 row")
+		assert.Equal(t, 2, tiers["sit0003"])
+		assert.Equal(t, 2, tiers["sit0004"])
+		assert.Equal(t, 3, tiers["sit0005"])
+	})
+	t.Run("SafeSitePaginationSkipsInvisible", func(t *testing.T) {
+		// Small pages prove the OFFSET stitch composes with the filter:
+		// draining the filtered tiers never surfaces an invisible row.
+		var got []string
+		cur := searchCursor{}
+		for page := 1; ; page++ {
+			res := runSearchForSite(t, app, "gribble", cur, 1, safeSiteCtx())
+			require.Less(t, page, 6, "pagination did not terminate")
+			got = append(got, hitIDs(res.Hits)...)
+			if !res.HasMore {
+				break
+			}
+			cur = res.Next
+		}
+		assert.Equal(t, []string{"sit0001", "sit0004", "sit0005"}, got)
+	})
+	t.Run("SafeHostHTTPPage", func(t *testing.T) {
+		status, body := getPageHost(t, ts, "safe.example.com", "/search?q=gribble")
+		require.Equal(t, http.StatusOK, status)
+		assertIDsInOrder(t, body, "sit0001", "sit0004", "sit0005")
+		for _, invisible := range []string{"sit0002", "sit0003", "sit0006"} {
+			assert.NotContains(t, body, invisible)
+		}
+	})
+	t.Run("SafeHostHTTPFragment", func(t *testing.T) {
+		status, body := getPageHost(t, ts, "safe.example.com", "/search-fragment?q=gribble")
+		require.Equal(t, http.StatusOK, status)
+		assertIDsInOrder(t, body, "sit0001", "sit0004", "sit0005")
+		for _, invisible := range []string{"sit0002", "sit0003", "sit0006"} {
+			assert.NotContains(t, body, invisible)
+		}
+	})
+	t.Run("DefaultHostHTTPPage", func(t *testing.T) {
+		status, body := getPage(t, ts.URL, "/search?q=gribble")
+		require.Equal(t, http.StatusOK, status)
+		for _, id := range []string{"sit0001", "sit0002", "sit0003", "sit0004", "sit0005"} {
+			assert.Contains(t, body, id, "default host sees id %s", id)
+		}
+		assert.NotContains(t, body, "sit0006", "hidden stays out of search on the default host")
+	})
+}
+
+// TestSearchTier3SiteFilteredBothShapes proves tier 3's site filter on
+// BOTH query shapes: the trigram-accelerated shape (every token ≥3
+// runes) and the short-token fallback plain scan. In each shape an
+// invisible efnet-unknown row and a visible libera row both substring-
+// match; only the visible one may surface on the safe site. This is
+// the regression class the "outer AND on the images row" rule exists
+// to prevent — the filter must ride the outer query, never the MATCH
+// expressions or the prefilter subquery.
+func TestSearchTier3SiteFilteredBothShapes(t *testing.T) {
+	app := newTestApp(t, safeSiteTestConfig())
+	ts := newTestServer(t, app)
+	safe := safeSiteCtx()
+
+	t.Run("TrigramAccelerated", func(t *testing.T) {
+		// "gribble" (7 runes) engages the accelerator; both rows match
+		// only via substring ("cowgribble" is invisible to FTS prefix
+		// terms).
+		insertImage(t, app, "vis0001", "2026-09-26 01:00:00", func(img *dbImage) {
+			img.OriginalPrompt = "a cowgribble grazes"
+		})
+		insertImage(t, app, "inv0001", "2026-09-26 02:00:00", func(img *dbImage) {
+			img.Network = ptrStr("efnet")
+			img.OriginalPrompt = "another cowgribble lurks"
+		})
+
+		res := runSearchForSite(t, app, "gribble", searchCursor{}, 48, safe)
+		assert.Equal(t, []string{"vis0001"}, hitIDs(res.Hits), "accelerated tier 3 drops the invisible row")
+
+		_, body := getPageHost(t, ts, "safe.example.com", "/search-fragment?q=gribble")
+		assert.Contains(t, body, "vis0001")
+		assert.NotContains(t, body, "inv0001")
+
+		res = runSearchForSite(t, app, "gribble", searchCursor{}, 48, siteCtx{})
+		assert.ElementsMatch(t, []string{"vis0001", "inv0001"}, hitIDs(res.Hits), "default host unchanged")
+	})
+	t.Run("ShortTokenFallbackScan", func(t *testing.T) {
+		// "qq" is 2 runes: trigramFilterExpr declines and tier 3 runs
+		// the plain LIKE scan. Both rows carry "qq" mid-word (xqqx /
+		// yqqy — no token starts with qq, so FTS tiers see nothing).
+		insertImage(t, app, "vis0002", "2026-09-26 03:00:00", func(img *dbImage) {
+			img.OriginalPrompt = "an xqqx fragment"
+		})
+		insertImage(t, app, "inv0002", "2026-09-26 04:00:00", func(img *dbImage) {
+			img.Network = ptrStr("efnet")
+			img.OriginalPrompt = "a yqqy fragment"
+		})
+
+		res := runSearchForSite(t, app, "qq", searchCursor{}, 48, safe)
+		assert.Equal(t, []string{"vis0002"}, hitIDs(res.Hits), "fallback scan drops the invisible row")
+
+		res = runSearchForSite(t, app, "qq", searchCursor{}, 48, siteCtx{})
+		assert.ElementsMatch(t, []string{"vis0002", "inv0002"}, hitIDs(res.Hits), "default host unchanged")
+	})
+}
+
+// TestBuildLikeTierQuerySiteFilterShape pins the SQL SHAPE of the safe
+// site's tier-3 conjunct: the visibility fragment is an outer AND
+// appended after every existing conjunct (site args bind after the
+// trigram expression), and neither the FTS NOT IN subquery nor the
+// trigram prefilter subquery is touched — preserving the
+// trigram-superset argument (the predicate intersects AFTER
+// retrieval).
+func TestBuildLikeTierQuerySiteFilterShape(t *testing.T) {
+	t.Run("DefaultSiteQueryUnchanged", func(t *testing.T) {
+		query, args := buildLikeTierQuery([]string{"gribble"}, `"gribble"*`, 49, 0, siteCtx{})
+		assert.NotContains(t, query, "LOWER(i.network)")
+		assert.NotContains(t, query, "i.safety")
+		assert.Len(t, args, 7, "orig×2, enh, ftsExpr, trigramExpr, limit, offset — no site args")
+	})
+	t.Run("SafeSiteFragmentAppendedAfterTrigram", func(t *testing.T) {
+		query, args := buildLikeTierQuery([]string{"gribble"}, `"gribble"*`, 49, 0, safeSiteCtx())
+
+		assert.Contains(t, query, substringFTSTable, "accelerated shape intact")
+		assert.Contains(t, query, " AND (LOWER(i.network) IN (?) OR i.safety = 'safe')",
+			"site predicate is one outer AND conjunct")
+		assert.Equal(t, 1, strings.Count(query, "LOWER(i.network)"), "exactly one site conjunct")
+		assert.Equal(t, 1, strings.Count(query, "images_fts MATCH"),
+			"the images_fts NOT IN subquery is untouched")
+		assert.Contains(t, query,
+			"SELECT rowid FROM "+substringFTSTable+" WHERE "+substringFTSTable+" MATCH ?",
+			"trigram prefilter subquery text is verbatim-untouched")
+		assert.Less(t, strings.Index(query, substringFTSTable), strings.Index(query, "LOWER(i.network)"),
+			"site conjunct sits after the trigram prefilter, never inside it")
+		assert.Less(t, strings.Index(query, "LOWER(i.network)"), strings.Index(query, "ORDER BY"),
+			"site conjunct is a WHERE-level conjunct, not trailing junk after ORDER BY")
+		assert.Equal(t, 8, len(args), "one extra arg per allowed network")
+
+		// Arg order must match placeholder order: orig (CASE), orig
+		// (WHERE), enh (WHERE), ftsExpr, trigramExpr, THEN site args,
+		// then limit/offset.
+		assert.Equal(t, "%gribble%", args[0])
+		assert.Equal(t, "%gribble%", args[1])
+		assert.Equal(t, "%gribble%", args[2])
+		assert.Equal(t, `"gribble"*`, args[3])
+		assert.Equal(t, `"gribble"`, args[4])
+		assert.Equal(t, "libera", args[5])
+		assert.Equal(t, 49, args[6])
+		assert.Equal(t, 0, args[7])
+	})
 }
 
 func readBody(t *testing.T, resp *http.Response) string {

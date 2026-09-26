@@ -454,6 +454,9 @@ const galleryPageSize = 48
 // handleGalleryPage renders GET / — the full gallery page (first page of
 // cards, no-JS complete; infinite scroll is progressive enhancement).
 func (a *App) handleGalleryPage(w http.ResponseWriter, r *http.Request) {
+	// Site resolution first: the gallery query below belongs to the
+	// site this request's Host selects.
+	sc := a.resolveSite(r)
 	// SSE cursor capture — MUST happen BEFORE the gallery query below.
 	// Ordering rationale: the page HTML is a DB snapshot and the
 	// embedded cursor is an event-stream snapshot; an event published
@@ -465,7 +468,7 @@ func (a *App) handleGalleryPage(w http.ResponseWriter, r *http.Request) {
 	// Overlap-safe, gap-unsafe: capture first.
 	lastEvent, hasHub := a.renderEventCursor()
 	cfg := a.getConfig()
-	rows, err := dbGetGalleryPage(a.db, "", "", galleryPageSize+1)
+	rows, err := dbGetGalleryPage(a.db, "", "", galleryPageSize+1, sc)
 	if err != nil {
 		logger.Error("gallery page query failed", "error", err)
 		http.Error(w, "lookup failure", http.StatusInternalServerError)
@@ -496,6 +499,7 @@ func (a *App) handleGalleryPage(w http.ResponseWriter, r *http.Request) {
 // fully functional without JS and a JSON shape would duplicate the card
 // markup contract for no consumer.
 func (a *App) handleGalleryFragment(w http.ResponseWriter, r *http.Request) {
+	sc := a.resolveSite(r)
 	var afterCreatedAt, afterID string
 	if after := r.URL.Query().Get("after"); after != "" {
 		var ok bool
@@ -506,7 +510,7 @@ func (a *App) handleGalleryFragment(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	cfg := a.getConfig()
-	rows, err := dbGetGalleryPage(a.db, afterCreatedAt, afterID, galleryPageSize+1)
+	rows, err := dbGetGalleryPage(a.db, afterCreatedAt, afterID, galleryPageSize+1, sc)
 	if err != nil {
 		logger.Error("gallery fragment query failed", "error", err)
 		http.Error(w, "lookup failure", http.StatusInternalServerError)
@@ -906,6 +910,10 @@ func (a *App) handleImagePage(w http.ResponseWriter, r *http.Request, id string)
 		http.NotFound(w, r)
 		return
 	}
+	// Site resolution first: the row lookup, the visibility 404 below,
+	// and both neighbor queries all belong to the site this request's
+	// Host selects.
+	sc := a.resolveSite(r)
 	// SSE cursor capture — BEFORE every DB read (row lookup and the
 	// neighbor queries below), same overlap-safe/gap-unsafe ordering as
 	// handleGalleryPage: an event between capture and query can double
@@ -920,16 +928,25 @@ func (a *App) handleImagePage(w http.ResponseWriter, r *http.Request, id string)
 		http.Error(w, "gone", http.StatusGone)
 		return
 	}
+	if !siteCanSee(sc, img) {
+		// Invisible on this site's host = indistinguishable from an
+		// unknown id on the wire: plain 404, no existence hint. The
+		// same id serves normally on the default host.
+		http.NotFound(w, r)
+		return
+	}
 
-	// Server-rendered keyset neighbors: prev = newer, next = older, both
-	// hidden-filtered. Failures degrade to missing links (page still
-	// renders); NoRows is the normal end-of-gallery case.
-	prev, err := dbGetNewerImageFn(a.db, img.CreatedAt, img.ID)
+	// Server-rendered keyset neighbors: prev = newer, next = older,
+	// both hidden- and site-filtered (a safe-host chevron must never
+	// navigate into an image invisible there). Failures degrade to
+	// missing links (page still renders); NoRows is the normal
+	// end-of-gallery case.
+	prev, err := dbGetNewerImageFn(a.db, img.CreatedAt, img.ID, sc)
 	if err != nil {
 		logger.Error("neighbor lookup failed", "id", id, "dir", "prev", "error", err)
 		prev = nil
 	}
-	next, err := dbGetOlderImageFn(a.db, img.CreatedAt, img.ID)
+	next, err := dbGetOlderImageFn(a.db, img.CreatedAt, img.ID, sc)
 	if err != nil {
 		logger.Error("neighbor lookup failed", "id", id, "dir", "next", "error", err)
 		next = nil

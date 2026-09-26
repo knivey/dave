@@ -232,6 +232,70 @@ func TestEnhancePromptChatCompletionsRefused(t *testing.T) {
 	assert.Contains(t, err.Error(), "enhancement refused: policy")
 }
 
+// TestEnhancePromptNSFWFlag pins the safety first pass riding the
+// enhancement response: "nsfw":true parses onto EnhanceResult, false and
+// absent both yield false (absent NEVER asserts safety — it is "no signal",
+// the vet still runs), and a refusal still fails the call regardless of the
+// flag.
+func TestEnhancePromptNSFWFlag(t *testing.T) {
+	t.Run("nsfw true lands on result", func(t *testing.T) {
+		srv, _ := newEnhancementStubServer(t, EnhancementResponse{
+			EnhancedPrompt: "a majestic cat",
+			NegativePrompt: "blurry",
+			NSFW:           true,
+		})
+
+		result, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, false, ""), "default", "a cat", "")
+		require.NoError(t, err)
+		assert.Equal(t, "a majestic cat", result.EnhancedPrompt)
+		assert.True(t, result.NSFW, `"nsfw":true must parse onto EnhanceResult`)
+	})
+
+	t.Run("nsfw false stays false", func(t *testing.T) {
+		srv, _ := newEnhancementStubServer(t, EnhancementResponse{
+			EnhancedPrompt: "a majestic cat",
+			NegativePrompt: "blurry",
+			NSFW:           false,
+		})
+
+		result, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, false, ""), "default", "a cat", "")
+		require.NoError(t, err)
+		assert.False(t, result.NSFW, "explicit nsfw:false must yield false")
+	})
+
+	t.Run("absent nsfw yields false", func(t *testing.T) {
+		// The stub marshals EnhancementResponse (which would always emit
+		// nsfw), so serve a raw reply whose content omits the key — the
+		// shape older/non-strict providers actually return.
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			content := `{"enhanced_prompt":"a majestic cat","negative_prompt":"blurry","refused":false,"reason":""}`
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"chatc-1","object":"chat.completion","created":1,"model":"stub",` +
+				`"choices":[{"index":0,"message":{"role":"assistant","content":` + content + `},"finish_reason":"stop"}],` +
+				`"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`))
+		}))
+		t.Cleanup(srv.Close)
+
+		result, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, false, ""), "default", "a cat", "")
+		require.NoError(t, err)
+		assert.False(t, result.NSFW, "absent nsfw must decode to false (no signal)")
+	})
+
+	t.Run("refusal path unaffected by nsfw flag", func(t *testing.T) {
+		srv, _ := newEnhancementStubServer(t, EnhancementResponse{
+			Refused: true,
+			Reason:  "policy",
+			NSFW:    true,
+		})
+
+		result, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, false, ""), "default", "a cat", "")
+		require.Error(t, err)
+		assert.Nil(t, result)
+		assert.Contains(t, err.Error(), "enhancement refused: policy",
+			"nsfw:true must not bypass the refusal check")
+	})
+}
+
 func TestEnhancePromptAppendsWorkflowInstructions(t *testing.T) {
 	reply := EnhancementResponse{EnhancedPrompt: "a majestic cat", NegativePrompt: "blurry"}
 

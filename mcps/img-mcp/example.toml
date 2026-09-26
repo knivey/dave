@@ -88,6 +88,14 @@ responses_api = false
 # models — an empty value sends nothing.
 # reasoning_effort = "low"
 
+# Safety first pass (loose networks only — do NOT add this to libera-safe,
+# whose prompt refuses instead of flagging): append a line like this to the
+# enhancement systemprompt so sexual content is flagged in the response JSON:
+#   Include "nsfw": true in your response when the request or the enhanced
+#   result contains sexual content; otherwise omit the field.
+# Absent or false never asserts safety — it only means "no first-pass
+# signal" and the strict second-pass vet (see [safety] below) still runs.
+
 # Example: content-safe enhancement for networks with strict content policies (e.g., Libera)
 # [enhancement.libera-safe]
 # description = "Content-safe prompt enhancer for Libera"

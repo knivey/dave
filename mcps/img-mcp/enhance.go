@@ -18,11 +18,21 @@ type EnhancementResponse struct {
 	NegativePrompt string `json:"negative_prompt"`
 	Refused        bool   `json:"refused"`
 	Reason         string `json:"reason"`
+	// NSFW is the safety first pass (safe-site split): the loose
+	// enhancement prompts instruct the model to include "nsfw": true when
+	// the request or the enhanced result contains sexual content. Absent
+	// or false is only "no first-pass signal" — it NEVER asserts safety;
+	// the strict second-pass vet still runs.
+	NSFW bool `json:"nsfw"`
 }
 
 type EnhanceResult struct {
 	EnhancedPrompt string
 	NegativePrompt string
+	// NSFW carries the first-pass sexual-content flag through to the
+	// safety stage (true → safety unsafe, vet call skipped). False/absent
+	// on the response means "no signal" — it never asserts safety.
+	NSFW bool
 	// Reasoning is the enhancement model's reasoning summary (Responses API
 	// path only — Chat Completions does not return summaries). Carried into
 	// the workflow's prompt note node so it is embedded in the image
@@ -112,12 +122,14 @@ func enhancePrompt(ctx context.Context, cfg Config, enhancementName, rawPrompt, 
 	loggerTools.Info("enhancement complete",
 		"enhanced_prompt", strings.TrimSpace(result.EnhancedPrompt),
 		"negative_prompt", strings.TrimSpace(result.NegativePrompt),
+		"nsfw", result.NSFW,
 	)
 
 	return &EnhanceResult{
 		EnhancedPrompt: strings.TrimSpace(result.EnhancedPrompt),
 		NegativePrompt: strings.TrimSpace(result.NegativePrompt),
 		Reasoning:      reasoning,
+		NSFW:           result.NSFW,
 	}, nil
 }
 

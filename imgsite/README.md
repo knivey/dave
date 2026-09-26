@@ -109,6 +109,39 @@ keep the card until their next load).
   (the CLI summary prints this reminder after every run). Bytes are
   never purged — content-addressed storage is shared by dedupe.
 
+## Set safety verdicts (admin)
+
+Manual override for an image's safety classification — the tool that
+clears the 'unknown' pile the automatic pipeline leaves behind
+(pre-safety history, vet failures and timeouts) and corrects mis-vetted
+verdicts. One DB path (`dbSetSafety`: writes `images.safety`, nothing
+else — no files, no other metadata):
+
+```bash
+./imgsite -safety <id>[,<id>…] safe|unsafe|unknown [config]
+```
+
+- The verdict is a positional argument after the id list; the optional
+  config path follows it. `unknown` is a full reset: the row returns to
+  no-verdict, so on the safe host a NULL/empty-network row goes back to
+  default-deny exactly as if never classified.
+- Applies over any prior value — that is the point. A re-extract or
+  metadata merge never overwrites a stored verdict; only another
+  explicit `-safety` run changes it.
+- Per-id report lines never stop the rest of the list:
+  `set safety=<v> <id> — "<prompt snippet>" (was <old>)`,
+  `not found: <id>`.
+- Exit status: `0` only when every requested id was set by this run —
+  a row already at the requested value still counts (the contract is
+  "these rows now have this verdict"; there is no HTTP 410 analogue to
+  mirror, unlike `-delete` repeats); any not-found / per-id error ⇒
+  `1`. Usage mistakes (missing, empty, or invalid value, empty or
+  malformed id list, combining with `-import` or `-delete`) ⇒ `2`.
+- Offline like `-import`/`-delete` — **stop the server first** (or
+  accept that safe-site visibility lags until the next page load: no
+  live-update event is published). Undo: run it again with another
+  value.
+
 ## Deploy behind a reverse proxy
 
 - Terminate TLS at the proxy and pass the scheme through — absolute URLs
@@ -171,6 +204,10 @@ direct link to IRC.
   connected browsers drop the card live). A second delete returns 410.
   Same soft delete offline via `./imgsite -delete <id>[,<id>…]` (see
   "Delete images (admin)").
+- Set a safety verdict manually: `./imgsite -safety <id>[,<id>…]
+  safe|unsafe|unknown` — writes `images.safety` over any prior value
+  (offline; safe-site visibility follows on the next page load; the
+  verdict survives re-extract). See "Set safety verdicts (admin)".
 - Re-extract metadata: if workflow parsing improves (it has — e.g. GGUF
   loader variants were initially missed), heal existing rows without
   re-uploading: `curl -X POST -H "X-API-Key: <key>" https://…/admin/reextract`

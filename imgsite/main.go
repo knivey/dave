@@ -20,10 +20,16 @@ var (
 	importDirFlag = flag.String("import", "", "import legacy ComfyUI outputs from DIR (recursive webp/PNG walk), then exit")
 	importTZFlag  = flag.String("tz", "", "timezone of -import filename timestamps (IANA name, e.g. America/New_York);\ndefault: this machine's local zone")
 	deleteIDsFlag = flag.String("delete", "", "hide gallery images by public id, comma-separated (soft delete, files retained),\nthen exit")
+	// -safety's verdict value (safe|unsafe|unknown) is NOT a flag: it
+	// rides as the first positional argument per the documented
+	// surface `imgsite -safety ID[,ID…] safe|unsafe|unknown [config]`,
+	// so an explicitly empty value stays a usage error instead of
+	// being indistinguishable from an unset flag.
+	safetyIDsFlag = flag.String("safety", "", "set the safety verdict on gallery images by public id, comma-separated;\nthe verdict (safe|unsafe|unknown) follows as the first positional argument, then exit")
 )
 
 // usage documents all modes; the flag package prints it on bad flag
-// usage, import/delete/serve-mode misuse prints it explicitly.
+// usage, import/delete/safety/serve-mode misuse prints it explicitly.
 func usage() {
 	prog := filepath.Base(os.Args[0])
 	fmt.Fprintf(os.Stderr, `%[1]s — image gallery for dave's generations
@@ -60,6 +66,27 @@ lines that do not stop the rest, but make the exit status 1 (the 404/
 410 equivalents); usage mistakes (empty or malformed id list, -delete
 combined with -import) exit 2; 0 means every id was hidden by this run.
 
+safety mode:
+  %[1]s -safety ID[,ID…] safe|unsafe|unknown [config]
+
+Sets the admin safety verdict on one or more gallery images by public
+id (comma-separated) — the override for rows the automatic pipeline
+left 'unknown' (pre-safety history, vet failures) and for correcting
+mis-vetted verdicts. 'unknown' resets the row to no-verdict
+(default-deny on the safe host again). The verdict is the first
+positional argument after the id list; the optional config path
+follows it. Writes images.safety and nothing else: no files or other
+metadata are touched, and the verdict survives re-extract and later
+uploads. A row already at the requested value still counts as set
+(there is no HTTP analogue whose error matrix to mirror — the run's
+contract is "these rows now have this verdict"). Offline like
+-import/-delete: no live-update events; safe-site visibility changes
+on the next page load. Unknown ids are per-id report lines that do not
+stop the rest, but make the exit status 1; usage mistakes (missing,
+empty, or invalid value, empty or malformed id list, combining with
+-import or -delete) exit 2; 0 means every id was set by this run.
+Undo: run it again with another value.
+
 flags:
 `, prog)
 	flag.PrintDefaults()
@@ -79,39 +106,61 @@ func main() {
 	initLogger(exeDir)
 	defer closeLogger()
 
-	// Config path: CLI arg if given, else config.toml next to the binary
-	// (same resolution as img-mcp).
-	configPath := filepath.Join(exeDir, "config.toml")
-	if args := flag.Args(); len(args) > 0 {
-		configPath = args[0]
-		if !filepath.IsAbs(configPath) {
-			configPath = filepath.Join(exeDir, configPath)
-		}
-	}
-
-	// Offline-mode presence (-import / -delete) is detected with
-	// flag.Visit, not plain != "" tests: an explicitly empty
-	// `-import ""` or `-delete ""` is an argument mistake that must
-	// reach the usage errors below, not silently fall into serve mode
-	// the way an unset flag does.
+	// Offline-mode presence (-import / -delete / -safety) is detected
+	// with flag.Visit, not plain != "" tests: an explicitly empty
+	// `-import ""`, `-delete ""`, or `-safety ""` is an argument
+	// mistake that must reach the usage errors below, not silently
+	// fall into serve mode the way an unset flag does.
 	importSet := false
 	deleteSet := false
+	safetySet := false
 	flag.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "import":
 			importSet = true
 		case "delete":
 			deleteSet = true
+		case "safety":
+			safetySet = true
 		}
 	})
 
-	// -import and -delete are both one-shot offline modes over the same
-	// DB; combining them is a usage error, checked BEFORE either branch
-	// so neither mode runs.
+	// -import, -delete, and -safety are all one-shot offline modes
+	// over the same DB; combining any two is a usage error, checked
+	// BEFORE any branch so no mode runs.
 	if importSet && deleteSet {
 		fmt.Fprintf(os.Stderr, "error: -import and -delete are mutually exclusive\n\n")
 		flag.Usage()
 		os.Exit(2)
+	}
+	if importSet && safetySet {
+		fmt.Fprintf(os.Stderr, "error: -import and -safety are mutually exclusive\n\n")
+		flag.Usage()
+		os.Exit(2)
+	}
+	if deleteSet && safetySet {
+		fmt.Fprintf(os.Stderr, "error: -delete and -safety are mutually exclusive\n\n")
+		flag.Usage()
+		os.Exit(2)
+	}
+
+	// Config path: CLI arg if given, else config.toml next to the binary
+	// (same resolution as img-mcp). In safety mode the FIRST positional
+	// is the verdict value — the documented surface is
+	// `imgsite -safety ID[,ID…] safe|unsafe|unknown [config]` — so the
+	// config, when given, is the SECOND positional there.
+	configPath := filepath.Join(exeDir, "config.toml")
+	if args := flag.Args(); len(args) > 0 {
+		configIdx := 0
+		if safetySet {
+			configIdx = 1
+		}
+		if len(args) > configIdx {
+			configPath = args[configIdx]
+			if !filepath.IsAbs(configPath) {
+				configPath = filepath.Join(exeDir, configPath)
+			}
+		}
 	}
 
 	// Import mode: -import DIR runs the legacy-output import and exits.
@@ -144,6 +193,38 @@ func main() {
 			os.Exit(2)
 		}
 		code := deleteMain(exeDir, configPath, ids)
+		closeLogger()
+		os.Exit(code)
+	}
+
+	// Safety mode: -safety ID[,ID…] VALUE sets the admin safety
+	// verdict and exits. VALUE is the first positional argument (see
+	// the config-path note above). The id list is validated before the
+	// value so `-safety "" cfg` reports the empty list rather than
+	// misreading cfg as the value; a missing, empty, or invalid value
+	// is then a usage error (exit 2). Per-id misses are run-level
+	// outcomes reported by safetyMain (exit 1). Same explicit
+	// closeLogger as the other offline modes.
+	if safetySet {
+		ids, err := parseSafetyIDs(*safetyIDsFlag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n\n", err)
+			flag.Usage()
+			os.Exit(2)
+		}
+		args := flag.Args()
+		if len(args) == 0 {
+			fmt.Fprintf(os.Stderr, "error: -safety needs a verdict value (safe, unsafe, or unknown) after the id list\n\n")
+			flag.Usage()
+			os.Exit(2)
+		}
+		value, err := parseSafetyValue(args[0])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n\n", err)
+			flag.Usage()
+			os.Exit(2)
+		}
+		code := safetyMain(exeDir, configPath, ids, value)
 		closeLogger()
 		os.Exit(code)
 	}

@@ -42,6 +42,11 @@ var (
 // dbGetImageByIDFn: handler-level failure injection for the 500 path).
 var dbHideImageFn = dbHideImage
 
+// dbSetSafetyFn is the verdict-write seam (same reason as
+// dbGetImageByIDFn: CLI-level failure injection for the per-id error
+// and vanished-row branches).
+var dbSetSafetyFn = dbSetSafety
+
 // lookupImage fetches a row for a handler, mapping errors to HTTP
 // responses: a missing row (sql.ErrNoRows, including wrapped variants) is
 // a plain 404, while any other DB failure is a logged 500. Flattening

@@ -338,6 +338,42 @@ func dbHideImage(db *sqlx.DB, id string) (bool, error) {
 	return n > 0, nil
 }
 
+// dbSetSafety writes an explicit admin safety verdict:
+// `SET safety = ? WHERE id = ?`, nothing else. DESIGN NOTE — this
+// UPDATE is deliberately NOT guarded on the current value, unlike
+// dbHideImage's `AND hidden = 0`. The hide guard exists so two racing
+// DELETEs elect exactly one winner and the loser can answer 410
+// instead of re-publishing the image-hidden SSE event; here there is
+// no event to suppress (the -safety CLI is offline) and last-write-
+// wins IS the semantics — an explicit admin set must apply over ANY
+// prior value, because overriding is the tool's entire purpose
+// (clearing the accumulated 'unknown' pile, correcting a mis-vetted
+// 'unsafe', resetting a wrong 'safe' back to 'unknown'). The column
+// invariant stays intact without a guard: every caller value is
+// pre-validated to exactly unknown|safe|unsafe (parseSafetyValue
+// before any DB call). rows-affected is still reported — zero after a
+// successful lookup means the row vanished between the two statements
+// (no hard delete exists, so that path is a tripwire, surfaced by the
+// CLI as a not-found line, not an expected outcome).
+//
+// FTS note: like dbHideImage, this touches none of the prompt columns
+// the images_fts_au trigger watches, so no index dance is needed —
+// the searchable text is unchanged; the verdict is visibility state,
+// not content. Re-extract and dbUpdateImageMetadata preserve the
+// stored verdict (their safety writes are fill-only / explicit-only),
+// so nothing but this function or a fresh upload verdict moves it.
+func dbSetSafety(db *sqlx.DB, id, safety string) (bool, error) {
+	res, err := db.Exec(`UPDATE images SET safety = ? WHERE id = ?`, safety, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // nullStr maps "" to SQL NULL for the display-only provenance columns, so
 // later queries can distinguish "not provided" from "empty".
 func nullStr(s string) *string {

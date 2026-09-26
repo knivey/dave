@@ -296,6 +296,32 @@ func TestEnhancePromptNSFWFlag(t *testing.T) {
 	})
 }
 
+// TestEnhancementSchemaIncludesNSFW pins the schema shape that makes the
+// first pass operable on strict structured-output providers (production
+// xAI/grok): guided decoding can only emit properties the schema declares
+// AND lists in required, so "nsfw" must be in both. Parsing already
+// tolerates an absent key (non-strict providers) — it decodes as false.
+func TestEnhancementSchemaIncludesNSFW(t *testing.T) {
+	data, err := json.Marshal(enhancementSchema)
+	require.NoError(t, err)
+
+	var schema struct {
+		Properties map[string]map[string]any `json:"properties"`
+		Required   []string                  `json:"required"`
+	}
+	require.NoError(t, json.Unmarshal(data, &schema))
+
+	nsfw, ok := schema.Properties["nsfw"]
+	require.True(t, ok, "schema must declare the nsfw property")
+	assert.Equal(t, "boolean", nsfw["type"])
+
+	assert.Contains(t, schema.Required, "nsfw",
+		"strict providers only emit properties listed in required")
+	for _, field := range []string{"enhanced_prompt", "negative_prompt", "refused", "reason"} {
+		assert.Contains(t, schema.Required, field, "original required fields must stay required")
+	}
+}
+
 func TestEnhancePromptAppendsWorkflowInstructions(t *testing.T) {
 	reply := EnhancementResponse{EnhancedPrompt: "a majestic cat", NegativePrompt: "blurry"}
 

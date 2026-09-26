@@ -49,8 +49,15 @@ var enhancementSchema = map[string]any{
 		"negative_prompt": map[string]any{"type": "string"},
 		"refused":         map[string]any{"type": "boolean"},
 		"reason":          map[string]any{"type": "string"},
+		// nsfw is the safety first pass (safe-site split). It MUST be
+		// declared here AND listed in required: strict structured-output
+		// providers can only emit properties the schema requires, so an
+		// undeclared key would make the flag unreachable there and every
+		// job would fall through to the vet. Non-strict providers that
+		// omit the key still decode as false (absent = no signal).
+		"nsfw": map[string]any{"type": "boolean"},
 	},
-	"required":             []string{"enhanced_prompt", "negative_prompt", "refused", "reason"},
+	"required":             []string{"enhanced_prompt", "negative_prompt", "refused", "reason", "nsfw"},
 	"additionalProperties": false,
 }
 

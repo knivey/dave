@@ -27,12 +27,20 @@ type workflowNode struct {
 }
 
 // promptNotePayload is the JSON carried by the note node's text input;
-// mirrors img-mcp's buildPromptNote contract.
+// mirrors img-mcp's buildPromptNote contract. network/channel/nick and
+// safety are the safe-site extensions img-mcp bakes into the note
+// post-generation (EXIF rewrite) — optional, absent on all legacy
+// notes, and parsed permissively here so imgsite is ready before the
+// img-mcp side ships.
 type promptNotePayload struct {
 	Prompt               string `json:"prompt"`
 	LLMGenerated         bool   `json:"llm_generated"`
 	JobID                string `json:"job_id"`
 	EnhancementReasoning string `json:"enhancement_reasoning,omitempty"`
+	Network              string `json:"network,omitempty"`
+	Channel              string `json:"channel,omitempty"`
+	Nick                 string `json:"nick,omitempty"`
+	Safety               string `json:"safety,omitempty"`
 }
 
 // extractedMetadata is everything the images table stores that can be
@@ -45,6 +53,16 @@ type extractedMetadata struct {
 	Reasoning      string
 	JobID          string
 	LLMGenerated   bool
+
+	// Safe-site note extensions (provenance + verdict, optional in the
+	// note payload — see promptNotePayload). Safety only ever holds a
+	// real verdict: extraction gates it to 'safe'/'unsafe' so anything
+	// else in a note degrades to "" (== unknown). A note can backfill a
+	// missing classification but never invent or elevate one.
+	Network string
+	Channel string
+	Nick    string
+	Safety  string
 
 	Seed      *int64
 	Steps     *int
@@ -135,6 +153,16 @@ func extractFromGraph(wf map[string]workflowNode) extractedMetadata {
 				md.LLMGenerated = pn.LLMGenerated
 				md.JobID = pn.JobID
 				md.Reasoning = pn.EnhancementReasoning
+				// Safe-site extensions: provenance copies through as-is;
+				// safety only when it is exactly a verdict — anything
+				// else ('unknown', garbage) is "no information" and must
+				// not write the column (degrade, never elevate).
+				md.Network = pn.Network
+				md.Channel = pn.Channel
+				md.Nick = pn.Nick
+				if validSafetyVerdict(pn.Safety) {
+					md.Safety = pn.Safety
+				}
 			}
 		}
 	}

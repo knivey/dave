@@ -55,6 +55,17 @@ const (
 	metaSourceEXIF          = "exif"
 	metaSourceUpload        = "upload"
 	metaSourceUploadAndEXIF = "upload+exif"
+
+	// images.safety values (migration 003). 'unknown' is default-deny:
+	// the safe site shows only allowed-network origins ∪ safety='safe',
+	// so rows without a verdict stay invisible there until one lands
+	// (upload meta or EXIF-note re-extract backfill today; the planned
+	// -safety admin CLI will add manual marking). A verdict, once
+	// stored, is only ever changed by an explicit write — merges and
+	// re-extracts preserve it.
+	safetyUnknown = "unknown"
+	safetySafe    = "safe"
+	safetyUnsafe  = "unsafe"
 )
 
 // dbImage mirrors the images table. Graph-derived columns are populated by
@@ -81,6 +92,11 @@ type dbImage struct {
 	Channel        *string `db:"channel"`
 	Nick           *string `db:"nick"`
 	WorkflowName   *string `db:"workflow_name"`
+	// Safety is one of safetyUnknown | safetySafe | safetyUnsafe —
+	// never "" and never NULL after insert (dbInsertImage normalizes a
+	// zero value to 'unknown'; migration 003 backfilled all
+	// pre-existing rows the same way).
+	Safety string `db:"safety"`
 
 	Seed      *int64   `db:"seed"`
 	Steps     *int     `db:"steps"`
@@ -137,12 +153,18 @@ func closeDB(db *sqlx.DB) {
 }
 
 func dbInsertImage(db *sqlx.DB, img *dbImage) error {
+	// safety normalization at the write boundary: a zero-value ("")
+	// Safety — any hand-built dbImage, e.g. the import path or test
+	// fixtures — lands as the column's semantic default 'unknown', so
+	// the DB invariant (values are exactly unknown|safe|unsafe) holds
+	// for every writer without each caller remembering to set it.
 	_, err := db.NamedExec(
 		`INSERT INTO images (
 			id, sha256, filename, mime_type, size_bytes, width, height,
 			created_at, thumb_status, hidden,
 			original_prompt, enhanced_prompt, negative_prompt, reasoning,
 			job_id, llm_generated, network, channel, nick, workflow_name,
+			safety,
 			seed, steps, cfg, denoise, sampler, scheduler,
 			model_unet, model_clip, model_vae, loras,
 			workflow_json, meta_source
@@ -151,6 +173,7 @@ func dbInsertImage(db *sqlx.DB, img *dbImage) error {
 			:created_at, :thumb_status, :hidden,
 			:original_prompt, :enhanced_prompt, :negative_prompt, :reasoning,
 			:job_id, :llm_generated, :network, :channel, :nick, :workflow_name,
+			COALESCE(NULLIF(:safety, ''), 'unknown'),
 			:seed, :steps, :cfg, :denoise, :sampler, :scheduler,
 			:model_unet, :model_clip, :model_vae, :loras,
 			:workflow_json, :meta_source
@@ -330,7 +353,10 @@ func dbGetImagesWithWorkflow(db *sqlx.DB) ([]dbImage, error) {
 // dims win when present, but a graph with no recognizable latent source
 // must not NULL out dimensions the thumb worker backfilled from the decoded
 // image (that ownership rule mirrors dbUpdateThumbReady's own
-// fill-only-when-NULL COALESCE).
+// fill-only-when-NULL COALESCE). safety uses the same guarded shape for
+// strings: an empty payload value ("") keeps the stored verdict — a
+// hand-built update struct can never clobber a classification — while an
+// explicit verdict (the re-extract backfill writes one that way) lands.
 func dbUpdateImageMetadata(db *sqlx.DB, img *dbImage) error {
 	_, err := db.NamedExec(
 		`UPDATE images SET
@@ -344,6 +370,7 @@ func dbUpdateImageMetadata(db *sqlx.DB, img *dbImage) error {
 			channel = :channel,
 			nick = :nick,
 			workflow_name = :workflow_name,
+			safety = COALESCE(NULLIF(:safety, ''), safety),
 			seed = :seed,
 			steps = :steps,
 			cfg = :cfg,

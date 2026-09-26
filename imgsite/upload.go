@@ -36,6 +36,10 @@ const imageIDAlphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrs
 // grow the payload without a coordinated deploy. LLMGenerated is a *bool
 // so "field absent" (nil) is distinguishable from an explicit false — the
 // merge cross-check only fires when meta actually carried the field.
+// Safety carries the LLM safety verdict ('safe'/'unsafe', omitempty —
+// img-mcp omits it when classification didn't resolve); anything but
+// those two values or absent is rejected by the handler (tripwire:
+// img-mcp is the only writer) and ignored by the merge.
 type UploadMeta struct {
 	JobID          string `json:"job_id"`
 	OriginalPrompt string `json:"original_prompt"`
@@ -47,6 +51,16 @@ type UploadMeta struct {
 	Network        string `json:"network"`
 	Channel        string `json:"channel"`
 	Nick           string `json:"nick"`
+	Safety         string `json:"safety,omitempty"`
+}
+
+// validSafetyVerdict reports whether s is a real verdict — exactly
+// 'safe' or 'unsafe'. 'unknown' is deliberately NOT a verdict: it is
+// the column's default meaning "no classification yet", so it never
+// writes the column from any source (meta, note, or merge) and a
+// stored 'unknown' simply falls through to note backfill.
+func validSafetyVerdict(s string) bool {
+	return s == safetySafe || s == safetyUnsafe
 }
 
 type uploadResponse struct {
@@ -164,6 +178,19 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid meta JSON: "+err.Error(), http.StatusBadRequest)
 			return
 		}
+		// safety tripwire: img-mcp is the only writer and only ever
+		// sends 'safe'/'unsafe' (omitempty). Anything else — including
+		// 'unknown' (the column default, not a writer-assertable
+		// value) or garbage — is a protocol violation worth rejecting
+		// loudly, not storing. The merge independently ignores
+		// non-verdicts (defense in depth); this 400 makes the bug on
+		// the writer side visible instead of silent.
+		if meta.Safety != "" && !validSafetyVerdict(meta.Safety) {
+			http.Error(w,
+				`invalid meta safety: must be "safe" or "unsafe" when present`,
+				http.StatusBadRequest)
+			return
+		}
 	}
 
 	sum := sha256.Sum256(data)
@@ -275,11 +302,21 @@ type mergedUploadMetadata struct {
 	JobID          string
 	LLMGenerated   bool
 
-	// Provenance: upload meta wins (EXIF never carries these).
+	// Provenance: upload meta wins; the EXIF note backfills fields the
+	// meta side left empty (the note began carrying provenance with the
+	// safe-site pipeline — img-mcp bakes it in post-generation). On
+	// re-extract the meta side is the stored column round-trip
+	// (rowToUploadMeta), so non-empty stored values are preserved and
+	// empty ones heal from the note: one rule covers both callers.
 	Network      string
 	Channel      string
 	Nick         string
 	WorkflowName string
+
+	// Safety follows the same meta-first / note-fallback rule as
+	// provenance, gated to real verdicts only ('safe'/'unsafe'; see
+	// validSafetyVerdict).
+	Safety string
 
 	// Graph-derived: EXIF is the source of truth when available.
 	Seed         *int64
@@ -306,7 +343,9 @@ type mergedUploadMetadata struct {
 //     negative prompts, workflow JSON — because it is what the image
 //     actually executed with.
 //   - Upload meta wins for provenance (network/channel/nick/workflow_name)
-//     and is the fallback for prompt fields when EXIF parsing failed.
+//     and safety, with the EXIF note backfilling whatever the meta side
+//     left empty; meta is also the fallback for prompt fields when EXIF
+//     parsing failed.
 //   - original_prompt, reasoning, llm_generated, job_id are cross-checked
 //     between both sides; a mismatch logs a WARN and prefers EXIF.
 //   - meta_source records which side(s) contributed: "exif", "upload",
@@ -319,6 +358,13 @@ func mergeUploadMetadata(meta UploadMeta, md extractedMetadata, exifOK bool) mer
 	m.Channel = meta.Channel
 	m.Nick = meta.Nick
 	m.WorkflowName = meta.WorkflowName
+	// Safety ditto, but only a real verdict counts ('unknown' is "no
+	// classification yet", not a value a source may assert) — this gate
+	// is what lets a re-extract round-tripped 'unknown' fall through to
+	// note backfill below.
+	if validSafetyVerdict(meta.Safety) {
+		m.Safety = meta.Safety
+	}
 
 	metaContributed := uploadMetaPresent(meta)
 
@@ -335,6 +381,25 @@ func mergeUploadMetadata(meta UploadMeta, md extractedMetadata, exifOK bool) mer
 		m.LorasJSON = md.LorasJSON
 		m.Width, m.Height = md.Width, md.Height
 		m.WorkflowJSON = md.WorkflowJSON
+
+		// Note-carried provenance + safety backfill: fills ONLY what the
+		// meta side left empty. On upload that means "meta omitted it";
+		// on re-extract (meta = stored columns round-tripped by
+		// rowToUploadMeta) it means "stored column empty" — giving the
+		// never-overwrite-non-empty preservation policy for free
+		// through the same shared code path.
+		if m.Network == "" {
+			m.Network = md.Network
+		}
+		if m.Channel == "" {
+			m.Channel = md.Channel
+		}
+		if m.Nick == "" {
+			m.Nick = md.Nick
+		}
+		if m.Safety == "" && validSafetyVerdict(md.Safety) {
+			m.Safety = md.Safety
+		}
 
 		// Cross-check quartet: WARN + prefer EXIF on mismatch. Only fields
 		// meta actually carried are compared (strings by non-empty,
@@ -353,6 +418,15 @@ func mergeUploadMetadata(meta UploadMeta, md extractedMetadata, exifOK bool) mer
 		if meta.LLMGenerated != nil && *meta.LLMGenerated != md.LLMGenerated {
 			loggerUpload.Warn("meta/exif mismatch: llm_generated differs; preferring exif",
 				"meta", *meta.LLMGenerated, "exif", md.LLMGenerated)
+		}
+		// Safety mismatches WARN too (preferring meta — the verdict of
+		// record at submit time, and on re-extract the stored column
+		// which may be an admin's -safety mark that a stale note must
+		// not undo). Unlike the quartet this is not extraction-derived
+		// data, so the stored/meta side wins rather than fresh EXIF.
+		if validSafetyVerdict(meta.Safety) && validSafetyVerdict(md.Safety) && meta.Safety != md.Safety {
+			loggerUpload.Warn("meta/exif mismatch: safety differs; preferring meta",
+				"meta", meta.Safety, "exif", md.Safety)
 		}
 
 		if metaContributed {
@@ -391,6 +465,17 @@ func applyMergedMetadata(img *dbImage, merged mergedUploadMetadata) {
 	img.Channel = nullStr(merged.Channel)
 	img.Nick = nullStr(merged.Nick)
 	img.WorkflowName = nullStr(merged.WorkflowName)
+	// Safety preserve-and-merge: a valid verdict (meta first, note
+	// fallback — see mergeUploadMetadata) writes; NO verdict leaves the
+	// row's existing value untouched, and a fresh row normalizes to
+	// 'unknown' so the DB invariant (never '', never NULL) holds. An
+	// absent verdict is not information: merges never invent, downgrade,
+	// or elevate a classification.
+	if validSafetyVerdict(merged.Safety) {
+		img.Safety = merged.Safety
+	} else if img.Safety == "" {
+		img.Safety = safetyUnknown
+	}
 	img.Seed = merged.Seed
 	img.Steps = merged.Steps
 	img.Cfg = merged.Cfg
@@ -413,13 +498,17 @@ func applyMergedMetadata(img *dbImage, merged mergedUploadMetadata) {
 // cross-check compares fresh-EXIF vs stored-EXIF — a mismatch means the
 // extraction rules changed the answer, and the fresh EXIF side wins.
 // Provenance columns (which came from the original upload meta) round-trip
-// untouched. LLMGenerated is always non-nil here: the stored value is the
-// best known answer. Side effect: the non-nil pointer makes the merge see
-// "meta contributed", so every re-extracted row's meta_source normalizes
-// to "upload+exif" — even rows originally uploaded EXIF-only ("exif").
-// meta_source is informational only (nothing reads it at runtime), and
-// distinguishing heal-generations from upload-generations isn't worth the
-// plumbing; documented here so the normalization is a choice, not a bug.
+// untouched. The stored safety verdict round-trips the same way: as a
+// real verdict it wins over the note (preservation); as 'unknown' it is
+// not a verdict and falls through to note backfill (healing) — see
+// validSafetyVerdict. LLMGenerated is always non-nil here: the stored
+// value is the best known answer. Side effect: the non-nil pointer makes
+// the merge see "meta contributed", so every re-extracted row's
+// meta_source normalizes to "upload+exif" — even rows originally uploaded
+// EXIF-only ("exif"). meta_source is informational only (nothing reads it
+// at runtime), and distinguishing heal-generations from
+// upload-generations isn't worth the plumbing; documented here so the
+// normalization is a choice, not a bug.
 func rowToUploadMeta(img *dbImage) UploadMeta {
 	llm := img.LLMGenerated
 	return UploadMeta{
@@ -433,6 +522,7 @@ func rowToUploadMeta(img *dbImage) UploadMeta {
 		Network:        ptrValue(img.Network),
 		Channel:        ptrValue(img.Channel),
 		Nick:           ptrValue(img.Nick),
+		Safety:         img.Safety,
 	}
 }
 
@@ -448,7 +538,8 @@ func uploadMetaPresent(meta UploadMeta) bool {
 		meta.WorkflowName != "" ||
 		meta.Network != "" ||
 		meta.Channel != "" ||
-		meta.Nick != ""
+		meta.Nick != "" ||
+		validSafetyVerdict(meta.Safety)
 }
 
 // deriveBaseURL builds the external base URL from the request when

@@ -861,6 +861,10 @@ func TestAdminReextractHealsGGUFRows(t *testing.T) {
 			img.WorkflowName = ptrStr("qwenHD")
 			img.ModelVae = ptrStr("qwen_image_vae.safetensors")
 			img.MetaSource = "upload+exif"
+			// A stored verdict (e.g. an admin -safety mark) must survive
+			// re-extraction: the gguf note carries no safety field, so
+			// there is nothing to backfill and nothing may reset it.
+			img.Safety = safetyUnsafe
 		},
 		func(img *dbImage) { img.CreatedAt = "2026-09-24 16:10:00" },
 	)
@@ -904,6 +908,7 @@ func TestAdminReextractHealsGGUFRows(t *testing.T) {
 	assert.Equal(t, "knivey", ptrValue(healed.Nick))
 	assert.Equal(t, "qwenHD", ptrValue(healed.WorkflowName))
 	assert.Equal(t, "a shrew on main street", healed.OriginalPrompt, "note-node prompt preserved")
+	assert.Equal(t, safetyUnsafe, healed.Safety, "stored verdict preserved by re-extract")
 	require.NotNil(t, healed.Width)
 	assert.Equal(t, 1920, *healed.Width)
 	assert.False(t, healed.Hidden, "visibility untouched")

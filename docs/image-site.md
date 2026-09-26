@@ -58,7 +58,14 @@ Verified payload of that node (sample 528):
 }
 ```
 
-`enhancement_reasoning` is present only on enhanced jobs. Everything else the
+`enhancement_reasoning` is present only on enhanced jobs. With the
+safe-site pipeline the payload grows four more OPTIONAL fields —
+`network`, `channel`, `nick` (provenance, mirroring the upload meta) and
+`safety` (`"safe"`/`"unsafe"`; baked in post-generation by img-mcp's EXIF
+note rewrite) — absent on every legacy note and parsed permissively:
+extraction takes a `safety` value only when it is exactly a verdict, so
+an unparseable value degrades to `unknown` and never elevates.
+Everything else the
 details page wants is discoverable by graph traversal (sample 528):
 
 | Field | Source node | Value |
@@ -202,6 +209,8 @@ CREATE TABLE images (
   llm_generated   INTEGER NOT NULL DEFAULT 0,
   -- provenance extras sent by dave (display-only)
   network  TEXT, channel TEXT, nick TEXT, workflow_name TEXT,
+  -- LLM safety verdict for the safe-site host split (migration 003)
+  safety   TEXT NOT NULL DEFAULT 'unknown',   -- 'unknown' | 'safe' | 'unsafe'
 
   -- graph-derived params
   seed INTEGER, steps INTEGER, cfg REAL, denoise REAL,
@@ -221,6 +230,23 @@ CREATE VIRTUAL TABLE images_fts USING fts5(
 );
 -- + AFTER INSERT/UPDATE/DELETE triggers maintaining images_fts ('delete' + insert dance for external content)
 ```
+
+#### Safety column (migration 003)
+
+`safety` holds the LLM safety classification: exactly `'unknown' | 'safe'
+| 'unsafe'`, `NOT NULL`, never `''` — every writer normalizes. `'unknown'`
+is **default-deny**: it is the migration default for all pre-existing
+rows and means "no verdict yet", so nothing but an explicit verdict ever
+writes the column. Sources of a verdict, in order: upload `meta.safety`
+(handler rejects anything but `safe`/`unsafe`/absent with a 400 —
+img-mcp is the only writer, this is a tripwire not a defense), the
+`dave_original_prompt` note payload baked into the image's EXIF
+(unparseable values degrade to unknown, never elevate), and (later) the
+`-safety` admin CLI. `dbUpdateImageMetadata` and re-extract **never
+reset** a stored verdict — the UPDATE is guarded so an empty payload
+value keeps the stored one — and re-extract additionally *backfills*
+`'unknown'` (and empty provenance) from the note. No index at gallery
+scale; revisit past ~50k rows.
 
 ### Public IDs
 
@@ -260,7 +286,7 @@ timestamps. Cursor wire format: `?after=YYYY-MM-DD%20HH%3AMM%3ASS.mmm~<id>`
 | `GET /events` | SSE stream | no-cache |
 | `POST /updo` | upload (X-API-Key) | — |
 | `POST /admin/reload` | hot reload (X-API-Key) | — |
-| `POST /admin/reextract` | re-run workflow extraction from stored `workflow_json` under current rules (X-API-Key) — heals rows when extraction improves; preserves provenance/visibility, skips unparseable rows | — |
+| `POST /admin/reextract` | re-run workflow extraction from stored `workflow_json` under current rules (X-API-Key) — heals rows when extraction improves; preserves provenance/visibility/safety, backfills EMPTY provenance + `unknown` safety from the note payload, skips unparseable rows | — |
 | `DELETE /api/images/<id>` | soft-delete → `hidden=1` (X-API-Key); CLI equivalent: `imgsite -delete <id>[,<id>…]` (see "Admin deletion") | — |
 
 Routes serve bytes directly — no redirect hops. We control both ends of
@@ -300,9 +326,16 @@ inside the submitted workflow anyway:
   "reasoning": "The user described a shrew …",
   "llm_generated": false,
   "workflow_name": "zimage-turbo",
-  "network": "libera", "channel": "#dave", "nick": "knivey"
+  "network": "libera", "channel": "#dave", "nick": "knivey",
+  "safety": "safe"
 }
 ```
+
+`safety` (omitempty, safe-site pipeline): `"safe"` or `"unsafe"` when the
+classification resolved, omitted when it didn't (the column then stays
+`'unknown'` — default-deny). The handler rejects any other value with a
+400; img-mcp is the only writer, so this is a tripwire that surfaces
+writer-side bugs, not a defense.
 
 `network`/`channel`/`nick` do not reach img-mcp today — see "img-mcp
 changes" for the (small but real) plumbing they require.
@@ -354,6 +387,18 @@ fallback for prompt fields if EXIF parsing ever fails. `original_prompt`,
 `reasoning`, `llm_generated`, `job_id` are cross-checked between both; a
 mismatch (e.g. different job_id) logs a WARN and prefers EXIF. `meta_source`
 records which side(s) contributed.
+
+`safety` (and, since the safe-site pipeline, note-carried provenance)
+follows the *provenance* pattern, not the quartet one: the meta side's
+verdict wins ('safe'/'unsafe' only; anything else, including `'unknown'`,
+is "no verdict" and never writes the column), and the EXIF note payload
+**backfills only what the meta side left empty**. That one rule serves
+both callers through the shared merge: at upload, "meta omitted it";
+at re-extract — where the stored columns are round-tripped into the
+meta slot by `rowToUploadMeta` — "stored column empty", which yields
+the preserve-non-empty policy for free (a stored verdict, e.g. an
+admin's `-safety` mark, survives a disagreeing note; an `'unknown'`
+heals from it).
 
 ## Importing legacy outputs (`imgsite -import`)
 
@@ -488,7 +533,7 @@ Shared semantics:
    payload prefix `prompt:` (API graph) and `workflow:` (UI graph, present
    when `save_workflow_as_json=true`; ignored by us). Strip trailing NUL.
 3. **Graph traversal** (`workflow.go`) — class_type-keyed, ID-agnostic:
-   - `dave_original_prompt` node → JSON payload → original prompt, llm_generated, job_id, reasoning
+   - `dave_original_prompt` node → JSON payload → original prompt, llm_generated, job_id, reasoning; optional safe-site fields `network`/`channel`/`nick` and `safety` (verdict-gated: only `safe`/`unsafe` parse, anything else degrades to empty)
    - sampler classes `KSampler`, `KSamplerAdvanced` (+ future additions) → seed/steps/cfg/sampler/scheduler/denoise; follow `positive`/`negative` edge refs (2-tuples `[nodeID, slot]`)
    - negative endpoint `ConditioningZeroOut`/`ConditioningCombine` ⇒ no text; `CLIPTextEncode.text` ⇒ negative text
    - loader classes by case-insensitive PREFIX on `class_type`

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/url"
@@ -258,6 +259,161 @@ func TestUploadMergePolicy(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestMergeUploadSafety pins the merge-side safety policy: the upload
+// meta side is preferred (it is also the slot the re-extract
+// round-trip uses to PRESERVE a stored verdict — see rowToUploadMeta),
+// the EXIF note backfills only when the meta side carries no verdict,
+// and invalid values never write the column. The handler rejects
+// invalid client input with a 400 (TestSafetyUploadHandler); the merge
+// treating leftovers as absent is the second layer, so a hand-built
+// meta can never smuggle a bogus verdict into a row.
+func TestMergeUploadSafety(t *testing.T) {
+	tests := []struct {
+		name       string
+		metaSafety string
+		noteSafety string
+		want       string
+	}{
+		{"MetaSafe", "safe", "", safetySafe},
+		{"MetaUnsafe", "unsafe", "", safetyUnsafe},
+		{"MetaInvalidIgnored", "banana", "", ""},
+		{"MetaUnknownIsNotAVerdict", "unknown", "", ""},
+		{"NoteBackfillsAbsentMeta", "", "safe", safetySafe},
+		{"NoteBackfillsUnknownMeta", "unknown", "unsafe", safetyUnsafe},
+		{"NoteInvalidNeverWrites", "", "banana", ""},
+		{"MetaWinsOverConflictingNote", "safe", "unsafe", safetySafe},
+		{"Neither", "", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			meta := UploadMeta{Safety: tt.metaSafety}
+			md := extractedMetadata{Safety: tt.noteSafety}
+			merged := mergeUploadMetadata(meta, md, true)
+			assert.Equal(t, tt.want, merged.Safety)
+		})
+	}
+}
+
+// TestSafetyUploadHandlerValidation pins the upload-side tripwire:
+// img-mcp is the only writer, so a meta.safety that isn't exactly
+// 'safe'/'unsafe' (or absent) is a protocol violation — rejected with
+// a 400 rather than silently stored. 'unknown' is rejected too: it is
+// the column's default, not a verdict a writer may assert.
+func TestSafetyUploadHandlerValidation(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		meta       string
+		wantStatus int
+		wantSafety string
+	}{
+		{"AbsentMetaAllowed", "", http.StatusCreated, safetyUnknown},
+		{"EmptyObjectAllowed", `{}`, http.StatusCreated, safetyUnknown},
+		{"SafeAccepted", `{"safety":"safe"}`, http.StatusCreated, safetySafe},
+		{"UnsafeAccepted", `{"safety":"unsafe"}`, http.StatusCreated, safetyUnsafe},
+		{"BananaRejected", `{"safety":"banana"}`, http.StatusBadRequest, ""},
+		{"UnknownRejected", `{"safety":"unknown"}`, http.StatusBadRequest, ""},
+		{"CaseSensitiveRejected", `{"safety":"SAFE"}`, http.StatusBadRequest, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			app := newTestApp(t, testConfig())
+			ts := newTestServer(t, app)
+
+			resp := doUpload(t, ts, testAPIKey, uploadParts{hasFile: true, filename: "x.png", data: pngBytes("x"), meta: tt.meta})
+
+			assert.Equal(t, tt.wantStatus, resp.StatusCode)
+			if tt.wantStatus != http.StatusCreated {
+				return
+			}
+			ur := decodeUploadResponse(t, resp)
+			img, err := dbGetImageByID(app.db, ur.ID)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantSafety, img.Safety)
+		})
+	}
+}
+
+// safetyNoteJSON builds a dave_original_prompt note payload carrying
+// provenance and (optionally) a safety verdict — the shape img-mcp
+// bakes into the image post-generation once the safe-site pipeline
+// ships. safety == "" omits the field (legacy notes).
+func safetyNoteJSON(safety string) string {
+	note := map[string]any{
+		"prompt": "a shrew on main street", "llm_generated": true, "job_id": "safex01",
+		"network": "libera", "channel": "#dave", "nick": "knivey",
+	}
+	if safety != "" {
+		note["safety"] = safety
+	}
+	b, err := json.Marshal(note)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
+// TestReextractBackfillsEmptyProvenanceAndSafety — direction 1 of the
+// re-extract healing contract: a row whose provenance columns are empty
+// and whose safety is still 'unknown' heals from the note payload the
+// img-mcp EXIF rewrite baked into the workflow.
+func TestReextractBackfillsEmptyProvenanceAndSafety(t *testing.T) {
+	db := setupTestDB(t)
+	require.NoError(t, dbInsertImage(db, &dbImage{
+		ID: "rex0001", SHA256: strings.Repeat("0a", 32), Filename: "x.webp",
+		MimeType: "image/webp", SizeBytes: 1, CreatedAt: "2026-09-26 00:00:00",
+		ThumbStatus: thumbStatusPending, Safety: safetyUnknown,
+		WorkflowJSON: syntheticGraph("ConditioningZeroOut", safetyNoteJSON(safetySafe)),
+		MetaSource:   metaSourceEXIF,
+	}))
+
+	row, err := dbGetImageByID(db, "rex0001")
+	require.NoError(t, err)
+	md, ok := ExtractMetadata(row.WorkflowJSON)
+	require.True(t, ok)
+	merged := mergeUploadMetadata(rowToUploadMeta(row), md, true)
+	applyMergedMetadata(row, merged)
+	require.NoError(t, dbUpdateImageMetadata(db, row))
+
+	healed, err := dbGetImageByID(db, "rex0001")
+	require.NoError(t, err)
+	assert.Equal(t, "libera", ptrValue(healed.Network), "empty network backfilled from the note")
+	assert.Equal(t, "#dave", ptrValue(healed.Channel))
+	assert.Equal(t, "knivey", ptrValue(healed.Nick))
+	assert.Equal(t, safetySafe, healed.Safety, "'unknown' backfilled to the note's verdict")
+}
+
+// TestReextractPreservesNonEmptyProvenanceAndSafety — direction 2:
+// non-empty stored provenance and a stored verdict are never
+// overwritten, even when the note disagrees (the same
+// preserve-and-merge policy as visibility; a stored verdict may be an
+// admin's -safety mark that a stale note must not undo).
+func TestReextractPreservesNonEmptyProvenanceAndSafety(t *testing.T) {
+	db := setupTestDB(t)
+	network, channel, nick := "rizon", "#shrews", "someone"
+	require.NoError(t, dbInsertImage(db, &dbImage{
+		ID: "rex0002", SHA256: strings.Repeat("0b", 32), Filename: "x.webp",
+		MimeType: "image/webp", SizeBytes: 1, CreatedAt: "2026-09-26 00:00:00",
+		ThumbStatus: thumbStatusPending, Safety: safetyUnsafe,
+		Network: &network, Channel: &channel, Nick: &nick,
+		WorkflowJSON: syntheticGraph("ConditioningZeroOut", safetyNoteJSON(safetySafe)),
+		MetaSource:   metaSourceUploadAndEXIF,
+	}))
+
+	row, err := dbGetImageByID(db, "rex0002")
+	require.NoError(t, err)
+	md, ok := ExtractMetadata(row.WorkflowJSON)
+	require.True(t, ok)
+	merged := mergeUploadMetadata(rowToUploadMeta(row), md, true)
+	applyMergedMetadata(row, merged)
+	require.NoError(t, dbUpdateImageMetadata(db, row))
+
+	healed, err := dbGetImageByID(db, "rex0002")
+	require.NoError(t, err)
+	assert.Equal(t, "rizon", ptrValue(healed.Network), "stored provenance survives a disagreeing note")
+	assert.Equal(t, "#shrews", ptrValue(healed.Channel))
+	assert.Equal(t, "someone", ptrValue(healed.Nick))
+	assert.Equal(t, safetyUnsafe, healed.Safety, "stored verdict survives a disagreeing note")
 }
 
 func TestUploadUnparseableEmbeddedWorkflowFallsBackToMeta(t *testing.T) {

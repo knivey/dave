@@ -169,6 +169,51 @@ func TestExtractMetadataNotePayload(t *testing.T) {
 	assert.Equal(t, "because", md.Reasoning)
 }
 
+// TestSafetyNotePayload pins the extended note contract: the
+// dave_original_prompt JSON may carry provenance (network/channel/nick)
+// and a safety verdict alongside the quartet — the payload shape the
+// img-mcp EXIF-note rewrite bakes in with the safe-site pipeline. A
+// verdict that isn't exactly 'safe'/'unsafe' degrades to empty
+// (== unknown): a note can never invent or elevate a classification.
+func TestSafetyNotePayload(t *testing.T) {
+	t.Run("ProvenanceAndVerdictParse", func(t *testing.T) {
+		note := `{"prompt":"a cat","llm_generated":true,"job_id":"j1","network":"libera","channel":"#dave","nick":"knivey","safety":"safe"}`
+		md, ok := ExtractMetadata(syntheticGraph("ConditioningZeroOut", note))
+		require.True(t, ok)
+		assert.Equal(t, "libera", md.Network)
+		assert.Equal(t, "#dave", md.Channel)
+		assert.Equal(t, "knivey", md.Nick)
+		assert.Equal(t, safetySafe, md.Safety)
+		// The quartet is unaffected by the new fields.
+		assert.Equal(t, "a cat", md.OriginalPrompt)
+		assert.True(t, md.LLMGenerated)
+		assert.Equal(t, "j1", md.JobID)
+	})
+	t.Run("InvalidVerdictDegradesToEmpty", func(t *testing.T) {
+		note := `{"prompt":"a cat","job_id":"j1","network":"libera","safety":"banana"}`
+		md, ok := ExtractMetadata(syntheticGraph("ConditioningZeroOut", note))
+		require.True(t, ok)
+		assert.Empty(t, md.Safety, "an unparseable verdict is not information — degrade, never elevate")
+		// Provenance still parses around the bad verdict.
+		assert.Equal(t, "libera", md.Network)
+	})
+	t.Run("UnknownIsNotAVerdict", func(t *testing.T) {
+		note := `{"prompt":"a cat","job_id":"j1","safety":"unknown"}`
+		md, ok := ExtractMetadata(syntheticGraph("ConditioningZeroOut", note))
+		require.True(t, ok)
+		assert.Empty(t, md.Safety, "'unknown' carries no information; only safe/unsafe backfill")
+	})
+	t.Run("LegacyNoteWithoutNewFields", func(t *testing.T) {
+		note := `{"prompt":"a cat","llm_generated":true,"job_id":"j1"}`
+		md, ok := ExtractMetadata(syntheticGraph("ConditioningZeroOut", note))
+		require.True(t, ok)
+		assert.Empty(t, md.Network)
+		assert.Empty(t, md.Channel)
+		assert.Empty(t, md.Nick)
+		assert.Empty(t, md.Safety)
+	})
+}
+
 func TestExtractMetadataNoteParseFailureDegrades(t *testing.T) {
 	md, ok := ExtractMetadata(syntheticGraph("ConditioningZeroOut", "this is not json"))
 

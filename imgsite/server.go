@@ -198,11 +198,15 @@ func (a *App) handleAdminReload(w http.ResponseWriter, r *http.Request) {
 // (UnetLoaderGGUF/CLIPLoaderGGUF) were missed by the original exact-match
 // rules (production: i.shrews.xyz/Xr8HDUL, Sep 2026) — re-extract heals
 // existing rows without re-uploading. The merge policy is reused verbatim:
-// fresh-EXIF wins graph-derived fields, stored provenance round-trips, and
-// prompt-field mismatches WARN + prefer the fresh side. Only metadata
-// columns are rewritten (visibility, thumbs, file identity, and timestamps
-// are untouched); no SSE is published (cards change under the user on next
-// load, which is acceptable for an admin-triggered maintenance action).
+// fresh-EXIF wins graph-derived fields, stored provenance and safety
+// verdicts round-trip (never overwritten), and prompt-field mismatches
+// WARN + prefer the fresh side. It also heals rows whose upload meta was
+// incomplete: EMPTY provenance (network/channel/nick) and an 'unknown'
+// safety backfill from the note payload the img-mcp EXIF rewrite bakes
+// into the workflow. Only metadata columns are rewritten (visibility,
+// thumbs, file identity, and timestamps are untouched); no SSE is
+// published (cards change under the user on next load, which is
+// acceptable for an admin-triggered maintenance action).
 func (a *App) handleAdminReextract(w http.ResponseWriter, r *http.Request) {
 	if !checkAPIKey(a.getConfig().Auth.APIKey, r.Header.Get(apiKeyHeader)) {
 		logger.Warn("admin re-extract rejected: bad or missing api key", "remote_addr", r.RemoteAddr)

@@ -209,14 +209,17 @@ func TestSubstringFTSMigration(t *testing.T) {
 
 	// Rebuild path: roll back to v1 (before the side table), insert a
 	// row through 001's triggers only, re-run 002, and assert the
-	// 'rebuild' command picked the pre-existing row up.
+	// 'rebuild' command picked the pre-existing row up. The insert is
+	// raw SQL on purpose: a row that predates migration 002 was written
+	// by a binary that also predated 003's safety column (and any later
+	// column), so dbInsertImage — which always targets the CURRENT
+	// schema — must not be used here.
 	require.NoError(t, goose.DownTo(db.DB, "migrations", 1))
-	require.NoError(t, dbInsertImage(db, &dbImage{
-		ID: "sub0001", SHA256: strings.Repeat("05", 32), Filename: "x.png",
-		MimeType: "image/png", SizeBytes: 1, CreatedAt: "2026-09-24 00:00:00",
-		ThumbStatus: thumbStatusPending, OriginalPrompt: "a cowshrew grazes",
-		MetaSource: metaSourceUpload,
-	}))
+	_, err := db.Exec(`INSERT INTO images
+		(id, sha256, filename, mime_type, size_bytes, created_at, thumb_status, original_prompt, meta_source)
+		VALUES ('sub0001', ?, 'x.png', 'image/png', 1, '2026-09-24 00:00:00', 'pending', 'a cowshrew grazes', 'upload')`,
+		strings.Repeat("05", 32))
+	require.NoError(t, err)
 	require.NoError(t, goose.Up(db.DB, "migrations"))
 
 	var n int
@@ -235,7 +238,7 @@ func TestSubstringFTSMigration(t *testing.T) {
 		`SELECT COUNT(*) FROM images_substring_fts WHERE images_substring_fts MATCH '"plain"'`))
 	assert.Equal(t, 1, n, "insert trigger feeds the trigram table")
 
-	_, err := db.Exec(`UPDATE images SET enhanced_prompt = 'totally cowshrew here' WHERE id = ?`, "sub0002")
+	_, err = db.Exec(`UPDATE images SET enhanced_prompt = 'totally cowshrew here' WHERE id = ?`, "sub0002")
 	require.NoError(t, err)
 	require.NoError(t, db.Get(&n,
 		`SELECT COUNT(*) FROM images_substring_fts WHERE images_substring_fts MATCH '"cowshrew"'`))
@@ -340,6 +343,87 @@ func TestDbHideImageConcurrentSingleWinner(t *testing.T) {
 		require.NoError(t, db.Get(&hidden, `SELECT hidden FROM images WHERE id = ?`, id))
 		assert.True(t, hidden, "round %d: row must end hidden regardless of arrival order", i)
 	}
+}
+
+// TestSafetyMigrationAddsColumn pins migration 003: the images.safety
+// column exists, NOT NULL, defaulting to 'unknown' (default-deny for
+// the safe site — unclassified rows stay invisible there until a
+// verdict lands). Three probes: a raw INSERT omitting the column must
+// land 'unknown' (the DEFAULT itself), dbInsertImage must normalize a
+// zero-value Safety to 'unknown' (the Go-side invariant: ” never
+// reaches the DB), and real verdicts round-trip.
+func TestSafetyMigrationAddsColumn(t *testing.T) {
+	db := setupTestDB(t)
+
+	// The migration default itself: a raw INSERT omitting safety.
+	_, err := db.Exec(`INSERT INTO images
+		(id, sha256, filename, mime_type, size_bytes, created_at)
+		VALUES ('saf0001', ?, 'x.png', 'image/png', 1, '2026-09-26 00:00:00')`,
+		strings.Repeat("07", 32))
+	require.NoError(t, err)
+	var s string
+	require.NoError(t, db.Get(&s, `SELECT safety FROM images WHERE id = 'saf0001'`))
+	assert.Equal(t, safetyUnknown, s, "omitted column must take the DEFAULT 'unknown'")
+
+	// dbInsertImage: zero-value struct normalizes to 'unknown'; verdicts
+	// round-trip.
+	for _, tt := range []struct {
+		id     string
+		safety string
+		want   string
+	}{
+		{"saf0002", "", safetyUnknown},
+		{"saf0003", safetySafe, safetySafe},
+		{"saf0004", safetyUnsafe, safetyUnsafe},
+	} {
+		require.NoError(t, dbInsertImage(db, &dbImage{
+			ID: tt.id, SHA256: strings.Repeat("08", 32), Filename: "x.png",
+			MimeType: "image/png", SizeBytes: 1, CreatedAt: "2026-09-26 00:00:00",
+			ThumbStatus: thumbStatusPending, Safety: tt.safety,
+		}), "insert %s", tt.id)
+		got, err := dbGetImageByID(db, tt.id)
+		require.NoError(t, err)
+		assert.Equal(t, tt.want, got.Safety, "id %s", tt.id)
+	}
+
+	// NOT NULL: the column can never hold NULL.
+	var notnull int
+	require.NoError(t, db.Get(&notnull,
+		`SELECT "notnull" FROM pragma_table_info('images') WHERE name = 'safety'`))
+	assert.Equal(t, 1, notnull, "safety must be NOT NULL — NULL never occurs")
+}
+
+// TestSafetyUpdatePreservedWhenPayloadEmpty pins the
+// dbUpdateImageMetadata guard: an update payload whose Safety is ""
+// (a hand-built struct that never went through applyMergedMetadata)
+// must not clobber a stored verdict, while an explicit verdict — how
+// the re-extract backfill path writes one — still lands.
+func TestSafetyUpdatePreservedWhenPayloadEmpty(t *testing.T) {
+	db := setupTestDB(t)
+	require.NoError(t, dbInsertImage(db, &dbImage{
+		ID: "safupd1", SHA256: strings.Repeat("09", 32), Filename: "x.png",
+		MimeType: "image/png", SizeBytes: 1, CreatedAt: "2026-09-26 00:00:00",
+		ThumbStatus: thumbStatusPending, Safety: safetySafe,
+	}))
+
+	img, err := dbGetImageByID(db, "safupd1")
+	require.NoError(t, err)
+
+	// Empty payload safety: the stored 'safe' survives.
+	img.Safety = ""
+	img.OriginalPrompt = "rewritten by re-extract"
+	require.NoError(t, dbUpdateImageMetadata(db, img))
+	got, err := dbGetImageByID(db, "safupd1")
+	require.NoError(t, err)
+	assert.Equal(t, safetySafe, got.Safety, "empty update payload must never clobber a verdict")
+	assert.Equal(t, "rewritten by re-extract", got.OriginalPrompt, "sanity: the update itself did run")
+
+	// Explicit verdict still writes (the re-extract backfill shape).
+	img.Safety = safetyUnsafe
+	require.NoError(t, dbUpdateImageMetadata(db, img))
+	got, err = dbGetImageByID(db, "safupd1")
+	require.NoError(t, err)
+	assert.Equal(t, safetyUnsafe, got.Safety, "explicit verdicts update (backfill)")
 }
 
 // TestGalleryOrdersMillisecondPrecise pins why created_at carries

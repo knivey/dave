@@ -13,6 +13,15 @@ import (
 
 // ─── Synthetic container/TIFF builders (adversarial fixtures) ─────────────
 
+// fixtureExifTagModel is the EXIF Model tag (0x0110) — where production
+// files carry the workflow payload. Fixture-only on purpose: the
+// production extractor is tag-agnostic (tiffASCIIPayloads scans every
+// ASCII entry, so the number documents the production shape rather
+// than filtering anything), and it lives next to the builder that
+// encodes it instead of in extract.go — the same treatment img-mcp
+// gave its twin constant.
+const fixtureExifTagModel = 0x0110
+
 // buildTIFF encodes a one-entry IFD0 (Model tag, ASCII) TIFF in either
 // byte order, mirroring the verified production structure.
 func buildTIFF(payload string, littleEndian bool) []byte {
@@ -28,7 +37,7 @@ func buildTIFF(payload string, littleEndian bool) []byte {
 	bo.PutUint32(header[4:8], 8) // IFD0 immediately follows the header
 
 	entry := make([]byte, 12)
-	bo.PutUint16(entry[0:2], exifTagModel)
+	bo.PutUint16(entry[0:2], fixtureExifTagModel)
 	bo.PutUint16(entry[2:4], tiffTypeASCII)
 	bo.PutUint32(entry[4:8], uint32(len(payload)))
 	bo.PutUint32(entry[8:12], 8+2+12+4) // value follows header+count+entry+next

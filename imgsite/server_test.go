@@ -262,7 +262,11 @@ func TestOrigRouteDBErrorReturns500(t *testing.T) {
 }
 
 func TestThumbRouteMatrix(t *testing.T) {
-	app := newTestApp(t, testConfig())
+	// safeSiteTestConfig (not testConfig): behavior-neutral for the
+	// default-host requests below — the default site is unchanged by
+	// design — and it lets HiddenIs410 assert the 410 through the SAFE
+	// host too, where the row is refused twice over.
+	app := newTestApp(t, safeSiteTestConfig())
 	ts := newTestServer(t, app)
 	cfg := testConfig()
 
@@ -273,6 +277,13 @@ func TestThumbRouteMatrix(t *testing.T) {
 	insertImageWithFile(t, app, "bbbb00b", loadFixture(t, "enhanced.webp")) // stays pending
 	insertImageWithFile(t, app, "cccc00c", loadFixture(t, "plain.webp"), func(img *dbImage) {
 		img.Hidden = true
+		// Hidden on a DISALLOWED network (efnet), deliberately not the
+		// NULL-network shape insertImageWithFile would leave: on the
+		// safe host this row is hidden AND site-invisible, so the 410
+		// below can only come from the hidden check firing FIRST — a
+		// hidden-but-allowed row would 410 under either check order
+		// and discriminate nothing.
+		img.Network = ptrStr("efnet")
 	})
 	require.NoError(t, processThumbJob(app.db, app.store, cfg, "cccc00c"))
 
@@ -296,6 +307,13 @@ func TestThumbRouteMatrix(t *testing.T) {
 	t.Run("HiddenIs410", func(t *testing.T) {
 		resp := fetchPath(t, ts, "/cccc00c/t/small")
 		assert.Equal(t, http.StatusGone, resp.StatusCode)
+		// Through the safe host the same row is hidden AND
+		// disallowed-origin: still 410, proving the hidden check runs
+		// before the site check (a site-check-first order would 404
+		// here — the previous hidden+NULL-network row could not tell
+		// the two apart on a no-safe-site config).
+		status, _ := getPageHost(t, ts, "safe.example.com", "/cccc00c/t/small")
+		assert.Equal(t, http.StatusGone, status)
 	})
 	t.Run("BadSizeTokenIs404", func(t *testing.T) {
 		resp := fetchPath(t, ts, "/aaaa00a/t/huge")
@@ -1105,10 +1123,13 @@ func TestSiteVisibilityFilter(t *testing.T) {
 // asset routes (thumb sizes, original file): an id invisible on the
 // safe site 404s on the safe host exactly like an unknown id — no
 // existence hint — while the same paths serve normally on the default
-// host. The details page's download anchor targets the orig URL (the
-// download attribute is client-side only — there is no separate
-// download route), so the orig assertions cover the download target
-// too.
+// host. Rows cover BOTH branches of the visibility rule: ORIGIN
+// (libera allowed / efnet disallowed / NULL default-denied) and
+// VERDICT (safety='safe' outranking a disallowed origin; an explicit
+// 'unsafe' denied exactly like 'unknown'). The details page's
+// download anchor targets the orig URL (the download attribute is
+// client-side only — there is no separate download route), so the
+// orig assertions cover the download target too.
 func TestAssetRoutesSiteMatrix(t *testing.T) {
 	app := newTestApp(t, safeSiteTestConfig())
 	ts := newTestServer(t, app)
@@ -1126,6 +1147,16 @@ func TestAssetRoutesSiteMatrix(t *testing.T) {
 		img.Network = ptrStr("libera") // allowed origin: visible on safe
 	})
 	require.NoError(t, processThumbJob(app.db, app.store, cfg, "libera1"))
+	insertImageWithFile(t, app, "efsafe1", loadFixture(t, "plain.webp"), func(img *dbImage) {
+		img.Network = ptrStr("efnet") // disallowed origin, safe VERDICT: the verdict branch must outrank the origin
+		img.Safety = safetySafe
+	})
+	require.NoError(t, processThumbJob(app.db, app.store, cfg, "efsafe1"))
+	insertImageWithFile(t, app, "efunsaf", loadFixture(t, "plain.webp"), func(img *dbImage) {
+		img.Network = ptrStr("efnet") // disallowed origin, unsafe VERDICT: denied exactly like unknown
+		img.Safety = safetyUnsafe
+	})
+	require.NoError(t, processThumbJob(app.db, app.store, cfg, "efunsaf"))
 
 	assetPaths := func(id string) []string {
 		return []string{
@@ -1155,6 +1186,88 @@ func TestAssetRoutesSiteMatrix(t *testing.T) {
 		for _, path := range assetPaths("libera1") {
 			status, _ := getPageHost(t, ts, "safe.example.com", path)
 			assert.Equal(t, http.StatusOK, status, path)
+		}
+	})
+	t.Run("VerdictSafeServesOnSafeHost", func(t *testing.T) {
+		// The safety branch of the visibility rule on the ASSET routes:
+		// safety='safe' outranks a disallowed origin (efnet here), so
+		// the verdict row serves on the safe host exactly like an
+		// allowed-origin row does.
+		for _, path := range assetPaths("efsafe1") {
+			status, _ := getPageHost(t, ts, "safe.example.com", path)
+			assert.Equal(t, http.StatusOK, status, path)
+		}
+	})
+	t.Run("VerdictUnsafeIs404OnSafeHostServesOnDefault", func(t *testing.T) {
+		// An explicit 'unsafe' verdict on a disallowed origin is denied
+		// exactly like 'unknown' (efnet01 above) — default-deny covers
+		// both non-affirmative verdicts — while the default host is
+		// unchanged.
+		for _, path := range assetPaths("efunsaf") {
+			status, _ := getPageHost(t, ts, "safe.example.com", path)
+			assert.Equal(t, http.StatusNotFound, status, path)
+			status, _ = getPage(t, ts.URL, path)
+			assert.Equal(t, http.StatusOK, status, path)
+		}
+	})
+}
+
+// TestAssetRoutesHiddenVsInvisibleStatuses pins, at ROUTE level, that
+// the asset routes' two refusal statuses stay distinct and in the
+// right order under a safe-site config: a hidden row answers 410 on
+// BOTH hosts (the hidden check runs before the site check — a
+// soft-deleted URL was already pasted into IRC and must say gone, not
+// silently 404), while a merely-invisible row answers 404 on the safe
+// host (no existence hint — and never 410, which is the hidden-only
+// admission) and serves normally on the default host. The site matrix
+// above covers the invisible statuses; TestDeletedImageExcludedEverywhere
+// covers hidden 410s only under a NO-safe-site config. This test is
+// the discriminating 2x2: the hidden row is deliberately on a
+// disallowed network too, so a site-check-first (or hidden-check-
+// dropped) bug turns its safe-host 410 into a 404 and fails here.
+func TestAssetRoutesHiddenVsInvisibleStatuses(t *testing.T) {
+	app := newTestApp(t, safeSiteTestConfig())
+	ts := newTestServer(t, app)
+	cfg := testConfig()
+
+	// Real files + ready thumbs on both rows so any non-refusal status
+	// is attributable to visibility alone.
+	insertImageWithFile(t, app, "hidef01", loadFixture(t, "plain.webp"), func(img *dbImage) {
+		img.Hidden = true
+		img.Network = ptrStr("efnet") // hidden AND disallowed: 410 must come from the hidden check alone
+	})
+	require.NoError(t, processThumbJob(app.db, app.store, cfg, "hidef01"))
+	insertImageWithFile(t, app, "invef01", loadFixture(t, "plain.webp"), func(img *dbImage) {
+		img.Network = ptrStr("efnet") // invisible on the safe host, served on the default host
+	})
+	require.NoError(t, processThumbJob(app.db, app.store, cfg, "invef01"))
+
+	assetPaths := func(id string) []string {
+		return []string{
+			"/" + id + "/t/small",
+			"/" + id + "/t/display",
+			"/" + id + "/orig/" + id + ".webp",
+		}
+	}
+
+	t.Run("HiddenIs410OnBothHosts", func(t *testing.T) {
+		for _, path := range assetPaths("hidef01") {
+			status, _ := getPage(t, ts.URL, path)
+			assert.Equal(t, http.StatusGone, status, "default host %s", path)
+			status, _ = getPageHost(t, ts, "safe.example.com", path)
+			assert.Equal(t, http.StatusGone, status, "safe host %s (hidden fires first despite the disallowed origin)", path)
+		}
+	})
+	t.Run("InvisibleIs404Not410OnSafeHost", func(t *testing.T) {
+		for _, path := range assetPaths("invef01") {
+			status, _ := getPageHost(t, ts, "safe.example.com", path)
+			assert.Equal(t, http.StatusNotFound, status, "safe host %s: no existence hint, and 410 stays reserved for hidden rows", path)
+		}
+	})
+	t.Run("InvisibleServesOnDefaultHost", func(t *testing.T) {
+		for _, path := range assetPaths("invef01") {
+			status, _ := getPage(t, ts.URL, path)
+			assert.Equal(t, http.StatusOK, status, "default host %s", path)
 		}
 	})
 }

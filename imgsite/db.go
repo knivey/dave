@@ -191,6 +191,25 @@ func dbGetImageByID(db *sqlx.DB, id string) (*dbImage, error) {
 	return &img, nil
 }
 
+// dbGetImageSiteVisibility fetches exactly the two columns the
+// safe-site visibility flag consults — network and safety; siteCanSee
+// reads nothing else. The thumb-ready publish path re-reads its row
+// through this (one indexed SELECT per thumbnail completion) instead
+// of dbGetImageByID's SELECT *, which drags workflow_json —
+// potentially tens of KB per row — along for two scalars' worth of
+// answer. The returned dbImage is PARTIAL by design: only Network and
+// Safety are populated, and callers must not reach for other fields.
+// Returns sql.ErrNoRows when the id is unknown (publishThumbReady
+// maps that to fail-closed: the event is withheld from the safe site).
+func dbGetImageSiteVisibility(db *sqlx.DB, id string) (*dbImage, error) {
+	var img dbImage
+	err := db.Get(&img, `SELECT network, safety FROM images WHERE id = ?`, id)
+	if err != nil {
+		return nil, err
+	}
+	return &img, nil
+}
+
 func dbImageIDExists(db *sqlx.DB, id string) (bool, error) {
 	var exists bool
 	err := db.Get(&exists, `SELECT EXISTS(SELECT 1 FROM images WHERE id = ?)`, id)

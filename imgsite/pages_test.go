@@ -690,6 +690,25 @@ func TestSiteCanSee(t *testing.T) {
 		{"VerdictOutranksDisallowedNetwork", safe, dbImage{Network: ptrStr("efnet"), Safety: safetySafe}, true},
 		{"UnsafeVerdictOnAllowedOriginStillVisible", safe, dbImage{Network: ptrStr("libera"), Safety: safetyUnsafe}, true},
 		{"ZeroValueSafetyBehavesAsUnknown", safe, dbImage{Network: ptrStr("efnet"), Safety: ""}, false},
+		// The one hand-built Safe&&empty siteCtx in the package.
+		// Production can never construct this shape: safeSiteCtx — the
+		// ONLY Safe=true constructor — always pairs Safe with a
+		// lowercased copy of a VALIDATED allowed_networks (loadConfig
+		// refuses an empty one at load AND reload), so Safe&&empty
+		// exists only in tests. The correct answer here is "no
+		// restriction", mirroring siteVisibilityFilter's degenerate
+		// case (empty networks = no fragment = no conjunct): the
+		// per-row twin and the SQL twin must agree for ANY
+		// constructible siteCtx, or a row could be navigable in SQL
+		// yet 404 at the page (or vice versa). The fail-closed
+		// direction lives at the boundaries that CAN actually fire:
+		// config validation rejects the half-configured safe site, and
+		// the runtime degenerate paths (a nil *SafeSiteConfig in
+		// allowsNetwork, publishThumbReady's failed visibility
+		// re-read) each withhold from the safe site. want=true pins
+		// that symmetric no-op; flipping it would make the twins
+		// disagree for hand-built ctxs — exactly the drift this case
+		// exists to catch.
 		{"EmptyNetworksSliceMirrorsSQLGuard", siteCtx{Safe: true}, dbImage{Network: ptrStr("efnet")}, true},
 	}
 	for _, tt := range tests {

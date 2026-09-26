@@ -402,30 +402,22 @@ var (
 // required for stable OFFSET pagination.
 const searchBM25Order = `ORDER BY bm25(images_fts, 8.0, 1.0), images_fts.rowid`
 
-// dbSearchFTSTier runs one of the two FTS tiers of the three-tier
-// search.
-//
-//	tier 1: rows whose ORIGINAL prompt column matched
-//	tier 2: rows that matched anywhere EXCEPT tier 1 — via
-//	        rowid NOT IN (tier-1 subquery), because NOT is a binary
-//	        operator in FTS5 query syntax and cannot prefix a column
-//	        filter inside the MATCH string
-//
-// Both tiers join back to images (external-content FTS exposes only
-// its own columns) for the hidden=0 filter and the card columns, and
-// both request a snippet from the column that defines their tier.
-//
-// Site awareness: the safe site's visibility fragment appends to the
-// OUTER query as one more AND conjunct on the images row — never into
-// the MATCH expression or the NOT IN subquery — so tier semantics and
-// the trigram-superset argument are untouched (the predicate intersects
-// results after retrieval).
-func dbSearchFTSTier(db *sqlx.DB, tier int, expr, tier1Expr string, offset, limit, snippetTokens int, sc siteCtx) ([]searchHit, error) {
+// buildFTSTierQuery assembles one FTS tier's SQL and bound args.
+// Factored out of dbSearchFTSTier — mirroring buildLikeTierQuery — so
+// the shape test can pin the exact production query text: the DEFAULT
+// site's query carries no site predicate at all (no fragment, no site
+// args), and the safe site's fragment rides as one more outer AND
+// conjunct on the images row, after hidden=0 and before ORDER BY,
+// with the MATCH expressions and tier 2's NOT IN subquery untouched.
+// Placeholder order is positionally load-bearing: snippet params, the
+// tier's MATCH expression(s), THEN the site fragment's args, then
+// limit/offset.
+func buildFTSTierQuery(tier int, expr, tier1Expr string, offset, limit, snippetTokens int, sc siteCtx) (string, []any) {
 	frag, fargs := siteVisibilityFilter(sc)
 	// Shared arg prefix: the four snippet() parameters, then the
 	// tier's MATCH expressions. The site fragment's args splice AFTER
 	// those (its conjunct sits after them in the SQL text) and BEFORE
-	// limit/offset — placeholder order is positionally load-bearing.
+	// limit/offset.
 	args := []any{snippetStartMarker, snippetEndMarker, snippetEllipsis, snippetTokens}
 	var query string
 	if tier == 1 {
@@ -451,6 +443,31 @@ func dbSearchFTSTier(db *sqlx.DB, tier int, expr, tier1Expr string, offset, limi
 	}
 	args = append(args, fargs...)
 	args = append(args, limit, offset)
+	return query, args
+}
+
+// dbSearchFTSTier runs one of the two FTS tiers of the three-tier
+// search.
+//
+//	tier 1: rows whose ORIGINAL prompt column matched
+//	tier 2: rows that matched anywhere EXCEPT tier 1 — via
+//	        rowid NOT IN (tier-1 subquery), because NOT is a binary
+//	        operator in FTS5 query syntax and cannot prefix a column
+//	        filter inside the MATCH string
+//
+// Both tiers join back to images (external-content FTS exposes only
+// its own columns) for the hidden=0 filter and the card columns, and
+// both request a snippet from the column that defines their tier.
+//
+// Site awareness: the safe site's visibility fragment appends to the
+// OUTER query as one more AND conjunct on the images row — never into
+// the MATCH expression or the NOT IN subquery — so tier semantics and
+// the trigram-superset argument are untouched (the predicate
+// intersects results after retrieval). Query text and arg order are
+// assembled by buildFTSTierQuery, whose shape is pinned in
+// search_test.go.
+func dbSearchFTSTier(db *sqlx.DB, tier int, expr, tier1Expr string, offset, limit, snippetTokens int, sc siteCtx) ([]searchHit, error) {
+	query, args := buildFTSTierQuery(tier, expr, tier1Expr, offset, limit, snippetTokens, sc)
 	var rows []searchRow
 	if err := db.Select(&rows, query, args...); err != nil {
 		return nil, err

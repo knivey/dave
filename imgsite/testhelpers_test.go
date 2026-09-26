@@ -110,13 +110,21 @@ func getPageHost(t *testing.T, ts *httptest.Server, host, path string) (int, str
 //	sit0005 efnet network, safety='safe' — verdict outranks the
 //	         disallowed origin; tier 3 (substring-only "cowgribble",
 //	         invisible to FTS prefix terms → trigram-accelerated scan)
-//	sit0006 libera network, hidden — invisible on BOTH sites
+//	sit0006 efnet network, hidden — invisible on BOTH sites; on the
+//	         disallowed origin so the 410-first pins (details page,
+//	         asset routes) discriminate check order: a site-check-
+//	         first bug would 404 it on the safe host, not 410
 //
 // Resulting visibility: safe host sees {sit0001, sit0004, sit0005};
 // default host sees all five non-hidden rows.
 func seedSiteMatrix(t *testing.T, app *App) {
 	t.Helper()
 	insertImage(t, app, "sit0001", "2026-09-26 01:00:00", func(img *dbImage) {
+		// Explicit libera, not the insertImage default: this row's
+		// whole role is "safe-visible by ORIGIN", so the fixture must
+		// not lean on an implicit helper value that a future edit to
+		// insertImage could silently change.
+		img.Network = ptrStr("libera")
 		img.OriginalPrompt = "gribble parade one"
 	})
 	insertImage(t, app, "sit0002", "2026-09-26 02:00:00", func(img *dbImage) {
@@ -141,6 +149,11 @@ func seedSiteMatrix(t *testing.T, app *App) {
 	})
 	insertImage(t, app, "sit0006", "2026-09-26 06:00:00", func(img *dbImage) {
 		img.Hidden = true
+		// efnet, not the helper's default libera: hidden AND
+		// disallowed, so HiddenIs410FirstEverywhere (pages) actually
+		// discriminates — under a site-check-first order this row
+		// would 404 on the safe host instead of 410.
+		img.Network = ptrStr("efnet")
 		img.OriginalPrompt = "gribble hidden six"
 	})
 }

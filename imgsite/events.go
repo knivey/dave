@@ -732,13 +732,15 @@ func (a *App) publishThumbReady(id string) {
 	}
 	// The worker seam hands over only the id, so the row is re-read
 	// here for the visibility flag: one indexed SELECT per thumbnail
-	// completion, the same order of magnitude as the upload-path
-	// publish it accompanies. On lookup failure the event is withheld
-	// from the safe site only (fail closed — a missed thumb swap
-	// degrades through the client's existing shimmer-retry path, while
-	// a leaked event cannot be unsent); the default site still gets it.
+	// completion, narrowed to the two columns siteCanSee consults via
+	// dbGetImageSiteVisibility (network + safety) instead of a full
+	// row whose workflow_json can run to tens of KB. On lookup failure
+	// the event is withheld from the safe site only (fail closed — a
+	// missed thumb swap degrades through the client's existing
+	// shimmer-retry path, while a leaked event cannot be unsent); the
+	// default site still gets it.
 	safeVisible := false
-	if img, err := dbGetImageByID(a.db, id); err != nil {
+	if img, err := dbGetImageSiteVisibility(a.db, id); err != nil {
 		loggerEvents.Warn("thumb-ready visibility lookup failed; withholding from safe site", "id", id, "error", err)
 	} else {
 		safeVisible = siteCanSee(safeSiteCtx(a.getConfig().SafeSite), img)

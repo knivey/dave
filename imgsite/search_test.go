@@ -1145,6 +1145,7 @@ func TestSearchTier3SiteFilteredBothShapes(t *testing.T) {
 		// only via substring ("cowgribble" is invisible to FTS prefix
 		// terms).
 		insertImage(t, app, "vis0001", "2026-09-26 01:00:00", func(img *dbImage) {
+			img.Network = ptrStr("libera") // explicit: the row's safe-host visibility hinges on the allowed origin
 			img.OriginalPrompt = "a cowgribble grazes"
 		})
 		insertImage(t, app, "inv0001", "2026-09-26 02:00:00", func(img *dbImage) {
@@ -1167,6 +1168,7 @@ func TestSearchTier3SiteFilteredBothShapes(t *testing.T) {
 		// the plain LIKE scan. Both rows carry "qq" mid-word (xqqx /
 		// yqqy — no token starts with qq, so FTS tiers see nothing).
 		insertImage(t, app, "vis0002", "2026-09-26 03:00:00", func(img *dbImage) {
+			img.Network = ptrStr("libera") // explicit: the row's safe-host visibility hinges on the allowed origin
 			img.OriginalPrompt = "an xqqx fragment"
 		})
 		insertImage(t, app, "inv0002", "2026-09-26 04:00:00", func(img *dbImage) {
@@ -1225,6 +1227,68 @@ func TestBuildLikeTierQuerySiteFilterShape(t *testing.T) {
 		assert.Equal(t, "libera", args[5])
 		assert.Equal(t, 49, args[6])
 		assert.Equal(t, 0, args[7])
+	})
+}
+
+// TestBuildFTSTierQuerySiteFilterShape pins the SQL SHAPE of the FTS
+// tiers' site handling — the tier-1/2 twin of
+// TestBuildLikeTierQuerySiteFilterShape (the default-host identity
+// was previously pinned only for tier 3). Default site: the query
+// text carries NO site predicate at all (no LOWER(i.network), no
+// i.safety) and no site args bind, so default-host identity cannot
+// silently drift. Safe site: the fragment is one outer AND conjunct
+// after hidden=0 and before ORDER BY, the MATCH expressions and tier
+// 2's NOT IN subquery stay untouched, and site args bind after the
+// MATCH placeholders and before limit/offset.
+func TestBuildFTSTierQuerySiteFilterShape(t *testing.T) {
+	expr := `"gribble"*`
+	tier1Expr := ftsTier1Expr(expr)
+
+	t.Run("DefaultSiteTier1QueryUnchanged", func(t *testing.T) {
+		query, args := buildFTSTierQuery(1, expr, tier1Expr, 0, 49, 27, siteCtx{})
+
+		assert.NotContains(t, query, "LOWER(i.network)")
+		assert.NotContains(t, query, "i.safety")
+		assert.Equal(t, 1, strings.Count(query, "images_fts MATCH ?"),
+			"tier 1 keeps exactly its own MATCH, no subquery")
+		assert.Len(t, args, 7, "4 snippet params + tier1Expr + limit + offset — no site args")
+	})
+	t.Run("DefaultSiteTier2QueryUnchanged", func(t *testing.T) {
+		query, args := buildFTSTierQuery(2, expr, tier1Expr, 0, 49, 27, siteCtx{})
+
+		assert.NotContains(t, query, "LOWER(i.network)")
+		assert.NotContains(t, query, "i.safety")
+		assert.Equal(t, 2, strings.Count(query, "images_fts MATCH ?"),
+			"tier 2 keeps its own MATCH plus the NOT IN subquery's")
+		assert.Len(t, args, 8, "4 snippet params + expr + tier1Expr + limit + offset — no site args")
+	})
+	t.Run("SafeSiteTier1FragmentAppendedAfterHidden", func(t *testing.T) {
+		query, args := buildFTSTierQuery(1, expr, tier1Expr, 0, 49, 27, matrixSafeSiteCtx())
+
+		assert.Contains(t, query, " AND (LOWER(i.network) IN (?) OR i.safety = 'safe')",
+			"site predicate is one outer AND conjunct")
+		assert.Equal(t, 1, strings.Count(query, "LOWER(i.network)"), "exactly one site conjunct")
+		assert.Less(t, strings.Index(query, "i.hidden = 0"), strings.Index(query, "LOWER(i.network)"),
+			"site conjunct sits after the hidden filter, never inside the MATCH")
+		assert.Less(t, strings.Index(query, "LOWER(i.network)"), strings.Index(query, "ORDER BY"),
+			"site conjunct is a WHERE-level conjunct, not trailing junk after ORDER BY")
+		assert.Equal(t, 1, strings.Count(query, "images_fts MATCH ?"))
+		assert.Equal(t, []any{snippetStartMarker, snippetEndMarker, snippetEllipsis, 27, tier1Expr, "libera", 49, 0}, args,
+			"snippet params, tier1 MATCH, THEN the site arg, then limit/offset")
+	})
+	t.Run("SafeSiteTier2SubqueryUntouched", func(t *testing.T) {
+		query, args := buildFTSTierQuery(2, expr, tier1Expr, 0, 49, 27, matrixSafeSiteCtx())
+
+		assert.Contains(t, query, " AND (LOWER(i.network) IN (?) OR i.safety = 'safe')")
+		assert.Equal(t, 1, strings.Count(query, "LOWER(i.network)"))
+		assert.Contains(t, query,
+			"SELECT rowid FROM images_fts WHERE images_fts MATCH ?",
+			"tier-2 NOT IN subquery text is verbatim-untouched")
+		assert.Equal(t, 2, strings.Count(query, "images_fts MATCH ?"))
+		assert.Less(t, strings.Index(query, "i.hidden = 0"), strings.Index(query, "LOWER(i.network)"))
+		assert.Less(t, strings.Index(query, "LOWER(i.network)"), strings.Index(query, "ORDER BY"))
+		assert.Equal(t, []any{snippetStartMarker, snippetEndMarker, snippetEllipsis, 27, expr, tier1Expr, "libera", 49, 0}, args,
+			"snippet params, both MATCH exprs, THEN the site arg, then limit/offset")
 	})
 }
 

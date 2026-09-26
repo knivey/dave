@@ -244,10 +244,11 @@ func resolvePath(baseDir, path string) string {
 // reloadConfigFromFile loads a fresh config and freezes every non-reloadable
 // section at its current (startup) value, warning when the file tried to
 // change one. Reloadable set: site.*, safe_site.*, thumbnails.* (except
-// workers), search.*, upload.rate_per_minute. Same semantics as img-mcp's
-// reload: an absent [safe_site] in the file disables the safe site without
-// a restart, and an invalid one fails the whole reload (current config
-// stays live).
+// workers), search.*, upload.* (both fields are read per request —
+// handleUpload re-reads max_bytes, the limiter retunes rate_per_minute).
+// Same semantics as img-mcp's reload: an absent [safe_site] in the file
+// disables the safe site without a restart, and an invalid one fails the
+// whole reload (current config stays live).
 func reloadConfigFromFile(configFile string, current Config) (Config, []string, error) {
 	newCfg, err := loadConfig(configFile)
 	if err != nil {

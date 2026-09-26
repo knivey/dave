@@ -114,6 +114,42 @@ func TestGetImageByIDUnknown(t *testing.T) {
 	assert.ErrorIs(t, err, sql.ErrNoRows)
 }
 
+// TestDbGetImageSiteVisibility pins the thumb-ready publish path's
+// narrowed re-read: exactly network and safety come back populated
+// (the PARTIAL-row contract dbGetImageSiteVisibility documents —
+// siteCanSee reads nothing else, and callers must not reach for other
+// fields), the write-boundary 'unknown' normalization is visible
+// through it, and an unknown id returns sql.ErrNoRows exactly like
+// dbGetImageByID (publishThumbReady maps that to fail-closed).
+func TestDbGetImageSiteVisibility(t *testing.T) {
+	db := setupTestDB(t)
+	in := &dbImage{
+		ID: "visred1", SHA256: strings.Repeat("ef", 32), Filename: "x.webp",
+		MimeType: "image/webp", SizeBytes: 1, CreatedAt: "2026-09-26 01:00:00",
+		ThumbStatus: thumbStatusPending, Network: ptrStr("efnet"),
+		OriginalPrompt: "full row carries prompts and workflow json",
+		WorkflowJSON:   `{"58":{"class_type":"KSampler"}}`,
+		MetaSource:     metaSourceUpload,
+		// Safety deliberately zero: dbInsertImage normalizes it to
+		// 'unknown' at the write boundary.
+	}
+	require.NoError(t, dbInsertImage(db, in))
+
+	img, err := dbGetImageSiteVisibility(db, "visred1")
+	require.NoError(t, err)
+	require.NotNil(t, img.Network)
+	assert.Equal(t, "efnet", *img.Network)
+	assert.Equal(t, safetyUnknown, img.Safety)
+	assert.Empty(t, img.ID, "id is not part of the projection — partial row by design")
+	assert.Empty(t, img.OriginalPrompt, "prompt columns are not part of the projection")
+	assert.Empty(t, img.WorkflowJSON, "workflow_json is the byte-heavy column the narrowing exists to skip")
+	assert.False(t, img.Hidden)
+
+	_, err = dbGetImageSiteVisibility(db, "zzzzzzz")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, sql.ErrNoRows)
+}
+
 func TestImageIDExists(t *testing.T) {
 	db := setupTestDB(t)
 	in := &dbImage{

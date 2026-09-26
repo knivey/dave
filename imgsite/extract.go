@@ -20,7 +20,6 @@ import (
 
 const (
 	tiffTypeASCII = 2
-	exifTagModel  = 0x0110 // production files carry the payload in the Model tag
 )
 
 // extractEmbeddedWorkflows returns the API-format workflow JSON (the

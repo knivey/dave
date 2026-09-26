@@ -154,6 +154,22 @@ func (a *App) resolveSite(r *http.Request) siteCtx {
 // publishImageNew/publishThumbReady), so the per-row predicate
 // siteCanSee and the SQL twin siteVisibilityFilter are always fed
 // identically-shaped input.
+//
+// CASE-FOLDING PARITY (the config side is folded HERE): this
+// strings.ToLower is Go's Unicode-aware folding, while the SQL twin's
+// LOWER(i.network) is SQLite's ASCII-only folding. IRC network names
+// are ASCII, so the two foldings agree on every real value — that is
+// the parity assumption this design carries. If a non-ASCII network
+// name ever crossed the comparison, the foldings could disagree and
+// the IN match would simply fail: the row turns INVISIBLE on the safe
+// site. Invisible is the fail-closed direction (wrongly withheld,
+// never wrongly shown), so the assumption is safe to document rather
+// than engineer away — an ASCII-only folder here plus matching
+// hand-rolled folds in siteCanSee and allowsNetwork would be three
+// custom folders to keep in sync instead of one stated assumption.
+// (The per-row twins fold BOTH sides with Go's ToLower, so they agree
+// with each other by construction; only the SQL path crosses
+// language runtimes.)
 func safeSiteCtx(ss *SafeSiteConfig) siteCtx {
 	if ss == nil {
 		return siteCtx{}

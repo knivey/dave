@@ -142,6 +142,12 @@ imgsite/
   *_test.go          parser/extractor/handler/SSE/FTS tests (testify)
 ```
 
+Frontend stance (owner, Sep 2026): hand-rolled CSS/JS today — one
+stylesheet, vanilla ES modules, no build step; assets served verbatim
+from the embedded `web/`. NOT a hard rule: a CSS framework is
+acceptable in the future and an extra build step is no obstacle; adopt
+one if the stylesheet outgrows hand-rolling.
+
 ## Configuration
 
 `imgsite/config.toml`, same conventions as sibling packages (reference

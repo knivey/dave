@@ -38,10 +38,18 @@ type Job struct {
 	Result        *JobResult
 	Error         string
 	ComfyPromptID string
-	CreatedAt     time.Time
-	StartedAt     *time.Time
-	CompletedAt   *time.Time
-	QueuedIndex   int
+	// Safety is the persisted safety verdict as restart recovery loaded
+	// it from the jobs row ("safe"/"unsafe"/"unknown"; "" = never
+	// resolved — the recovery path re-vets only then). A recovery-time
+	// carrier only: processJob keeps its verdict in the local jobSafety
+	// (awaited from the vet future) and persists straight to the DB, so
+	// nothing outside queue.go reads this field and it deliberately stays
+	// out of JobSnapshot.
+	Safety      string
+	CreatedAt   time.Time
+	StartedAt   *time.Time
+	CompletedAt *time.Time
+	QueuedIndex int
 
 	done      chan struct{}
 	cancel    chan struct{}
@@ -824,6 +832,9 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 	// marker.
 	jobSafety := safetyVet.wait()
 	loggerQueue.Info("safety verdict resolved", "job_id", job.ID, "safety", jobSafety)
+	// Persist the moment it resolves — before the upload loop — so a crash
+	// mid-upload still leaves recovery with the verdict in hand.
+	q.persistJobSafety(job.ID, jobSafety)
 	uploadMeta := buildUploadMeta(job, prompt, negativePrompt, enhancementReasoning)
 	for i, img := range comfyResult.Images {
 		imgData := ImageData{
@@ -897,6 +908,21 @@ func (q *JobQueue) transitionTerminal(job *Job, status JobStatus, errMsg string,
 		q.statsMu.Unlock()
 	}
 	return true
+}
+
+// persistJobSafety stamps a resolved verdict onto the jobs row so restart
+// recovery never re-vets. The unvetted marker ("") is deliberately NOT
+// written: the column's empty default IS that marker, kept distinct from
+// "unknown" (vetted but unresolved), which recovery must not re-vet either.
+// Failures only log — a lost verdict degrades to a re-vet on recovery,
+// never to a failed job.
+func (q *JobQueue) persistJobSafety(jobID, safety string) {
+	if safety == safetyVerdictUnvetted || q.db == nil {
+		return
+	}
+	if err := dbUpdateJobSafety(q.db, jobID, safety); err != nil {
+		loggerQueue.Error("error persisting job safety verdict", "job_id", jobID, "error", err)
+	}
 }
 
 // completeJob marks a job terminally completed and persists the result.
@@ -1122,6 +1148,33 @@ func (q *JobQueue) recoverRunningJob(_ context.Context, job *Job, comfyPromptID 
 	outputFormat := job.Input.OutputFormat
 	if outputFormat == "" {
 		outputFormat = "url"
+	}
+
+	// Safety verdict on the recovery path (same jobSafety shape processJob
+	// produces for the EXIF rewrite / upload meta): a verdict persisted
+	// before the crash is reused as-is — never re-vetted, an "unknown" as
+	// final as a "safe". An empty column means the crash happened before
+	// resolution, so the vet re-runs here: original prompt from the job
+	// input, enhanced prompt recovered from the completed image's embedded
+	// workflow (the only surviving copy — recovery never re-runs
+	// enhancement). skip_networks applies exactly as on the live path (a
+	// Libera job must not be classified by recovery either), and the
+	// resolved verdict persists so a second restart never re-vets. The vet
+	// rides the recovery context, so a Cancel aborts it too.
+	jobSafety := job.Safety
+	if jobSafety == safetyVerdictUnvetted {
+		enhanced := job.Input.Prompt
+		if len(comfyResult.Images) > 0 {
+			if fromEXIF, ok := enhancedPromptFromImage(cfg, job.Workflow, comfyResult.Images[0].Data); ok {
+				enhanced = fromEXIF
+			} else {
+				loggerQueue.Warn("recovery could not extract the enhanced prompt from the image; vetting the original prompt only",
+					"job_id", job.ID)
+			}
+		}
+		jobSafety = startSafetyVet(recoverCtx, cfg, job.Input.Network, false, job.Input.Prompt, enhanced).wait()
+		q.persistJobSafety(job.ID, jobSafety)
+		loggerQueue.Info("safety verdict resolved during recovery", "job_id", job.ID, "safety", jobSafety)
 	}
 
 	jobResult := &JobResult{}

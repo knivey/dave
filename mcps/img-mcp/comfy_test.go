@@ -635,6 +635,9 @@ type mockComfyFlowServer struct {
 	mu          sync.Mutex
 	prompts     []ComfyPromptRequest
 	wsClientIDs []string
+	// viewData, when non-nil, is what /view serves instead of "fakedata"
+	// (e.g. a webp with an embedded workflow for EXIF-recovery tests).
+	viewData []byte
 }
 
 func newMockComfyFlowServer(t *testing.T) *mockComfyFlowServer {
@@ -666,7 +669,13 @@ func newMockComfyFlowServer(t *testing.T) *mockComfyFlowServer {
 		})
 	})
 	mux.HandleFunc("/view", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("fakedata"))
+		m.mu.Lock()
+		data := m.viewData
+		m.mu.Unlock()
+		if data == nil {
+			data = []byte("fakedata")
+		}
+		w.Write(data)
 	})
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		m.mu.Lock()
@@ -687,6 +696,13 @@ func (m *mockComfyFlowServer) submittedPrompts() []ComfyPromptRequest {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]ComfyPromptRequest{}, m.prompts...)
+}
+
+// serveViewData makes /view return data (nil restores "fakedata").
+func (m *mockComfyFlowServer) serveViewData(data []byte) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.viewData = data
 }
 
 func (m *mockComfyFlowServer) wsClientIDList() []string {

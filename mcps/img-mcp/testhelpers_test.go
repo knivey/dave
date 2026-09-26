@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -175,4 +176,80 @@ func dbJobStatus(t *testing.T, db *sqlx.DB, jobID string) string {
 	err := db.Get(&status, "SELECT status FROM jobs WHERE job_id = ?", jobID)
 	require.NoError(t, err, "querying job status")
 	return status
+}
+
+func dbJobSafety(t *testing.T, db *sqlx.DB, jobID string) string {
+	t.Helper()
+	var safety string
+	err := db.Get(&safety, "SELECT safety FROM jobs WHERE job_id = ?", jobID)
+	require.NoError(t, err, "querying job safety")
+	return safety
+}
+
+// ─── Synthetic webp/TIFF builders (recovery EXIF fixtures) ────────────────
+//
+// Adapted from imgsite's extract_test.go builders: the same
+// production-verified structure ComfyUI's webp writer emits (one IFD0
+// ASCII Model-tag entry holding "prompt:"+API-workflow-JSON+NUL inside the
+// RIFF EXIF chunk) and img-mcp's embeddedWorkflowJSON reads back. Task 11's
+// EXIF rewrite tests build on these too.
+
+// buildTestTIFF encodes a one-entry IFD0 (Model tag, ASCII) little-endian
+// TIFF, mirroring the verified production structure.
+func buildTestTIFF(payload string) []byte {
+	bo := binary.ByteOrder(binary.LittleEndian)
+	header := make([]byte, 8)
+	copy(header[0:2], []byte("II"))
+	bo.PutUint16(header[2:4], 42)
+	bo.PutUint32(header[4:8], 8) // IFD0 immediately follows the header
+
+	entry := make([]byte, 12)
+	bo.PutUint16(entry[0:2], exifTagModel)
+	bo.PutUint16(entry[2:4], tiffTypeASCII)
+	bo.PutUint32(entry[4:8], uint32(len(payload)))
+	bo.PutUint32(entry[8:12], 8+2+12+4) // value follows header+count+entry+next
+
+	ifd := make([]byte, 18)
+	bo.PutUint16(ifd[0:2], 1) // one entry
+	copy(ifd[2:14], entry)
+	// next-IFD offset stays 0
+
+	out := append(header, ifd...)
+	out = append(out, payload...)
+	return out
+}
+
+// buildTestWebP assembles a minimal RIFF/webp (VP8X + EXIF chunk), applying
+// the odd-size pad byte per the container spec.
+func buildTestWebP(exif []byte) []byte {
+	body := []byte("WEBP")
+	body = append(body, []byte("VP8X")...)
+	body = append(body, 10, 0, 0, 0)
+	body = append(body, make([]byte, 10)...)
+	var sz [4]byte
+	binary.LittleEndian.PutUint32(sz[:], uint32(len(exif)))
+	body = append(body, []byte("EXIF")...)
+	body = append(body, sz[:]...)
+	body = append(body, exif...)
+	if len(exif)%2 == 1 {
+		body = append(body, 0)
+	}
+	var total [4]byte
+	binary.LittleEndian.PutUint32(total[:], uint32(len(body)))
+	out := append([]byte("RIFF"), total[:]...)
+	return append(out, body...)
+}
+
+// exifWebPWithPrompt builds a completed-image fixture: a webp whose EXIF
+// embeds an API workflow whose prompt node carries promptText — the only
+// place the enhanced prompt survives a crash on the recovery path.
+func exifWebPWithPrompt(t *testing.T, promptText string) []byte {
+	t.Helper()
+	workflow := ComfyWorkflow{
+		"prompt-node": {Inputs: map[string]interface{}{"text": promptText}, Class: "CLIPTextEncode"},
+		"output-node": {Inputs: map[string]interface{}{"images": []string{"1"}}, Class: "SaveImage"},
+	}
+	wfJSON, err := json.Marshal(workflow)
+	require.NoError(t, err, "marshaling fixture workflow")
+	return buildTestWebP(buildTestTIFF("prompt:" + string(wfJSON) + "\x00"))
 }

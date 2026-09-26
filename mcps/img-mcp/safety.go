@@ -142,6 +142,10 @@ func runSafetyVet(ctx context.Context, cfg Config, originalPrompt, enhancedPromp
 		return safetyVerdictUnknown, fmt.Errorf("parsing safety vet verdict: %w", err)
 	}
 
+	// Fail-closed by design: a missing/null "safe" key decodes to false →
+	// unsafe. Strict-schema providers make this unreachable (the verdict
+	// schema lists "safe" as required); a loose provider that drops the key
+	// gets the safe site's default-deny verdict, never an accidental pass.
 	outcome := safetyVerdictUnsafe
 	if verdict.Safe {
 		outcome = safetyVerdictSafe

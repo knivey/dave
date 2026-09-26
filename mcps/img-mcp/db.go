@@ -41,9 +41,17 @@ type dbJob struct {
 	// Network/Channel/Nick are IRC provenance for the imgsite upload meta.
 	// Insert/recovery-only columns: no terminal UPDATE statement touches
 	// them, so they cannot interfere with the terminal-update fencing.
-	Network       string  `db:"network"`
-	Channel       string  `db:"channel"`
-	Nick          string  `db:"nick"`
+	Network string `db:"network"`
+	Channel string `db:"channel"`
+	Nick    string `db:"nick"`
+	// Safety is the resolved safety verdict ("safe"/"unsafe"/"unknown");
+	// empty = never classified (skip_networks, or a crash before the
+	// verdict resolved) — deliberately distinct from "unknown", which is
+	// vetted-but-unresolved and equally final. Written once via
+	// dbUpdateJobSafety when the verdict resolves; recovery-read so
+	// restarts never re-vet. Like the provenance columns it stays out of
+	// every terminal-fenced statement.
+	Safety        string  `db:"safety"`
 	Error         *string `db:"error"`
 	ComfyPromptID *string `db:"comfy_prompt_id"`
 	CreatedAt     string  `db:"created_at"`
@@ -136,6 +144,20 @@ func dbUpdateJobComfyPromptID(db *sqlx.DB, jobID, comfyPromptID string) error {
 	_, err := db.Exec(
 		`UPDATE jobs SET comfy_prompt_id = ? WHERE job_id = ?`,
 		comfyPromptID, jobID,
+	)
+	return err
+}
+
+// dbUpdateJobSafety persists a resolved safety verdict. Deliberately
+// unfenced like dbUpdateJobComfyPromptID: the safety column never touches
+// status, so it cannot interact with the terminal-update guard set (once
+// the row is terminal the verdict is dead data), and the verdict resolves
+// at exactly one point per job — first-write-wins has no second writer to
+// arbitrate.
+func dbUpdateJobSafety(db *sqlx.DB, jobID, safety string) error {
+	_, err := db.Exec(
+		`UPDATE jobs SET safety = ? WHERE job_id = ?`,
+		safety, jobID,
 	)
 	return err
 }
@@ -295,6 +317,7 @@ func jobFromDBJob(dbj *dbJob) *Job {
 		Status:        JobStatus(dbj.Status),
 		Workflow:      dbj.Workflow,
 		ComfyPromptID: ptrStr(dbj.ComfyPromptID),
+		Safety:        dbj.Safety,
 		Input: JobInput{
 			Prompt:         dbj.Prompt,
 			NegativePrompt: dbj.NegativePrompt,

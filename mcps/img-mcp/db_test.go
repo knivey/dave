@@ -97,6 +97,49 @@ func TestJobProvenanceEmptyDefaults(t *testing.T) {
 	assert.Empty(t, recovered.Input.Nick)
 }
 
+// TestJobSafetyColumnRoundTrip covers migration 004 + the persistence
+// plumbing for jobs.safety: the column defaults to ” (unvetted — never
+// classified, e.g. skip_networks), dbUpdateJobSafety stamps a resolved
+// verdict, and both recovery read paths (dbGetJob and the
+// dbLoadRecoverableJobs query recoverJobs uses) hand it back through
+// jobFromDBJob onto Job.Safety. setupTestDB runs goose migrations, so the
+// column existing at all here proves 004 applies cleanly.
+func TestJobSafetyColumnRoundTrip(t *testing.T) {
+	db := setupTestDB(t)
+
+	job := &Job{
+		ID:       "safejob",
+		Type:     JobTypeGenerate,
+		Status:   StatusQueued,
+		Workflow: "test",
+		Input:    JobInput{Prompt: "a cat", Network: "graped"},
+	}
+	require.NoError(t, dbInsertJob(db, job), "dbInsertJob")
+
+	// The column's empty default IS the unvetted marker — distinct from
+	// 'unknown' (vetted but unresolved), which recovery must not re-vet.
+	var safety string
+	require.NoError(t, db.Get(&safety, "SELECT safety FROM jobs WHERE job_id = ?", job.ID), "safety column")
+	assert.Empty(t, safety, "insert must leave safety at the unvetted default")
+
+	require.NoError(t, dbUpdateJobSafety(db, job.ID, safetyVerdictUnsafe), "dbUpdateJobSafety")
+	assert.Equal(t, safetyVerdictUnsafe, dbJobSafety(t, db, job.ID), "resolved verdict must persist")
+
+	// Direct dbGetJob path (recoverJobs rebuilds the Job from this row).
+	dbj, err := dbGetJob(db, job.ID)
+	require.NoError(t, err, "dbGetJob")
+	assert.Equal(t, safetyVerdictUnsafe, dbj.Safety, "dbJob must map the safety column")
+	assert.Equal(t, safetyVerdictUnsafe, jobFromDBJob(dbj).Safety,
+		"jobFromDBJob must carry the verdict onto Job.Safety for recovery")
+
+	// The recoverable-jobs query recoverJobs actually issues at startup.
+	recoverable, err := dbLoadRecoverableJobs(db)
+	require.NoError(t, err, "dbLoadRecoverableJobs")
+	require.Len(t, recoverable, 1)
+	assert.Equal(t, safetyVerdictUnsafe, recoverable[0].Safety)
+	assert.Equal(t, safetyVerdictUnsafe, jobFromDBJob(&recoverable[0]).Safety)
+}
+
 func completeCall(db *sqlx.DB, jobID string) error {
 	return dbCompleteJob(db, jobID, &JobResult{Images: []ImageData{{MIMEType: "image/png", URL: "https://x/img.png"}}}, nil)
 }

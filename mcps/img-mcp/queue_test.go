@@ -984,3 +984,214 @@ func TestProcessJobVetFailureStillCompletesJob(t *testing.T) {
 	// rather than an exact count.
 	assert.NotZero(t, vet.calls.Load(), "the vet must have been tried (and failed)")
 }
+
+// safetyQueueConfig wires a queue-test config's safety-vet enhancement at
+// the given stub and sets skip_networks, keeping the workflow path + queue
+// pieces testConfig/mustWriteWorkflow provide.
+func safetyQueueConfig(t *testing.T, comfyURL string, vet *vetStubServer, skipNetworks []string) Config {
+	t.Helper()
+	cfg := testConfig(comfyURL)
+	wc := cfg.Workflows["test"]
+	wc.WorkflowPath = mustWriteWorkflow(t, t.TempDir())
+	cfg.Workflows["test"] = wc
+	cfg.Enhancements = map[string]EnhancementConfig{
+		"safety-vet": {
+			BaseURL:      vet.server.URL + "/v1",
+			Key:          "test-key",
+			Model:        "stub-model",
+			SystemPrompt: "judge the prompts",
+			Timeout:      10,
+		},
+	}
+	cfg.Safety.SkipNetworks = skipNetworks
+	return cfg
+}
+
+// TestProcessJobPersistsSafetyVerdict pins the resolution→row write: by the
+// time the job completes, jobs.safety holds the awaited verdict. The
+// empty-string distinction is load-bearing — a skip_networks job (never
+// classified) must leave the column at its unvetted default so recovery can
+// tell "nothing to write" apart from a persisted unknown.
+func TestProcessJobPersistsSafetyVerdict(t *testing.T) {
+	tests := []struct {
+		name         string
+		network      string
+		skipNetworks []string
+		vetStatus    int
+		vetContent   string
+		wantSafety   string
+	}{
+		{
+			name:       "vet safe:true persists safe",
+			network:    "graped",
+			vetStatus:  http.StatusOK,
+			vetContent: `{"safe":true,"reason":"fine"}`,
+			wantSafety: safetyVerdictSafe,
+		},
+		{
+			name:       "vet safe:false persists unsafe",
+			network:    "graped",
+			vetStatus:  http.StatusOK,
+			vetContent: `{"safe":false,"reason":"sexual content"}`,
+			wantSafety: safetyVerdictUnsafe,
+		},
+		{
+			name:       "vet failure persists unknown",
+			network:    "graped",
+			vetStatus:  http.StatusInternalServerError,
+			wantSafety: safetyVerdictUnknown,
+		},
+		{
+			name:         "skip network leaves the column unvetted",
+			network:      "Libera",
+			skipNetworks: []string{"libera"},
+			vetStatus:    http.StatusOK,
+			vetContent:   `{"safe":true,"reason":"fine"}`,
+			wantSafety:   safetyVerdictUnvetted,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockComfy := newMockComfyFlowServer(t)
+			vet := newVetStubServer(t, tt.vetStatus, tt.vetContent)
+			cfg := safetyQueueConfig(t, mockComfy.URL(), vet, tt.skipNetworks)
+
+			q, cleanup := setupTestQueue(t, cfg)
+			defer cleanup()
+
+			job, err := q.Submit(JobTypeGenerate, "test", JobInput{
+				Prompt:       "a cat sitting on a mat",
+				Network:      tt.network,
+				OutputFormat: "base64", // upload is not under test here
+			})
+			require.NoError(t, err, "Submit")
+
+			waitForJobDone(t, job, 15*time.Second)
+			assertJobStatus(t, q, job.ID, StatusCompleted)
+			assert.Equal(t, tt.wantSafety, dbJobSafety(t, q.db, job.ID),
+				"resolved verdict must be persisted on the jobs row")
+		})
+	}
+}
+
+// restartRecoverJob mimics what recoverJobs does for a running job at
+// startup: reload the row from the DB into a fresh Job (the persisted
+// safety verdict rides along on Job.Safety) and rewire its channels.
+func restartRecoverJob(t *testing.T, q *JobQueue, jobID string) *Job {
+	t.Helper()
+	dbj, err := dbGetJob(q.db, jobID)
+	require.NoError(t, err, "dbGetJob")
+	recovered := jobFromDBJob(dbj)
+	recovered.done = make(chan struct{})
+	recovered.cancel = make(chan struct{})
+	q.mu.Lock()
+	q.results[recovered.ID] = recovered
+	q.mu.Unlock()
+	return recovered
+}
+
+// TestRecoverRunningJobUsesPersistedSafety pins the never-re-vet rule: a
+// crash AFTER the verdict resolved left jobs.safety populated, so the
+// restart's resume monitor reuses it — the vet endpoint sees zero calls —
+// and the row keeps the original verdict (an unknown verdict is equally
+// final: "vetted but unresolved" must not be re-classified either).
+func TestRecoverRunningJobUsesPersistedSafety(t *testing.T) {
+	mockComfy := newMockComfyFlowServer(t)
+	vet := newVetStubServer(t, http.StatusOK, `{"safe":true,"reason":"fine"}`) // would say safe...
+	cfg := safetyQueueConfig(t, mockComfy.URL(), vet, nil)
+	cfg.Queue.MaxWorkers = 0
+	q := manualQueueLiteral(t, cfg)
+
+	job, err := q.Submit(JobTypeGenerate, "test", JobInput{
+		Prompt: "a cat", Network: "graped", OutputFormat: "base64",
+	})
+	require.NoError(t, err, "Submit")
+	markRunningInMemoryAndDB(t, q, job, "test-prompt-1")
+
+	// ...but the verdict resolved (to unsafe) before the crash.
+	require.NoError(t, dbUpdateJobSafety(q.db, job.ID, safetyVerdictUnsafe))
+	recovered := restartRecoverJob(t, q, job.ID)
+	require.Equal(t, safetyVerdictUnsafe, recovered.Safety,
+		"the recovered job must carry the persisted verdict")
+
+	q.wg.Add(1)
+	go q.recoverRunningJob(context.Background(), recovered, "test-prompt-1")
+
+	waitForJobDone(t, recovered, 15*time.Second)
+	assertJobStatus(t, q, recovered.ID, StatusCompleted)
+	assert.Zero(t, vet.calls.Load(), "a persisted verdict must never be re-vetted on recovery")
+	assert.Equal(t, safetyVerdictUnsafe, dbJobSafety(t, q.db, job.ID),
+		"row must keep the pre-crash verdict, not a fresh one")
+}
+
+// TestRecoverRunningJobReVetsWhenUnresolved pins the crash-before-resolution
+// path: an empty jobs.safety means the vet never resolved, so recovery
+// re-vets during the resume monitor — original prompt from the job input,
+// enhanced prompt recovered from the completed image's embedded workflow
+// (the only surviving copy — recovery never re-runs enhancement) — and
+// persists the fresh verdict.
+func TestRecoverRunningJobReVetsWhenUnresolved(t *testing.T) {
+	mockComfy := newMockComfyFlowServer(t)
+	const enhancedPrompt = "an enhanced majestic cat, studio lighting"
+	mockComfy.serveViewData(exifWebPWithPrompt(t, enhancedPrompt))
+	vet := newVetStubServer(t, http.StatusOK, `{"safe":true,"reason":"fine"}`)
+	cfg := safetyQueueConfig(t, mockComfy.URL(), vet, nil)
+	cfg.Queue.MaxWorkers = 0
+	q := manualQueueLiteral(t, cfg)
+
+	job, err := q.Submit(JobTypeGenerate, "test", JobInput{
+		Prompt: "a cat", Network: "graped", OutputFormat: "base64",
+	})
+	require.NoError(t, err, "Submit")
+	markRunningInMemoryAndDB(t, q, job, "test-prompt-1")
+
+	recovered := restartRecoverJob(t, q, job.ID)
+	require.Empty(t, recovered.Safety, "no verdict survived the crash")
+
+	q.wg.Add(1)
+	go q.recoverRunningJob(context.Background(), recovered, "test-prompt-1")
+
+	waitForJobDone(t, recovered, 15*time.Second)
+	assertJobStatus(t, q, recovered.ID, StatusCompleted)
+
+	assert.Equal(t, int32(1), vet.calls.Load(), "recovery must re-vet exactly once")
+	contents := vet.userContents()
+	require.Len(t, contents, 1, "one vet call, one captured user message")
+	assert.Contains(t, contents[0], "a cat",
+		"re-vet input must carry the original prompt from the job input")
+	assert.Contains(t, contents[0], enhancedPrompt,
+		"re-vet input must carry the enhanced prompt recovered from the image's EXIF")
+
+	assert.Equal(t, safetyVerdictSafe, dbJobSafety(t, q.db, job.ID),
+		"the re-vetted verdict must persist so a second restart never re-vets")
+}
+
+// TestRecoverRunningJobSkipNetworksDoesNotReVet pins the skip_networks rule
+// on the recovery path: restart recovery of a Libera job must not classify
+// even when the verdict never resolved — its visibility comes from imgsite's
+// allowed_networks rule, not a verdict.
+func TestRecoverRunningJobSkipNetworksDoesNotReVet(t *testing.T) {
+	mockComfy := newMockComfyFlowServer(t)
+	vet := newVetStubServer(t, http.StatusOK, `{"safe":true,"reason":"fine"}`)
+	cfg := safetyQueueConfig(t, mockComfy.URL(), vet, []string{"libera"})
+	cfg.Queue.MaxWorkers = 0
+	q := manualQueueLiteral(t, cfg)
+
+	job, err := q.Submit(JobTypeGenerate, "test", JobInput{
+		Prompt: "a cat", Network: "Libera", OutputFormat: "base64",
+	})
+	require.NoError(t, err, "Submit")
+	markRunningInMemoryAndDB(t, q, job, "test-prompt-1")
+
+	recovered := restartRecoverJob(t, q, job.ID)
+	require.Empty(t, recovered.Safety)
+
+	q.wg.Add(1)
+	go q.recoverRunningJob(context.Background(), recovered, "test-prompt-1")
+
+	waitForJobDone(t, recovered, 15*time.Second)
+	assertJobStatus(t, q, recovered.ID, StatusCompleted)
+	assert.Zero(t, vet.calls.Load(), "skip_networks applies on recovery too — no vet call")
+	assert.Empty(t, dbJobSafety(t, q.db, job.ID),
+		"an unvetted job must stay unvetted — empty column, not unknown")
+}

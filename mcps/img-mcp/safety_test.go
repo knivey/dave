@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -14,13 +15,17 @@ import (
 
 // vetStubServer stands in for the vetting LLM: an OpenAI-compatible Chat
 // Completions endpoint whose assistant content and HTTP status are
-// configurable. Every request is counted so tests can assert whether a vet
-// call was made at all.
+// configurable. Every request is counted (and its user message captured)
+// so tests can assert whether a vet call was made at all and what it was
+// fed.
 type vetStubServer struct {
 	server  *httptest.Server
 	calls   atomic.Int32
 	status  int
 	content string
+
+	mu           sync.Mutex
+	capturedUser []string
 }
 
 func newVetStubServer(t *testing.T, status int, content string) *vetStubServer {
@@ -29,6 +34,21 @@ func newVetStubServer(t *testing.T, status int, content string) *vetStubServer {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 		v.calls.Add(1)
+		var body struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err == nil && len(body.Messages) > 0 {
+			v.mu.Lock()
+			for _, m := range body.Messages {
+				if m.Role == "user" {
+					v.capturedUser = append(v.capturedUser, m.Content)
+				}
+			}
+			v.mu.Unlock()
+		}
 		if v.status != http.StatusOK {
 			w.WriteHeader(v.status)
 			return
@@ -41,6 +61,13 @@ func newVetStubServer(t *testing.T, status int, content string) *vetStubServer {
 	v.server = httptest.NewServer(mux)
 	t.Cleanup(v.server.Close)
 	return v
+}
+
+// userContents returns the captured user-message bodies, one per request.
+func (v *vetStubServer) userContents() []string {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return append([]string{}, v.capturedUser...)
 }
 
 // vetTestConfig builds a Config whose safety-vet enhancement points at srv.
@@ -98,6 +125,16 @@ func TestStartSafetyVetMapping(t *testing.T) {
 			name:        "vet safe false",
 			vetStatus:   http.StatusOK,
 			vetContent:  `{"safe":false,"reason":"sexual content"}`,
+			wantVerdict: safetyVerdictUnsafe,
+			someVetCall: true,
+		},
+		{
+			// Fail-closed by design: a provider that drops the "safe" key
+			// entirely (impossible under strict-schema enforcement, possible
+			// on loose ones) decodes to false and must never pass.
+			name:        "vet missing safe key fails closed to unsafe",
+			vetStatus:   http.StatusOK,
+			vetContent:  `{"reason":"model omitted the key"}`,
 			wantVerdict: safetyVerdictUnsafe,
 			someVetCall: true,
 		},

@@ -161,9 +161,11 @@ func TestDetailsPageEscapesUntrustedText(t *testing.T) {
 
 // TestDetailsPageTitleFromPrompt pins the owner-requested (Sep 2026)
 // browser <title>: the whitespace-collapsed, 60-rune-clamped prompt —
-// original first, enhanced as fallback, public id only when both are
-// empty — with no id suffix, no site name, and no separator ("get rid
-// of the id in the title entirely nobody uses it").
+// original first, enhanced as fallback (collapse-then-compare, so a
+// whitespace-only original never shadows it), public id only when both
+// are effectively empty — with no id suffix, no site name, and no
+// separator ("get rid of the id in the title entirely nobody uses
+// it").
 func TestDetailsPageTitleFromPrompt(t *testing.T) {
 	app := newTestApp(t, testConfig())
 	ts := newTestServer(t, app)
@@ -195,7 +197,11 @@ func TestDetailsPageTitleFromPrompt(t *testing.T) {
 		{"OriginalWinsOverEnhanced", "titl003", "the original", "the enhanced prompt",
 			"the original"},
 		{"BothEmptyFallsBackToID", "titl004", "", "", "titl004"},
-		{"WhitespaceOnlyFallsBackToID", "titl005", " \n\t ", "", "titl005"},
+		// Collapse-then-compare: a whitespace-only original is
+		// effectively empty, so the enhanced prompt is consulted.
+		{"WhitespaceOnlyOriginalFallsToEnhanced", "titl005", " \n\t ", "the enhanced prompt",
+			"the enhanced prompt"},
+		{"BothEffectivelyEmptyFallsBackToID", "titl009", " \n\t ", "   \n", "titl009"},
 		// html/template auto-escapes the raw prompt text; the expected
 		// strings here are the ESCAPED forms (&, <, >).
 		{"EscapedByTemplate", "titl006", "cats & <dogs>", "",
@@ -232,6 +238,26 @@ func TestDetailsPageTitleFromPrompt(t *testing.T) {
 		assert.LessOrEqual(t, utf8.RuneCountInString(title), detailsTitleMaxRunes,
 			"clamped title stays within 60 runes including the ellipsis")
 		assert.True(t, utf8.ValidString(title), "truncation never lands mid-rune")
+	})
+
+	t.Run("CollapseBeforeTruncateOrdering", func(t *testing.T) {
+		// Pins the ORDER: collapse whitespace first, clamp second.
+		// Prompt = 28 a's, a blank line, 28 b's, a 3-space run, 20
+		// c's — 81 raw runes, 78 collapsed (still over the 60 cap, so
+		// the clamp runs on the COLLAPSED string). Hand-computed
+		// expectation: collapsed[:59] + ellipsis = "a×28 b×28 c…".
+		// A wrong truncate-then-collapse build clamps the RAW string
+		// at rune 59 — inside the 3-space run — and collapses to
+		// "a×28 b×28…" with no c at all, failing the equality.
+		prompt := strings.Repeat("a", 28) + "\n\n" + strings.Repeat("b", 28) + "   " + strings.Repeat("c", 20)
+		insertImage(t, app, "titl010", "2026-09-24 03:12:00", func(img *dbImage) {
+			img.OriginalPrompt = prompt
+		})
+		title := extractTitle(t, getPage2(t, ts, "/titl010"))
+		want := strings.Repeat("a", 28) + " " + strings.Repeat("b", 28) + " c…"
+		assert.Equal(t, want, title,
+			"collapse runs before the 60-rune clamp (want is 59 collapsed runes + ellipsis)")
+		assert.LessOrEqual(t, utf8.RuneCountInString(title), detailsTitleMaxRunes)
 	})
 }
 

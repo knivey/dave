@@ -616,24 +616,28 @@ const detailsTitleMaxRunes = 60
 // buildDetailsTitle composes the details page's browser <title>:
 // the original prompt, falling back to the enhanced prompt, falling
 // back to the public id (imported/legacy rows can carry neither — a
-// browser tab must never get an empty title). Newlines and whitespace
-// runs collapse to single spaces FIRST, so a multi-line prompt can't
-// wedge the one-line <title> element; the clamp is rune-counted (via
+// browser tab must never get an empty title). Each candidate is
+// whitespace-COLLAPSED BEFORE the emptiness comparison
+// (collapse-then-compare): a whitespace-only original must not shadow
+// a real enhanced prompt, so the chain is collapsed-original non-empty
+// → use it; else collapsed-enhanced non-empty → use it; else id.
+// Collapsing (newlines and whitespace runs to single spaces —
+// strings.Fields also drops leading/trailing whitespace) happens
+// before the clamp too, so a multi-line prompt can't wedge the
+// one-line <title> element; the clamp is rune-counted (via
 // clampSnippet), so a cut never lands mid-rune. No id suffix, no site
 // name, no separator — the prompt text alone. HTML-safety is left to
 // html/template's auto-escaping; this returns raw text by design.
 func buildDetailsTitle(img *dbImage) string {
-	src := img.OriginalPrompt
-	if src == "" {
-		src = img.EnhancedPrompt
+	original := strings.Join(strings.Fields(img.OriginalPrompt), " ")
+	if original != "" {
+		return clampSnippet(original, detailsTitleMaxRunes)
 	}
-	// strings.Fields drops leading/trailing whitespace too, so a
-	// whitespace-only prompt lands in the id fallback below.
-	src = strings.Join(strings.Fields(src), " ")
-	if src == "" {
-		return img.ID
+	enhanced := strings.Join(strings.Fields(img.EnhancedPrompt), " ")
+	if enhanced != "" {
+		return clampSnippet(enhanced, detailsTitleMaxRunes)
 	}
-	return clampSnippet(src, detailsTitleMaxRunes)
+	return img.ID
 }
 
 // workflowJSONMaxRunes bounds the workflow JSON rendered into the

@@ -1096,3 +1096,108 @@ func TestSiteVisibilityFilter(t *testing.T) {
 		assert.Nil(t, args)
 	})
 }
+
+// ---------------------------------------------------------------------------
+// Safe-site asset gating + og bases (task 4)
+// ---------------------------------------------------------------------------
+
+// TestAssetRoutesSiteMatrix pins the per-site gate on the id-keyed
+// asset routes (thumb sizes, original file): an id invisible on the
+// safe site 404s on the safe host exactly like an unknown id — no
+// existence hint — while the same paths serve normally on the default
+// host. The details page's download anchor targets the orig URL (the
+// download attribute is client-side only — there is no separate
+// download route), so the orig assertions cover the download target
+// too.
+func TestAssetRoutesSiteMatrix(t *testing.T) {
+	app := newTestApp(t, safeSiteTestConfig())
+	ts := newTestServer(t, app)
+	cfg := testConfig()
+
+	// Real files + ready thumbs on every row, so a 200 is attributable
+	// to visibility alone, never to a missing derivative.
+	insertImageWithFile(t, app, "efnet01", loadFixture(t, "plain.webp"), func(img *dbImage) {
+		img.Network = ptrStr("efnet") // disallowed origin, unknown verdict: invisible on safe
+	})
+	require.NoError(t, processThumbJob(app.db, app.store, cfg, "efnet01"))
+	insertImageWithFile(t, app, "nullnet", loadFixture(t, "plain.webp")) // NULL network: default-denied on safe
+	require.NoError(t, processThumbJob(app.db, app.store, cfg, "nullnet"))
+	insertImageWithFile(t, app, "libera1", loadFixture(t, "plain.webp"), func(img *dbImage) {
+		img.Network = ptrStr("libera") // allowed origin: visible on safe
+	})
+	require.NoError(t, processThumbJob(app.db, app.store, cfg, "libera1"))
+
+	assetPaths := func(id string) []string {
+		return []string{
+			"/" + id + "/t/small",
+			"/" + id + "/t/display",
+			"/" + id + "/orig/" + id + ".webp",
+		}
+	}
+
+	t.Run("InvisibleIDsAre404OnSafeHost", func(t *testing.T) {
+		for _, id := range []string{"efnet01", "nullnet"} {
+			for _, path := range assetPaths(id) {
+				status, _ := getPageHost(t, ts, "safe.example.com", path)
+				assert.Equal(t, http.StatusNotFound, status, "%s %s", id, path)
+			}
+		}
+	})
+	t.Run("InvisibleIDsServeOnDefaultHost", func(t *testing.T) {
+		for _, id := range []string{"efnet01", "nullnet"} {
+			for _, path := range assetPaths(id) {
+				status, _ := getPage(t, ts.URL, path)
+				assert.Equal(t, http.StatusOK, status, "%s %s", id, path)
+			}
+		}
+	})
+	t.Run("VisibleIDServesOnSafeHost", func(t *testing.T) {
+		for _, path := range assetPaths("libera1") {
+			status, _ := getPageHost(t, ts, "safe.example.com", path)
+			assert.Equal(t, http.StatusOK, status, path)
+		}
+	})
+}
+
+// TestDetailsPageOGBaseSiteMatrix pins the per-site og bases: on the
+// safe host, og:image/og:url (and the copy-link absolute URL) are
+// built from the safe site's base_url; on the default host they keep
+// using server.base_url. og:image still points at the DISPLAY thumb
+// path for ready rows (only the base changes) and keeps its orig-URL
+// fallback shape for pending rows.
+func TestDetailsPageOGBaseSiteMatrix(t *testing.T) {
+	cfg := safeSiteTestConfig()
+	cfg.Server.BaseURL = "https://img.example.com"
+	app := newTestApp(t, cfg)
+	ts := newTestServer(t, app)
+	thumbCfg := testConfig()
+
+	insertImageWithFile(t, app, "libe001", loadFixture(t, "plain.webp"), func(img *dbImage) {
+		img.Network = ptrStr("libera")
+	})
+	require.NoError(t, processThumbJob(app.db, app.store, thumbCfg, "libe001")) // ready: og:image = /t/display
+	insertImageWithFile(t, app, "libe002", loadFixture(t, "plain.webp"), func(img *dbImage) {
+		img.Network = ptrStr("libera")
+	}) // stays pending: og:image falls back to the orig URL
+
+	t.Run("SafeHostUsesSafeBaseURL", func(t *testing.T) {
+		_, body := getPageHost(t, ts, "safe.example.com", "/libe001")
+		assert.Contains(t, body, `<meta property="og:image" content="https://safe.example.com/libe001/t/display">`,
+			"og:image keeps the display-thumb path; only the base swaps to the safe site's")
+		assert.Contains(t, body, `<meta property="og:url" content="https://safe.example.com/libe001">`)
+		assert.Contains(t, body, `data-copy="https://safe.example.com/libe001/orig/libe001.webp"`,
+			"copy-link absolute URL agrees on the safe host too")
+		assert.NotContains(t, body, "https://img.example.com", "the default site's base never leaks onto the safe page")
+	})
+	t.Run("SafeHostPendingThumbKeepsFallbackShape", func(t *testing.T) {
+		_, body := getPageHost(t, ts, "safe.example.com", "/libe002")
+		assert.Contains(t, body, `<meta property="og:image" content="https://safe.example.com/libe002/orig/libe002.webp">`,
+			"pending thumb: the fallback URL keeps its path, base still the safe site's")
+	})
+	t.Run("DefaultHostUsesServerBaseURL", func(t *testing.T) {
+		_, body := getPage(t, ts.URL, "/libe001")
+		assert.Contains(t, body, `<meta property="og:image" content="https://img.example.com/libe001/t/display">`)
+		assert.Contains(t, body, `<meta property="og:url" content="https://img.example.com/libe001">`)
+		assert.NotContains(t, body, "safe.example.com", "the safe base never leaks onto the default page")
+	})
+}

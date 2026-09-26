@@ -205,8 +205,9 @@ func siteVisibilityFilter(sc siteCtx) (sqlFrag string, args []any) {
 
 // siteCanSee is the per-row twin of siteVisibilityFilter's SQL
 // predicate: it answers "is this row visible on the site sc selected?"
-// for rows already fetched (the details page's id check here; asset
-// gating in a later task consumes it too). It must stay semantically
+// for rows already fetched (the details page's and the asset routes'
+// id checks — orig, thumbs, and thereby the download target — all
+// consume it). It must stay semantically
 // identical to the WHERE fragment — allowed-network origin
 // (case-insensitive) OR safety='safe', with NULL/empty networks
 // default-denied — so a row can never be navigable in SQL yet 404 at
@@ -384,20 +385,32 @@ func (a *App) handleAdminReextract(w http.ResponseWriter, r *http.Request) {
 
 // handleOrigFile serves the original bytes DIRECTLY from the content
 // address — no redirect hops. Unknown id or filename mismatch is a 404.
-// Ids are never reused and the content behind a row never changes, so the
-// response is immutable year-long cacheable. Dispatched manually by
+// Site-aware: an id invisible on the requesting host's site 404s
+// exactly like an unknown id (the details page's download anchor
+// targets this same URL — the download attribute is client-side only
+// — so this gate covers the download target too). Ids are never
+// reused and the content behind a row never changes, so the response
+// is immutable year-long cacheable. Dispatched manually by
 // handleImageRoutes (see its DESIGN NOTE).
 func (a *App) handleOrigFile(w http.ResponseWriter, r *http.Request, id, filename string) {
 	if !validImageID(id) {
 		http.NotFound(w, r)
 		return
 	}
+	sc := a.resolveSite(r)
 	img, ok := a.lookupImage(w, r, id)
 	if !ok {
 		return
 	}
 	if img.Hidden {
 		http.Error(w, "gone", http.StatusGone)
+		return
+	}
+	if !siteCanSee(sc, img) {
+		// Same rule as the details page, checked at the same spot
+		// (after hidden, before any file access): no existence hint
+		// on the safe host, normal service on the default host.
+		http.NotFound(w, r)
 		return
 	}
 	if filename != img.Filename {
@@ -535,11 +548,13 @@ func (a *App) handleImageRoutes(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleThumb serves GET /<id>/t/<size>. The size token is "small" or
-// "display" — NOT the raw pixel widths from config (small deviation from
-// the plan's "(480|1280)" notation): tokens stay URL-stable if the
-// configured widths ever change or hot-reload, and the on-disk file is
-// keyed by the width that was resolved at generation time. Resolution
+// handleThumb serves GET /<id>/t/<size>. Site-aware like handleOrigFile:
+// an id invisible on the requesting host's site 404s exactly like an
+// unknown id. The size token is "small" or "display" — NOT the raw
+// pixel widths from config (small deviation from the plan's
+// "(480|1280)" notation): tokens stay URL-stable if the configured
+// widths ever change or hot-reload, and the on-disk file is keyed by
+// the width that was resolved at generation time. Resolution
 // therefore goes through Store.FindThumbPath: the current-config width
 // file first, then any existing <hash>-*.jpg — otherwise a width reload
 // would 404 every pre-existing ready row forever (see FindThumbPath's
@@ -551,6 +566,7 @@ func (a *App) handleThumb(w http.ResponseWriter, r *http.Request, id, sizeToken 
 		http.NotFound(w, r)
 		return
 	}
+	sc := a.resolveSite(r)
 	cfg := a.getConfig()
 	var width int
 	switch sizeToken {
@@ -569,6 +585,14 @@ func (a *App) handleThumb(w http.ResponseWriter, r *http.Request, id, sizeToken 
 	}
 	if img.Hidden {
 		http.Error(w, "gone", http.StatusGone)
+		return
+	}
+	if !siteCanSee(sc, img) {
+		// Same rule as the details page, checked at the same spot
+		// (after hidden, before the thumb-status/file lookup): no
+		// existence hint on the safe host, normal service on the
+		// default host.
+		http.NotFound(w, r)
 		return
 	}
 	if img.ThumbStatus != thumbStatusReady {

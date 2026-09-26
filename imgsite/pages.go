@@ -762,10 +762,11 @@ func buildImageView(cfg Config, img *dbImage, prev, next *dbImage, absBase strin
 
 	v.ParamRows = buildParamRows(img)
 
-	// OpenGraph fields (M7). absBase is the same base the copy-link
-	// button uses (configured server.base_url, else request-derived —
-	// the exact rules the upload response uses), so all absolute URLs
-	// on the page agree on the host.
+	// OpenGraph fields (M7). absBase is the site-aware base (the safe
+	// site's base_url on the safe host; otherwise configured
+	// server.base_url, else request-derived — the exact rules the
+	// upload response uses), so all absolute URLs on the page —
+	// copy-link included — agree on the host.
 	v.OGTitle = clampSnippet(img.OriginalPrompt, ogTitleMaxChars)
 	if v.OGTitle == "" {
 		v.OGTitle = clampSnippet(img.Filename, ogTitleMaxChars)
@@ -952,7 +953,7 @@ func (a *App) handleImagePage(w http.ResponseWriter, r *http.Request, id string)
 		next = nil
 	}
 
-	view := buildImageView(a.getConfig(), img, prev, next, a.absBaseFromRequest(r))
+	view := buildImageView(a.getConfig(), img, prev, next, a.absBaseForSite(sc, r))
 	if hasHub {
 		view.LastEvent = &lastEvent
 	}
@@ -966,12 +967,27 @@ func (a *App) handleImagePage(w http.ResponseWriter, r *http.Request, id string)
 	}
 }
 
-// absBaseFromRequest builds the absolute base for page-embedded absolute
-// links (copy-link button): the configured server.base_url when set,
-// otherwise derived from the request — same rules as upload-response URL
-// derivation, so both paths agree on what the host is.
-func (a *App) absBaseFromRequest(r *http.Request) string {
-	if cfgBase := strings.TrimRight(a.getConfig().Server.BaseURL, "/"); cfgBase != "" {
+// absBaseForSite builds the absolute base for the page-embedded
+// absolute links (copy-link button, og:image, og:url): the safe
+// site's base_url on the safe host, otherwise the same rules the
+// upload response uses — configured server.base_url, else derived
+// from the request — so every absolute URL a details page ships
+// agrees on the host (and a link copied on the safe host stays a
+// safe-host link).
+func (a *App) absBaseForSite(sc siteCtx, r *http.Request) string {
+	cfg := a.getConfig()
+	if sc.Safe && cfg.SafeSite != nil {
+		if base := strings.TrimRight(cfg.SafeSite.BaseURL, "/"); base != "" {
+			return base
+		}
+		// Unreachable in production: config validation requires
+		// safe_site.base_url whenever [safe_site] exists, and
+		// resolveSite only sets Safe=true upon seeing that section. A
+		// hot-reload that drops [safe_site] between resolution and
+		// here degrades to the default-site base instead of
+		// dereferencing a nil section.
+	}
+	if cfgBase := strings.TrimRight(cfg.Server.BaseURL, "/"); cfgBase != "" {
 		return cfgBase
 	}
 	return deriveBaseURL(r)

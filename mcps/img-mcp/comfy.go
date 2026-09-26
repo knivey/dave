@@ -197,20 +197,54 @@ func truncateForPromptNote(reasoning string) string {
 // "prompt" metadata chunk, so this survives inside every generated file.
 // EnhancementReasoning is omitempty: plain-generate jobs (and Chat
 // Completions enhancement, which exposes no reasoning summaries) produce the
-// same compact payload as before the field existed.
+// same compact payload as before the field existed. The provenance trio and
+// Safety follow the same discipline:
+//
+//   - Network/Channel/Nick ride the note from submit time (job input is the
+//     source), so the file carries its IRC origin even if the upload meta is
+//     lost — imgsite's reextract backfills provenance from the note.
+//   - Safety is added by the EXIF note rewrite at upload-prep time (after the
+//     vet resolves), never at submit — the verdict does not exist yet. Only
+//     affirmative verdicts ("safe"/"unsafe", see reportableSafety) are baked:
+//     "" (unvetted/skip_networks) and "unknown" bake nothing, keeping the
+//     ""-vs-"unknown" distinction out of the file — imgsite's column already
+//     defaults to unknown, and baking "unknown" would merely restate the
+//     default while making the payload larger.
 type promptNotePayload struct {
 	Prompt               string `json:"prompt"`
 	LLMGenerated         bool   `json:"llm_generated"`
 	JobID                string `json:"job_id"`
 	EnhancementReasoning string `json:"enhancement_reasoning,omitempty"`
+	Network              string `json:"network,omitempty"`
+	Channel              string `json:"channel,omitempty"`
+	Nick                 string `json:"nick,omitempty"`
+	Safety               string `json:"safety,omitempty"`
 }
 
+// buildPromptNote assembles the submit-time note: everything known when the
+// workflow is built (prompt, flags, provenance) with the safety verdict left
+// empty — the vet is still running. The rewrite path calls
+// buildPromptNoteWithSafety to rebuild the payload wholesale once the verdict
+// resolves.
 func buildPromptNote(job *Job, enhancementReasoning string) (string, error) {
+	return buildPromptNoteWithSafety(job, enhancementReasoning, "")
+}
+
+// buildPromptNoteWithSafety is the rewrite-time note builder: the full
+// payload — submit-time fields plus the resolved safety verdict — re-marshaled
+// wholesale (never string-patched). Callers pass the verdict exactly as the
+// vet/persistence produced it; non-affirmative values drop out via
+// reportableSafety + omitempty.
+func buildPromptNoteWithSafety(job *Job, enhancementReasoning, safety string) (string, error) {
 	data, err := json.Marshal(promptNotePayload{
 		Prompt:               job.Input.Prompt,
 		LLMGenerated:         job.Input.LLMGenerated,
 		JobID:                job.ID,
 		EnhancementReasoning: truncateForPromptNote(enhancementReasoning),
+		Network:              job.Input.Network,
+		Channel:              job.Input.Channel,
+		Nick:                 job.Input.Nick,
+		Safety:               reportableSafety(safety),
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshaling prompt note: %w", err)
@@ -282,7 +316,9 @@ func prepareComfyWorkflow(cfg Config, workflowName, prompt, negativePrompt strin
 	// server accepts. The full submitted graph — orphan nodes included — is
 	// embedded in the file metadata by the save node, so the original user
 	// prompt (pre-enhancement, otherwise overwritten in the prompt node above)
-	// and provenance are recoverable from the image file itself.
+	// and provenance are recoverable from the image file itself, and the
+	// post-generation EXIF note rewrite (webp_rewrite.go) can enrich this
+	// node's text in place once the safety verdict resolves.
 	//
 	// The class MUST be a backend-registered core type: validate_prompt checks
 	// class_type registration for EVERY node in the prompt, even unreachable

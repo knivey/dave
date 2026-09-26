@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -379,9 +381,11 @@ func TestJobQueue_ProvenancePersists(t *testing.T) {
 // TestBuildUploadMeta covers the meta payload img-mcp hands imgsite per
 // upload: the plain path sends the final generation prompt as
 // enhanced_prompt (equal to the original — it IS what the image ran with),
-// the enhanced path carries the LLM's prompt/negative/reasoning, and the
+// the enhanced path carries the LLM's prompt/negative/reasoning, the
 // recovery path (empty enhancement args) omits those and lets EXIF supply
-// them server-side.
+// them server-side, and the safety verdict rides along only when
+// affirmatively resolved ("" and "unknown" drop out; imgsite's column
+// already defaults to unknown and rejects other values).
 func TestBuildUploadMeta(t *testing.T) {
 	plainJob := &Job{
 		ID:       "plainjob",
@@ -415,6 +419,7 @@ func TestBuildUploadMeta(t *testing.T) {
 		finalPrompt  string
 		finalNeg     string
 		reasoning    string
+		safety       string
 		expect       UploadMeta
 		expectJSONEq string
 	}{
@@ -424,6 +429,69 @@ func TestBuildUploadMeta(t *testing.T) {
 			finalPrompt: "a cat",
 			finalNeg:    "",
 			reasoning:   "",
+			safety:      safetyVerdictSafe,
+			expect: UploadMeta{
+				JobID:          "plainjob",
+				OriginalPrompt: "a cat",
+				EnhancedPrompt: "a cat",
+				WorkflowName:   "zimage",
+				Network:        "libera",
+				Channel:        "#dave",
+				Nick:           "knivey",
+				Safety:         safetyVerdictSafe,
+			},
+			expectJSONEq: `{"job_id":"plainjob","original_prompt":"a cat","enhanced_prompt":"a cat",
+				"workflow_name":"zimage","network":"libera","channel":"#dave","nick":"knivey","safety":"safe"}`,
+		},
+		{
+			name:        "enhanced: LLM prompt, negative, reasoning all carried",
+			job:         enhancedJob,
+			finalPrompt: "a fluffy cat, cinematic lighting",
+			finalNeg:    "blurry, extra limbs",
+			reasoning:   "the user asked for a cat",
+			safety:      safetyVerdictUnsafe,
+			expect: UploadMeta{
+				JobID:          "enhjob",
+				OriginalPrompt: "a cat",
+				EnhancedPrompt: "a fluffy cat, cinematic lighting",
+				NegativePrompt: "blurry, extra limbs",
+				Reasoning:      "the user asked for a cat",
+				LLMGenerated:   true,
+				WorkflowName:   "zimage",
+				Network:        "libera",
+				Channel:        "#dave",
+				Nick:           "knivey",
+				Safety:         safetyVerdictUnsafe,
+			},
+			expectJSONEq: `{"job_id":"enhjob","original_prompt":"a cat","enhanced_prompt":"a fluffy cat, cinematic lighting",
+				"negative_prompt":"blurry, extra limbs","reasoning":"the user asked for a cat","llm_generated":true,
+				"workflow_name":"zimage","network":"libera","channel":"#dave","nick":"knivey","safety":"unsafe"}`,
+		},
+		{
+			name:        "recovery: empty enhancement args drop out, EXIF supplies them",
+			job:         enhancedJob,
+			finalPrompt: "",
+			finalNeg:    "",
+			reasoning:   "",
+			safety:      safetyVerdictUnsafe,
+			expect: UploadMeta{
+				JobID:          "enhjob",
+				OriginalPrompt: "a cat",
+				LLMGenerated:   true,
+				WorkflowName:   "zimage",
+				Network:        "libera",
+				Channel:        "#dave",
+				Nick:           "knivey",
+				Safety:         safetyVerdictUnsafe,
+			},
+			expectJSONEq: `{"job_id":"enhjob","original_prompt":"a cat","llm_generated":true,
+				"workflow_name":"zimage","network":"libera","channel":"#dave","nick":"knivey","safety":"unsafe"}`,
+		},
+		{
+			name:        "unknown verdict is omitted, not sent",
+			job:         plainJob,
+			finalPrompt: "a cat",
+			safety:      safetyVerdictUnknown,
 			expect: UploadMeta{
 				JobID:          "plainjob",
 				OriginalPrompt: "a cat",
@@ -437,43 +505,20 @@ func TestBuildUploadMeta(t *testing.T) {
 				"workflow_name":"zimage","network":"libera","channel":"#dave","nick":"knivey"}`,
 		},
 		{
-			name:        "enhanced: LLM prompt, negative, reasoning all carried",
-			job:         enhancedJob,
-			finalPrompt: "a fluffy cat, cinematic lighting",
-			finalNeg:    "blurry, extra limbs",
-			reasoning:   "the user asked for a cat",
+			name:        "unvetted (skip_networks) verdict is omitted",
+			job:         plainJob,
+			finalPrompt: "a cat",
+			safety:      safetyVerdictUnvetted,
 			expect: UploadMeta{
-				JobID:          "enhjob",
+				JobID:          "plainjob",
 				OriginalPrompt: "a cat",
-				EnhancedPrompt: "a fluffy cat, cinematic lighting",
-				NegativePrompt: "blurry, extra limbs",
-				Reasoning:      "the user asked for a cat",
-				LLMGenerated:   true,
+				EnhancedPrompt: "a cat",
 				WorkflowName:   "zimage",
 				Network:        "libera",
 				Channel:        "#dave",
 				Nick:           "knivey",
 			},
-			expectJSONEq: `{"job_id":"enhjob","original_prompt":"a cat","enhanced_prompt":"a fluffy cat, cinematic lighting",
-				"negative_prompt":"blurry, extra limbs","reasoning":"the user asked for a cat","llm_generated":true,
-				"workflow_name":"zimage","network":"libera","channel":"#dave","nick":"knivey"}`,
-		},
-		{
-			name:        "recovery: empty enhancement args drop out, EXIF supplies them",
-			job:         enhancedJob,
-			finalPrompt: "",
-			finalNeg:    "",
-			reasoning:   "",
-			expect: UploadMeta{
-				JobID:          "enhjob",
-				OriginalPrompt: "a cat",
-				LLMGenerated:   true,
-				WorkflowName:   "zimage",
-				Network:        "libera",
-				Channel:        "#dave",
-				Nick:           "knivey",
-			},
-			expectJSONEq: `{"job_id":"enhjob","original_prompt":"a cat","llm_generated":true,
+			expectJSONEq: `{"job_id":"plainjob","original_prompt":"a cat","enhanced_prompt":"a cat",
 				"workflow_name":"zimage","network":"libera","channel":"#dave","nick":"knivey"}`,
 		},
 		{
@@ -491,7 +536,7 @@ func TestBuildUploadMeta(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			meta := buildUploadMeta(tt.job, tt.finalPrompt, tt.finalNeg, tt.reasoning)
+			meta := buildUploadMeta(tt.job, tt.finalPrompt, tt.finalNeg, tt.reasoning, tt.safety)
 			assert.Equal(t, tt.expect, meta)
 
 			data, err := json.Marshal(meta)
@@ -1194,4 +1239,253 @@ func TestRecoverRunningJobSkipNetworksDoesNotReVet(t *testing.T) {
 	assert.Zero(t, vet.calls.Load(), "skip_networks applies on recovery too — no vet call")
 	assert.Empty(t, dbJobSafety(t, q.db, job.ID),
 		"an unvetted job must stay unvetted — empty column, not unknown")
+}
+
+// TestProcessJobRewritesNoteBeforeUpload pins the load-bearing ordering of
+// the EXIF note rewrite: after the monitor completes and the verdict is
+// awaited, each image's note is rebuilt wholesale (verdict + provenance join
+// the submit-time fields) and baked into the bytes BEFORE the upload — the
+// bytes imgsite receives, stores, and sha256-dedups are the rewritten bytes.
+// The submit-time note carries provenance but never a safety verdict (it
+// does not exist yet at submit).
+func TestProcessJobRewritesNoteBeforeUpload(t *testing.T) {
+	mockComfy := newMockComfyFlowServer(t)
+	const enhancedPrompt = "an enhanced majestic cat, studio lighting"
+	fixture := exifWebPWithNote(t,
+		`{"prompt":"a cat","llm_generated":true,"job_id":"stale"}`, enhancedPrompt)
+	mockComfy.serveViewData(fixture)
+	vet := newVetStubServer(t, http.StatusOK, `{"safe":true,"reason":"fine"}`)
+	up := newFakeUploadServer(t)
+
+	cfg := safetyQueueConfig(t, mockComfy.URL(), vet, nil)
+	cfg.Upload.URL = up.server.URL
+
+	q, cleanup := setupTestQueue(t, cfg)
+	defer cleanup()
+
+	job, err := q.Submit(JobTypeGenerate, "test", JobInput{
+		Prompt:       "a cat",
+		LLMGenerated: true,
+		Network:      "graped",
+		Channel:      "#test",
+		Nick:         "user1",
+		OutputFormat: "url",
+	})
+	require.NoError(t, err, "Submit")
+
+	waitForJobDone(t, job, 15*time.Second)
+	assertJobStatus(t, q, job.ID, StatusCompleted)
+
+	// Submit-time note: provenance rides from submit; the verdict does not.
+	submitted := mockComfy.submittedPrompts()
+	require.Len(t, submitted, 1, "exactly one prompt submission")
+	submitNote, ok := submitted[0].Prompt[davePromptNoteNodeID].Inputs["text"].(string)
+	require.True(t, ok, "submitted note text should be a string")
+	assert.Contains(t, submitNote, `"network":"graped"`)
+	assert.Contains(t, submitNote, `"channel":"#test"`)
+	assert.Contains(t, submitNote, `"nick":"user1"`)
+	assert.NotContains(t, submitNote, "safety",
+		"the submit-time note must not carry a safety verdict — it has not resolved yet")
+
+	// The uploaded bytes must hash-match the rewritten artifact: reconstruct
+	// the expected result (note + surgery) and compare against what the fake
+	// site received. Had the rewrite landed after the upload — or not at all
+	// — the received hash would match the fixture instead.
+	expectedNote, err := buildPromptNoteWithSafety(job, "", safetyVerdictSafe)
+	require.NoError(t, err, "buildPromptNoteWithSafety")
+	expectedBytes, err := rewriteWebpNoteData(fixture, expectedNote)
+	require.NoError(t, err, "rewriteWebpNoteData")
+
+	received := up.gotFileContent
+	require.NotEmpty(t, received, "upload must have received the image")
+	assert.NotEqual(t, sha256.Sum256(fixture), sha256.Sum256(received),
+		"the uploaded bytes must not be the un-rewritten fixture")
+	assert.Equal(t, sha256.Sum256(expectedBytes), sha256.Sum256(received),
+		"uploaded bytes must hash-match the post-rewrite image (rewrite → sha256 → upload)")
+	assert.True(t, bytes.Equal(received, expectedBytes),
+		"uploaded bytes must be exactly the rewritten image")
+
+	// The verdict + provenance are recoverable from the uploaded bytes via
+	// the production reader (imgsite's extraction twin).
+	note, ok := embeddedPromptNote(received)
+	require.True(t, ok, "rewritten note must parse back out of the uploaded bytes")
+	assert.Equal(t, "a cat", note.Prompt)
+	assert.True(t, note.LLMGenerated)
+	assert.Equal(t, job.ID, note.JobID)
+	assert.Equal(t, "graped", note.Network)
+	assert.Equal(t, "#test", note.Channel)
+	assert.Equal(t, "user1", note.Nick)
+	assert.Equal(t, safetyVerdictSafe, note.Safety)
+
+	// The enhanced prompt the image ran with survives the surgery.
+	api, ok := embeddedWorkflowJSON(received)
+	require.True(t, ok, "uploaded bytes must still embed a workflow")
+	var wf ComfyWorkflow
+	require.NoError(t, json.Unmarshal([]byte(api), &wf))
+	assert.Equal(t, enhancedPrompt, wf["prompt-node"].Inputs["text"])
+
+	// Meta carries the verdict alongside the baked copy.
+	var meta UploadMeta
+	require.NoError(t, json.Unmarshal([]byte(up.gotMetaRaw), &meta))
+	assert.Equal(t, safetyVerdictSafe, meta.Safety)
+	assert.Equal(t, "graped", meta.Network)
+}
+
+// TestProcessJobNoteRewriteSkipsNonWebp pins the WARN-and-skip path:
+// production output is webp, but a non-webp output must not fail the job —
+// the original bytes upload unchanged and the verdict still travels in the
+// upload meta.
+func TestProcessJobNoteRewriteSkipsNonWebp(t *testing.T) {
+	mockComfy := newMockComfyFlowServer(t) // /view serves "fakedata" — not a webp
+	vet := newVetStubServer(t, http.StatusOK, `{"safe":true,"reason":"fine"}`)
+	up := newFakeUploadServer(t)
+
+	cfg := safetyQueueConfig(t, mockComfy.URL(), vet, nil)
+	cfg.Upload.URL = up.server.URL
+
+	q, cleanup := setupTestQueue(t, cfg)
+	defer cleanup()
+
+	job, err := q.Submit(JobTypeGenerate, "test", JobInput{
+		Prompt: "a cat", Network: "graped", OutputFormat: "url",
+	})
+	require.NoError(t, err, "Submit")
+
+	waitForJobDone(t, job, 15*time.Second)
+	assertJobStatus(t, q, job.ID, StatusCompleted)
+
+	assert.Equal(t, []byte("fakedata"), up.gotFileContent,
+		"non-webp output must upload the original bytes (rewrite skipped)")
+	var meta UploadMeta
+	require.NoError(t, json.Unmarshal([]byte(up.gotMetaRaw), &meta))
+	assert.Equal(t, safetyVerdictSafe, meta.Safety,
+		"the verdict still travels in the upload meta when the rewrite is skipped")
+}
+
+// TestProcessJobNoteRewriteOmitsUnresolvedSafety pins the bake discipline for
+// non-affirmative verdicts: unknown (vet failed) and unvetted
+// (skip_networks) bake nothing into the note and send nothing in the meta —
+// imgsite's column already defaults to unknown and the site rejects any
+// other value.
+func TestProcessJobNoteRewriteOmitsUnresolvedSafety(t *testing.T) {
+	tests := []struct {
+		name         string
+		network      string
+		skipNetworks []string
+		vetStatus    int
+	}{
+		{
+			name:      "vet failure degrades to unknown: nothing baked",
+			network:   "graped",
+			vetStatus: http.StatusInternalServerError,
+		},
+		{
+			name:         "skip networks is unvetted: nothing baked",
+			network:      "Libera",
+			skipNetworks: []string{"libera"},
+			vetStatus:    http.StatusOK,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockComfy := newMockComfyFlowServer(t)
+			mockComfy.serveViewData(exifWebPWithNote(t,
+				`{"prompt":"a cat","llm_generated":false,"job_id":"stale"}`, "enhanced cat"))
+			vet := newVetStubServer(t, tt.vetStatus, `{"safe":true,"reason":"fine"}`)
+			up := newFakeUploadServer(t)
+
+			cfg := safetyQueueConfig(t, mockComfy.URL(), vet, tt.skipNetworks)
+			cfg.Upload.URL = up.server.URL
+
+			q, cleanup := setupTestQueue(t, cfg)
+			defer cleanup()
+
+			job, err := q.Submit(JobTypeGenerate, "test", JobInput{
+				Prompt: "a cat", Network: tt.network, OutputFormat: "url",
+			})
+			require.NoError(t, err, "Submit")
+
+			waitForJobDone(t, job, 15*time.Second)
+			assertJobStatus(t, q, job.ID, StatusCompleted)
+
+			note, ok := embeddedPromptNote(up.gotFileContent)
+			require.True(t, ok, "the rewrite itself must still happen (webp served)")
+			assert.Empty(t, note.Safety, "non-affirmative verdicts must bake nothing")
+			// Struct decoding can't tell an absent key from ""; pin the raw
+			// note text (the note JSON rides escaped inside the workflow JSON,
+			// so the workflow-level string would not show it verbatim).
+			wfJSON, ok := embeddedWorkflowJSON(up.gotFileContent)
+			require.True(t, ok)
+			var wf ComfyWorkflow
+			require.NoError(t, json.Unmarshal([]byte(wfJSON), &wf))
+			noteText, ok := wf[davePromptNoteNodeID].Inputs["text"].(string)
+			require.True(t, ok, "note text should be a string")
+			assert.NotContains(t, noteText, "safety",
+				"the safety key must be absent from the embedded note, not empty")
+
+			assert.NotContains(t, up.gotMetaRaw, "safety",
+				"non-affirmative verdicts must be omitted from the upload meta")
+		})
+	}
+}
+
+// TestRecoverRunningJobRewritesNoteWithPersistedSafety pins the recovery
+// half of the rewrite: the persisted verdict (jobSafety) is baked into the
+// bytes AND sent in the meta, and the enhancement reasoning — which recovery
+// cannot rebuild — is carried across the wholesale note replacement from the
+// note already embedded in the image, its only surviving copy.
+func TestRecoverRunningJobRewritesNoteWithPersistedSafety(t *testing.T) {
+	mockComfy := newMockComfyFlowServer(t)
+	const enhancedPrompt = "an enhanced majestic cat, studio lighting"
+	fixture := exifWebPWithNote(t,
+		`{"prompt":"a cat","llm_generated":true,"job_id":"stale","enhancement_reasoning":"the user asked for a cat"}`,
+		enhancedPrompt)
+	mockComfy.serveViewData(fixture)
+	vet := newVetStubServer(t, http.StatusOK, `{"safe":true,"reason":"fine"}`) // would say safe...
+	up := newFakeUploadServer(t)
+
+	cfg := safetyQueueConfig(t, mockComfy.URL(), vet, nil)
+	cfg.Upload.URL = up.server.URL
+	cfg.Queue.MaxWorkers = 0
+	q := manualQueueLiteral(t, cfg)
+
+	job, err := q.Submit(JobTypeGenerate, "test", JobInput{
+		Prompt:       "a cat",
+		LLMGenerated: true,
+		Network:      "graped",
+		Channel:      "#test",
+		Nick:         "user1",
+		OutputFormat: "url",
+	})
+	require.NoError(t, err, "Submit")
+	markRunningInMemoryAndDB(t, q, job, "test-prompt-1")
+
+	// ...but the verdict resolved (unsafe) before the crash.
+	require.NoError(t, dbUpdateJobSafety(q.db, job.ID, safetyVerdictUnsafe))
+	recovered := restartRecoverJob(t, q, job.ID)
+
+	q.wg.Add(1)
+	go q.recoverRunningJob(context.Background(), recovered, "test-prompt-1")
+
+	waitForJobDone(t, recovered, 15*time.Second)
+	assertJobStatus(t, q, recovered.ID, StatusCompleted)
+	assert.Zero(t, vet.calls.Load(), "a persisted verdict must never be re-vetted")
+
+	received := up.gotFileContent
+	require.NotEmpty(t, received, "upload must have received the image")
+	note, ok := embeddedPromptNote(received)
+	require.True(t, ok, "recovery-rewritten note must parse back out")
+	assert.Equal(t, safetyVerdictUnsafe, note.Safety,
+		"the persisted verdict must be baked on the recovery path")
+	assert.Equal(t, job.ID, note.JobID, "the rebuild is wholesale: stale fields do not survive")
+	assert.Equal(t, "graped", note.Network)
+	assert.Equal(t, "#test", note.Channel)
+	assert.Equal(t, "user1", note.Nick)
+	assert.Equal(t, "the user asked for a cat", note.EnhancementReasoning,
+		"the embedded reasoning must be carried across the rewrite — recovery cannot rebuild it")
+
+	var meta UploadMeta
+	require.NoError(t, json.Unmarshal([]byte(up.gotMetaRaw), &meta))
+	assert.Equal(t, safetyVerdictUnsafe, meta.Safety,
+		"the recovery path's buildUploadMeta must consume the jobSafety verdict too")
 }

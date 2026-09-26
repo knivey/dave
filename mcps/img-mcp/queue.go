@@ -141,7 +141,12 @@ type ImageData struct {
 // anyway). The recovery path passes empty enhancement values: it never
 // re-runs enhancement, so the enhanced prompt/reasoning live only in the
 // image's EXIF and provenance is all meta can honestly contribute.
-func buildUploadMeta(job *Job, finalPrompt, finalNegative, reasoning string) UploadMeta {
+//
+// safety is the resolved verdict (jobSafety at both call sites): only
+// affirmative values leave the process (reportableSafety) — "" and "unknown"
+// are omitted so imgsite's unknown-defaulted column stays unknown instead of
+// the upload being rejected for a value the site refuses.
+func buildUploadMeta(job *Job, finalPrompt, finalNegative, reasoning, safety string) UploadMeta {
 	return UploadMeta{
 		JobID:          job.ID,
 		OriginalPrompt: job.Input.Prompt,
@@ -153,7 +158,29 @@ func buildUploadMeta(job *Job, finalPrompt, finalNegative, reasoning string) Upl
 		Network:        job.Input.Network,
 		Channel:        job.Input.Channel,
 		Nick:           job.Input.Nick,
+		Safety:         reportableSafety(safety),
 	}
+}
+
+// rewriteJobImageNote bakes the enriched note into one completed image's
+// bytes (resolved verdict + provenance; webp_rewrite.go does the container
+// surgery). Failure NEVER fails the job: production output is webp, but a
+// non-webp output or an unparseable container WARNs and the original bytes
+// flow on — the verdict still travels in the upload meta, and imgsite's
+// reextract can heal the note from there later.
+func rewriteJobImageNote(jobID, filename string, data []byte, noteJSON string) []byte {
+	rewritten, err := rewriteWebpNoteData(data, noteJSON)
+	if err != nil {
+		if errors.Is(err, errWebpOnly) {
+			loggerQueue.Warn("image is not webp; skipping EXIF note rewrite (safety travels in the upload meta only)",
+				"job_id", jobID, "filename", filename)
+		} else {
+			loggerQueue.Warn("EXIF note rewrite failed; uploading with the submit-time note",
+				"job_id", jobID, "filename", filename, "error", err)
+		}
+		return data
+	}
+	return rewritten
 }
 
 type JobQueue struct {
@@ -835,10 +862,30 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 	// Persist the moment it resolves — before the upload loop — so a crash
 	// mid-upload still leaves recovery with the verdict in hand.
 	q.persistJobSafety(job.ID, jobSafety)
-	uploadMeta := buildUploadMeta(job, prompt, negativePrompt, enhancementReasoning)
+	uploadMeta := buildUploadMeta(job, prompt, negativePrompt, enhancementReasoning, jobSafety)
+	// EXIF note rewrite, post-generation and pre-upload: the note payload is
+	// rebuilt wholesale with everything known at upload-prep time — the
+	// submit-time fields plus the now-resolved verdict — and baked into the
+	// image bytes BEFORE hashing/uploading, so the bytes imgsite receives,
+	// stores, and sha256-dedups are the enriched bytes (rewrite → sha256 →
+	// upload; the site computes the hash from what it receives). Applied to
+	// every output format, not just uploads: base64 deliveries carry the same
+	// enriched artifact the gallery would.
+	rewriteNote, noteErr := buildPromptNoteWithSafety(job, enhancementReasoning, jobSafety)
+	if noteErr != nil {
+		// Unreachable in practice (marshaling plain strings); degrade like
+		// the container-surgery failures below rather than fail the job.
+		loggerQueue.Warn("building the rewrite-time prompt note failed; keeping the submit-time note",
+			"job_id", job.ID, "error", noteErr)
+		rewriteNote = ""
+	}
 	for i, img := range comfyResult.Images {
 		imgData := ImageData{
 			MIMEType: guessMIMEType(img.Filename, "image/png"),
+		}
+
+		if rewriteNote != "" {
+			img.Data = rewriteJobImageNote(job.ID, img.Filename, img.Data, rewriteNote)
 		}
 
 		if i < len(comfyResult.ComfyImages) {
@@ -1183,11 +1230,34 @@ func (q *JobQueue) recoverRunningJob(_ context.Context, job *Job, comfyPromptID 
 	// the enhanced prompt/negative/reasoning exist only inside the image's
 	// EXIF (imgsite's merge policy prefers EXIF for those fields anyway —
 	// see docs/image-site.md). Meta contributes provenance + the original
-	// prompt; the empty enhancement args drop out via omitempty.
-	uploadMeta := buildUploadMeta(job, "", "", "")
+	// prompt + the verdict (jobSafety — persisted before the crash, or
+	// re-vetted above); the empty enhancement args drop out via omitempty.
+	uploadMeta := buildUploadMeta(job, "", "", "", jobSafety)
+	// Rewrite-time note on the recovery path: the note is replaced
+	// wholesale, and the enhancement reasoning cannot be rebuilt here
+	// (recovery never re-runs enhancement), so it is recovered from the note
+	// already embedded in the image — its only surviving copy — before the
+	// rewrite drops it. Everything else comes from the job row, the same
+	// source the submit-time note used.
+	rewriteReasoning := ""
+	if len(comfyResult.Images) > 0 {
+		if note, ok := embeddedPromptNote(comfyResult.Images[0].Data); ok {
+			rewriteReasoning = note.EnhancementReasoning
+		}
+	}
+	rewriteNote, noteErr := buildPromptNoteWithSafety(job, rewriteReasoning, jobSafety)
+	if noteErr != nil {
+		loggerQueue.Warn("building the rewrite-time prompt note failed; keeping the submit-time note",
+			"job_id", job.ID, "error", noteErr)
+		rewriteNote = ""
+	}
 	for i, img := range comfyResult.Images {
 		imgData := ImageData{
 			MIMEType: guessMIMEType(img.Filename, "image/png"),
+		}
+
+		if rewriteNote != "" {
+			img.Data = rewriteJobImageNote(job.ID, img.Filename, img.Data, rewriteNote)
 		}
 
 		if i < len(comfyResult.ComfyImages) {

@@ -41,6 +41,13 @@ type UploadMeta struct {
 	Network        string `json:"network,omitempty"`
 	Channel        string `json:"channel,omitempty"`
 	Nick           string `json:"nick,omitempty"`
+	// Safety carries the resolved safety verdict, but only when
+	// affirmatively resolved ("safe"/"unsafe" — filtered by
+	// reportableSafety at the buildUploadMeta call site). The unvetted
+	// marker and "unknown" are omitted: imgsite's images.safety column
+	// defaults to unknown and the site rejects any other value as a bad
+	// request, so an unfiltered pass-through would 400 the upload.
+	Safety string `json:"safety,omitempty"`
 }
 
 // uploadResponse is the JSON body of imgsite's 201 answer.

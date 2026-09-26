@@ -215,3 +215,45 @@ func enhancedPromptFromImage(cfg Config, workflowName string, data []byte) (stri
 	}
 	return text, true
 }
+
+// embeddedPromptNote decodes the dave_original_prompt note payload from the
+// workflow embedded in a completed image. This is the write side's read
+// mirror: the EXIF note rewrite replaces the note wholesale, so the recovery
+// path reads the old payload first to carry fields it cannot rebuild (the
+// enhancement reasoning — recovery never re-runs enhancement, so the note is
+// its only surviving copy) across the rewrite. ok is false when no note could
+// be recovered; callers degrade to empty.
+func embeddedPromptNote(data []byte) (promptNotePayload, bool) {
+	wfJSON, ok := embeddedWorkflowJSON(data)
+	if !ok {
+		return promptNotePayload{}, false
+	}
+	// UseNumber keeps large int64 seeds exact through the round trip; the
+	// note lives one level deeper (a string field), but parsing the workflow
+	// through map[string]any is the only shape-agnostic walk available and
+	// costs nothing here (the bytes are re-marshaled by the rewrite, not by
+	// this reader — the values below come from the note's own JSON).
+	dec := json.NewDecoder(strings.NewReader(wfJSON))
+	dec.UseNumber()
+	var workflow map[string]any
+	if err := dec.Decode(&workflow); err != nil {
+		return promptNotePayload{}, false
+	}
+	node, ok := workflow[davePromptNoteNodeID].(map[string]any)
+	if !ok {
+		return promptNotePayload{}, false
+	}
+	inputs, ok := node["inputs"].(map[string]any)
+	if !ok {
+		return promptNotePayload{}, false
+	}
+	text, ok := inputs["text"].(string)
+	if !ok {
+		return promptNotePayload{}, false
+	}
+	var payload promptNotePayload
+	if err := json.Unmarshal([]byte(text), &payload); err != nil {
+		return promptNotePayload{}, false
+	}
+	return payload, true
+}

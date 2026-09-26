@@ -240,6 +240,16 @@ func buildTestWebP(exif []byte) []byte {
 	return append(out, body...)
 }
 
+// exifWebPFromWorkflow wraps an arbitrary API workflow in the production EXIF
+// shape: a "prompt:"-prefixed workflow JSON in the TIFF Model tag inside a
+// webp EXIF chunk.
+func exifWebPFromWorkflow(t *testing.T, workflow ComfyWorkflow) []byte {
+	t.Helper()
+	wfJSON, err := json.Marshal(workflow)
+	require.NoError(t, err, "marshaling fixture workflow")
+	return buildTestWebP(buildTestTIFF("prompt:" + string(wfJSON) + "\x00"))
+}
+
 // exifWebPWithPrompt builds a completed-image fixture: a webp whose EXIF
 // embeds an API workflow whose prompt node carries promptText — the only
 // place the enhanced prompt survives a crash on the recovery path.
@@ -249,7 +259,23 @@ func exifWebPWithPrompt(t *testing.T, promptText string) []byte {
 		"prompt-node": {Inputs: map[string]interface{}{"text": promptText}, Class: "CLIPTextEncode"},
 		"output-node": {Inputs: map[string]interface{}{"images": []string{"1"}}, Class: "SaveImage"},
 	}
-	wfJSON, err := json.Marshal(workflow)
-	require.NoError(t, err, "marshaling fixture workflow")
-	return buildTestWebP(buildTestTIFF("prompt:" + string(wfJSON) + "\x00"))
+	return exifWebPFromWorkflow(t, workflow)
+}
+
+// exifWebPWithNote builds a completed-image fixture whose embedded workflow
+// also carries a dave_original_prompt note node (text = noteJSON) — the shape
+// the EXIF note rewrite operates on. promptText lands in the prompt node so
+// tests can assert the enhanced prompt survives the surgery.
+func exifWebPWithNote(t *testing.T, noteJSON, promptText string) []byte {
+	t.Helper()
+	workflow := ComfyWorkflow{
+		"prompt-node": {Inputs: map[string]interface{}{"text": promptText}, Class: "CLIPTextEncode"},
+		"output-node": {Inputs: map[string]interface{}{"images": []string{"1"}}, Class: "SaveImage"},
+		davePromptNoteNodeID: {
+			Inputs: map[string]interface{}{"text": noteJSON},
+			Class:  "CLIPTextEncode",
+			Meta:   &comfyNodeMeta{Title: davePromptNoteTitle},
+		},
+	}
+	return exifWebPFromWorkflow(t, workflow)
 }

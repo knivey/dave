@@ -21,6 +21,22 @@ const (
 	safetyVerdictUnvetted = ""
 )
 
+// reportableSafety filters a verdict down to the values that may leave the
+// process: only affirmative verdicts ("safe"/"unsafe") are baked into the
+// image's EXIF note and sent in the upload meta. The unvetted marker ("",
+// skip_networks / never classified) and "unknown" (vetted but unresolved)
+// report nothing — imgsite's images.safety column already defaults to unknown
+// and the site rejects any value other than safe/unsafe as a bad request, so
+// forwarding them would range from redundant to a failed upload. Anything
+// else (hand-edited DB rows, future verdict values) is treated the same way:
+// dropped rather than guessed at.
+func reportableSafety(safety string) string {
+	if safety == safetyVerdictSafe || safety == safetyVerdictUnsafe {
+		return safety
+	}
+	return ""
+}
+
 // defaultSafetyVetEnhancement is the reserved [enhancement.*] entry name
 // that performs the strict second-pass judgment ([safety] vet_enhancement).
 const defaultSafetyVetEnhancement = "safety-vet"

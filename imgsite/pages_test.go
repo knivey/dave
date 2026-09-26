@@ -528,8 +528,8 @@ func TestDetailsPageZoomOverlayMarkup(t *testing.T) {
 		"class-based open state (visibility keeps the closed overlay out of the a11y tree and tab order)")
 	assert.Contains(t, body, `opacity: 0; visibility: hidden;`, "closed overlay is fully inert")
 	assert.Contains(t, body, `position: fixed; inset: 0; z-index: 100;`, "fixed overlay covers the entire page — topnav, chevrons, everything")
-	assert.Contains(t, body, `.zoom-overlay img { width: 100%; height: 100%; object-fit: contain; }`,
-		"overlay sizing is pure-CSS contain — larger-than-screen shrinks, smaller-than-screen scales up, both letterbox")
+	assert.Contains(t, body, `.zoom-overlay img { width: 100%; height: 100%; object-fit: contain; touch-action: none; user-select: none; -webkit-user-select: none; }`,
+		"overlay sizing is pure-CSS contain — larger-than-screen shrinks, smaller-than-screen scales up, both letterbox; touch-action/user-select keep pointer gestures flowing to image.js's magnification layer (mobile audit #5)")
 	assert.Contains(t, body, `.zoom-overlay { transition: opacity 0.15s ease, visibility 0s linear 0.15s; }`,
 		"closing transition delays the visibility flip to the fade's end (fade-out stays visible, then inert)")
 	assert.Contains(t, body, `.zoom-overlay.open { transition: opacity 0.15s ease, visibility 0s; }`,
@@ -538,6 +538,46 @@ func TestDetailsPageZoomOverlayMarkup(t *testing.T) {
 		"fade transitions gated behind prefers-reduced-motion")
 	assert.Contains(t, body, `body.zoom-open { overflow: hidden; }`, "page scroll locks behind the open overlay")
 	assert.Equal(t, 2, strings.Count(body, "object-fit: contain"), "contain pattern on both the fit-state img and the overlay img")
+}
+
+// TestDetailsPageMobileViewportCSS pins the details page's mobile
+// fixes in the rendered inline CSS (source-level; behavioral
+// verification is the real-browser harness at
+// ~/dev/imgsite-mobile-fix/verify.ts, mobile audit #1/#2/#3/#6/#8):
+//
+//   - topnav flex-wrap: unwrapped, the nav needs ~555px of inline
+//     axis and Chromium EXPANDS a 390px layout viewport to match —
+//     the page renders as a zoomed-out canvas that must be touch-
+//     panned sideways, with the rightmost actions fully off-screen
+//   - overflow-wrap: anywhere on the text containers: long model
+//     filenames, URLs, and unbroken tokens otherwise hold min-content
+//     above the viewport (measured 492px table, 1560px+ page) and
+//     force the same sideways panning; word-break: break-word does
+//     NOT shrink min-content
+//   - zoom-close at 3rem (48px): a touch-reachable close target now
+//     that the overlay no longer spans an expanded viewport
+//   - :active pressed states (touch feedback) on nav controls and
+//     chevrons
+//   - pre blocks at 0.875rem (14px type floor)
+func TestDetailsPageMobileViewportCSS(t *testing.T) {
+	app := newTestApp(t, testConfig())
+	ts := newTestServer(t, app)
+	insertImage(t, app, "mobil01", "2026-09-24 03:12:00")
+
+	_, body := getPage(t, ts.URL, "/mobil01")
+
+	assert.Contains(t, body, ".topnav { display: flex; flex-wrap: wrap;",
+		"topnav must wrap on phones instead of expanding the layout viewport (mobile audit #1)")
+	assert.Contains(t, body, ".original, main p, main pre, main h1, table.params td { overflow-wrap: anywhere; }",
+		"unbreakable tokens must be allowed to shrink min-content to the container (mobile audit #2)")
+	assert.Contains(t, body, ".zoom-close { position: absolute; top: 0.75rem; right: 0.75rem; width: 3rem; height: 3rem;",
+		"close button must keep a ≥48px touch target (mobile audit #3/#7)")
+	assert.Contains(t, body, "button:active", "nav buttons need a touch pressed state (mobile audit #6)")
+	assert.Contains(t, body, ".chevron:active", "chevrons need a touch pressed state (mobile audit #6)")
+	assert.Contains(t, body, "pre { white-space: pre-wrap; word-break: break-word; font-size: 0.875rem; }",
+		"pre blocks must sit at the 14px type floor (mobile audit #8)")
+	assert.Contains(t, body, ".zoom-overlay.zoomed img { cursor: grab; }",
+		"gesture-zoomed overlay state must exist (mobile audit #5)")
 }
 
 // TestDetailsPageMainImageDimsAspectRatio pins the layout-shift guard

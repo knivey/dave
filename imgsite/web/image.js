@@ -73,6 +73,7 @@ export function boot() {
 	const overlay = document.getElementById("zoom-overlay");
 	if (zoomToggle && overlay) {
 		const closeBtn = document.getElementById("zoom-close");
+		const zimg = overlay.querySelector("img");
 		// Unlock the CSS state machine: from here on visibility is
 		// class-owned (hidden attr gone), so the fade transition can
 		// run in both directions without display juggling.
@@ -84,6 +85,7 @@ export function boot() {
 			overlay.classList.toggle("open", on);
 			document.body.classList.toggle("zoom-open", on);
 			zoomToggle.setAttribute("aria-expanded", on ? "true" : "false");
+			if (!on) resetGestureZoom();
 			// Focus: into the dialog on open (the close button — the
 			// one tabbable control inside), back to the toggle on
 			// close. The open-path focus waits one rAF because the
@@ -113,13 +115,296 @@ export function boot() {
 			}
 		}
 
+		// ---- Touch magnification (mobile audit #5) ----
+		// The overlay's contain-fit renders the image at ~1× of its
+		// fit state on phones, and touch has neither the zoom-out
+		// cursor hint nor Esc — the overlay was a same-size picture
+		// you could only dismiss. This layer adds the gestures a phone
+		// user expects, ALL via pointer events on the overlay:
+		//   double-tap → 2× zoom centered on the tap point
+		//   drag (zoomed) → pan, clamped so the image never leaves
+		//   pinch (two pointers) → continuous 1–8×, anchored under the
+		//     fingers; lifting one finger continues as a pan
+		//   single tap (zoomed) → reset to 1×
+		//   single tap (not zoomed) → close, DELAYED one double-tap
+		//     window (~330ms) so the second tap of a double-tap can
+		//     cancel it
+		// Mouse keeps its old contract (any left press closes; drag
+		// while zoomed pans instead), and keyboard ✕ activation still
+		// closes through the click listener's e.detail === 0 branch.
+		// touch-action: none on the overlay/img (CSS) is what keeps
+		// the browser from claiming the moves for page panning.
+		//
+		// Transform model: the img element (width/height 100% of the
+		// overlay content box) carries
+		// translate(x,y) scale(s) with transform-origin 0 0, so
+		// element point e lands at x + e*s. Panning math therefore
+		// works in element coordinates; clamping uses the letterboxed
+		// PAINTED rect (contain fit of naturalWidth/Height inside the
+		// content box) so the image, not the letterbox, is what stays
+		// under the viewport.
+		const z = { s: 1, x: 0, y: 0 };
+		let gesture = null; // active touch/mouse gesture (see pointerdown)
+		const pointers = new Map(); // pointerId -> last client position
+		let pendingClose = null; // single-tap close timer (double-tap window)
+		let suppressClickUntil = 0; // gesture-produced clicks (expiry-dated)
+		let lastTap = { t: 0, x: 0, y: 0 };
+		// A tap that reset the zoom consumes the NEXT tap inside the
+		// double-tap window: the classic lightbox contract is that a
+		// double-tap while zoomed zooms OUT (first tap resets, second
+		// tap is its partner) — without this, the partner tap armed the
+		// single-tap close timer and a pinch-then-double-tap dismissed
+		// the overlay entirely.
+		let tapAfterReset = false;
+		const MAX_SCALE = 8;
+		const TAP_SLOP = 8; // px of movement before a press stops being a tap
+		const DBL_TAP_MS = 320;
+		const DBL_TAP_RADIUS = 48;
+
+		// baseBox measures the img's UNTRANSFORMED geometry (overlay
+		// content box + the contain-fit painted rect inside it),
+		// independent of the current transform — the overlay itself is
+		// never transformed. x0/y0 are the content box's client-space
+		// origin; pointer client coords minus them are element coords.
+		function baseBox() {
+			const o = overlay.getBoundingClientRect();
+			const cs = getComputedStyle(overlay);
+			const pl = parseFloat(cs.paddingLeft) || 0;
+			const pt = parseFloat(cs.paddingTop) || 0;
+			const w = o.width - pl - (parseFloat(cs.paddingRight) || 0);
+			const h = o.height - pt - (parseFloat(cs.paddingBottom) || 0);
+			const nw = zimg.naturalWidth || w;
+			const nh = zimg.naturalHeight || h;
+			const fit = Math.min(w / nw, h / nh);
+			const dw = nw * fit;
+			const dh = nh * fit;
+			return { x0: o.left + pl, y0: o.top + pt, w, h, ox: (w - dw) / 2, oy: (h - dh) / 2, dw, dh };
+		}
+
+		function applyZoom() {
+			zimg.style.transformOrigin = "0 0";
+			zimg.style.transform = z.s === 1 ? "" : "translate(" + z.x + "px, " + z.y + "px) scale(" + z.s + ")";
+			overlay.classList.toggle("zoomed", z.s > 1);
+		}
+
+		// clampT bounds the pan so the scaled PAINTED rect cannot leave
+		// the viewport while it is larger than it (an axis where it is
+		// smaller centers the element — the painting is centered in the
+		// element, so it centers on screen).
+		function clampT(b) {
+			if (z.s <= 1) {
+				z.s = 1;
+				z.x = 0;
+				z.y = 0;
+				return;
+			}
+			if (b.dw * z.s <= b.w) z.x = (b.w - b.w * z.s) / 2;
+			else z.x = Math.min(Math.max(z.x, b.w - z.s * (b.ox + b.dw)), -z.s * b.ox);
+			if (b.dh * z.s <= b.h) z.y = (b.h - b.h * z.s) / 2;
+			else z.y = Math.min(Math.max(z.y, b.h - z.s * (b.oy + b.dh)), -z.s * b.oy);
+		}
+
+		// zoomTo scales to s1 keeping the viewport point (cx, cy)
+		// pinned: the element coordinate under it stays under it.
+		function zoomTo(cx, cy, s1, b) {
+			const ex = (cx - b.x0 - z.x) / z.s;
+			const ey = (cy - b.y0 - z.y) / z.s;
+			z.s = s1;
+			z.x = cx - b.x0 - ex * s1;
+			z.y = cy - b.y0 - ey * s1;
+			clampT(b);
+			applyZoom();
+		}
+
+		function resetGestureZoom() {
+			z.s = 1;
+			z.x = 0;
+			z.y = 0;
+			gesture = null;
+			pointers.clear();
+			tapAfterReset = false;
+			if (pendingClose) {
+				clearTimeout(pendingClose);
+				pendingClose = null;
+			}
+			lastTap = { t: 0, x: 0, y: 0 };
+			applyZoom();
+		}
+
+		function dist(ax, ay, bx, by) {
+			return Math.hypot(ax - bx, ay - by);
+		}
+
+		overlay.addEventListener("pointerdown", (e) => {
+			if (!isOpen()) return;
+			// Capture per pointer so moves/ups keep targeting the
+			// overlay even outside it (multi-pointer safe: capture is
+			// keyed by pointerId).
+			try {
+				overlay.setPointerCapture(e.pointerId);
+			} catch {
+				/* pointer already gone: the subsequent up is a no-op */
+			}
+			pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+			if (pointers.size === 1) {
+				// A new press cancels any single-tap close still inside
+				// the double-tap window — either this press is the
+				// double-tap's second tap, or a fresh interaction that
+				// should not race the timer.
+				if (pendingClose) {
+					clearTimeout(pendingClose);
+					pendingClose = null;
+				}
+				gesture = { kind: "tap", startX: e.clientX, startY: e.clientY, base: baseBox() };
+			} else if (pointers.size === 2) {
+				// Second finger: a pinch, never a delayed close.
+				if (pendingClose) {
+					clearTimeout(pendingClose);
+					pendingClose = null;
+				}
+				const [p1, p2] = [...pointers.values()];
+				const b = (gesture && gesture.base) || baseBox();
+				// Anchor: the element coordinate under the initial
+				// midpoint stays under the moving midpoint.
+				const anchor = {
+					x: ((p1.x + p2.x) / 2 - b.x0 - z.x) / z.s,
+					y: ((p1.y + p2.y) / 2 - b.y0 - z.y) / z.s,
+				};
+				gesture = { kind: "pinch", d0: dist(p1.x, p1.y, p2.x, p2.y) || 1, s0: z.s, anchor, base: b };
+			}
+		});
+
+		overlay.addEventListener("pointermove", (e) => {
+			if (!pointers.has(e.pointerId) || !gesture) return;
+			pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+			if (gesture.kind === "tap") {
+				if (dist(e.clientX, e.clientY, gesture.startX, gesture.startY) > TAP_SLOP) {
+					// Past the slop it is a drag: panning (and cursor
+					// feedback) only mean anything while zoomed; an
+					// unzoomed drag is a dead gesture (no close on up).
+					gesture.kind = z.s > 1 ? "pan" : "drag";
+					gesture.panFrom = { x: e.clientX, y: e.clientY };
+					if (gesture.kind === "pan") overlay.classList.add("dragging");
+				}
+				return;
+			}
+			if (gesture.kind === "pan") {
+				z.x += e.clientX - gesture.panFrom.x;
+				z.y += e.clientY - gesture.panFrom.y;
+				gesture.panFrom = { x: e.clientX, y: e.clientY };
+				clampT(gesture.base);
+				applyZoom();
+				return;
+			}
+			if (gesture.kind === "pinch" && pointers.size >= 2) {
+				const [p1, p2] = [...pointers.values()];
+				const d = dist(p1.x, p1.y, p2.x, p2.y) || 1;
+				const mx = (p1.x + p2.x) / 2;
+				const my = (p1.y + p2.y) / 2;
+				z.s = Math.min(MAX_SCALE, Math.max(1, gesture.s0 * (d / gesture.d0)));
+				z.x = mx - gesture.base.x0 - gesture.anchor.x * z.s;
+				z.y = my - gesture.base.y0 - gesture.anchor.y * z.s;
+				clampT(gesture.base);
+				applyZoom();
+			}
+		});
+
+		function onPointerEnd(e, fromUp) {
+			if (!pointers.has(e.pointerId)) return;
+			const kind = gesture && gesture.kind;
+			pointers.delete(e.pointerId);
+			overlay.classList.remove("dragging");
+			if (pointers.size === 1 && kind === "pinch") {
+				// One finger lifted mid-pinch: continue as a pan with
+				// the survivor, from its current position.
+				const [p] = [...pointers.values()];
+				gesture = { kind: "pan", panFrom: { x: p.x, y: p.y }, base: gesture.base };
+				return;
+			}
+			if (pointers.size > 0) return;
+			gesture = null;
+			if (kind === "pinch" || kind === "pan" || kind === "drag") {
+				// Consumed by the gesture layer; the compatibility
+				// click the engine may still fire must not close.
+				// Expiry-dated (not one-shot) so a click the engine
+				// never fires cannot swallow a later real one.
+				suppressClickUntil = performance.now() + 500;
+				if (z.s <= 1) resetGestureZoom();
+				return;
+			}
+			// pointercancel is the engine reclaiming the pointer (a
+			// system gesture) — never reward it with a close.
+			if (kind === "tap" && fromUp) handleTap(e);
+		}
+
+		overlay.addEventListener("pointerup", (e) => onPointerEnd(e, true));
+		overlay.addEventListener("pointercancel", (e) => onPointerEnd(e, false));
+
+		// hitClose: pointer capture retargets pointer events to the
+		// overlay, so e.target cannot identify the ✕ — hit-test the
+		// release point instead.
+		function hitClose(cx, cy) {
+			const el = document.elementFromPoint(cx, cy);
+			return !!(el && el.closest && el.closest(".zoom-close"));
+		}
+
+		function handleTap(e) {
+			if (!isOpen()) return;
+			// The ✕ always closes, zoomed or not — a tap that only
+			// reset the zoom would hide the one visible exit.
+			if (hitClose(e.clientX, e.clientY)) {
+				setOpen(false);
+				lastTap = { t: 0, x: 0, y: 0 };
+				return;
+			}
+			if (e.pointerType !== "touch") {
+				// Mouse/pen tap: immediate close, no double-tap game.
+				setOpen(false);
+				return;
+			}
+			const now = performance.now();
+			if (z.s > 1) {
+				// Tap while zoomed: back to 1× (double-tap and ✕ exit
+				// fully; pan readers get an easy un-zoom too). The flag
+				// makes a rapid second tap (the double-tap partner)
+				// purely a zoom-out instead of arming the close timer.
+				resetGestureZoom();
+				tapAfterReset = true;
+				return;
+			}
+			if (tapAfterReset) {
+				// Partner tap of a zoom-out double-tap: consumed.
+				tapAfterReset = false;
+				lastTap = { t: 0, x: 0, y: 0 };
+				return;
+			}
+			const isDouble =
+				now - lastTap.t < DBL_TAP_MS && dist(e.clientX, e.clientY, lastTap.x, lastTap.y) < DBL_TAP_RADIUS;
+			lastTap = { t: now, x: e.clientX, y: e.clientY };
+			if (isDouble) {
+				lastTap = { t: 0, x: 0, y: 0 };
+				zoomTo(e.clientX, e.clientY, 2, baseBox());
+				return;
+			}
+			// Single tap: close after the double-tap window so a quick
+			// second tap can cancel it and zoom instead.
+			if (pendingClose) clearTimeout(pendingClose);
+			pendingClose = setTimeout(() => {
+				pendingClose = null;
+				if (isOpen()) setOpen(false);
+			}, DBL_TAP_MS + 10);
+		}
+
 		zoomToggle.addEventListener("click", () => setOpen(!isOpen()));
 
-		// Any click inside the overlay closes it: the backdrop, the
-		// image itself, and the close button (the visible affordance —
-		// the whole surface also shows the zoom-out cursor).
-		overlay.addEventListener("click", () => {
-			if (isOpen()) setOpen(false);
+		// Keyboard activation of the ✕ (Enter/Space while focused)
+		// closes here: e.detail === 0 marks non-pointer clicks. Mouse
+		// and touch activations are fully owned by the pointer layer
+		// above (touch needs the delayed-close window; mouse closes on
+		// pointerup), so their compatibility click events are ignored.
+		overlay.addEventListener("click", (e) => {
+			if (performance.now() < suppressClickUntil) return;
+			if (e.detail === 0 && isOpen()) setOpen(false);
 		});
 
 		// Esc exits zoom. Deliberately NOT routed through the nav

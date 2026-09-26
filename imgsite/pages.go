@@ -49,11 +49,30 @@ var imageTemplate = template.Must(template.New("image").Parse(headExtrasSrc + `<
 body { margin: 0; font-family: system-ui, sans-serif; background: #141416; color: #ddd; line-height: 1.5; }
 a { color: #7ab0ff; text-decoration: none; }
 a:hover { text-decoration: underline; }
-.topnav { display: flex; gap: 1rem; align-items: center; padding: 0.6rem 1rem; background: #1d1d21; border-bottom: 1px solid #2c2c31; }
-.topnav .spacer { flex: 1; }
-.topnav input[type="search"] { background: #141416; color: #ddd; border: 1px solid #3c3c44; border-radius: 6px; padding: 0.25rem 0.7rem; font: inherit; min-width: min(14rem, 40vw); }
 button { background: #2a2a30; color: #ddd; border: 1px solid #3c3c44; border-radius: 6px; padding: 0.25rem 0.7rem; cursor: pointer; font: inherit; }
 button:hover { background: #35353d; }
+/* Touch feedback (mobile audit #6): every interactive surface gets a
+   pressed state — touch taps otherwise read as unregistered, and the
+   only other affordance (title tooltips) is desktop-only. */
+button:active { background: #3d3d46; border-color: #4a6fb5; }
+.topnav a:active { color: #a8c8ff; }
+/* Topnav wraps on phones (mobile audit #1): unwrapped, the nav's
+   content needs ~555px of inline axis, which Chromium honors by
+   EXPANDING the 390px layout viewport — the whole details page then
+   renders as a zoomed-out 555px canvas that must be touch-panned
+   sideways to read any wrapped line, and the rightmost nav actions
+   sit fully off-screen. Wrapping keeps the layout viewport at the
+   window width; row-gap tightens the wrapped rows. */
+.topnav { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; align-items: center; padding: 0.6rem 1rem; background: #1d1d21; border-bottom: 1px solid #2c2c31; }
+.topnav .spacer { flex: 1; }
+.topnav input[type="search"] { background: #141416; color: #ddd; border: 1px solid #3c3c44; border-radius: 6px; padding: 0.25rem 0.7rem; font: inherit; min-width: min(14rem, 40vw); }
+@media (max-width: 560px) {
+	/* Audit #9: at phone widths the search input gets a full flexible
+	   row of its own instead of the cramped 40vw sliver, and the nav
+	   actions wrap together onto the row above it. */
+	.topnav form { flex: 1 1 auto; min-width: 0; }
+	.topnav input[type="search"] { width: 100%; min-width: 0; }
+}
 /* Viewer row: chevrons flank the image OUTSIDE it (flex items, never
    overlapping the image — the 2fedc24 design absolutely positioned
    18%-wide strips over the image, which put the chevrons' hit area on
@@ -64,6 +83,7 @@ button:hover { background: #35353d; }
 .viewer { display: flex; align-items: center; background: #0d0d0f; }
 .chevron { flex: none; width: clamp(2.25rem, 5vw, 3.5rem); align-self: stretch; display: flex; align-items: center; justify-content: center; font-size: 3rem; color: rgba(255,255,255,0.4); text-decoration: none; }
 .chevron:hover { background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.85); text-decoration: none; }
+.chevron:active { background: rgba(255,255,255,0.18); color: rgba(255,255,255,0.95); }
 .stage { flex: 1 1 auto; min-width: 0; display: flex; justify-content: center; }
 /* Fit state — the bulletproof aspect pattern (owner redesign, Sep
    2026). The BUTTON is the sized box: it carries the image's
@@ -131,14 +151,29 @@ button:hover { background: #35353d; }
    box, so small images only ever grew to box size, not screen size).
    body.zoom-open locks page scroll behind the fixed backdrop. */
 .zoom-overlay[hidden] { display: none; }
-.zoom-overlay { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center; padding: 1rem; background: rgba(8,8,10,0.94); cursor: zoom-out; opacity: 0; visibility: hidden; }
+.zoom-overlay { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center; padding: 1rem; background: rgba(8,8,10,0.94); cursor: zoom-out; opacity: 0; visibility: hidden; touch-action: none; }
 .zoom-overlay.open { opacity: 1; visibility: visible; }
 @media (prefers-reduced-motion: no-preference) {
 	.zoom-overlay { transition: opacity 0.15s ease, visibility 0s linear 0.15s; }
 	.zoom-overlay.open { transition: opacity 0.15s ease, visibility 0s; }
 }
-.zoom-overlay img { width: 100%; height: 100%; object-fit: contain; }
-.zoom-close { position: absolute; top: 0.75rem; right: 0.75rem; width: 2.4rem; height: 2.4rem; display: flex; align-items: center; justify-content: center; font-size: 1.2rem; cursor: pointer; }
+.zoom-overlay img { width: 100%; height: 100%; object-fit: contain; touch-action: none; user-select: none; -webkit-user-select: none; }
+/* Gesture-zoomed overlay (mobile audit #5): the img's transform is
+   JS-driven (translate+scale, transform-origin 0 0 — see image.js).
+   touch-action: none (here and on the overlay itself) is what keeps
+   pointermove flowing to that gesture layer instead of being claimed
+   by browser panning/zooming. */
+.zoom-overlay.zoomed img { cursor: grab; }
+.zoom-overlay.zoomed.dragging img { cursor: grabbing; }
+/* 48px square (mobile audit #3/#7 tap-target floor): the button was
+   2.4rem (38px) — reachable once the viewport stopped expanding, but
+   under the touch-guideline minimum. z-index is LOAD-BEARING while
+   gesture-zoomed: a transform promotes the img into the positioned
+   painting tier, where DOM order (img after button) would otherwise
+   paint the magnified image OVER the ✕ — hiding the one visible exit
+   from inside the zoom state. */
+.zoom-close { position: absolute; top: 0.75rem; right: 0.75rem; width: 3rem; height: 3rem; z-index: 1; display: flex; align-items: center; justify-content: center; font-size: 1.2rem; cursor: pointer; }
+.zoom-close:active { background: rgba(255,255,255,0.15); }
 .zoom-close:focus-visible { outline: 2px solid #7ab0ff; outline-offset: 2px; }
 body.zoom-open { overflow: hidden; }
 main { max-width: 60rem; margin: 0 auto; padding: 1rem; }
@@ -146,7 +181,19 @@ h1 { font-size: 1.15rem; margin: 1rem 0 0.25rem; }
 details { background: #1d1d21; border: 1px solid #2c2c31; border-radius: 8px; padding: 0.5rem 0.9rem; margin: 0.5rem 0; }
 summary { cursor: pointer; font-weight: 600; }
 .original { font-size: 1.05rem; background: #1d1d21; border: 1px solid #2c2c31; border-radius: 8px; padding: 0.6rem 0.9rem; white-space: pre-wrap; }
-pre { white-space: pre-wrap; word-break: break-word; font-size: 0.85rem; }
+pre { white-space: pre-wrap; word-break: break-word; font-size: 0.875rem; }
+/* Unbreakable tokens (mobile audit #2): long model filenames, URLs,
+   and single-token prompts set these containers' min-content WIDER
+   than the phone viewport (measured: 492px table, 489px .original,
+   1560px+ pages), and nothing above them can shrink min-content — the
+   whole layout viewport expanded and every text block panned
+   sideways. overflow-wrap: anywhere (unlike word-break: break-word)
+   lets min-content collapse to the container; the gallery card
+   .prompt has carried it since day one, which is why the gallery
+   itself never overflowed. Applies to the prompt blocks, params
+   cells (the model-filename offenders), the workflow JSON pre, and
+   the filename h1 for good measure. */
+.original, main p, main pre, main h1, table.params td { overflow-wrap: anywhere; }
 table.params { border-collapse: collapse; width: 100%; }
 table.params td { border: 1px solid #2c2c31; padding: 0.35rem 0.6rem; vertical-align: top; }
 table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
@@ -257,9 +304,11 @@ table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
      the class-based visibility at boot. role=dialog + aria-modal mark
      it as modal while open (it is a11y-excluded entirely while
      visibility: hidden). The img reuses the main image's src — same
-     URL, browser cache, no refetch. Every click inside (backdrop,
-     image, or the close button — a visible affordance next to the
-     zoom-out cursor) plus Esc closes; there is no focus trap, but
+     URL, browser cache, no refetch. Dismissal: the ✕ button (a
+     visible affordance next to the zoom-out cursor), Esc, any mouse
+     click inside, and any touch tap — plus, on touch, double-tap /
+     pinch magnification with drag-to-pan (image.js's gesture layer;
+     mobile audit #5). There is no focus trap, but
      focus moves to the close button on open and returns to the toggle
      on close (see image.js). */}}
 <div class="zoom-overlay" id="zoom-overlay" hidden role="dialog" aria-modal="true" aria-label="zoomed image">

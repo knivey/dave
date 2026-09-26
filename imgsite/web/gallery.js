@@ -161,6 +161,18 @@ export function boot() {
 			for (const card of doc.querySelectorAll("article.card")) {
 				grid.appendChild(card);
 			}
+			// The fetched page carries its own successor sentinel: the
+			// "cards" partial emits a fresh <div class="sentinel"
+			// data-next-cursor=…> AFTER the card range whenever more
+			// pages exist. Append it BEFORE dropping the old sentinel so
+			// watchSentinel() below has something to re-arm on. Skipping
+			// this (the old behavior) disarmed the observer for good on
+			// the FIRST fetched page: attached cards capped at ~96 —
+			// initial page + one fragment — which sits under DOM_CAP, so
+			// trim()/restore() were unreachable and long scrolls
+			// stalled mid-gallery while the server still had rows.
+			const next = doc.querySelector(".sentinel");
+			if (next) grid.appendChild(next);
 			observer.unobserve(sentinel);
 			sentinel.remove();
 			trim();
@@ -193,26 +205,40 @@ export function boot() {
 	// data-next-cursor, and detached cards sit above whatever the
 	// sentinel tracks, so reattaching them never disturbs the
 	// infinite-scroll cursor bookkeeping.
+	//
+	// ORDERING (paging-repair finding, verified in a real browser):
+	// batches accumulate OLDEST-trimmed-first → NEW batches are
+	// CONCATENATED AT THE TAIL. trim() always slices from the top of
+	// the remaining grid, so each successive batch is strictly OLDER
+	// than every card already in `detached`; appending at the tail
+	// keeps the array newest-first, which is exactly the order
+	// restore() must prepend in (see below). The previous
+	// `batch.concat(detached)` built the array oldest-batch-first —
+	// unreachable while the sentinel bug kept trim() dead, it
+	// reattached cards as [B2, B1, rest] instead of [B1, B2, rest],
+	// scrambling gallery order after any deep scroll + scroll-back.
 	function trim() {
 		const cards = grid.querySelectorAll("article.card");
 		const over = cards.length - DOM_CAP;
 		if (over <= 0) return;
 		const batch = Array.from(cards).slice(0, over);
 		for (const card of batch) card.remove();
-		detached = batch.concat(detached);
+		detached = detached.concat(batch);
 		if (detached.length > RETAIN_CAP) {
 			detached.length = RETAIN_CAP;
 		}
 	}
 
 	// restore reattaches every retained card once the user scrolls back
-	// to the top, prepending them in order (oldest-detached first, so the
-	// grid ends up newest-first again). The scroll offset is shifted by
-	// the height the prepend added, keeping the currently visible cards
-	// in view instead of jumping to the new top. Skipped while a search
-	// filter owns the grid: reattaching live-gallery cards into filtered
-	// results would lie about the filter (the same rule as live
-	// prepends); search.js's exit path refetches the gallery instead.
+	// to the top, prepending them in array order — newest batch first,
+	// so the grid ends up newest-first again (the same order the pages
+	// were attached in; see trim()'s ORDERING note). The scroll offset
+	// is shifted by the height the prepend added, keeping the currently
+	// visible cards in view instead of jumping to the new top. Skipped
+	// while a search filter owns the grid: reattaching live-gallery
+	// cards into filtered results would lie about the filter (the same
+	// rule as live prepends); search.js's exit path refetches the
+	// gallery instead.
 	//
 	// Results-mode asymmetry (accepted): trim() is NOT filter-gated, so
 	// in results mode the top-ranked cards still detach once the grid

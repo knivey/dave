@@ -472,6 +472,127 @@ func TestGalleryThumbHealInvariant(t *testing.T) {
 		"the detached sweep must drop src — restore()'s re-arm only picks imgs with no src attribute")
 }
 
+// TestGalleryLoadMoreReArmsSentinel pins the infinite-scroll paging
+// repair in the SERVED gallery.js (source-level; the behavioral pin is
+// the browser harness at ~/dev/imgsite-mobile-fix/verify.ts):
+//
+// The "cards" partial (pages.go) emits a FRESH
+// <div class="sentinel" data-next-cursor=…> after every page that has
+// a successor. loadMore used to append only the fetched article.card
+// elements, drop the old sentinel, and then call watchSentinel() —
+// which re-arms on grid.querySelector(".sentinel") and so found
+// NOTHING: the IntersectionObserver was disarmed for good on the first
+// fetched page, attached cards capped at ~96 (initial page + one
+// fragment, under DOM_CAP), and trim()/restore() were unreachable
+// while the server still had rows. The fix appends the fetched
+// fragment's successor sentinel BEFORE removing the exhausted one.
+func TestGalleryLoadMoreReArmsSentinel(t *testing.T) {
+	app := newTestApp(t, testConfig())
+	ts := newTestServer(t, app)
+
+	resp := fetchPath(t, ts, "/static/gallery.js")
+	require.Equal(t, 200, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	js := string(body)
+
+	// Extract loadMore's body (up to the next top-level function).
+	start := strings.Index(js, "async function loadMore(")
+	require.NotEqual(t, -1, start, "loadMore not found in served gallery.js")
+	rest := js[start:]
+	next := strings.Index(rest[len("async function loadMore("):], "\n\tfunction ")
+	end := len(rest)
+	if next != -1 {
+		end = next + len("async function loadMore(")
+	}
+	handler := rest[:end]
+
+	assert.Contains(t, handler, `doc.querySelector(".sentinel")`,
+		"loadMore must pick up the fetched fragment's successor sentinel")
+	assert.Contains(t, handler, "grid.appendChild(next)",
+		"loadMore must append the successor sentinel to the grid — without it the observer is disarmed after the first fetched page")
+	// The successor must land in the grid BEFORE the exhausted sentinel
+	// is removed, or watchSentinel() finds an empty grid.
+	appendIdx := strings.Index(handler, "grid.appendChild(next)")
+	removeIdx := strings.Index(handler, "sentinel.remove()")
+	require.NotEqual(t, -1, appendIdx)
+	require.NotEqual(t, -1, removeIdx)
+	assert.Less(t, appendIdx, removeIdx,
+		"the successor sentinel must be appended before the old one is removed")
+}
+
+// TestGalleryTrimRestoreOrdering pins the trim()/restore() batch order
+// (source-level; behavioral pin is the browser harness): trim slices
+// each successive batch from the TOP of the remaining grid, so every
+// new batch is strictly OLDER than everything already detached, and
+// `detached` must accumulate NEW BATCHES AT THE TAIL — the array then
+// reads newest-first, which is exactly the order restore() prepends
+// in. The previous `batch.concat(detached)` built it oldest-batch-first
+// and restore() reattached cards as [B2, B1, rest] — scrambling gallery
+// order after any deep scroll + scroll-back (latent only while the
+// sentinel bug kept trim() unreachable; first observed live once paging
+// was repaired).
+func TestGalleryTrimRestoreOrdering(t *testing.T) {
+	app := newTestApp(t, testConfig())
+	ts := newTestServer(t, app)
+
+	resp := fetchPath(t, ts, "/static/gallery.js")
+	require.Equal(t, 200, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	js := string(body)
+
+	start := strings.Index(js, "\tfunction trim()")
+	require.NotEqual(t, -1, start, "trim not found in served gallery.js")
+	rest := js[start:]
+	end := strings.Index(rest[len("\tfunction trim()"):], "\n\t}")
+	handler := rest[:end+len("\t}")]
+
+	assert.Contains(t, handler, "detached = detached.concat(batch)",
+		"trim must append new (older) batches at the tail so restore() prepends newest-first")
+	assert.NotContains(t, handler, "batch.concat(detached)",
+		"prepending oldest-batch-first scrambles the restored grid order")
+}
+
+// TestGalleryMobileCSSPins pins the gallery-layer mobile fixes in the
+// SERVED style.css (source-level; behavioral verification is the
+// browser harness at ~/dev/imgsite-mobile-fix/verify.ts):
+//
+//   - grid columns minmax(min(360px, 100%), 1fr): a bare 360px floor
+//     overflowed iPhone-SE-class viewports (320px window, 288px
+//     content box) and panned the whole gallery sideways (audit #4)
+//   - :active pressed states on cards and the pill: touch taps
+//     otherwise give zero visual feedback (audit #6)
+//   - pill padding ≥48px tall tap target (audit #7)
+//   - prompt/time type floor 14px/13px (audit #8)
+//   - full-width search row ≤480px (audit #9)
+func TestGalleryMobileCSSPins(t *testing.T) {
+	app := newTestApp(t, testConfig())
+	ts := newTestServer(t, app)
+
+	resp := fetchPath(t, ts, "/static/style.css")
+	require.Equal(t, 200, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	css := string(body)
+
+	assert.Contains(t, css, "minmax(min(360px, 100%), 1fr)",
+		"grid floor must collapse to the available width on narrow viewports (mobile audit #4)")
+	assert.Contains(t, css, ".card:active",
+		"cards need a touch pressed state (mobile audit #6)")
+	assert.Contains(t, css, "#new-pill:active",
+		"the +N new pill needs a touch pressed state (mobile audit #6)")
+	assert.Contains(t, css, "padding: 0.75rem 1.25rem",
+		"pill padding must keep the tap target ≥48px tall (mobile audit #7)")
+	assert.Contains(t, css, ".card .prompt { margin: 0.5rem 0.75rem 0.25rem; font-size: 0.875rem;",
+		"card prompts must sit at the 14px type floor (mobile audit #8)")
+	assert.Contains(t, css, "font-size: 0.8125rem", "card timestamps must sit at the 13px floor (mobile audit #8)")
+	assert.Contains(t, css, "@media (max-width: 480px)",
+		"phone-width search row media query must exist (mobile audit #9)")
+	assert.Contains(t, css, "#search-box { width: 100%; }",
+		"the search box must go full-width on phones (mobile audit #9)")
+}
+
 // insertFiveImages seeds rows with distinct timestamps, newest first
 // ordering dddd005 > dddd004 > ... > dddd001, one hidden.
 func insertFiveImages(t *testing.T, app *App) {

@@ -66,6 +66,42 @@ api_key = "CHANGE_ME_TO_A_STRONG_RANDOM_SECRET"
 # enhancement = "libera-safe"
 # force = true
 
+# Safety classification for the safe-site split (second pass). The vet is a
+# reserved enhancement entry: its prompt sees the original and enhanced
+# prompts and returns {"safe": true|false, "reason": "..."}. It runs
+# CONCURRENTLY with generation (never delaying the submit); its verdict is
+# what gates the safe site. Failures degrade to "unknown" and never fail
+# the job. The whole block is hot-reloadable.
+[safety]
+# Name of the [enhancement.*] entry performing the strict judgment.
+# Default: "safety-vet".
+vet_enhancement = "safety-vet"
+# Networks whose jobs skip classification entirely (case-insensitive).
+# Default: ["libera"]; an explicit empty list means "vet everything". Keep
+# in correspondence with imgsite's [safe_site] allowed_networks —
+# separately configured by convention, like upload.api_key vs imgsite's
+# auth.api_key.
+skip_networks = ["libera"]
+
+# Example: the safety vet (DRAFT judging prompt — tune to your policy; it
+# must return the JSON verdict below and nothing else).
+# [enhancement.safety-vet]
+# description = "Strict second-pass safety judgment for the safe site"
+# baseurl = "https://api.x.ai/v1/"
+# key = "YOUR_API_KEY_HERE"
+# model = "grok-4.6"
+# systemprompt = """You are a strict content-safety reviewer for AI image generation.
+# You will receive the original prompt and the enhanced prompt actually used
+# for generation. Judge what the imagery would depict.
+#
+# Respond with JSON only: {"safe": true|false, "reason": "<one sentence>"}
+# - "safe": false when the prompts request or clearly imply sexual, nude, or
+#   otherwise explicit imagery (the safe-site audience must never see it)
+# - "safe": true otherwise
+# When genuinely unsure, answer safe=false — the safe site default-denies.
+# Never refuse; always answer the JSON."""
+# timeout = 30
+
 [enhancement.default]
 # Prompt enhancement settings (optional)
 description = "General purpose image prompt enhancer"

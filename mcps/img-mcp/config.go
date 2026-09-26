@@ -16,6 +16,7 @@ type Config struct {
 	Upload          UploadConfig                 `toml:"upload"`
 	Queue           QueueConfig                  `toml:"queue"`
 	Auth            AuthConfig                   `toml:"auth"`
+	Safety          SafetyConfig                 `toml:"safety"`
 	Enhancements    map[string]EnhancementConfig `toml:"enhancement"`
 	Workflows       map[string]WorkflowConfig    `toml:"workflow"`
 	NetworkPolicies map[string]NetworkPolicy     `toml:"network_policy"`
@@ -81,6 +82,23 @@ type NetworkPolicy struct {
 	Force       bool   `toml:"force"`
 }
 
+// SafetyConfig configures the second-pass safety classification (the
+// safe-site split). The whole block is hot-reloadable: it only names an
+// enhancement entry and a network list, both read per job.
+type SafetyConfig struct {
+	// VetEnhancement names the reserved [enhancement.*] entry whose prompt
+	// judges safety. Empty defaults to "safety-vet".
+	VetEnhancement string `toml:"vet_enhancement"`
+	// SkipNetworks lists IRC networks whose jobs skip classification
+	// entirely (case-insensitive). nil defaults to ["libera"]; an explicit
+	// empty list means "vet everything" (nil-vs-empty distinguishes
+	// default from override, like dave's config convention). Keep it in
+	// correspondence with imgsite's [safe_site] allowed_networks — they are
+	// separately configured by convention, like upload.api_key vs imgsite's
+	// auth.api_key.
+	SkipNetworks []string `toml:"skip_networks"`
+}
+
 type WorkflowConfig struct {
 	WorkflowPath       string        `toml:"workflow_path"`
 	ClientID           string        `toml:"clientid"`
@@ -127,6 +145,13 @@ func loadConfig(configFile string) (Config, error) {
 	}
 	if cfg.Queue.ResultTTL == 0 {
 		cfg.Queue.ResultTTL = 1 * time.Hour
+	}
+
+	if cfg.Safety.VetEnhancement == "" {
+		cfg.Safety.VetEnhancement = defaultSafetyVetEnhancement
+	}
+	if cfg.Safety.SkipNetworks == nil {
+		cfg.Safety.SkipNetworks = []string{"libera"}
 	}
 
 	if cfg.Enhancements == nil {

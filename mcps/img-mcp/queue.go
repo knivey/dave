@@ -688,6 +688,11 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 	// (Responses API path) into the workflow's prompt note node. Plumbed
 	// from the enhancePrompt result below; "" for plain generate jobs.
 	enhancementReasoning := ""
+	// firstPassNSFW is the safety first pass riding the enhancement call:
+	// true means sexual content was flagged (→ safety unsafe, vet call
+	// skipped); false/absent is NO signal — it never asserts safety. Plain
+	// generate jobs have no first pass and go straight to the vet.
+	firstPassNSFW := false
 
 	loggerQueue.Info("processing job",
 		"job_id", job.ID,
@@ -723,10 +728,20 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 		)
 		prompt = result.EnhancedPrompt
 		enhancementReasoning = result.Reasoning
+		firstPassNSFW = result.NSFW
 		if negativePrompt == "" {
 			negativePrompt = result.NegativePrompt
 		}
 	}
+
+	// Safety classification (safe-site split), started BEFORE the workflow
+	// build/submit so the vet's LLM latency overlaps the 10-60s generation
+	// instead of delaying it: nsfw:true short-circuits to unsafe with no
+	// vet call, skip_networks jobs are not classified at all, and the vet
+	// itself never blocks generation — its verdict is awaited after the
+	// monitor completes. A job that fails or is cancelled earlier simply
+	// never waits: the goroutine terminates with the job context below.
+	safetyVet := startSafetyVet(jobCtx, cfg, job.Input.Network, firstPassNSFW, job.Input.Prompt, prompt)
 
 	promptNote, err := buildPromptNote(job, enhancementReasoning)
 	if err != nil {
@@ -800,6 +815,15 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 
 	jobResult := &JobResult{}
 	var comfyImgs []ComfyImage
+	// jobSafety is the resolved safety verdict, awaited now that generation
+	// has finished — by upload time it is always computed, so persistence
+	// (jobs.safety) and the EXIF note rewrite can consume it downstream.
+	// Normally the vet finished long ago (it overlapped generation); the
+	// worst case is its remainder. Failures already degraded to "unknown"
+	// inside runSafetyVet, and skipped networks yield the empty unvetted
+	// marker.
+	jobSafety := safetyVet.wait()
+	loggerQueue.Info("safety verdict resolved", "job_id", job.ID, "safety", jobSafety)
 	uploadMeta := buildUploadMeta(job, prompt, negativePrompt, enhancementReasoning)
 	for i, img := range comfyResult.Images {
 		imgData := ImageData{

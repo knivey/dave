@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -835,4 +836,151 @@ func TestCancelAbortsRecoveryPromptly(t *testing.T) {
 	q.mu.RUnlock()
 	assert.Empty(t, jobErr, "cancelled job must not be overwritten by the recovery failure")
 	assert.Equal(t, string(StatusCancelled), dbJobStatus(t, q.db, job.ID), "DB status")
+}
+
+// hangingVetServer stands in for the vetting LLM with a slow judgment: each
+// /v1/chat/completions request parks until released, then answers with the
+// given verdict JSON. Requests are counted and their arrival signalled so a
+// test can prove generation proceeded while the vet was still hanging.
+type hangingVetServer struct {
+	server  *httptest.Server
+	calls   atomic.Int32
+	arrived chan struct{}
+	release chan struct{}
+}
+
+func newHangingVetServer(t *testing.T, verdictJSON string) *hangingVetServer {
+	t.Helper()
+	v := &hangingVetServer{
+		arrived: make(chan struct{}, 16),
+		release: make(chan struct{}),
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		v.calls.Add(1)
+		v.arrived <- struct{}{}
+		<-v.release
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatc-1","object":"chat.completion","created":1,"model":"stub",` +
+			`"choices":[{"index":0,"message":{"role":"assistant","content":` + verdictJSON + `},"finish_reason":"stop"}],` +
+			`"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`))
+	})
+	v.server = httptest.NewServer(mux)
+	t.Cleanup(v.server.Close)
+	return v
+}
+
+// TestProcessJobVetOverlapsGenerationAndUploadAwaitsIt pins the vet stage's
+// concurrency contract: the vet call starts right after enhancement (here:
+// a direct-tool job, so straight away) and generation must NOT block on it
+// — the ComfyUI submit lands while the vet is still hanging — while the
+// upload waits for the resolved verdict (persistence and the EXIF note
+// rewrite consume jobSafety after the monitor completes).
+func TestProcessJobVetOverlapsGenerationAndUploadAwaitsIt(t *testing.T) {
+	mockComfy := newMockComfyFlowServer(t)
+	vet := newHangingVetServer(t, `{"safe":true,"reason":"fine"}`)
+	up := newBlockingUploadServer(t)
+
+	cfg := testConfig(mockComfy.URL())
+	wc := cfg.Workflows["test"]
+	wc.WorkflowPath = mustWriteWorkflow(t, t.TempDir())
+	cfg.Workflows["test"] = wc
+	cfg.Upload.URL = up.server.URL
+	cfg.Enhancements = map[string]EnhancementConfig{
+		"safety-vet": {
+			BaseURL:      vet.server.URL + "/v1",
+			Key:          "test-key",
+			Model:        "stub-model",
+			SystemPrompt: "judge the prompts",
+			Timeout:      30,
+		},
+	}
+
+	q, cleanup := setupTestQueue(t, cfg)
+	defer cleanup()
+
+	job, err := q.Submit(JobTypeGenerate, "test", JobInput{
+		Prompt:       "a cat sitting on a mat",
+		Network:      "graped",
+		OutputFormat: "url",
+	})
+	require.NoError(t, err, "Submit")
+
+	// The vet call is in flight and hanging...
+	select {
+	case <-vet.arrived:
+	case <-time.After(15 * time.Second):
+		t.Fatal("vet call never started")
+	}
+
+	// ...yet generation must already be under way: the submit must land
+	// while the vet is still parked (serializing the vet before the submit
+	// would add its full latency to every image).
+	require.Eventually(t, func() bool {
+		return len(mockComfy.submittedPrompts()) > 0
+	}, 5*time.Second, 10*time.Millisecond, "comfy submit must not block on the hanging vet")
+
+	// The monitor (instant on the mock) has finished by now; the upload is
+	// gated on the awaited verdict, so it must NOT arrive while the vet
+	// hangs. This cannot flake on slowness: with the await in place the
+	// upload is unreachable until the release below.
+	select {
+	case <-up.arrived:
+		t.Fatal("upload started before the vet verdict was resolved — the await is missing or misplaced")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// Resolving the verdict unblocks the upload.
+	close(vet.release)
+	select {
+	case <-up.arrived:
+	case <-time.After(15 * time.Second):
+		t.Fatal("upload never started after the vet resolved")
+	}
+
+	close(up.release)
+	waitForJobDone(t, job, 15*time.Second)
+	assertJobStatus(t, q, job.ID, StatusCompleted)
+	assert.Equal(t, int32(1), vet.calls.Load(), "exactly one vet call per job")
+}
+
+// TestProcessJobVetFailureStillCompletesJob pins the failure semantics: a
+// vet endpoint that 500s degrades the verdict to unknown but never fails
+// the job — it completes and uploads normally (the main site shows it
+// regardless; the safe site default-denies until an admin marks it).
+func TestProcessJobVetFailureStillCompletesJob(t *testing.T) {
+	mockComfy := newMockComfyFlowServer(t)
+	up := newFakeUploadServer(t)
+	vet := newVetStubServer(t, http.StatusInternalServerError, "")
+
+	cfg := testConfig(mockComfy.URL())
+	wc := cfg.Workflows["test"]
+	wc.WorkflowPath = mustWriteWorkflow(t, t.TempDir())
+	cfg.Workflows["test"] = wc
+	cfg.Upload.URL = up.server.URL
+	cfg.Enhancements = map[string]EnhancementConfig{
+		"safety-vet": {
+			BaseURL:      vet.server.URL + "/v1",
+			Key:          "test-key",
+			Model:        "stub-model",
+			SystemPrompt: "judge the prompts",
+			Timeout:      10,
+		},
+	}
+
+	q, cleanup := setupTestQueue(t, cfg)
+	defer cleanup()
+
+	job, err := q.Submit(JobTypeGenerate, "test", JobInput{
+		Prompt:       "a cat sitting on a mat",
+		Network:      "graped",
+		OutputFormat: "url",
+	})
+	require.NoError(t, err, "Submit")
+
+	waitForJobDone(t, job, 15*time.Second)
+	assertJobStatus(t, q, job.ID, StatusCompleted)
+	// The SDK retries 5xx (machinery the vet inherits), so pin "tried"
+	// rather than an exact count.
+	assert.NotZero(t, vet.calls.Load(), "the vet must have been tried (and failed)")
 }

@@ -54,10 +54,20 @@ var enhancementSchema = map[string]any{
 	"additionalProperties": false,
 }
 
-func enhancePrompt(ctx context.Context, cfg Config, enhancementName, rawPrompt, extraInstructions string) (*EnhanceResult, error) {
+// callEnhancementLLM runs one structured-output LLM call against the named
+// enhancement config and returns the raw assistant JSON text plus the
+// Responses-API reasoning summary (empty on Chat Completions). This is the
+// shared machinery behind BOTH prompt enhancement and the safety vet
+// (safety.go): config lookup, per-workflow instruction merging, client
+// construction, timeouts, both API paths, and reasoning_effort live here so
+// the vet inherits all of it — including SIGHUP hot-reload, which simply
+// swaps the Config the caller passes. Callers own the response contract:
+// schemaName/schema describe the JSON the model must produce
+// ("prompt_enhancement" for enhancement, "safety_verdict" for the vet).
+func callEnhancementLLM(ctx context.Context, cfg Config, enhancementName, rawPrompt, extraInstructions, schemaName string, schema map[string]any) (string, string, error) {
 	enhCfg, ok := cfg.Enhancements[enhancementName]
 	if !ok {
-		return nil, fmt.Errorf("enhancement %q not found", enhancementName)
+		return "", "", fmt.Errorf("enhancement %q not found", enhancementName)
 	}
 
 	// Per-workflow enhancement instructions (extracted from the workflow
@@ -71,9 +81,10 @@ func enhancePrompt(ctx context.Context, cfg Config, enhancementName, rawPrompt, 
 	if instructions := strings.TrimSpace(extraInstructions); instructions != "" {
 		enhCfg.SystemPrompt += "\n" + instructions
 	}
-	loggerTools.Debug("enhancing prompt",
+	loggerTools.Debug("enhancement llm call",
 		"enhancement", enhancementName,
 		"model", enhCfg.Model,
+		"schema", schemaName,
 		"raw_prompt", rawPrompt,
 	)
 
@@ -92,18 +103,25 @@ func enhancePrompt(ctx context.Context, cfg Config, enhancementName, rawPrompt, 
 	enhanceCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	var enhanced string
+	var content string
 	var reasoning string
 	var err error
 	if enhCfg.ResponsesAPI {
-		enhanced, reasoning, err = enhanceViaResponses(enhanceCtx, client, enhCfg, rawPrompt)
+		content, reasoning, err = enhanceViaResponses(enhanceCtx, client, enhCfg, rawPrompt, schemaName, schema)
 	} else {
-		enhanced, err = enhanceViaChatCompletions(enhanceCtx, client, enhCfg, rawPrompt)
+		content, err = enhanceViaChatCompletions(enhanceCtx, client, enhCfg, rawPrompt, schemaName, schema)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("enhancement API call: %w", err)
+		return "", "", fmt.Errorf("enhancement API call: %w", err)
 	}
-	enhanced = strings.TrimSpace(enhanced)
+	return strings.TrimSpace(content), reasoning, nil
+}
+
+func enhancePrompt(ctx context.Context, cfg Config, enhancementName, rawPrompt, extraInstructions string) (*EnhanceResult, error) {
+	enhanced, reasoning, err := callEnhancementLLM(ctx, cfg, enhancementName, rawPrompt, extraInstructions, "prompt_enhancement", enhancementSchema)
+	if err != nil {
+		return nil, err
+	}
 
 	var result EnhancementResponse
 	if err := json.Unmarshal([]byte(enhanced), &result); err != nil {
@@ -136,8 +154,9 @@ func enhancePrompt(ctx context.Context, cfg Config, enhancementName, rawPrompt, 
 // enhanceViaChatCompletions calls the Chat Completions API and returns the raw
 // assistant message content. Reasoning effort, when set, is sent as the
 // top-level reasoning_effort field (the format xAI's Chat Completions API
-// expects; same as dave's chatCompletion.go).
-func enhanceViaChatCompletions(ctx context.Context, client openai.Client, enhCfg EnhancementConfig, rawPrompt string) (string, error) {
+// expects; same as dave's chatCompletion.go). schemaName/schema select the
+// structured-output contract (enhancement or safety verdict).
+func enhanceViaChatCompletions(ctx context.Context, client openai.Client, enhCfg EnhancementConfig, rawPrompt, schemaName string, schema map[string]any) (string, error) {
 	params := openai.ChatCompletionNewParams{
 		Model: enhCfg.Model,
 		Messages: []openai.ChatCompletionMessageParamUnion{
@@ -147,8 +166,8 @@ func enhanceViaChatCompletions(ctx context.Context, client openai.Client, enhCfg
 		ResponseFormat: openai.ChatCompletionNewParamsResponseFormatUnion{
 			OfJSONSchema: &shared.ResponseFormatJSONSchemaParam{
 				JSONSchema: shared.ResponseFormatJSONSchemaJSONSchemaParam{
-					Name:   "prompt_enhancement",
-					Schema: enhancementSchema,
+					Name:   schemaName,
+					Schema: schema,
 					Strict: openai.Bool(true),
 				},
 			},
@@ -180,8 +199,9 @@ func enhanceViaChatCompletions(ctx context.Context, client openai.Client, enhCfg
 // Reasoning summaries are logged at INFO — the Responses API is the only way
 // to get them back from reasoning models. Structured output goes in
 // Text.Format, NOT a top-level ResponseFormat (different mechanism than Chat
-// Completions).
-func enhanceViaResponses(ctx context.Context, client openai.Client, enhCfg EnhancementConfig, rawPrompt string) (string, string, error) {
+// Completions). schemaName/schema select the structured-output contract
+// (enhancement or safety verdict).
+func enhanceViaResponses(ctx context.Context, client openai.Client, enhCfg EnhancementConfig, rawPrompt, schemaName string, schema map[string]any) (string, string, error) {
 	params := responses.ResponseNewParams{
 		Model: enhCfg.Model,
 		Input: responses.ResponseNewParamsInputUnion{
@@ -203,8 +223,8 @@ func enhanceViaResponses(ctx context.Context, client openai.Client, enhCfg Enhan
 		Text: responses.ResponseTextConfigParam{
 			Format: responses.ResponseFormatTextConfigUnionParam{
 				OfJSONSchema: &responses.ResponseFormatTextJSONSchemaConfigParam{
-					Name:   "prompt_enhancement",
-					Schema: enhancementSchema,
+					Name:   schemaName,
+					Schema: schema,
 					Strict: openai.Bool(true),
 				},
 			},

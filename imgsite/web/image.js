@@ -149,13 +149,17 @@ export function boot() {
 		let pendingClose = null; // single-tap close timer (double-tap window)
 		let suppressClickUntil = 0; // gesture-produced clicks (expiry-dated)
 		let lastTap = { t: 0, x: 0, y: 0 };
-		// A tap that reset the zoom consumes the NEXT tap inside the
-		// double-tap window: the classic lightbox contract is that a
+		// A tap that reset the zoom consumes the NEXT tap, but only
+		// inside the double-tap window (tapAfterResetAt + DBL_TAP_MS —
+		// the same duration and performance.now() clock the double-tap
+		// detector uses): the classic lightbox contract is that a
 		// double-tap while zoomed zooms OUT (first tap resets, second
-		// tap is its partner) — without this, the partner tap armed the
-		// single-tap close timer and a pinch-then-double-tap dismissed
-		// the overlay entirely.
-		let tapAfterReset = false;
+		// tap is its partner) — without the consumption rule, the
+		// partner tap armed the single-tap close timer and a
+		// pinch-then-double-tap dismissed the overlay entirely; without
+		// the time bound, a tap-to-close made seconds after a zoom-out
+		// hit the stale consumed flag and died as a no-op.
+		let tapAfterResetAt = 0;
 		const MAX_SCALE = 8;
 		const TAP_SLOP = 8; // px of movement before a press stops being a tap
 		const DBL_TAP_MS = 320;
@@ -222,7 +226,7 @@ export function boot() {
 			z.y = 0;
 			gesture = null;
 			pointers.clear();
-			tapAfterReset = false;
+			tapAfterResetAt = 0;
 			if (pendingClose) {
 				clearTimeout(pendingClose);
 				pendingClose = null;
@@ -365,16 +369,19 @@ export function boot() {
 			const now = performance.now();
 			if (z.s > 1) {
 				// Tap while zoomed: back to 1× (double-tap and ✕ exit
-				// fully; pan readers get an easy un-zoom too). The flag
-				// makes a rapid second tap (the double-tap partner)
-				// purely a zoom-out instead of arming the close timer.
+				// fully; pan readers get an easy un-zoom too). The
+				// timestamp makes a rapid second tap (the double-tap
+				// partner) purely a zoom-out instead of arming the
+				// close timer — and expires with the same window, so a
+				// much later tap-to-close is not eaten by a stale flag.
 				resetGestureZoom();
-				tapAfterReset = true;
+				tapAfterResetAt = now;
 				return;
 			}
-			if (tapAfterReset) {
-				// Partner tap of a zoom-out double-tap: consumed.
-				tapAfterReset = false;
+			if (tapAfterResetAt && now - tapAfterResetAt < DBL_TAP_MS) {
+				// Partner tap of a zoom-out double-tap (inside the
+				// window): consumed.
+				tapAfterResetAt = 0;
 				lastTap = { t: 0, x: 0, y: 0 };
 				return;
 			}
@@ -402,8 +409,14 @@ export function boot() {
 		// and touch activations are fully owned by the pointer layer
 		// above (touch needs the delayed-close window; mouse closes on
 		// pointerup), so their compatibility click events are ignored.
+		// The gesture suppression above must NEVER swallow the
+		// detail === 0 branch: keyboard clicks are never
+		// gesture-produced (no pan/pinch/drag dispatches one), and this
+		// listener is the keyboard's ONLY close path — a Enter press
+		// landing within 500ms after a pan would otherwise die as a
+		// no-op.
 		overlay.addEventListener("click", (e) => {
-			if (performance.now() < suppressClickUntil) return;
+			if (e.detail !== 0 && performance.now() < suppressClickUntil) return;
 			if (e.detail === 0 && isOpen()) setOpen(false);
 		});
 

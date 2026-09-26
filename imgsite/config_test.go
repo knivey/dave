@@ -281,3 +281,150 @@ func warningsString(warnings []string) string {
 	}
 	return out
 }
+
+func TestLoadConfigSafeSite(t *testing.T) {
+	t.Run("AbsentSectionMeansNil", func(t *testing.T) {
+		path := writeConfigFile(t, "[auth]\napi_key = \"secret\"\n")
+
+		cfg, err := loadConfig(path)
+
+		require.NoError(t, err)
+		assert.Nil(t, cfg.SafeSite, "no [safe_site] section = single-site behavior identical to today")
+	})
+
+	t.Run("ValidSectionLoaded", func(t *testing.T) {
+		path := writeConfigFile(t, `
+[auth]
+api_key = "secret"
+
+[safe_site]
+hosts = ["safe.example.com", "alt.example.org"]
+base_url = "https://safe.example.com"
+allowed_networks = ["libera", "efnet"]
+`)
+
+		cfg, err := loadConfig(path)
+
+		require.NoError(t, err)
+		require.NotNil(t, cfg.SafeSite)
+		assert.Equal(t, []string{"safe.example.com", "alt.example.org"}, cfg.SafeSite.Hosts)
+		assert.Equal(t, "https://safe.example.com", cfg.SafeSite.BaseURL)
+		assert.Equal(t, []string{"libera", "efnet"}, cfg.SafeSite.AllowedNetworks)
+	})
+}
+
+func TestLoadConfigSafeSiteInvalid(t *testing.T) {
+	tests := []struct {
+		name    string
+		section string
+		errMsg  string
+	}{
+		{"MissingHosts", `
+[safe_site]
+base_url = "https://safe.example.com"
+allowed_networks = ["libera"]`, "safe_site.hosts"},
+		{"ExplicitEmptyHosts", `
+[safe_site]
+hosts = []
+base_url = "https://safe.example.com"
+allowed_networks = ["libera"]`, "safe_site.hosts"},
+		{"MissingBaseURL", `
+[safe_site]
+hosts = ["safe.example.com"]
+allowed_networks = ["libera"]`, "safe_site.base_url"},
+		{"MissingAllowedNetworks", `
+[safe_site]
+hosts = ["safe.example.com"]
+base_url = "https://safe.example.com"`, "safe_site.allowed_networks"},
+		{"ExplicitEmptyAllowedNetworks", `
+[safe_site]
+hosts = ["safe.example.com"]
+base_url = "https://safe.example.com"
+allowed_networks = []`, "safe_site.allowed_networks"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeConfigFile(t, "[auth]\napi_key = \"secret\"\n"+tt.section)
+
+			_, err := loadConfig(path)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.errMsg)
+		})
+	}
+}
+
+func TestReloadConfigSafeSiteHotSwaps(t *testing.T) {
+	safe := &SafeSiteConfig{
+		Hosts:           []string{"safe.example.com"},
+		BaseURL:         "https://safe.example.com",
+		AllowedNetworks: []string{"libera"},
+	}
+
+	t.Run("AddedOnReload", func(t *testing.T) {
+		path := writeConfigFile(t, `
+[auth]
+api_key = "test-api-key"
+
+[server]
+addr = ":0"
+
+[safe_site]
+hosts = ["safe.example.com"]
+base_url = "https://safe.example.com"
+allowed_networks = ["libera"]
+`)
+		current := testConfig()
+
+		newCfg, warnings, err := reloadConfigFromFile(path, current)
+
+		require.NoError(t, err)
+		assert.Empty(t, warnings, "safe_site is reloadable — no restart warning")
+		require.NotNil(t, newCfg.SafeSite)
+		assert.Equal(t, safe, newCfg.SafeSite)
+	})
+
+	t.Run("RemovedOnReload", func(t *testing.T) {
+		path := writeConfigFile(t, `
+[auth]
+api_key = "test-api-key"
+
+[server]
+addr = ":0"
+`)
+		current := testConfig()
+		current.SafeSite = safe
+
+		newCfg, _, err := reloadConfigFromFile(path, current)
+
+		require.NoError(t, err)
+		assert.Nil(t, newCfg.SafeSite, "omitting the section disables the safe site without a restart")
+	})
+}
+
+func TestReloadConfigSafeSiteInvalidKeepsCurrent(t *testing.T) {
+	path := writeConfigFile(t, `
+[auth]
+api_key = "test-api-key"
+
+[server]
+addr = ":0"
+
+[safe_site]
+hosts = ["safe.example.com"]
+base_url = ""
+allowed_networks = ["libera"]
+`)
+	current := testConfig()
+	current.SafeSite = &SafeSiteConfig{
+		Hosts:           []string{"safe.example.com"},
+		BaseURL:         "https://safe.example.com",
+		AllowedNetworks: []string{"libera"},
+	}
+
+	newCfg, warnings, err := reloadConfigFromFile(path, current)
+
+	require.Error(t, err)
+	assert.Nil(t, warnings)
+	assert.Equal(t, current, newCfg, "failed reloads return the current config untouched")
+}

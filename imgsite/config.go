@@ -21,6 +21,11 @@ type Config struct {
 	Upload     UploadConfig     `toml:"upload"`
 	Search     SearchConfig     `toml:"search"`
 	Site       SiteConfig       `toml:"site"`
+	// SafeSite is nil unless a [safe_site] section is present; nil is
+	// single-site behavior identical to today. Pointer (not value) so
+	// absence stays distinguishable from an empty-but-present section,
+	// which validation rejects.
+	SafeSite *SafeSiteConfig `toml:"safe_site"`
 }
 
 type ServerConfig struct {
@@ -72,6 +77,19 @@ type SearchConfig struct {
 type SiteConfig struct {
 	Title       string `toml:"title"`
 	Description string `toml:"description"`
+}
+
+// SafeSiteConfig is the optional second logical site served from the
+// same process, selected by the request Host header (design:
+// docs/superpowers/specs/2026-09-26-safe-site-design.md). The safe
+// site shows only images whose provenance network is in
+// AllowedNetworks (case-insensitive) or whose safety verdict is
+// 'safe' — 'unknown' is default-deny. All three fields are required
+// when the section is present; see loadConfig.
+type SafeSiteConfig struct {
+	Hosts           []string `toml:"hosts"`
+	BaseURL         string   `toml:"base_url"`
+	AllowedNetworks []string `toml:"allowed_networks"`
 }
 
 const (
@@ -182,6 +200,25 @@ func loadConfig(configFile string) (Config, error) {
 	cfg.Site.Title = defaultString(cfg.Site.Title, defaultSiteTitle)
 	cfg.Site.Description = defaultString(cfg.Site.Description, defaultSiteDesc)
 
+	// [safe_site] is optional — nil means single-site behavior. When
+	// present, all three fields are required: hosts without the rest
+	// (or the rest without hosts) is half a site; and an empty
+	// allowed_networks would silently reduce the safe site to
+	// safety='safe' rows only, which is almost certainly a config
+	// mistake rather than an intent. loadConfig failing here also
+	// fails a SIGHUP reload, keeping the running config untouched.
+	if cfg.SafeSite != nil {
+		if len(cfg.SafeSite.Hosts) == 0 {
+			return cfg, fmt.Errorf("safe_site.hosts is required when [safe_site] is set")
+		}
+		if cfg.SafeSite.BaseURL == "" {
+			return cfg, fmt.Errorf("safe_site.base_url is required when [safe_site] is set")
+		}
+		if len(cfg.SafeSite.AllowedNetworks) == 0 {
+			return cfg, fmt.Errorf("safe_site.allowed_networks is required when [safe_site] is set")
+		}
+	}
+
 	return cfg, nil
 }
 
@@ -206,8 +243,11 @@ func resolvePath(baseDir, path string) string {
 
 // reloadConfigFromFile loads a fresh config and freezes every non-reloadable
 // section at its current (startup) value, warning when the file tried to
-// change one. Reloadable set: site.*, thumbnails.* (except workers),
-// search.*, upload.rate_per_minute. Same semantics as img-mcp's reload.
+// change one. Reloadable set: site.*, safe_site.*, thumbnails.* (except
+// workers), search.*, upload.rate_per_minute. Same semantics as img-mcp's
+// reload: an absent [safe_site] in the file disables the safe site without
+// a restart, and an invalid one fails the whole reload (current config
+// stays live).
 func reloadConfigFromFile(configFile string, current Config) (Config, []string, error) {
 	newCfg, err := loadConfig(configFile)
 	if err != nil {

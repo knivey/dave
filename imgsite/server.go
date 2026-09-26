@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"regexp"
@@ -101,6 +102,105 @@ func (a *App) setConfig(cfg Config) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.config = cfg
+}
+
+// siteCtx is the per-request resolution of which logical site a
+// request belongs to (default vs safe), taken once per request by
+// resolveSite and threaded through every read surface. Safe selects
+// the safe site's visibility rules; false is the default site —
+// today's single-site behavior, no restrictions.
+//
+// networks is the lowercased allowed_networks snapshot from the config
+// generation the request was resolved against, so a mid-request config
+// swap can never produce a WHERE clause mixing two configs (the same
+// snapshot discipline getConfig() gives every other per-request read).
+// It rides unexported so the only production constructor pairing
+// Safe=true with networks is resolveSite.
+type siteCtx struct {
+	Safe     bool
+	networks []string
+}
+
+// resolveSite maps a request to the logical site its Host header
+// selects. A Host matching any configured safe_site host
+// (case-insensitive, port stripped) is the safe site; anything else —
+// unknown hosts included — is the default site. Reads the current
+// config on every call: [safe_site] is hot-reloadable, so a SIGHUP
+// swap takes effect on the next request with no caching here.
+func (a *App) resolveSite(r *http.Request) siteCtx {
+	ss := a.getConfig().SafeSite
+	if ss == nil {
+		return siteCtx{}
+	}
+	host := strings.ToLower(hostWithoutPort(r.Host))
+	for _, h := range ss.Hosts {
+		if strings.ToLower(strings.TrimSpace(h)) == host && host != "" {
+			networks := make([]string, len(ss.AllowedNetworks))
+			for i, n := range ss.AllowedNetworks {
+				networks[i] = strings.ToLower(n)
+			}
+			return siteCtx{Safe: true, networks: networks}
+		}
+	}
+	return siteCtx{}
+}
+
+// hostWithoutPort strips the port from an HTTP Host value, IPv6
+// bracket form included; a bare host without a port returns unchanged.
+func hostWithoutPort(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	return host
+}
+
+// allowsNetwork reports whether n — an image's stored provenance
+// network — falls in the safe site's allowed set, compared
+// case-insensitively on both sides. An empty n is never allowed:
+// rows without provenance (imported/legacy/direct uploads) are only
+// visible on the safe site via safety='safe' — default-deny, per the
+// design doc. A nil receiver allows nothing, so callers can use it
+// without guarding config presence.
+func (s *SafeSiteConfig) allowsNetwork(n string) bool {
+	if s == nil || n == "" {
+		return false
+	}
+	ln := strings.ToLower(n)
+	for _, allowed := range s.AllowedNetworks {
+		if strings.ToLower(allowed) == ln {
+			return true
+		}
+	}
+	return false
+}
+
+// siteVisibilityFilter returns the SQL predicate fragment that every
+// safe-site read surface appends to its WHERE clause, plus the args
+// that go with it. The default site gets "" / nil — no restriction,
+// today's behavior. The safe site gets:
+//
+//	AND (LOWER(i.network) IN (?, ...) OR i.safety = 'safe')
+//
+// with exactly one lowercased arg per allowed network, in config
+// order. Callers splice the fragment directly after their existing
+// predicates and append the args — the shape is load-bearing:
+// `i` is the images alias every read query already uses, so no
+// query restructuring is needed. NULL networks fail the IN and stay
+// reachable only through safety='safe' (default-deny for
+// imported/legacy rows).
+func siteVisibilityFilter(sc siteCtx) (sqlFrag string, args []any) {
+	if !sc.Safe || len(sc.networks) == 0 {
+		return "", nil
+	}
+	placeholders := make([]string, len(sc.networks))
+	args = make([]any, len(sc.networks))
+	for i, n := range sc.networks {
+		placeholders[i] = "?"
+		// resolveSite already lowercased, but the filter re-asserts it
+		// so the "args are lowercase" contract holds for any siteCtx.
+		args[i] = strings.ToLower(n)
+	}
+	return " AND (LOWER(i.network) IN (" + strings.Join(placeholders, ", ") + ") OR i.safety = 'safe')", args
 }
 
 // setThumbWorker attaches the background thumbnailer (main calls this

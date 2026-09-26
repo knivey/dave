@@ -934,3 +934,165 @@ func TestAdminReextractHealsGGUFRows(t *testing.T) {
 }
 
 func ptrStr(s string) *string { return &s }
+
+func TestSafeSiteConfigAllowsNetwork(t *testing.T) {
+	ss := &SafeSiteConfig{AllowedNetworks: []string{"libera"}}
+
+	tests := []struct {
+		name    string
+		network string
+		want    bool
+	}{
+		{"ExactLower", "libera", true},
+		{"MixedCase", "Libera", true},
+		{"UpperCase", "LIBERA", true},
+		{"EmptyNetwork", "", false},
+		{"DifferentNetwork", "efnet", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, ss.allowsNetwork(tt.network))
+		})
+	}
+
+	t.Run("ConfiguredSideIsCaseInsensitiveToo", func(t *testing.T) {
+		mixed := &SafeSiteConfig{AllowedNetworks: []string{"Libera", "EFnet"}}
+		assert.True(t, mixed.allowsNetwork("libera"))
+		assert.True(t, mixed.allowsNetwork("efnet"))
+		assert.False(t, mixed.allowsNetwork("rizon"))
+	})
+
+	t.Run("NilReceiverAllowsNothing", func(t *testing.T) {
+		var nilSS *SafeSiteConfig
+		assert.False(t, nilSS.allowsNetwork("libera"))
+	})
+}
+
+func TestResolveSite(t *testing.T) {
+	safeCfg := testConfig()
+	safeCfg.SafeSite = &SafeSiteConfig{
+		Hosts:           []string{"safe.example.com"},
+		BaseURL:         "https://safe.example.com",
+		AllowedNetworks: []string{"libera"},
+	}
+	app := newTestApp(t, safeCfg)
+
+	tests := []struct {
+		name     string
+		host     string
+		wantSafe bool
+	}{
+		{"ExactHost", "safe.example.com", true},
+		{"UpperCaseHost", "SAFE.EXAMPLE.COM", true},
+		{"MixedCaseHostWithPort", "Safe.Example.com:443", true},
+		{"NonStandardPort", "safe.example.com:8443", true},
+		{"UnknownHostFallsBackToDefault", "img.example.com", false},
+		{"SuffixIsNotAMatch", "notsafe.example.com", false},
+		{"EmptyHost", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/", nil)
+			req.Host = tt.host
+
+			sc := app.resolveSite(req)
+
+			assert.Equal(t, tt.wantSafe, sc.Safe)
+		})
+	}
+
+	t.Run("NoSafeSiteConfigIsAlwaysDefault", func(t *testing.T) {
+		plain := newTestApp(t, testConfig())
+		req := httptest.NewRequest("GET", "/", nil)
+		req.Host = "safe.example.com"
+
+		assert.False(t, plain.resolveSite(req).Safe)
+	})
+
+	t.Run("ConfiguredHostsAreCaseInsensitive", func(t *testing.T) {
+		mixedCfg := testConfig()
+		mixedCfg.SafeSite = &SafeSiteConfig{
+			Hosts:           []string{"SAFE.Example.Com"},
+			BaseURL:         "https://safe.example.com",
+			AllowedNetworks: []string{"libera"},
+		}
+		mixed := newTestApp(t, mixedCfg)
+		req := httptest.NewRequest("GET", "/", nil)
+		req.Host = "safe.example.com"
+
+		assert.True(t, mixed.resolveSite(req).Safe)
+	})
+
+	t.Run("ConfigSwapReadPerRequest", func(t *testing.T) {
+		// The safe-site config is hot-reloadable, so resolveSite must
+		// read it from the App's current config every call, never
+		// cache it — mirroring how handlers read getConfig() today.
+		swappable := newTestApp(t, testConfig())
+		req := httptest.NewRequest("GET", "/", nil)
+		req.Host = "safe.example.com"
+		require.False(t, swappable.resolveSite(req).Safe, "no safe site configured yet")
+
+		reloaded := testConfig()
+		reloaded.SafeSite = safeCfg.SafeSite
+		swappable.setConfig(reloaded)
+
+		assert.True(t, swappable.resolveSite(req).Safe, "reload takes effect on the next request")
+	})
+}
+
+func TestSiteVisibilityFilter(t *testing.T) {
+	t.Run("DefaultSiteGetsNoFilter", func(t *testing.T) {
+		frag, args := siteVisibilityFilter(siteCtx{})
+
+		assert.Equal(t, "", frag)
+		assert.Nil(t, args)
+	})
+
+	t.Run("OneNetwork", func(t *testing.T) {
+		frag, args := siteVisibilityFilter(siteCtx{Safe: true, networks: []string{"libera"}})
+
+		assert.Equal(t, " AND (LOWER(i.network) IN (?) OR i.safety = 'safe')", frag)
+		assert.Equal(t, []any{"libera"}, args)
+	})
+
+	t.Run("TwoNetworks", func(t *testing.T) {
+		frag, args := siteVisibilityFilter(siteCtx{Safe: true, networks: []string{"efnet", "libera"}})
+
+		assert.Equal(t, " AND (LOWER(i.network) IN (?, ?) OR i.safety = 'safe')", frag)
+		assert.Equal(t, []any{"efnet", "libera"}, args)
+	})
+
+	t.Run("ResolvedSafeSiteComposes", func(t *testing.T) {
+		safeCfg := testConfig()
+		safeCfg.SafeSite = &SafeSiteConfig{
+			Hosts:           []string{"safe.example.com"},
+			BaseURL:         "https://safe.example.com",
+			AllowedNetworks: []string{"Libera"},
+		}
+		app := newTestApp(t, safeCfg)
+		req := httptest.NewRequest("GET", "/", nil)
+		req.Host = "safe.example.com"
+
+		frag, args := siteVisibilityFilter(app.resolveSite(req))
+
+		assert.Equal(t, " AND (LOWER(i.network) IN (?) OR i.safety = 'safe')", frag)
+		assert.Equal(t, []any{"libera"}, args, "args are lowercased regardless of config casing")
+	})
+
+	t.Run("ResolvedDefaultSiteComposes", func(t *testing.T) {
+		safeCfg := testConfig()
+		safeCfg.SafeSite = &SafeSiteConfig{
+			Hosts:           []string{"safe.example.com"},
+			BaseURL:         "https://safe.example.com",
+			AllowedNetworks: []string{"libera"},
+		}
+		app := newTestApp(t, safeCfg)
+		req := httptest.NewRequest("GET", "/", nil)
+		req.Host = "img.example.com"
+
+		frag, args := siteVisibilityFilter(app.resolveSite(req))
+
+		assert.Equal(t, "", frag)
+		assert.Nil(t, args)
+	})
+}

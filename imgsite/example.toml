@@ -48,8 +48,26 @@
 #   title       = (string) site title                      default: "dave's image dump"
 #   description = (string) site description                 default: "generations from IRC"
 #
+# [safe_site]  (optional — omit the section entirely for single-site
+#               behavior identical to today)
+#   hosts            = ([string]) hostnames that select the safe site;
+#                      matched case-insensitively against the request
+#                      Host header (port stripped). Any other host,
+#                      including unknown ones, gets the default site.
+#                      REQUIRED when the section is present   no default
+#   base_url         = (string) external base URL for the safe site's
+#                      absolute links (og:url, and upload responses
+#                      for allowed-network uploads).
+#                      REQUIRED when the section is present   no default
+#   allowed_networks = ([string]) provenance networks whose content is
+#                      visible on the safe site (case-insensitive
+#                      compare against images.network); everything
+#                      else is visible there only with
+#                      safety = 'safe' ('unknown' default-denies).
+#                      REQUIRED when the section is present   no default
+#
 # Reloadable via SIGHUP or POST /admin/reload (X-API-Key):
-#   site.*, thumbnails.* (except workers), search.*, upload.*
+#   site.*, safe_site.*, thumbnails.* (except workers), search.*, upload.*
 # Everything else requires a restart.
 
 # ---------------------------------------------------------------------------
@@ -88,6 +106,11 @@
 # [site]
 # title = "dave's image dump"
 # description = "generations from IRC"
+#
+# [safe_site]
+# hosts = ["safe.example.com"]
+# base_url = "https://safe.example.com"
+# allowed_networks = ["libera"]
 
 # ---- live configuration ---------------------------------------------------
 

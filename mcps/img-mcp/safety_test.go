@@ -200,9 +200,11 @@ func TestRunSafetyVetMissingConfigWarnsOnce(t *testing.T) {
 	// Swapped through the setter, not by bare assignment: the emitter reads
 	// the sink under vetMissingWarnMu, and an in-flight vet goroutine from
 	// any concurrently-running job would turn a direct write into a data
-	// race under -race.
-	setVetMissingWarnSink(func(vetName string) { warns.Add(1) })
-	t.Cleanup(func() { setVetMissingWarnSink(nil) })
+	// race under -race. The setter returns the prior sink so cleanup
+	// restores exactly what was there, not a hardcoded nil — a future
+	// second user of the seam cannot be silently disconnected.
+	prev := setVetMissingWarnSink(func(vetName string) { warns.Add(1) })
+	t.Cleanup(func() { setVetMissingWarnSink(prev) })
 
 	// Unique name so the process-global once-map cannot have been primed
 	// by an earlier test.

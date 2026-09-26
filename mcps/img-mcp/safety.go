@@ -77,11 +77,15 @@ var (
 )
 
 // setVetMissingWarnSink installs/removes the test seam under the same mutex
-// the emitter reads it under.
-func setVetMissingWarnSink(fn func(vetName string)) {
+// the emitter reads it under, returning the sink it replaced so callers can
+// restore the prior value (a cleanup that hardcodes nil would silently
+// disconnect a future second user of the seam).
+func setVetMissingWarnSink(fn func(vetName string)) (prev func(vetName string)) {
 	vetMissingWarnMu.Lock()
+	prev = vetMissingWarnSink
 	vetMissingWarnSink = fn
 	vetMissingWarnMu.Unlock()
+	return prev
 }
 
 // warnVetConfigMissing emits the missing-vet-config WARN once per process

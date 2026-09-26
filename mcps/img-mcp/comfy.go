@@ -210,11 +210,27 @@ func truncateForPromptNote(reasoning string) string {
 //     ""-vs-"unknown" distinction out of the file — imgsite's column already
 //     defaults to unknown, and baking "unknown" would merely restate the
 //     default while making the payload larger.
+//   - NSFW is the enhancement first pass (safe-site split), persisted into
+//     the note for the site's future use (owner: "it can be used later to
+//     improve the site") — today it is consumed internally (nsfw:true →
+//     safety unsafe, vet skipped) and never persisted. It rides from submit
+//     time so, exactly like EnhancementReasoning, it survives a crash and
+//     recovery carries it across the rewrite from the old note. Its
+//     tri-state is expressed BY COMPOSITION, never an explicit false:
+//     nsfw:true = enhanced and flagged; enhancement_reasoning present
+//     without nsfw = enhanced and unflagged (Responses API summaries only —
+//     Chat Completions enhancement yields no reasoning, so an
+//     enhanced-but-unflagged Chat Completions note is indistinguishable from
+//     a plain-generate one, which is honest: the note carries no signal);
+//     neither field = never enhanced (direct tools). skip_networks jobs
+//     never carry the flag — the whole classification machinery, first pass
+//     included, is skipped there.
 type promptNotePayload struct {
 	Prompt               string `json:"prompt"`
 	LLMGenerated         bool   `json:"llm_generated"`
 	JobID                string `json:"job_id"`
 	EnhancementReasoning string `json:"enhancement_reasoning,omitempty"`
+	NSFW                 bool   `json:"nsfw,omitempty"`
 	Network              string `json:"network,omitempty"`
 	Channel              string `json:"channel,omitempty"`
 	Nick                 string `json:"nick,omitempty"`
@@ -222,25 +238,29 @@ type promptNotePayload struct {
 }
 
 // buildPromptNote assembles the submit-time note: everything known when the
-// workflow is built (prompt, flags, provenance) with the safety verdict left
-// empty — the vet is still running. The rewrite path calls
-// buildPromptNoteWithSafety to rebuild the payload wholesale once the verdict
-// resolves.
-func buildPromptNote(job *Job, enhancementReasoning string) (string, error) {
-	return buildPromptNoteWithSafety(job, enhancementReasoning, "")
+// workflow is built (prompt, flags, provenance, first-pass nsfw) with the
+// safety verdict left empty — the vet is still running. The rewrite path
+// calls buildPromptNoteWithSafety to rebuild the payload wholesale once the
+// verdict resolves.
+func buildPromptNote(job *Job, enhancementReasoning string, nsfwFirstPass bool) (string, error) {
+	return buildPromptNoteWithSafety(job, enhancementReasoning, "", nsfwFirstPass)
 }
 
 // buildPromptNoteWithSafety is the rewrite-time note builder: the full
 // payload — submit-time fields plus the resolved safety verdict — re-marshaled
 // wholesale (never string-patched). Callers pass the verdict exactly as the
 // vet/persistence produced it; non-affirmative values drop out via
-// reportableSafety + omitempty.
-func buildPromptNoteWithSafety(job *Job, enhancementReasoning, safety string) (string, error) {
+// reportableSafety + omitempty. nsfwFirstPass is the enhancement first-pass
+// flag from the same source the submit-time build used (processJob's enhance
+// result; recovery's parsed old note) — it drops out via omitempty when
+// unset.
+func buildPromptNoteWithSafety(job *Job, enhancementReasoning, safety string, nsfwFirstPass bool) (string, error) {
 	data, err := json.Marshal(promptNotePayload{
 		Prompt:               job.Input.Prompt,
 		LLMGenerated:         job.Input.LLMGenerated,
 		JobID:                job.ID,
 		EnhancementReasoning: truncateForPromptNote(enhancementReasoning),
+		NSFW:                 nsfwFirstPass,
 		Network:              job.Input.Network,
 		Channel:              job.Input.Channel,
 		Nick:                 job.Input.Nick,

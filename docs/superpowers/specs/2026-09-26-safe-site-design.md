@@ -279,3 +279,20 @@ vetting of old images via the vetting LLM; admin tooling for marking
 old files for sexual content (`-safety` CLI exists; a batch/marking
 helper would build on it). Also: admin web UI; any notion of hiding
 unsafe content from the default site; image-pixel classification.
+
+## Addendum (2026-09-26): nsfw first-pass flag persisted into the EXIF note
+
+Shipped follow-up to the first pass, recorded here without rewriting
+the design above: the note payload's field list gains `nsfw`
+(omitempty). The flag is baked at submit time — enhancement has
+resolved by then, so `EnhanceResult.NSFW` is known — and the
+rewrite-time rebuild and restart recovery carry it forward (recovery
+reads it from the old note, exactly the enhancement_reasoning
+surviving-copy pattern). Semantics are tri-state by composition:
+`nsfw:true` = enhanced and flagged; `enhancement_reasoning` present
+without `nsfw` = enhanced and unflagged; neither = never enhanced
+(direct tools). skip_networks jobs never carry the flag (the whole
+classification machinery is skipped there). Owner intent: the flag
+"can be used later to improve the site" — imgsite parses it (`*bool`,
+nil = absent) onto the extracted metadata struct for reextract/future
+tooling, with no column and no merge consequence today.

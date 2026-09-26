@@ -778,7 +778,16 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 	// never waits: the goroutine terminates with the job context below.
 	safetyVet := startSafetyVet(jobCtx, cfg, job.Input.Network, firstPassNSFW, job.Input.Prompt, prompt)
 
-	promptNote, err := buildPromptNote(job, enhancementReasoning)
+	// noteNSFW is what the note payload bakes: the first-pass flag, but ONLY
+	// on networks that undergo classification at all. skip_networks (Libera)
+	// skips the whole safety machinery — first pass and verdict alike — so
+	// its notes carry neither (the nsfw key drops out via omitempty, same
+	// discipline as the absent safety verdict). In practice the libera-safe
+	// enhancement prompts never flag; this gate makes absence structural
+	// rather than incidental.
+	noteNSFW := firstPassNSFW && !safetyNetworkSkipped(cfg, job.Input.Network)
+
+	promptNote, err := buildPromptNote(job, enhancementReasoning, noteNSFW)
 	if err != nil {
 		q.failJob(job, fmt.Sprintf("workflow preparation failed: %v", err))
 		return
@@ -871,7 +880,7 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 	// upload; the site computes the hash from what it receives). Applied to
 	// every output format, not just uploads: base64 deliveries carry the same
 	// enriched artifact the gallery would.
-	rewriteNote, noteErr := buildPromptNoteWithSafety(job, enhancementReasoning, jobSafety)
+	rewriteNote, noteErr := buildPromptNoteWithSafety(job, enhancementReasoning, jobSafety, noteNSFW)
 	if noteErr != nil {
 		// Unreachable in practice (marshaling plain strings); degrade like
 		// the container-surgery failures below rather than fail the job.
@@ -1237,12 +1246,15 @@ func (q *JobQueue) recoverRunningJob(_ context.Context, job *Job, comfyPromptID 
 	// wholesale, and the enhancement reasoning cannot be rebuilt here
 	// (recovery never re-runs enhancement), so it is recovered from the note
 	// already embedded in the image — its only surviving copy — before the
-	// rewrite drops it. Everything else comes from the job row, the same
-	// source the submit-time note used.
+	// rewrite drops it. The nsfw first-pass flag rides the same way: it was
+	// baked at submit time precisely so a crash cannot lose it. Everything
+	// else comes from the job row, the same source the submit-time note used.
 	rewriteReasoning := ""
+	rewriteNSFW := false
 	if len(comfyResult.Images) > 0 {
 		if note, ok := embeddedPromptNote(comfyResult.Images[0].Data); ok {
 			rewriteReasoning = note.EnhancementReasoning
+			rewriteNSFW = note.NSFW
 		} else {
 			// Parity with the other degrade paths (see the enhanced-prompt
 			// WARN above): silent reasoning loss is undebuggable from the
@@ -1253,7 +1265,7 @@ func (q *JobQueue) recoverRunningJob(_ context.Context, job *Job, comfyPromptID 
 			)
 		}
 	}
-	rewriteNote, noteErr := buildPromptNoteWithSafety(job, rewriteReasoning, jobSafety)
+	rewriteNote, noteErr := buildPromptNoteWithSafety(job, rewriteReasoning, jobSafety, rewriteNSFW)
 	if noteErr != nil {
 		loggerQueue.Warn("building the rewrite-time prompt note failed; keeping the submit-time note",
 			"job_id", job.ID, "error", noteErr)

@@ -31,12 +31,17 @@ type workflowNode struct {
 // safety are the safe-site extensions img-mcp bakes into the note
 // post-generation (EXIF rewrite) — optional, absent on all legacy
 // notes, and parsed permissively here so imgsite is ready before the
-// img-mcp side ships.
+// img-mcp side ships. nsfw is img-mcp's enhancement first pass
+// (true only when flagged; absent = no signal — the tri-state is
+// expressed by composition with enhancement_reasoning, see img-mcp's
+// note builder): *bool keeps absent distinguishable from an explicit
+// false. Parsed for future site use only — no column, no behavior.
 type promptNotePayload struct {
 	Prompt               string `json:"prompt"`
 	LLMGenerated         bool   `json:"llm_generated"`
 	JobID                string `json:"job_id"`
 	EnhancementReasoning string `json:"enhancement_reasoning,omitempty"`
+	NSFW                 *bool  `json:"nsfw,omitempty"`
 	Network              string `json:"network,omitempty"`
 	Channel              string `json:"channel,omitempty"`
 	Nick                 string `json:"nick,omitempty"`
@@ -63,6 +68,15 @@ type extractedMetadata struct {
 	Channel string
 	Nick    string
 	Safety  string
+
+	// NSFW is the note payload's first-pass sexual-content flag (nil =
+	// absent, no signal). FUTURE USE (owner: it "can be used later to
+	// improve the site" — e.g. informing heuristics or admin tooling):
+	// parsed and exposed here for reextract/CLI consumption, but
+	// deliberately NOT written to any column and NOT part of the
+	// upload/reextract merge. Wiring it into the schema is a schema
+	// migration away when that use is designed.
+	NSFW *bool
 
 	Seed      *int64
 	Steps     *int
@@ -160,6 +174,10 @@ func extractFromGraph(wf map[string]workflowNode) extractedMetadata {
 				md.Network = pn.Network
 				md.Channel = pn.Channel
 				md.Nick = pn.Nick
+				// The nsfw first-pass flag copies through as-is (pointer:
+				// nil stays nil) — exposed for future use, consumed by no
+				// column or merge today (see extractedMetadata.NSFW).
+				md.NSFW = pn.NSFW
 				if validSafetyVerdict(pn.Safety) {
 					md.Safety = pn.Safety
 				}

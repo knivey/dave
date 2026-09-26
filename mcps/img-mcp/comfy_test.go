@@ -560,6 +560,7 @@ func TestBuildPromptNote(t *testing.T) {
 		name      string
 		job       *Job
 		reasoning string
+		nsfw      bool
 		want      string
 	}{
 		{
@@ -578,12 +579,39 @@ func TestBuildPromptNote(t *testing.T) {
 			reasoning: "the user wants a cat",
 			want:      `{"prompt":"a cat","llm_generated":false,"job_id":"j_3","enhancement_reasoning":"the user wants a cat"}`,
 		},
+		{
+			name: "nsfw first pass flagged",
+			job:  &Job{ID: "j_4", Input: JobInput{Prompt: "a cat"}},
+			nsfw: true,
+			want: `{"prompt":"a cat","llm_generated":false,"job_id":"j_4","nsfw":true}`,
+		},
+		{
+			name: "nsfw false omits the key",
+			job:  &Job{ID: "j_5", Input: JobInput{Prompt: "a cat"}},
+			nsfw: false,
+			want: `{"prompt":"a cat","llm_generated":false,"job_id":"j_5"}`,
+		},
+		{
+			name:      "nsfw flagged alongside reasoning",
+			job:       &Job{ID: "j_6", Input: JobInput{Prompt: "a cat"}},
+			reasoning: "the user wants a cat",
+			nsfw:      true,
+			want:      `{"prompt":"a cat","llm_generated":false,"job_id":"j_6","enhancement_reasoning":"the user wants a cat","nsfw":true}`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := buildPromptNote(tt.job, tt.reasoning)
+			got, err := buildPromptNote(tt.job, tt.reasoning, tt.nsfw)
 			require.NoError(t, err, "buildPromptNote")
 			assert.JSONEq(t, tt.want, got)
+			// JSONEq is key-set equality, but pin the omitempty shape raw
+			// too: the flag must appear ONLY as "nsfw":true, never an
+			// explicit false (absent = no signal is the tri-state rule).
+			if tt.nsfw {
+				assert.Contains(t, got, `"nsfw":true`)
+			} else {
+				assert.NotContains(t, got, "nsfw")
+			}
 		})
 	}
 }
@@ -595,7 +623,7 @@ func TestBuildPromptNoteTruncatesReasoning(t *testing.T) {
 	job := &Job{ID: "j_t", Input: JobInput{Prompt: "a cat"}}
 
 	exact := strings.Repeat("x", maxPromptNoteReasoningRunes)
-	got, err := buildPromptNote(job, exact)
+	got, err := buildPromptNote(job, exact, false)
 	require.NoError(t, err, "buildPromptNote")
 	var payload promptNotePayload
 	require.NoError(t, json.Unmarshal([]byte(got), &payload))
@@ -603,7 +631,7 @@ func TestBuildPromptNoteTruncatesReasoning(t *testing.T) {
 		"reasoning at exactly the cap must pass through untouched")
 
 	over := strings.Repeat("y", maxPromptNoteReasoningRunes+50)
-	got, err = buildPromptNote(job, over)
+	got, err = buildPromptNote(job, over, false)
 	require.NoError(t, err, "buildPromptNote")
 	require.NoError(t, json.Unmarshal([]byte(got), &payload))
 	assert.Equal(t, strings.Repeat("y", maxPromptNoteReasoningRunes)+promptNoteTruncationMarker,
@@ -618,7 +646,7 @@ func TestBuildPromptNoteTruncatesReasoning(t *testing.T) {
 	// passes. (A byte-split rune would surface as U+FFFD after the JSON
 	// round-trip and fail the equality below.)
 	multibyte := "a" + strings.Repeat("é", maxPromptNoteReasoningRunes+10)
-	got, err = buildPromptNote(job, multibyte)
+	got, err = buildPromptNote(job, multibyte, false)
 	require.NoError(t, err, "buildPromptNote")
 	require.NoError(t, json.Unmarshal([]byte(got), &payload))
 	want := "a" + strings.Repeat("é", maxPromptNoteReasoningRunes-1) + promptNoteTruncationMarker
@@ -757,6 +785,8 @@ func TestProcessJobSubmitsPromptNote(t *testing.T) {
 	// serialized shape too: omitempty must keep the key out entirely.
 	assert.NotContains(t, text, "enhancement_reasoning",
 		"raw note JSON must omit the enhancement_reasoning key for plain generate jobs")
+	assert.NotContains(t, text, "nsfw",
+		"plain generate jobs have no first pass: the nsfw key must be absent, not false")
 
 	assert.Equal(t, "a cat sitting on a mat", submitted[0].Prompt["prompt-node"].Inputs["text"],
 		"prompt node should receive the unenhanced prompt for a plain generate job")
@@ -836,6 +866,10 @@ func TestProcessJobEnhanceKeepsOriginalPromptInNote(t *testing.T) {
 	assert.Equal(t, job.ID, payload.JobID)
 	assert.Empty(t, payload.EnhancementReasoning,
 		"chat completions enhancement returns no reasoning summaries")
+	// The stub's reply carries no nsfw flag (absent = no signal), so the
+	// enhanced-but-unflagged note must omit the key entirely.
+	assert.NotContains(t, node.Inputs["text"].(string), "nsfw",
+		"an unflagged enhancement must not bake nsfw:false — absent is the no-signal shape")
 
 	assert.Equal(t, "a majestic cat, studio lighting, 4k", submitted[0].Prompt["prompt-node"].Inputs["text"],
 		"prompt node should receive the enhanced prompt")

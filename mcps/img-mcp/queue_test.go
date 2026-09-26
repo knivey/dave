@@ -1291,7 +1291,7 @@ func TestProcessJobRewritesNoteBeforeUpload(t *testing.T) {
 	// the expected result (note + surgery) and compare against what the fake
 	// site received. Had the rewrite landed after the upload — or not at all
 	// — the received hash would match the fixture instead.
-	expectedNote, err := buildPromptNoteWithSafety(job, "", safetyVerdictSafe)
+	expectedNote, err := buildPromptNoteWithSafety(job, "", safetyVerdictSafe, false)
 	require.NoError(t, err, "buildPromptNoteWithSafety")
 	expectedBytes, err := rewriteWebpNoteData(fixture, expectedNote)
 	require.NoError(t, err, "rewriteWebpNoteData")
@@ -1362,6 +1362,145 @@ func TestProcessJobNoteRewriteSkipsNonWebp(t *testing.T) {
 		"the verdict still travels in the upload meta when the rewrite is skipped")
 }
 
+// TestProcessJobNoteRewriteCarriesNSFWFirstPass pins the first-pass flag's
+// full journey into the EXIF note: an enhancement reply carrying
+// "nsfw":true bakes nsfw:true into the SUBMIT-time note (so the flag
+// survives a crash exactly like the enhancement reasoning), and the
+// rewrite-time note rebuilt after the short-circuited verdict carries BOTH
+// nsfw:true and safety:"unsafe" in the uploaded bytes. The vet stub would
+// say safe — zero calls prove the flag short-circuits classification
+// rather than riding alongside it.
+func TestProcessJobNoteRewriteCarriesNSFWFirstPass(t *testing.T) {
+	mockComfy := newMockComfyFlowServer(t)
+	const enhancedPrompt = "an enhanced majestic cat, studio lighting"
+	fixture := exifWebPWithNote(t,
+		`{"prompt":"a cat","llm_generated":false,"job_id":"stale"}`, enhancedPrompt)
+	mockComfy.serveViewData(fixture)
+	enhServer, _ := newEnhancementStubServer(t, EnhancementResponse{
+		EnhancedPrompt: enhancedPrompt,
+		NegativePrompt: "blurry",
+		NSFW:           true,
+	})
+	vet := newVetStubServer(t, http.StatusOK, `{"safe":true,"reason":"fine"}`)
+	up := newFakeUploadServer(t)
+
+	cfg := testConfig(mockComfy.URL())
+	wc := cfg.Workflows["test"]
+	wc.WorkflowPath = mustWriteWorkflow(t, t.TempDir())
+	cfg.Workflows["test"] = wc
+	cfg.Upload.URL = up.server.URL
+	cfg.Enhancements = map[string]EnhancementConfig{
+		"default": {
+			BaseURL:      enhServer.URL + "/v1",
+			Key:          "test-key",
+			Model:        "stub-model",
+			SystemPrompt: "enhance",
+			Timeout:      10,
+		},
+		"safety-vet": {
+			BaseURL:      vet.server.URL + "/v1",
+			Key:          "test-key",
+			Model:        "stub-model",
+			SystemPrompt: "judge the prompts",
+			Timeout:      10,
+		},
+	}
+
+	q, cleanup := setupTestQueue(t, cfg)
+	defer cleanup()
+
+	job, err := q.Submit(JobTypeEnhanceGenerate, "test", JobInput{
+		Prompt:       "a cat",
+		Network:      "graped",
+		OutputFormat: "url",
+	})
+	require.NoError(t, err, "Submit")
+
+	waitForJobDone(t, job, 15*time.Second)
+	assertJobStatus(t, q, job.ID, StatusCompleted)
+
+	// Submit-time note: the flag rides from the moment enhancement
+	// resolves, so a crash before the rewrite leaves it in the image.
+	submitted := mockComfy.submittedPrompts()
+	require.Len(t, submitted, 1, "exactly one prompt submission")
+	submitNote, ok := submitted[0].Prompt[davePromptNoteNodeID].Inputs["text"].(string)
+	require.True(t, ok, "submitted note text should be a string")
+	assert.Contains(t, submitNote, `"nsfw":true`,
+		"the submit-time note must bake the flagged first pass")
+	assert.NotContains(t, submitNote, "safety",
+		"the submit-time note still carries no verdict — it has not resolved yet")
+
+	// nsfw:true short-circuits to unsafe with NO vet call.
+	assert.Zero(t, vet.calls.Load(), "nsfw:true must skip the vet call entirely")
+	assert.Equal(t, safetyVerdictUnsafe, dbJobSafety(t, q.db, job.ID),
+		"the short-circuit verdict must be the persisted one")
+
+	// Uploaded bytes carry nsfw:true ALONGSIDE safety unsafe.
+	received := up.gotFileContent
+	require.NotEmpty(t, received, "upload must have received the image")
+	note, ok := embeddedPromptNote(received)
+	require.True(t, ok, "rewritten note must parse back out of the uploaded bytes")
+	assert.True(t, note.NSFW, "the first-pass flag must ride the rewrite into the uploaded bytes")
+	assert.Equal(t, safetyVerdictUnsafe, note.Safety,
+		"the baked verdict is the short-circuited unsafe")
+}
+
+// TestRecoverRunningJobCarriesNSFWFlagAcrossRewrite pins the recovery half
+// of the first-pass flag's persistence: the nsfw flag baked into the
+// submit-time note is carried across the wholesale rewrite from the note
+// already embedded in the image — the same surviving-copy pattern the
+// enhancement reasoning uses — alongside the persisted verdict.
+func TestRecoverRunningJobCarriesNSFWFlagAcrossRewrite(t *testing.T) {
+	mockComfy := newMockComfyFlowServer(t)
+	const enhancedPrompt = "an enhanced majestic cat, studio lighting"
+	fixture := exifWebPWithNote(t,
+		`{"prompt":"a cat","llm_generated":true,"job_id":"stale","enhancement_reasoning":"the user asked for a cat","nsfw":true}`,
+		enhancedPrompt)
+	mockComfy.serveViewData(fixture)
+	vet := newVetStubServer(t, http.StatusOK, `{"safe":true,"reason":"fine"}`) // would say safe...
+	up := newFakeUploadServer(t)
+
+	cfg := safetyQueueConfig(t, mockComfy.URL(), vet, nil)
+	cfg.Upload.URL = up.server.URL
+	cfg.Queue.MaxWorkers = 0
+	q := manualQueueLiteral(t, cfg)
+
+	job, err := q.Submit(JobTypeGenerate, "test", JobInput{
+		Prompt:       "a cat",
+		LLMGenerated: true,
+		Network:      "graped",
+		Channel:      "#test",
+		Nick:         "user1",
+		OutputFormat: "url",
+	})
+	require.NoError(t, err, "Submit")
+	markRunningInMemoryAndDB(t, q, job, "test-prompt-1")
+
+	// ...but the verdict resolved (unsafe) before the crash, and the note
+	// in the completed image carries the submit-time nsfw flag.
+	require.NoError(t, dbUpdateJobSafety(q.db, job.ID, safetyVerdictUnsafe))
+	recovered := restartRecoverJob(t, q, job.ID)
+
+	q.wg.Add(1)
+	go q.recoverRunningJob(context.Background(), recovered, "test-prompt-1")
+
+	waitForJobDone(t, recovered, 15*time.Second)
+	assertJobStatus(t, q, recovered.ID, StatusCompleted)
+	assert.Zero(t, vet.calls.Load(), "a persisted verdict must never be re-vetted")
+
+	received := up.gotFileContent
+	require.NotEmpty(t, received, "upload must have received the image")
+	note, ok := embeddedPromptNote(received)
+	require.True(t, ok, "recovery-rewritten note must parse back out")
+	assert.True(t, note.NSFW,
+		"the first-pass flag must survive the recovery rewrite via the old note")
+	assert.Equal(t, "the user asked for a cat", note.EnhancementReasoning,
+		"the reasoning must keep riding the same carry-across path")
+	assert.Equal(t, safetyVerdictUnsafe, note.Safety,
+		"the persisted verdict must be baked on the recovery path")
+	assert.Equal(t, job.ID, note.JobID, "the rebuild is wholesale: stale fields do not survive")
+}
+
 // TestProcessJobNoteRewriteOmitsUnresolvedSafety pins the bake discipline for
 // non-affirmative verdicts: unknown (vet failed) and unvetted
 // (skip_networks) bake nothing into the note and send nothing in the meta —
@@ -1422,6 +1561,8 @@ func TestProcessJobNoteRewriteOmitsUnresolvedSafety(t *testing.T) {
 			require.True(t, ok, "note text should be a string")
 			assert.NotContains(t, noteText, "safety",
 				"the safety key must be absent from the embedded note, not empty")
+			assert.NotContains(t, noteText, "nsfw",
+				"these paths ran no first pass (direct tool, no enhancement): the nsfw key must be absent too")
 
 			assert.NotContains(t, up.gotMetaRaw, "safety",
 				"non-affirmative verdicts must be omitted from the upload meta")

@@ -64,7 +64,10 @@ safe-site pipeline the payload grows four more OPTIONAL fields —
 `safety` (`"safe"`/`"unsafe"`; baked in post-generation by img-mcp's EXIF
 note rewrite) — absent on every legacy note and parsed permissively:
 extraction takes a `safety` value only when it is exactly a verdict, so
-an unparseable value degrades to `unknown` and never elevates.
+an unparseable value degrades to `unknown` and never elevates. A fifth
+optional field, `nsfw` (first-pass sexual-content flag from img-mcp's
+enhancement call; present only as `true`, absent = no signal), is parsed
+onto the extracted struct for future site use — no column behind it yet.
 Everything else the
 details page wants is discoverable by graph traversal (sample 528):
 
@@ -621,7 +624,7 @@ Shared semantics:
    payload prefix `prompt:` (API graph) and `workflow:` (UI graph, present
    when `save_workflow_as_json=true`; ignored by us). Strip trailing NUL.
 3. **Graph traversal** (`workflow.go`) — class_type-keyed, ID-agnostic:
-   - `dave_original_prompt` node → JSON payload → original prompt, llm_generated, job_id, reasoning; optional safe-site fields `network`/`channel`/`nick` and `safety` (verdict-gated: only `safe`/`unsafe` parse, anything else degrades to empty)
+   - `dave_original_prompt` node → JSON payload → original prompt, llm_generated, job_id, reasoning; optional safe-site fields `network`/`channel`/`nick` and `safety` (verdict-gated: only `safe`/`unsafe` parse, anything else degrades to empty) plus `nsfw` (first-pass flag, parsed `*bool` for future use — no column, no merge consequence)
    - sampler classes `KSampler`, `KSamplerAdvanced` (+ future additions) → seed/steps/cfg/sampler/scheduler/denoise; follow `positive`/`negative` edge refs (2-tuples `[nodeID, slot]`)
    - negative endpoint `ConditioningZeroOut`/`ConditioningCombine` ⇒ no text; `CLIPTextEncode.text` ⇒ negative text
    - loader classes by case-insensitive PREFIX on `class_type`

@@ -211,6 +211,18 @@ func TestSafetyNotePayload(t *testing.T) {
 		assert.Empty(t, md.Channel)
 		assert.Empty(t, md.Nick)
 		assert.Empty(t, md.Safety)
+		assert.Nil(t, md.NSFW, "a legacy note carries no first-pass signal")
+	})
+	t.Run("NSFWFlagExposed", func(t *testing.T) {
+		// The first-pass flag is exposed on the extracted struct for future
+		// site use (owner: "it can be used later to improve the site") —
+		// parsed here alongside the verdict, with no column behind it yet.
+		note := `{"prompt":"a cat","llm_generated":false,"job_id":"j1","nsfw":true,"safety":"unsafe"}`
+		md, ok := ExtractMetadata(syntheticGraph("ConditioningZeroOut", note))
+		require.True(t, ok)
+		require.NotNil(t, md.NSFW, "extraction must surface the flagged first pass")
+		assert.True(t, *md.NSFW)
+		assert.Equal(t, safetyUnsafe, md.Safety, "the verdict rides alongside unchanged")
 	})
 }
 
@@ -296,6 +308,27 @@ func TestParsePromptPayload(t *testing.T) {
 	t.Run("Garbage", func(t *testing.T) {
 		_, ok := parsePromptPayload("nope")
 		assert.False(t, ok)
+	})
+	// The nsfw first-pass flag parses as a *bool so absent (no signal)
+	// stays distinguishable from an explicit false — img-mcp only ever
+	// bakes true (omitempty), but the parser must not collapse the
+	// shapes future tooling might read.
+	t.Run("NSFWTrue", func(t *testing.T) {
+		pn, ok := parsePromptPayload(`{"prompt":"p","llm_generated":false,"job_id":"j","nsfw":true}`)
+		require.True(t, ok)
+		require.NotNil(t, pn.NSFW, "nsfw:true must parse onto the payload")
+		assert.True(t, *pn.NSFW)
+	})
+	t.Run("NSFWFalse", func(t *testing.T) {
+		pn, ok := parsePromptPayload(`{"prompt":"p","llm_generated":false,"job_id":"j","nsfw":false}`)
+		require.True(t, ok)
+		require.NotNil(t, pn.NSFW, "an explicit nsfw:false must parse, not decode as absent")
+		assert.False(t, *pn.NSFW)
+	})
+	t.Run("NSFWAbsent", func(t *testing.T) {
+		pn, ok := parsePromptPayload(`{"prompt":"p","llm_generated":false,"job_id":"j"}`)
+		require.True(t, ok)
+		assert.Nil(t, pn.NSFW, "a note without nsfw carries no signal — nil, not false")
 	})
 }
 

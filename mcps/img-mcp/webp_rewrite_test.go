@@ -92,7 +92,7 @@ func TestRewriteNoteInWebpReplacesPayloadAndRoundTrips(t *testing.T) {
 			Nick:         "user1",
 		},
 	}
-	noteJSON, err := buildPromptNoteWithSafety(job, "", safetyVerdictUnsafe)
+	noteJSON, err := buildPromptNoteWithSafety(job, "", safetyVerdictUnsafe, true)
 	require.NoError(t, err, "buildPromptNoteWithSafety")
 
 	path := filepath.Join(t.TempDir(), "img_00001_.webp")
@@ -121,6 +121,8 @@ func TestRewriteNoteInWebpReplacesPayloadAndRoundTrips(t *testing.T) {
 	assert.Equal(t, "a cat", note.Prompt)
 	assert.True(t, note.LLMGenerated)
 	assert.Equal(t, "newjob", note.JobID)
+	assert.True(t, note.NSFW,
+		"the first-pass nsfw flag must survive the container surgery alongside the verdict")
 	assert.Equal(t, "graped", note.Network)
 	assert.Equal(t, "#test", note.Channel)
 	assert.Equal(t, "user1", note.Nick)
@@ -153,7 +155,7 @@ func TestRewriteNoteInWebpPreservesOtherChunksAndFixesSizes(t *testing.T) {
 	})
 
 	job := &Job{ID: "sizetest", Input: JobInput{Prompt: "a cat", Network: "graped"}}
-	noteJSON, err := buildPromptNoteWithSafety(job, "", safetyVerdictSafe)
+	noteJSON, err := buildPromptNoteWithSafety(job, "", safetyVerdictSafe, false)
 	require.NoError(t, err, "buildPromptNoteWithSafety")
 
 	path := filepath.Join(t.TempDir(), "chunks.webp")
@@ -289,7 +291,7 @@ func TestRewriteNoteInWebpProductionBigEndianFixture(t *testing.T) {
 			Network: "graped", Channel: "#test", Nick: "user1",
 		},
 	}
-	noteJSON, err := buildPromptNoteWithSafety(job, "", safetyVerdictSafe)
+	noteJSON, err := buildPromptNoteWithSafety(job, "", safetyVerdictSafe, false)
 	require.NoError(t, err, "buildPromptNoteWithSafety")
 
 	after, err := rewriteWebpNoteData(before, noteJSON)

@@ -24,10 +24,12 @@ import (
 // never a panic. Extraction failure degrades upstream — it must never fail
 // a job.
 
-const (
-	tiffTypeASCII = 2
-	exifTagModel  = 0x0110 // production files carry the payload in the Model tag
-)
+// tiffTypeASCII is the TIFF field type whose IFD0 entries carry the
+// "prompt:"-prefixed workflow payload. The production reader does NOT filter
+// by tag number (it scans every ASCII entry — production files carry the
+// payload in the Model tag, 0x0110, but the extraction is tag-agnostic), so
+// no tag constants live here.
+const tiffTypeASCII = 2
 
 // embeddedWorkflowJSON returns the API-format workflow JSON embedded in a
 // completed image's bytes. found is true only when a "prompt" payload was
@@ -128,6 +130,13 @@ var tiffTypeSize = map[uint16]int{
 // exactly one IFD0 entry; we do not chase the IFD chain or the Exif
 // sub-IFD — a camera-style EXIF block has no "prompt:" payloads anyway,
 // and bounded walking keeps adversarial inputs cheap.
+//
+// Known exotic-input envelope: TIFF says field values SHOULD start on a
+// word (even) boundary, but this reader is strictly offset-driven — it
+// reads at whatever offset the entry declares, aligned or not, and never
+// writes — so mis-aligned values from exotic writers still parse. Sub-IFD
+// contents (ExifIFD/GPS) are likewise invisible here: only the pointer
+// entry in IFD0 is seen, as an opaque non-ASCII entry that is skipped.
 //
 // As with the container walkers, offsets and sizes are computed in int64:
 // field counts and value offsets are attacker-influenced uint32s whose

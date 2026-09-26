@@ -175,6 +175,18 @@ func replacePromptNoteInWorkflowJSON(wfJSON, noteJSON string) (string, error) {
 // a missing prompt entry. Production files are one-entry, next-IFD-zero
 // TIFFs, so none of these occur in practice — they are tripwires against
 // mangling exotic inputs.
+//
+// Known exotic-input envelope, accepted deliberately: (1) word alignment —
+// the TIFF spec says values SHOULD start on an even offset, but the
+// re-laid-out value area is packed contiguously with no even-padding, so a
+// rewritten multi-entry TIFF may carry odd value offsets; every reader in
+// this pipeline (exif.go, imgsite's extractor) is offset-driven and
+// alignment-agnostic, and production's single-entry shape keeps the value
+// area trivially aligned anyway. (2) sub-IFDs — an ExifIFD/GPS pointer
+// entry is preserved as an inline value like any other, but whatever it
+// points at inside the re-laid-out area is not re-based; such files are not
+// production shapes and the chained-IFD/unknown-type tripwires already
+// refuse the ones that could corrupt.
 func rewriteTIFFPromptValue(t []byte, noteJSON string) ([]byte, error) {
 	if len(t) < 8 {
 		return nil, fmt.Errorf("exif TIFF too short (%d bytes)", len(t))

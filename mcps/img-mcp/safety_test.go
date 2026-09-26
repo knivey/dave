@@ -178,7 +178,7 @@ func TestStartSafetyVetMapping(t *testing.T) {
 			}
 			cfg.Safety.SkipNetworks = tt.skipNetworks
 
-			fut := startSafetyVet(context.Background(), cfg, tt.network, tt.nsfw, "a cat", "a majestic cat")
+			fut := startSafetyVet(context.Background(), cfg, "job1", tt.network, tt.nsfw, "a cat", "a majestic cat")
 			verdict := fut.wait()
 
 			assert.Equal(t, tt.wantVerdict, verdict)
@@ -197,16 +197,19 @@ func TestStartSafetyVetMapping(t *testing.T) {
 // subsequent job keeps degrading to unknown.
 func TestRunSafetyVetMissingConfigWarnsOnce(t *testing.T) {
 	var warns atomic.Int32
-	prev := vetMissingWarnSink
-	vetMissingWarnSink = func(vetName string) { warns.Add(1) }
-	t.Cleanup(func() { vetMissingWarnSink = prev })
+	// Swapped through the setter, not by bare assignment: the emitter reads
+	// the sink under vetMissingWarnMu, and an in-flight vet goroutine from
+	// any concurrently-running job would turn a direct write into a data
+	// race under -race.
+	setVetMissingWarnSink(func(vetName string) { warns.Add(1) })
+	t.Cleanup(func() { setVetMissingWarnSink(nil) })
 
 	// Unique name so the process-global once-map cannot have been primed
 	// by an earlier test.
 	cfg := Config{Safety: SafetyConfig{VetEnhancement: "missing-" + t.Name()}}
 
-	v1, err1 := runSafetyVet(context.Background(), cfg, "a cat", "a majestic cat")
-	v2, err2 := runSafetyVet(context.Background(), cfg, "a cat", "a majestic cat")
+	v1, err1 := runSafetyVet(context.Background(), cfg, "job1", "a cat", "a majestic cat")
+	v2, err2 := runSafetyVet(context.Background(), cfg, "job2", "a cat", "a majestic cat")
 
 	assert.Equal(t, safetyVerdictUnknown, v1)
 	assert.Equal(t, safetyVerdictUnknown, v2)
@@ -242,7 +245,7 @@ func TestRunSafetyVetSendsBothPrompts(t *testing.T) {
 		},
 	}
 
-	verdict, err := runSafetyVet(context.Background(), cfg, "a cat sitting on a mat", "a majestic cat, studio lighting")
+	verdict, err := runSafetyVet(context.Background(), cfg, "job1", "a cat sitting on a mat", "a majestic cat, studio lighting")
 	require.NoError(t, err)
 	assert.Equal(t, safetyVerdictSafe, verdict)
 

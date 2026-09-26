@@ -776,7 +776,7 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 	// itself never blocks generation — its verdict is awaited after the
 	// monitor completes. A job that fails or is cancelled earlier simply
 	// never waits: the goroutine terminates with the job context below.
-	safetyVet := startSafetyVet(jobCtx, cfg, job.Input.Network, firstPassNSFW, job.Input.Prompt, prompt)
+	safetyVet := startSafetyVet(jobCtx, cfg, job.ID, job.Input.Network, firstPassNSFW, job.Input.Prompt, prompt)
 
 	// noteNSFW is what the note payload bakes: the first-pass flag, but ONLY
 	// on networks that undergo classification at all. skip_networks (Libera)
@@ -866,6 +866,16 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 	// worst case is its remainder. Failures already degraded to "unknown"
 	// inside runSafetyVet, and skipped networks yield the empty unvetted
 	// marker.
+	//
+	// DESIGN NOTE: this wait's ceiling is the vet enhancement's timeout
+	// config, inherited deliberately — callEnhancementLLM wraps the job
+	// context with the vet entry's own timeout (enhance.go), so the vet
+	// goroutine always terminates and this wait cannot hang past that
+	// bound. There is intentionally no independent vet-wait knob: the vet
+	// runs concurrently with generation, so its latency only surfaces here
+	// when generation finished faster than the vet (the rare case), and
+	// the enhancement timeout already encodes how long an LLM call on this
+	// deployment may reasonably take. Trust the config.
 	jobSafety := safetyVet.wait()
 	loggerQueue.Info("safety verdict resolved", "job_id", job.ID, "safety", jobSafety)
 	// Persist the moment it resolves — before the upload loop — so a crash
@@ -1214,13 +1224,16 @@ func (q *JobQueue) recoverRunningJob(_ context.Context, job *Job, comfyPromptID 
 	// input, enhanced prompt recovered from the completed image's embedded
 	// workflow (the only surviving copy — recovery never re-runs
 	// enhancement). skip_networks applies exactly as on the live path (a
-	// Libera job must not be classified by recovery either), and the
+	// Libera job must not be classified by recovery either) — and the gate
+	// runs BEFORE the EXIF extraction below, so a skip-listed job whose
+	// image bytes do not parse never produces the extraction WARN: that
+	// trouble report would be about a prompt the vet never needed. The
 	// resolved verdict persists so a second restart never re-vets. The vet
 	// rides the recovery context, so a Cancel aborts it too.
 	jobSafety := job.Safety
 	if jobSafety == safetyVerdictUnvetted {
 		enhanced := job.Input.Prompt
-		if len(comfyResult.Images) > 0 {
+		if !safetyNetworkSkipped(cfg, job.Input.Network) && len(comfyResult.Images) > 0 {
 			if fromEXIF, ok := enhancedPromptFromImage(cfg, job.Workflow, comfyResult.Images[0].Data); ok {
 				enhanced = fromEXIF
 			} else {
@@ -1228,7 +1241,7 @@ func (q *JobQueue) recoverRunningJob(_ context.Context, job *Job, comfyPromptID 
 					"job_id", job.ID)
 			}
 		}
-		jobSafety = startSafetyVet(recoverCtx, cfg, job.Input.Network, false, job.Input.Prompt, enhanced).wait()
+		jobSafety = startSafetyVet(recoverCtx, cfg, job.ID, job.Input.Network, false, job.Input.Prompt, enhanced).wait()
 		q.persistJobSafety(job.ID, jobSafety)
 		loggerQueue.Info("safety verdict resolved during recovery", "job_id", job.ID, "safety", jobSafety)
 	}

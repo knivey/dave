@@ -194,6 +194,13 @@ func dbJobSafety(t *testing.T, db *sqlx.DB, jobID string) string {
 // RIFF EXIF chunk) and img-mcp's embeddedWorkflowJSON reads back. Task 11's
 // EXIF rewrite tests build on these too.
 
+// fixtureExifTagModel is the EXIF Model tag (0x0110) — where production
+// files carry the workflow payload. Fixture-only on purpose: the production
+// extractor is tag-agnostic (it scans every ASCII entry), so the number
+// documents the production shape rather than filtering anything; it lives
+// next to the builder that encodes it instead of in exif.go.
+const fixtureExifTagModel = 0x0110
+
 // buildTestTIFF encodes a one-entry IFD0 (Model tag, ASCII) little-endian
 // TIFF, mirroring the verified production structure.
 func buildTestTIFF(payload string) []byte {
@@ -204,7 +211,7 @@ func buildTestTIFF(payload string) []byte {
 	bo.PutUint32(header[4:8], 8) // IFD0 immediately follows the header
 
 	entry := make([]byte, 12)
-	bo.PutUint16(entry[0:2], exifTagModel)
+	bo.PutUint16(entry[0:2], fixtureExifTagModel)
 	bo.PutUint16(entry[2:4], tiffTypeASCII)
 	bo.PutUint32(entry[4:8], uint32(len(payload)))
 	bo.PutUint32(entry[8:12], 8+2+12+4) // value follows header+count+entry+next

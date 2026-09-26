@@ -1331,6 +1331,68 @@ func TestProcessJobRewritesNoteBeforeUpload(t *testing.T) {
 	assert.Equal(t, "graped", meta.Network)
 }
 
+// TestProcessJobRewritesEveryImageNote pins the per-image half of the
+// rewrite loop: a job whose workflow produced MULTIPLE output images must
+// have every image's note rewritten and the rewritten bytes uploaded — not
+// just the first file. (The loop bodies in processJob/recoverRunningJob
+// rewrite inside the `for i, img := range comfyResult.Images` iteration; a
+// regression that hoisted the rewrite out of the loop would leave the
+// second upload carrying the stale submit-time fixture.)
+func TestProcessJobRewritesEveryImageNote(t *testing.T) {
+	mockComfy := newMockComfyFlowServer(t)
+	const enhancedPrompt = "an enhanced majestic cat, studio lighting"
+	fixture := exifWebPWithNote(t,
+		`{"prompt":"a cat","llm_generated":false,"job_id":"stale"}`, enhancedPrompt)
+	mockComfy.serveViewData(fixture) // every /view fetch serves the same fixture bytes
+	mockComfy.serveHistoryImages(2)  // ...but they are two distinct output files
+	vet := newVetStubServer(t, http.StatusOK, `{"safe":true,"reason":"fine"}`)
+	up := newFakeUploadServer(t)
+
+	cfg := safetyQueueConfig(t, mockComfy.URL(), vet, nil)
+	cfg.Upload.URL = up.server.URL
+
+	q, cleanup := setupTestQueue(t, cfg)
+	defer cleanup()
+
+	job, err := q.Submit(JobTypeGenerate, "test", JobInput{
+		Prompt:       "a cat",
+		Network:      "graped",
+		OutputFormat: "url",
+	})
+	require.NoError(t, err, "Submit")
+
+	waitForJobDone(t, job, 15*time.Second)
+	assertJobStatus(t, q, job.ID, StatusCompleted)
+
+	// Exactly one upload per output image, in production filename order.
+	files := up.uploadedFiles()
+	require.Len(t, files, 2, "both output images must be uploaded")
+	assert.Equal(t, "img_00001.png", files[0].Filename)
+	assert.Equal(t, "img_00002.png", files[1].Filename)
+
+	// Every uploaded file must be the REWRITTEN artifact, not the fixture.
+	expectedNote, err := buildPromptNoteWithSafety(job, "", safetyVerdictSafe, false)
+	require.NoError(t, err, "buildPromptNoteWithSafety")
+	expectedBytes, err := rewriteWebpNoteData(fixture, expectedNote)
+	require.NoError(t, err, "rewriteWebpNoteData")
+
+	for i, f := range files {
+		assert.NotEqual(t, sha256.Sum256(fixture), sha256.Sum256(f.Content),
+			"upload %d must not be the un-rewritten fixture", i)
+		assert.Equal(t, sha256.Sum256(expectedBytes), sha256.Sum256(f.Content),
+			"upload %d must hash-match the post-rewrite image (every file, not just the first)", i)
+		assert.True(t, bytes.Equal(expectedBytes, f.Content),
+			"upload %d must be exactly the rewritten image", i)
+
+		note, ok := embeddedPromptNote(f.Content)
+		require.True(t, ok, "upload %d: rewritten note must parse back out", i)
+		assert.Equal(t, safetyVerdictSafe, note.Safety,
+			"upload %d: the verdict must be baked into every file", i)
+		assert.Equal(t, job.ID, note.JobID,
+			"upload %d: the rebuild is wholesale — the stale fixture job id must not survive", i)
+	}
+}
+
 // TestProcessJobNoteRewriteSkipsNonWebp pins the WARN-and-skip path:
 // production output is webp, but a non-webp output must not fail the job —
 // the original bytes upload unchanged and the verdict still travels in the

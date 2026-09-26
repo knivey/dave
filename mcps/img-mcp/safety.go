@@ -62,7 +62,9 @@ type vetVerdictResponse struct {
 
 // vetMissingWarnSink is invoked exactly when the missing-config WARN is
 // emitted. Nil in production; a test seam so the WARN-once behavior stays
-// observable (logxi has no per-test capture).
+// observable (logxi has no per-test capture). Swapped via
+// setVetMissingWarnSink only — the emitter reads it under vetMissingWarnMu,
+// so a bare assignment from a test would race any in-flight vet goroutine.
 var vetMissingWarnSink func(vetName string)
 
 var (
@@ -74,10 +76,19 @@ var (
 	vetMissingWarned = map[string]bool{}
 )
 
+// setVetMissingWarnSink installs/removes the test seam under the same mutex
+// the emitter reads it under.
+func setVetMissingWarnSink(fn func(vetName string)) {
+	vetMissingWarnMu.Lock()
+	vetMissingWarnSink = fn
+	vetMissingWarnMu.Unlock()
+}
+
 // warnVetConfigMissing emits the missing-vet-config WARN once per process
 // per enhancement name: every job on an unconfigured deployment would
-// otherwise repeat it.
-func warnVetConfigMissing(vetName string) {
+// otherwise repeat it. jobID identifies the first job that hit the missing
+// config (correlation only — the warning itself is process-wide).
+func warnVetConfigMissing(vetName, jobID string) {
 	vetMissingWarnMu.Lock()
 	first := !vetMissingWarned[vetName]
 	vetMissingWarned[vetName] = true
@@ -91,6 +102,7 @@ func warnVetConfigMissing(vetName string) {
 		sink(vetName)
 	}
 	loggerQueue.Warn("safety vet enhancement config missing; verdicts degrade to unknown until it is configured",
+		"job_id", jobID,
 		"vet_enhancement", vetName,
 		"hint", "add an [enhancement."+defaultSafetyVetEnhancement+"] section (see example.toml) or point [safety] vet_enhancement at an existing one",
 	)
@@ -131,30 +143,42 @@ func buildVetInput(originalPrompt, enhancedPrompt string) string {
 // enhancement machinery — both API paths, reasoning_effort, timeouts,
 // SIGHUP hot-reload. Failures NEVER fail the job: every error path WARNs
 // here and returns verdict "unknown" alongside the error.
-func runSafetyVet(ctx context.Context, cfg Config, originalPrompt, enhancedPrompt string) (string, error) {
+//
+// Every log line this function (and its caller startSafetyVet) emits carries
+// job_id: safety decisions must correlate by job in production logs. The
+// shared enhancement machinery below deliberately does NOT know job ids —
+// it serves enhancement calls too — so the job-scoped correlation lines
+// live at this level instead of being threaded through enhance.go.
+func runSafetyVet(ctx context.Context, cfg Config, jobID, originalPrompt, enhancedPrompt string) (string, error) {
 	vetName := cfg.Safety.VetEnhancement
 	if vetName == "" {
 		vetName = defaultSafetyVetEnhancement
 	}
 
 	if _, ok := cfg.Enhancements[vetName]; !ok {
-		warnVetConfigMissing(vetName)
+		warnVetConfigMissing(vetName, jobID)
 		return safetyVerdictUnknown, fmt.Errorf("safety vet enhancement %q not configured", vetName)
 	}
+
+	// Vet-start correlation line: the generic "enhancement llm call" DBG in
+	// enhance.go legitimately has no job id (the enhancement path never
+	// knows one), so this safety-level twin provides it for vet calls.
+	loggerQueue.Debug("safety vet call started", "job_id", jobID, "vet_enhancement", vetName)
 
 	vetInput := buildVetInput(originalPrompt, enhancedPrompt)
 	content, _, err := callEnhancementLLM(ctx, cfg, vetName, vetInput, "", "safety_verdict", vetVerdictSchema)
 	if err != nil {
 		// Context cancellation (job cancelled / shutdown) lands here too;
 		// unknown is correct — the verdict never resolved.
-		loggerQueue.Warn("safety vet call failed; verdict unknown", "vet_enhancement", vetName, "error", err)
+		loggerQueue.Warn("safety vet call failed; verdict unknown",
+			"job_id", jobID, "vet_enhancement", vetName, "error", err)
 		return safetyVerdictUnknown, fmt.Errorf("safety vet call: %w", err)
 	}
 
 	var verdict vetVerdictResponse
 	if err := json.Unmarshal([]byte(content), &verdict); err != nil {
 		loggerQueue.Warn("safety vet returned an unparseable verdict; verdict unknown",
-			"vet_enhancement", vetName, "error", err, "content", content)
+			"job_id", jobID, "vet_enhancement", vetName, "error", err, "content", content)
 		return safetyVerdictUnknown, fmt.Errorf("parsing safety vet verdict: %w", err)
 	}
 
@@ -167,6 +191,7 @@ func runSafetyVet(ctx context.Context, cfg Config, originalPrompt, enhancedPromp
 		outcome = safetyVerdictSafe
 	}
 	loggerQueue.Info("safety vet verdict",
+		"job_id", jobID,
 		"vet_enhancement", vetName,
 		"verdict", outcome,
 		"reason", verdict.Reason,
@@ -214,14 +239,16 @@ func resolvedSafetyVet(verdict string) *safetyVetFuture {
 // submit — generation must not block on the vet. If the job fails or is
 // cancelled first, nobody waits; the goroutine still terminates because its
 // context is the job's.
-func startSafetyVet(ctx context.Context, cfg Config, network string, nsfwFirstPass bool, originalPrompt, enhancedPrompt string) *safetyVetFuture {
+func startSafetyVet(ctx context.Context, cfg Config, jobID, network string, nsfwFirstPass bool, originalPrompt, enhancedPrompt string) *safetyVetFuture {
 	if safetyNetworkSkipped(cfg, network) {
-		loggerQueue.Info("safety: network in skip_networks, classification skipped", "network", network)
+		loggerQueue.Info("safety: network in skip_networks, classification skipped",
+			"job_id", jobID, "network", network)
 		return nil
 	}
 
 	if nsfwFirstPass {
-		loggerQueue.Info("safety: enhancement first pass flagged nsfw; verdict unsafe without a vet call")
+		loggerQueue.Info("safety: enhancement first pass flagged nsfw; verdict unsafe without a vet call",
+			"job_id", jobID)
 		return resolvedSafetyVet(safetyVerdictUnsafe)
 	}
 
@@ -230,7 +257,7 @@ func startSafetyVet(ctx context.Context, cfg Config, network string, nsfwFirstPa
 		defer close(f.done)
 		// Failure semantics (WARN + "unknown") are handled inside
 		// runSafetyVet; the verdict alone is the contract here.
-		f.verdict, _ = runSafetyVet(ctx, cfg, originalPrompt, enhancedPrompt)
+		f.verdict, _ = runSafetyVet(ctx, cfg, jobID, originalPrompt, enhancedPrompt)
 	}()
 	return f
 }

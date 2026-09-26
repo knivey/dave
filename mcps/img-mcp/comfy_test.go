@@ -666,11 +666,15 @@ type mockComfyFlowServer struct {
 	// viewData, when non-nil, is what /view serves instead of "fakedata"
 	// (e.g. a webp with an embedded workflow for EXIF-recovery tests).
 	viewData []byte
+	// imageCount is how many images the /history entry reports for the
+	// output node (default 1 — the production single-image shape; the
+	// multi-image EXIF-rewrite test raises it to pin the per-image loop).
+	imageCount int
 }
 
 func newMockComfyFlowServer(t *testing.T) *mockComfyFlowServer {
 	t.Helper()
-	m := &mockComfyFlowServer{}
+	m := &mockComfyFlowServer{imageCount: 1}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/prompt", func(w http.ResponseWriter, r *http.Request) {
 		var req ComfyPromptRequest
@@ -685,12 +689,19 @@ func newMockComfyFlowServer(t *testing.T) *mockComfyFlowServer {
 		json.NewEncoder(w).Encode(ComfyPromptResponse{PromptID: "test-prompt-1"})
 	})
 	mux.HandleFunc("/history/", func(w http.ResponseWriter, r *http.Request) {
+		m.mu.Lock()
+		count := m.imageCount
+		m.mu.Unlock()
+		images := make([]ComfyImage, count)
+		for i := range images {
+			images[i] = ComfyImage{Filename: fmt.Sprintf("img_%05d.png", i+1), Subfolder: "", Type: "output"}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(ComfyHistoryResponse{
 			"test-prompt-1": {
 				Outputs: map[string]ComfyOutput{
 					"output-node": {
-						Images: []ComfyImage{{Filename: "img_00001.png", Subfolder: "", Type: "output"}},
+						Images: images,
 					},
 				},
 			},
@@ -731,6 +742,15 @@ func (m *mockComfyFlowServer) serveViewData(data []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.viewData = data
+}
+
+// serveHistoryImages makes the /history entry report n output images for
+// the prompt — the multi-image generation shape (every image is downloaded
+// from /view and run through the per-image upload/rewrite loop).
+func (m *mockComfyFlowServer) serveHistoryImages(n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.imageCount = n
 }
 
 func (m *mockComfyFlowServer) wsClientIDList() []string {

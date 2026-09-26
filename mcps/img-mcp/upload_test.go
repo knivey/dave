@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"testing/iotest"
 	"time"
@@ -33,7 +34,27 @@ type fakeUploadServer struct {
 	gotFileFilename string
 	gotFileContent  []byte
 
+	// files records every upload in arrival order (mutex-guarded: the
+	// handler runs on the httptest server goroutine), so multi-image jobs
+	// can assert per-file bytes. The single-request fields above keep
+	// their last-request semantics for the older single-image tests.
+	filesMu sync.Mutex
+	files   []fakeUploadFile
+
 	server *httptest.Server
+}
+
+// fakeUploadFile is one recorded /updo request's file part.
+type fakeUploadFile struct {
+	Filename string
+	Content  []byte
+}
+
+// uploadedFiles returns every recorded upload in arrival order.
+func (f *fakeUploadServer) uploadedFiles() []fakeUploadFile {
+	f.filesMu.Lock()
+	defer f.filesMu.Unlock()
+	return append([]fakeUploadFile{}, f.files...)
 }
 
 func newFakeUploadServer(t *testing.T) *fakeUploadServer {
@@ -57,7 +78,12 @@ func newFakeUploadServer(t *testing.T) *fakeUploadServer {
 		defer file.Close()
 		f.gotFileField = "file"
 		f.gotFileFilename = hdr.Filename
-		f.gotFileContent, _ = io.ReadAll(file)
+		content, _ := io.ReadAll(file)
+		f.gotFileContent = content
+
+		f.filesMu.Lock()
+		f.files = append(f.files, fakeUploadFile{Filename: hdr.Filename, Content: content})
+		f.filesMu.Unlock()
 
 		if f.updoStatus != http.StatusCreated {
 			w.WriteHeader(f.updoStatus)

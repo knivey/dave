@@ -33,6 +33,33 @@ Everything else has sane defaults. Data lives next to the binary by default:
 `data/imgsite.db` (SQLite, WAL), `data/images/` (originals, sha256 fan-out),
 `data/thumbs/` (JPEG derivatives), `logs/` (logxi, daily files).
 
+## Safe site (optional)
+
+The optional `[safe_site]` section serves a second logical site from the
+same process, selected by the request Host header (port stripped,
+case-insensitive): requests whose Host is in `hosts` see only images
+whose provenance network is in `allowed_networks` (case-insensitive) OR
+whose `safety` verdict is `safe`. Everything else — including `unknown`
+verdicts and rows without provenance — is default-deny there. The
+default site (any other Host) is unchanged and shows everything.
+
+```toml
+[safe_site]
+hosts = ["safe.example.com"]
+base_url = "https://safe.example.com"
+allowed_networks = ["libera"]
+```
+
+All three fields are required when the section is present; omit the
+section entirely for single-site behavior. Hot-reloadable via SIGHUP.
+`base_url` builds the upload-response links for allowed-network uploads
+(so dave pastes safe links into Libera channels) plus `og:image` /
+`og:url` on the safe host. Site-aware surfaces and the full visibility
+rule: `docs/image-site.md`, "Safe-site host split". The classification
+pipeline that produces verdicts lives in img-mcp (`[safety]` +
+`[enhancement.safety-vet]` — see img-mcp's example.toml); manual
+marking is `./imgsite -safety` below.
+
 ## Run
 
 ```bash
@@ -40,7 +67,7 @@ Everything else has sane defaults. Data lives next to the binary by default:
 ./imgsite prod.toml    # or a named config (relative to the binary dir)
 ```
 
-Reload hot-reloadable settings (`site.*`, `thumbnails.*` minus workers,
+Reload hot-reloadable settings (`site.*`, `safe_site.*`, `thumbnails.*` minus workers,
 `search.*`, `upload.*`) with `SIGHUP` or:
 
 ```bash

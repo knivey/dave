@@ -178,11 +178,85 @@ prefix_min = 2            # enable prefix token indexing from 2 chars
 [site]
 title = "dave's image dump"
 description = "generations from IRC"
+
+# [safe_site]  # OPTIONAL — omit the whole section for single-site behavior
+# hosts = ["safe.example.com"]     # matched case-insensitively against the
+#                                  # request Host (port stripped); anything
+#                                  # else is the default site
+# base_url = "https://safe.example.com"
+# allowed_networks = ["libera"]    # compared case-insensitively against the
+#                                  # stored provenance network
 ```
 
-Reloadable via SIGHUP: `site.*`, `thumbnails.*` (except worker count),
-`search.*`, `upload.rate_per_minute`. Not reloadable (restart required):
-`server.*`, `database.*`, `storage.*`, `auth.*`. Same pattern as img-mcp.
+Reloadable via SIGHUP: `site.*`, `safe_site.*`, `thumbnails.*` (except
+worker count), `search.*`, `upload.rate_per_minute`. Not reloadable
+(restart required): `server.*`, `database.*`, `storage.*`, `auth.*`.
+Same pattern as img-mcp.
+
+## Safe-site host split
+
+One process serves two logical sites, selected by the request Host
+header (design: `docs/superpowers/specs/2026-09-26-safe-site-design.md`).
+The **default site** (`server.base_url`) shows all non-hidden images —
+today's behavior. The **safe site** (optional `[safe_site]`) shows only
+non-hidden images that pass the visibility predicate:
+
+```sql
+AND (LOWER(i.network) IN (/* lowercased allowed_networks */)
+     OR i.safety = 'safe')
+```
+
+`'unknown'` and `'unsafe'` verdicts fail the predicate — default-deny —
+and NULL/empty provenance (imported/legacy/direct uploads) is reachable
+only via `safety = 'safe'`. Site-aware surfaces, all resolving the site
+once per request via the Host header:
+
+- Gallery page + fragment (`dbGetGalleryPage`) and search page +
+  fragment — the predicate lands as an outer AND on the images row in
+  all three search tiers (FTS 1, FTS 2, LIKE 3 including the trigram
+  prefilter set; MATCH expressions untouched).
+- Details page and the neighbors API (`/api/images/<id>/neighbors`) —
+  a safe-host "next" never navigates into an invisible image; an
+  invisible id 404s exactly like an unknown id (no existence hint).
+- Asset routes — original, thumbnails, and thereby the download target
+  (the download anchor targets the orig route) — invisible ids 404 on
+  the safe host only; the same ids serve normally on the default host.
+- `og:image` / `og:url` (and the copy-link button) build from the
+  current site's base URL — `safe_site.base_url` on the safe host.
+- SSE `/events` — the subscriber is site-tagged at subscribe time;
+  `image-new` / `thumb-ready` carry a publish-time visibility flag on
+  the ring entry, so live delivery AND replay filter per site without
+  DB reads. `image-hidden`, `hello`, and `reset` go to all sites
+  (dropping an absent card is a client no-op).
+- Upload responses — when the upload meta's `network` is in
+  `allowed_networks`, BOTH `page` and `url` build from
+  `safe_site.base_url`, so dave pastes safe links into Libera channels
+  with zero dave/img-mcp changes (see "Upload protocol").
+
+Manual marking of verdicts the pipeline leaves `unknown` (pre-safety
+history, vet failures): `imgsite -safety <id>… safe|unsafe|unknown` —
+see "Set safety verdicts (admin)" in imgsite/README.md.
+
+### Rollout checklist (as shipped)
+
+1. Deploy both rebuilt binaries. imgsite runs migration 003
+   (`images.safety TEXT NOT NULL DEFAULT 'unknown'`); img-mcp runs
+   migration 004 (`jobs.safety`, insert/recovery-read only).
+2. Add `[safe_site]` to imgsite's config — SIGHUP applies it live; an
+   absent section keeps single-site behavior.
+3. Point DNS + proxy for the safe hostname at the same imgsite; the
+   Host header must pass through (nginx default).
+4. img-mcp config: append the nsfw instruction line to the LOOSE
+   enhancement prompts (first pass; never the libera-safe one), add
+   `[enhancement.safety-vet]` with the owner's judging prompt (returns
+   `{"safe": bool, "reason": "…"}`), and add the `[safety]` block
+   (`skip_networks` default `["libera"]`, kept in correspondence with
+   imgsite's `allowed_networks` by convention). All hot-reloadable.
+5. Backfill is automatic: existing libera-provenance rows become
+   safe-host-visible by the origin rule the moment the config lands.
+   Everything older without provenance stays `unknown`
+   (default-deny) until marked with `-safety`; new uploads classify
+   themselves via the img-mcp pipeline.
 
 ## Data model
 
@@ -241,8 +315,10 @@ writes the column. Sources of a verdict, in order: upload `meta.safety`
 (handler rejects anything but `safe`/`unsafe`/absent with a 400 —
 img-mcp is the only writer, this is a tripwire not a defense), the
 `dave_original_prompt` note payload baked into the image's EXIF
-(unparseable values degrade to unknown, never elevate), and (later) the
-`-safety` admin CLI. `dbUpdateImageMetadata` and re-extract **never
+(unparseable values degrade to unknown, never elevate), and the
+`-safety` admin CLI (`imgsite -safety <id>… safe|unsafe|unknown`,
+offline manual marking — see "Set safety verdicts (admin)" in
+imgsite/README.md). `dbUpdateImageMetadata` and re-extract **never
 reset** a stored verdict — the UPDATE is guarded so an empty payload
 value keeps the stored one — and re-extract additionally *backfills*
 `'unknown'` (and empty provenance) from the note. No index at gallery

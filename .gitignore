@@ -28,3 +28,4 @@ imgsite/imgsite
 imgsite/config.toml
 imgsite/data/*
 .worktrees/
+.superpowers/

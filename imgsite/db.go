@@ -59,10 +59,9 @@ const (
 	// images.safety values (migration 003). 'unknown' is default-deny:
 	// the safe site shows only allowed-network origins ∪ safety='safe',
 	// so rows without a verdict stay invisible there until one lands
-	// (upload meta or EXIF-note re-extract backfill today; the planned
-	// -safety admin CLI will add manual marking). A verdict, once
-	// stored, is only ever changed by an explicit write — merges and
-	// re-extracts preserve it.
+	// (upload meta, EXIF-note re-extract backfill, or the -safety admin
+	// CLI's manual marking). A verdict, once stored, is only ever changed
+	// by an explicit write — merges and re-extracts preserve it.
 	safetyUnknown = "unknown"
 	safetySafe    = "safe"
 	safetyUnsafe  = "unsafe"

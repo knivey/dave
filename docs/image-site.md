@@ -684,7 +684,17 @@ Shared semantics:
   targets the card's `img` by the card's `data-id` — NOT via
   `img.pending`, because the placeholder's successful load clears
   `pending` within milliseconds of arrival (querying `.pending` would
-  strand the placeholder forever). The `pending` class itself may be
+  strand the placeholder forever). It also sweeps the detached set the
+  way `image-hidden` does: a card trimmed out of the grid by the DOM cap
+  would otherwise keep stale placeholder bytes until reload (its load
+  already cleared the shimmer and left `src` set — the mid-retry shape
+  `restore()`'s re-arm used to heal became unreachable). The sweep
+  PRE-STAGES that shape (refresh `data-thumb`, remove `src`, re-present
+  the shimmer class) instead of assigning `src` directly, because a load
+  fired on a detached img never reaches the grid's capture-phase
+  listeners — on `restore()` the re-arm refetches while attached and the
+  load listener clears the shimmer, keeping the whole invariant intact.
+  The `pending` class itself may be
   cleared ONLY by a successful `load` (capture-phase load listener) or
   by the `data-orig` terminal fallback — never by `onThumbReady`. The
   handler instead FORCES a real refetch (cache-busting `?v=` query on

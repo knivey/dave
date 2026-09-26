@@ -229,10 +229,15 @@ export function boot() {
 		for (const card of detached) frag.appendChild(card);
 		grid.prepend(frag);
 		detached = [];
-		// Re-arm pending thumbs whose retry timer was dropped while the
-		// card was detached (the timer guard skips disconnected imgs):
-		// without this a restored card would shimmer until a thumb-ready
-		// event happened to arrive while it is attached again.
+		// Re-arm imgs the thumb pipeline left in the src-less shimmer
+		// state while the card was detached (the timer guard skips
+		// disconnected imgs): without this a restored card would
+		// shimmer until a thumb-ready event happened to arrive while
+		// it is attached again. Two producers of that shape now: the
+		// error listener's retry wait, and onThumbReady's detached
+		// sweep, which pre-stages exactly this state so restore()
+		// finishes the heal (refetch while attached; the load listener
+		// clears the shimmer).
 		for (const img of grid.querySelectorAll("img.pending")) {
 			if (!img.getAttribute("src") && img.dataset.thumb) img.src = img.dataset.thumb;
 		}
@@ -486,18 +491,53 @@ function onImageNew(ev) {
 //     listener sees a retryable img if it is still pending and re-arms
 //     the capped backoff chain; the next no-cache retry decides the
 //     end state then.
+//
+// DESIGN NOTE — detached-card sweep: a card trimmed out of the grid by
+// trim() into the detached set is invisible to the live swap above
+// (grid.querySelector cannot reach it), and pre-placeholder it was
+// still healed eventually because restore()'s re-arm matched the
+// mid-retry shape (shimmer + no src + stashed data-thumb). The
+// placeholder broke that: its successful load cleared the shimmer and
+// left src set, so a trimmed card kept STALE PLACEHOLDER BYTES until a
+// full reload. The sweep below restores healability the same way
+// onImageHidden sweeps the set: pre-stage the exact state restore()'s
+// re-arm finishes — refresh the data-thumb stash, remove src, re-present
+// the shimmer class. Assigning src right here instead would be wrong:
+// a load fired on a detached img never reaches the grid's capture-phase
+// listeners (events do not propagate from outside the subtree), so the
+// sanctioned pending-clearer could not run and the bookkeeping above
+// would silently desync. Pre-staged + restored, the refetch loads while
+// ATTACHED, the load listener clears the shimmer, and the whole
+// invariant holds unchanged.
 function onThumbReady(ev) {
 	if (!grid || !ev || !ev.id) return;
 	const card = grid.querySelector('article.card[data-id="' + CSS.escape(ev.id) + '"]');
-	if (!card) return; // trimmed from DOM, or another page state
-	const img = card.querySelector("img");
-	if (!img) return;
-	// Capture the target BEFORE mutating: mid-retry-wait imgs have no src
-	// attribute at all (the error listener removed it for a clean
-	// shimmer), so the stashed data-thumb is the source of truth there.
-	const target = img.dataset.thumb || img.getAttribute("src");
-	if (!target) return;
-	img.src = target + (target.includes("?") ? "&" : "?") + "v=" + Date.now();
+	if (card) {
+		// Live swap. Capture the target BEFORE mutating: mid-retry-wait
+		// imgs have no src attribute at all (the error listener removed
+		// it for a clean shimmer), so the stashed data-thumb is the
+		// source of truth there.
+		const img = card.querySelector("img");
+		if (img) {
+			const target = img.dataset.thumb || img.getAttribute("src");
+			if (target) {
+				img.src = target + (target.includes("?") ? "&" : "?") + "v=" + Date.now();
+			}
+		}
+	}
+	// Detached sweep (see DESIGN NOTE above): pre-stage the state
+	// restore()'s re-arm finishes. Removing src is required, not
+	// cosmetic — the re-arm only picks imgs with NO src attribute.
+	for (let i = detached.length - 1; i >= 0; i--) {
+		if (detached[i].dataset.id !== ev.id) continue;
+		const img = detached[i].querySelector("img");
+		if (!img) continue;
+		const target = img.dataset.thumb || img.getAttribute("src");
+		if (!target) continue;
+		img.dataset.thumb = target;
+		img.removeAttribute("src");
+		img.classList.add("pending");
+	}
 }
 
 // onImageHidden drops a soft-deleted image's card (SSE image-hidden,

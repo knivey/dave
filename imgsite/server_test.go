@@ -422,6 +422,14 @@ func TestStaticRoute(t *testing.T) {
 //     clears `pending` within milliseconds of the card's arrival — by
 //     thumb-ready time the img is virtually never .pending. An img.pending
 //     query would early-return and strand the placeholder forever.
+//  4. onThumbReady must sweep the detached set: a card trimmed out of
+//     the grid keeps stale placeholder bytes until reload otherwise
+//     (the placeholder load cleared the shimmer and left src set — the
+//     mid-retry shape restore()'s re-arm used to heal is unreachable).
+//     The sweep PRE-STAGES that shape (data-thumb refreshed, src
+//     removed, shimmer re-presented) because a load fired on a detached
+//     img never reaches the grid's capture listeners — mutating only,
+//     no .pending querying, per rule 3.
 func TestGalleryThumbHealInvariant(t *testing.T) {
 	app := newTestApp(t, testConfig())
 	ts := newTestServer(t, app)
@@ -456,6 +464,12 @@ func TestGalleryThumbHealInvariant(t *testing.T) {
 		"onThumbReady must target the card's img by data-id — the placeholder load clears .pending long before thumb-ready fires")
 	assert.Contains(t, handler, `"v=" + Date.now()`,
 		"onThumbReady must force a refetch with a cache-busting query (same-URL assign is a verified no-op in Chromium)")
+	assert.Contains(t, handler, "detached.length",
+		"onThumbReady must sweep the detached set — trimmed cards are invisible to the grid query and their load events can't reach the grid listeners")
+	assert.Contains(t, handler, `classList.add("pending")`,
+		"the detached sweep must pre-stage the shimmer state (mutation is sanctioned; only .pending QUERYING is forbidden)")
+	assert.Contains(t, handler, `removeAttribute("src")`,
+		"the detached sweep must drop src — restore()'s re-arm only picks imgs with no src attribute")
 }
 
 // insertFiveImages seeds rows with distinct timestamps, newest first

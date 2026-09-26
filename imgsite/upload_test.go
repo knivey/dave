@@ -93,6 +93,82 @@ func TestUploadBaseURLFromConfig(t *testing.T) {
 	assert.Equal(t, "https://img.example.com/"+ur.ID+"/orig/test.png", ur.URL)
 }
 
+// TestUploadResponseBaseURLByNetwork pins the safe-site link rule for
+// the upload response: when a [safe_site] is configured AND the upload
+// meta's network (case-folded) is in allowed_networks, BOTH url and
+// page build from safe_site.base_url — so the link dave pastes into a
+// Libera channel points at the host serving the filtered view, with
+// zero img-mcp/dave changes. Everything else — other networks, absent
+// provenance, or no [safe_site] at all — keeps server.base_url,
+// byte-identical to the single-site behavior that predates the split.
+func TestUploadResponseBaseURLByNetwork(t *testing.T) {
+	const serverBase = "https://img.example.com"
+	const safeBase = "https://safe.example.com"
+	tests := []struct {
+		name     string
+		safeSite bool
+		network  string // "" = no meta field at all
+		wantBase string
+	}{
+		{"NoSafeSiteLiberaUsesServerBase", false, "libera", serverBase},
+		{"NoSafeSiteMixedCaseUsesServerBase", false, "Libera", serverBase},
+		{"NoSafeSiteEfnetUsesServerBase", false, "efnet", serverBase},
+		{"NoSafeSiteAbsentNetworkUsesServerBase", false, "", serverBase},
+		{"SafeSiteLiberaUsesSafeBase", true, "libera", safeBase},
+		{"SafeSiteMixedCaseUsesSafeBase", true, "Libera", safeBase},
+		{"SafeSiteEfnetUsesServerBase", true, "efnet", serverBase},
+		{"SafeSiteAbsentNetworkUsesServerBase", true, "", serverBase},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := testConfig()
+			cfg.Server.BaseURL = serverBase
+			if tt.safeSite {
+				cfg = safeSiteTestConfig()
+				cfg.Server.BaseURL = serverBase
+			}
+			app := newTestApp(t, cfg)
+			ts := newTestServer(t, app)
+
+			meta := ""
+			if tt.network != "" {
+				meta = `{"network":"` + tt.network + `"}`
+			}
+			resp := doUpload(t, ts, testAPIKey, uploadParts{hasFile: true, filename: "test.png", data: pngBytes("x"), meta: meta})
+
+			require.Equal(t, http.StatusCreated, resp.StatusCode)
+			ur := decodeUploadResponse(t, resp)
+			assert.Equal(t, tt.wantBase+"/"+ur.ID, ur.Page, "page is absolute on the winning base")
+			assert.Equal(t, tt.wantBase+"/"+ur.ID+"/orig/test.png", ur.URL, "url is absolute on the winning base")
+		})
+	}
+}
+
+// TestUploadBaseSelectionPrecedesDeriveFallback pins the fallback
+// semantics: the network-based base SELECTION happens first, and the
+// derive-from-request fallback (empty server.base_url) then applies to
+// whichever base won. In practice safe_site.base_url is required
+// non-empty by config validation, so only the default side can ever
+// derive — here an allowed-network upload gets safe links even while
+// efnet uploads on the same deployment derive from the request.
+func TestUploadBaseSelectionPrecedesDeriveFallback(t *testing.T) {
+	cfg := safeSiteTestConfig() // Server.BaseURL == "" → default side derives
+	app := newTestApp(t, cfg)
+	ts := newTestServer(t, app)
+
+	libera := doUpload(t, ts, testAPIKey, uploadParts{hasFile: true, filename: "a.png", data: pngBytes("a"), meta: `{"network":"libera"}`})
+	require.Equal(t, http.StatusCreated, libera.StatusCode)
+	lr := decodeUploadResponse(t, libera)
+	assert.Equal(t, "https://safe.example.com/"+lr.ID, lr.Page, "safe base wins the selection; nothing is derived")
+	assert.Equal(t, "https://safe.example.com/"+lr.ID+"/orig/a.png", lr.URL)
+
+	efnet := doUpload(t, ts, testAPIKey, uploadParts{hasFile: true, filename: "b.png", data: pngBytes("b"), meta: `{"network":"efnet"}`})
+	require.Equal(t, http.StatusCreated, efnet.StatusCode)
+	er := decodeUploadResponse(t, efnet)
+	assert.Equal(t, ts.URL+"/"+er.ID, er.Page, "default side with empty base derives from the request")
+	assert.Equal(t, ts.URL+"/"+er.ID+"/orig/b.png", er.URL)
+}
+
 // TestUploadResponsePageIsDetailsPage pins the link contract dave consumes:
 // `page` is the ABSOLUTE details-page URL (what img-mcp hands to IRC — the
 // page carries the prompt/params/provenance a bare image URL can't), `url`

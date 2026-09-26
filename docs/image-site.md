@@ -364,8 +364,7 @@ Handler sequence (all synchronous, fast — heavy work is deferred):
 }
 ```
 
-   `url` and `page` are both absolute, built from `server.base_url` — which
-   therefore must be set correctly in prod config. `url` is the permanent
+   `url` and `page` are both absolute. `url` is the permanent
    direct image link; `page` is the details-page link. Since the image pages
    went live (Sep 2026), dave consumes `page`: img-mcp stores it verbatim
    into the job result and pastes it to IRC, so a pasted link lands readers
@@ -373,6 +372,19 @@ Handler sequence (all synchronous, fast — heavy work is deferred):
    instead of bare bytes. img-mcp prefers `page` and falls back to `url`
    (with a WARN) only for older imgsite deployments that answer with an
    empty `page`.
+
+   Base selection is origin-aware when a `[safe_site]` is configured: an
+   upload whose `meta.network` (case-folded) is in
+   `safe_site.allowed_networks` gets BOTH `url` and `page` built from
+   `safe_site.base_url`, so the link dave pastes into a Libera channel
+   points at the host that serves the filtered view — img-mcp and dave
+   change nothing. Every other upload (other networks, absent network, or
+   no `[safe_site]` section at all) keeps `server.base_url` — which
+   therefore must still be set correctly in prod config — byte-identical
+   to the single-site behavior. The derive-from-request fallback for an
+   empty `server.base_url` applies to whichever base won the selection;
+   `safe_site.base_url` is required non-empty by validation, so only the
+   default side can ever derive.
 
 Thumbnail generation is NOT in the upload path — an upload answers in the
 time it takes to hash + write the file + one INSERT.

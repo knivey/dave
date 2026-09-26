@@ -263,12 +263,27 @@ func (a *App) handleUpload(w http.ResponseWriter, r *http.Request) {
 	// Hand off to the background thumbnailer (nil-safe / non-blocking).
 	a.enqueueThumb(img.ID)
 
-	// 6. 201 with both links absolute, built from server.base_url (or the
-	// derived request base): `page` (the details-page URL) is what
-	// img-mcp hands to dave for IRC; `url` stays the permanent direct
-	// image link. dave pastes whichever it got verbatim — nothing is
-	// derived client-side on either end.
-	base := strings.TrimRight(cfg.Server.BaseURL, "/")
+	// 6. 201 with both links absolute: `page` (the details-page URL) is
+	// what img-mcp hands to dave for IRC; `url` stays the permanent
+	// direct image link. dave pastes whichever it got verbatim — nothing
+	// is derived client-side on either end.
+	//
+	// Base selection is origin-aware (safe-site design): when a safe
+	// site is configured and the upload meta's network is in its
+	// allowed_networks (case-folded both sides; nil safe site / absent
+	// network never match), BOTH links build from safe_site.base_url —
+	// the link dave pastes into a Libera channel then lands readers on
+	// the host that serves the filtered view, with zero img-mcp/dave
+	// changes. Every other upload keeps server.base_url, byte-identical
+	// to the single-site behavior. The empty-base derive fallback below
+	// applies to whichever base won the selection; safe_site.base_url
+	// is required non-empty by config validation, so only the server
+	// side can actually derive.
+	base := cfg.Server.BaseURL
+	if cfg.SafeSite.allowsNetwork(meta.Network) {
+		base = cfg.SafeSite.BaseURL
+	}
+	base = strings.TrimRight(base, "/")
 	if base == "" {
 		base = deriveBaseURL(r)
 	}

@@ -63,8 +63,9 @@ func newTestServer(t *testing.T, app *App) *httptest.Server {
 
 // safeSiteTestConfig is testConfig with the safe site configured: host
 // safe.example.com (the getPageHost override target), allowed network
-// libera. The safe host's base_url is set but irrelevant to the query
-// surfaces (it matters for link building, later tasks).
+// libera. The safe base_url (https://safe.example.com) is what
+// upload-response link building switches to for allowed-network
+// uploads; query surfaces ignore it (they select by request Host).
 func safeSiteTestConfig() Config {
 	cfg := testConfig()
 	cfg.SafeSite = &SafeSiteConfig{

@@ -39,7 +39,7 @@ var imageTemplate = template.Must(template.New("image").Parse(headExtrasSrc + `<
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{.Title}} — {{.ID}}</title>
+<title>{{.Title}}</title>
 {{template "head-extras" .}}<meta property="og:image" content="{{.OGImageURL}}">
 <meta property="og:url" content="{{.OGPageURL}}">
 <meta name="twitter:card" content="summary_large_image">
@@ -607,6 +607,35 @@ func clampSnippet(s string, maxRunes int) string {
 	return string(r[:maxRunes-1]) + "…"
 }
 
+// detailsTitleMaxRunes caps the details page's browser <title> (owner
+// request, Sep 2026: the title is the image's prompt, not the site
+// name + id). clampSnippet counts the ellipsis inside the cap, so a
+// truncated title is exactly 60 runes.
+const detailsTitleMaxRunes = 60
+
+// buildDetailsTitle composes the details page's browser <title>:
+// the original prompt, falling back to the enhanced prompt, falling
+// back to the public id (imported/legacy rows can carry neither — a
+// browser tab must never get an empty title). Newlines and whitespace
+// runs collapse to single spaces FIRST, so a multi-line prompt can't
+// wedge the one-line <title> element; the clamp is rune-counted (via
+// clampSnippet), so a cut never lands mid-rune. No id suffix, no site
+// name, no separator — the prompt text alone. HTML-safety is left to
+// html/template's auto-escaping; this returns raw text by design.
+func buildDetailsTitle(img *dbImage) string {
+	src := img.OriginalPrompt
+	if src == "" {
+		src = img.EnhancedPrompt
+	}
+	// strings.Fields drops leading/trailing whitespace too, so a
+	// whitespace-only prompt lands in the id fallback below.
+	src = strings.Join(strings.Fields(src), " ")
+	if src == "" {
+		return img.ID
+	}
+	return clampSnippet(src, detailsTitleMaxRunes)
+}
+
 // workflowJSONMaxRunes bounds the workflow JSON rendered into the
 // details page's <pre> viewer. Real ComfyUI graphs are a few KB; the
 // bound exists only so a pathological row (or a hand-crafted upload)
@@ -649,6 +678,11 @@ type loraView struct {
 }
 
 type imageView struct {
+	// Title is the browser <title>: the whitespace-collapsed,
+	// rune-clamped prompt (original → enhanced → public id fallback).
+	// Owner request (Sep 2026): no id suffix, no site name, no
+	// separator — just the prompt text ("get rid of the id in the
+	// title entirely nobody uses it"). Built by buildDetailsTitle.
 	Title string
 	ID    string
 
@@ -719,9 +753,12 @@ type imageView struct {
 // neighbors (prev = newer, next = older). Display formatting (humanized
 // sizes, lora strings, param rows) happens here so the template stays
 // logic-free and everything untrusted flows through auto-escaping only.
-func buildImageView(cfg Config, img *dbImage, prev, next *dbImage, absBase string) imageView {
+// The browser title comes from the row's prompt, so no Config is needed
+// here (og fields clamp from the row too; the site title no longer
+// appears anywhere on this page).
+func buildImageView(img *dbImage, prev, next *dbImage, absBase string) imageView {
 	v := imageView{
-		Title:          cfg.Site.Title,
+		Title:          buildDetailsTitle(img),
 		ID:             img.ID,
 		Filename:       img.Filename,
 		CreatedAt:      img.CreatedAt,
@@ -953,7 +990,7 @@ func (a *App) handleImagePage(w http.ResponseWriter, r *http.Request, id string)
 		next = nil
 	}
 
-	view := buildImageView(a.getConfig(), img, prev, next, a.absBaseForSite(sc, r))
+	view := buildImageView(img, prev, next, a.absBaseForSite(sc, r))
 	if hasHub {
 		view.LastEvent = &lastEvent
 	}

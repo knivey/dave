@@ -159,6 +159,82 @@ func TestDetailsPageEscapesUntrustedText(t *testing.T) {
 	assert.NotContains(t, body, "alert(3)</script>", "workflow JSON in pre escaped")
 }
 
+// TestDetailsPageTitleFromPrompt pins the owner-requested (Sep 2026)
+// browser <title>: the whitespace-collapsed, 60-rune-clamped prompt —
+// original first, enhanced as fallback, public id only when both are
+// empty — with no id suffix, no site name, and no separator ("get rid
+// of the id in the title entirely nobody uses it").
+func TestDetailsPageTitleFromPrompt(t *testing.T) {
+	app := newTestApp(t, testConfig())
+	ts := newTestServer(t, app)
+
+	// extractTitle isolates the <title> element's inner text so each
+	// case asserts on the title ALONE — exact equality is what proves
+	// neither the id nor the site title ever sneaks in.
+	extractTitle := func(t *testing.T, body string) string {
+		t.Helper()
+		const open, closeTag = "<title>", "</title>"
+		i := strings.Index(body, open)
+		require.GreaterOrEqual(t, i, 0, "title element present")
+		j := strings.Index(body[i:], closeTag)
+		require.Greater(t, j, 0, "title element closed")
+		return body[i+len(open) : i+j]
+	}
+
+	cases := []struct {
+		name      string
+		id        string
+		original  string
+		enhanced  string
+		wantTitle string
+	}{
+		{"LongOriginalTruncated", "titl001", strings.Repeat("x", 100), "",
+			strings.Repeat("x", 59) + "…"},
+		{"EnhancedFallback", "titl002", "", "the enhanced prompt",
+			"the enhanced prompt"},
+		{"OriginalWinsOverEnhanced", "titl003", "the original", "the enhanced prompt",
+			"the original"},
+		{"BothEmptyFallsBackToID", "titl004", "", "", "titl004"},
+		{"WhitespaceOnlyFallsBackToID", "titl005", " \n\t ", "", "titl005"},
+		// html/template auto-escapes the raw prompt text; the expected
+		// strings here are the ESCAPED forms (&, <, >).
+		{"EscapedByTemplate", "titl006", "cats & <dogs>", "",
+			"cats &amp; &lt;dogs&gt;"},
+		{"MultilineCollapsedToSpaces", "titl007", "line one\nline two\n\n\tindented  end", "",
+			"line one line two indented end"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			insertImage(t, app, tc.id, "2026-09-24 03:12:00", func(img *dbImage) {
+				img.OriginalPrompt = tc.original
+				img.EnhancedPrompt = tc.enhanced
+			})
+			body := getPage2(t, ts, "/"+tc.id)
+			title := extractTitle(t, body)
+			assert.Equal(t, tc.wantTitle, title)
+			// The id-fallback cases ARE the id by design; everywhere
+			// else the id must not appear (no suffix, no site name).
+			if tc.wantTitle != tc.id {
+				assert.NotContains(t, title, tc.id, "no id suffix in the title")
+			}
+			assert.NotContains(t, title, "test site", "no site name in the title")
+		})
+	}
+
+	t.Run("TruncateCountsRunesNotBytes", func(t *testing.T) {
+		// 80 three-byte runes: byte-length truncation would split a
+		// rune; the clamp must cut at 59 whole runes + ellipsis.
+		insertImage(t, app, "titl008", "2026-09-24 03:12:00", func(img *dbImage) {
+			img.OriginalPrompt = strings.Repeat("世", 80)
+		})
+		title := extractTitle(t, getPage2(t, ts, "/titl008"))
+		assert.Equal(t, strings.Repeat("世", 59)+"…", title)
+		assert.LessOrEqual(t, utf8.RuneCountInString(title), detailsTitleMaxRunes,
+			"clamped title stays within 60 runes including the ellipsis")
+		assert.True(t, utf8.ValidString(title), "truncation never lands mid-rune")
+	})
+}
+
 // insertThreeImages seeds oldest/middle/newest rows and returns their ids.
 func insertThreeImages(t *testing.T, app *App) (oldest, middle, newest string) {
 	t.Helper()

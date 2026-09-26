@@ -1247,7 +1247,11 @@ func (q *JobQueue) recoverRunningJob(_ context.Context, job *Job, comfyPromptID 
 	// (recovery never re-runs enhancement), so it is recovered from the note
 	// already embedded in the image — its only surviving copy — before the
 	// rewrite drops it. The nsfw first-pass flag rides the same way: it was
-	// baked at submit time precisely so a crash cannot lose it. Everything
+	// baked at submit time precisely so a crash cannot lose it. (Reachable
+	// recovered shape: a flagged job crashing between monitor completion and
+	// verdict persistence re-vets with first-pass=false, so a vet "safe" can
+	// produce nsfw:true + safety:"safe" — a faithful record of a
+	// disagreement; safety stays authoritative for visibility.) Everything
 	// else comes from the job row, the same source the submit-time note used.
 	rewriteReasoning := ""
 	rewriteNSFW := false

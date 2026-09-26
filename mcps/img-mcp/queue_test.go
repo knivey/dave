@@ -1445,6 +1445,99 @@ func TestProcessJobNoteRewriteCarriesNSFWFirstPass(t *testing.T) {
 		"the baked verdict is the short-circuited unsafe")
 }
 
+// TestProcessJobNoteRewriteSkipNetworksOmitsNSFW pins the skip gate inside
+// noteNSFW (firstPassNSFW && !safetyNetworkSkipped): an enhancement reply
+// carrying "nsfw":true on a skip_networks job must bake NO nsfw key at
+// submit or in the rewritten upload. Deleting the gate clause (leaving
+// noteNSFW := firstPassNSFW) fails this test — the plain-generate skip case
+// in TestProcessJobNoteRewriteOmitsUnresolvedSafety cannot catch it, because
+// its absence follows from having no enhancement at all, not from the gate.
+// The vet stub would say safe and is never called: skip_networks
+// short-circuits classification before the flag is even consulted.
+func TestProcessJobNoteRewriteSkipNetworksOmitsNSFW(t *testing.T) {
+	mockComfy := newMockComfyFlowServer(t)
+	const enhancedPrompt = "an enhanced majestic cat, studio lighting"
+	fixture := exifWebPWithNote(t,
+		`{"prompt":"a cat","llm_generated":false,"job_id":"stale"}`, enhancedPrompt)
+	mockComfy.serveViewData(fixture)
+	enhServer, _ := newEnhancementStubServer(t, EnhancementResponse{
+		EnhancedPrompt: enhancedPrompt,
+		NegativePrompt: "blurry",
+		NSFW:           true,
+	})
+	vet := newVetStubServer(t, http.StatusOK, `{"safe":true,"reason":"fine"}`)
+	up := newFakeUploadServer(t)
+
+	cfg := testConfig(mockComfy.URL())
+	wc := cfg.Workflows["test"]
+	wc.WorkflowPath = mustWriteWorkflow(t, t.TempDir())
+	cfg.Workflows["test"] = wc
+	cfg.Upload.URL = up.server.URL
+	cfg.Enhancements = map[string]EnhancementConfig{
+		"default": {
+			BaseURL:      enhServer.URL + "/v1",
+			Key:          "test-key",
+			Model:        "stub-model",
+			SystemPrompt: "enhance",
+			Timeout:      10,
+		},
+		"safety-vet": {
+			BaseURL:      vet.server.URL + "/v1",
+			Key:          "test-key",
+			Model:        "stub-model",
+			SystemPrompt: "judge the prompts",
+			Timeout:      10,
+		},
+	}
+	cfg.Safety.SkipNetworks = []string{"libera"}
+
+	q, cleanup := setupTestQueue(t, cfg)
+	defer cleanup()
+
+	job, err := q.Submit(JobTypeEnhanceGenerate, "test", JobInput{
+		Prompt:       "a cat",
+		Network:      "Libera",
+		OutputFormat: "url",
+	})
+	require.NoError(t, err, "Submit")
+
+	waitForJobDone(t, job, 15*time.Second)
+	assertJobStatus(t, q, job.ID, StatusCompleted)
+
+	// skip_networks short-circuits classification before the flag is
+	// consulted: no vet call, unvetted column.
+	assert.Zero(t, vet.calls.Load(), "skip_networks must skip the vet call even with nsfw:true")
+	assert.Empty(t, dbJobSafety(t, q.db, job.ID), "an unvetted job must stay unvetted — empty column")
+
+	// Submit-time note: the gate — not the absence of enhancement — keeps
+	// the flagged first pass out.
+	submitted := mockComfy.submittedPrompts()
+	require.Len(t, submitted, 1, "exactly one prompt submission")
+	submitNote, ok := submitted[0].Prompt[davePromptNoteNodeID].Inputs["text"].(string)
+	require.True(t, ok, "submitted note text should be a string")
+	assert.NotContains(t, submitNote, "nsfw",
+		"the skip gate must keep the flagged first pass out of the submit-time note")
+
+	// Rewritten upload: same absence through the rewrite (and no verdict —
+	// a skipped network is unvetted). Raw-text pins because struct decoding
+	// cannot tell an absent key from a false one.
+	received := up.gotFileContent
+	require.NotEmpty(t, received, "upload must have received the image")
+	note, ok := embeddedPromptNote(received)
+	require.True(t, ok, "rewritten note must parse back out of the uploaded bytes")
+	assert.False(t, note.NSFW)
+	wfJSON, ok := embeddedWorkflowJSON(received)
+	require.True(t, ok)
+	var wf ComfyWorkflow
+	require.NoError(t, json.Unmarshal([]byte(wfJSON), &wf))
+	noteText, ok := wf[davePromptNoteNodeID].Inputs["text"].(string)
+	require.True(t, ok, "note text should be a string")
+	assert.NotContains(t, noteText, "nsfw",
+		"the skip gate must hold through the rewrite-time rebuild too")
+	assert.NotContains(t, noteText, "safety",
+		"a skipped network is unvetted: no verdict baked either")
+}
+
 // TestRecoverRunningJobCarriesNSFWFlagAcrossRewrite pins the recovery half
 // of the first-pass flag's persistence: the nsfw flag baked into the
 // submit-time note is carried across the wholesale rewrite from the note

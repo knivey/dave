@@ -210,10 +210,11 @@ func truncateForPromptNote(reasoning string) string {
 //     ""-vs-"unknown" distinction out of the file — imgsite's column already
 //     defaults to unknown, and baking "unknown" would merely restate the
 //     default while making the payload larger.
-//   - NSFW is the enhancement first pass (safe-site split), persisted into
-//     the note for the site's future use (owner: "it can be used later to
-//     improve the site") — today it is consumed internally (nsfw:true →
-//     safety unsafe, vet skipped) and never persisted. It rides from submit
+//   - NSFW is the enhancement first pass (safe-site split). It used to be
+//     consumed internally only (nsfw:true → safety unsafe, vet skipped) and
+//     never persisted anywhere; it now persists in the note for the site's
+//     future use (owner: "it can be used later to improve the site") —
+//     still with no DB column. It rides from submit
 //     time so, exactly like EnhancementReasoning, it survives a crash and
 //     recovery carries it across the rewrite from the old note. Its
 //     tri-state is expressed BY COMPOSITION, never an explicit false:

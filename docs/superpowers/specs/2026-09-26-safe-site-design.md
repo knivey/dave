@@ -20,7 +20,11 @@ graphic content generated on the other networks. Requirements:
   a cheap NSFW first pass riding the enhancement call that already
   happens, then a stricter second-pass vetting call for anything the
   first pass doesn't mark NSFW. Failures degrade to unknown and never
-  elevate.
+  elevate. The vet runs CONCURRENTLY with generation (LLM calls cost
+  ~5s; serializing them before submit would visibly delay every
+  image) — the verdict is baked into the image's EXIF afterward by
+  rewriting the workflow note, and persisted in the jobs table so
+  recovery never re-vets.
 
 ## Non-goals
 
@@ -43,13 +47,16 @@ request Host header:
   non-hidden AND (origin network in `allowed_networks` OR
   `safety = 'safe'`). Default-deny: `unknown` is invisible here.
 
-img-mcp classifies every non-Libera generation before upload:
-enhancement responses gain an `nsfw` flag (first pass), and a
-reserved enhancement-config entry (`safety-vet`) performs the strict
-second-pass judgment. The verdict travels in the upload metadata into
-the `images.safety` column. dave changes nothing — it pastes the
-upload response verbatim, and imgsite builds that response with the
-safe site's base URL for Libera-origin uploads.
+img-mcp classifies every non-Libera generation: enhancement responses
+gain an `nsfw` flag (first pass), and a reserved enhancement-config
+entry (`safety-vet`) performs the strict second-pass judgment
+concurrently with generation. The verdict travels three places for
+durability: the jobs table (recovery), the image's EXIF note (baked
+in post-generation by chunk surgery, alongside provenance), and the
+upload metadata into the `images.safety` column. dave changes
+nothing — it pastes the upload response verbatim, and imgsite builds
+that response with the safe site's base URL for Libera-origin
+uploads.
 
 ## imgsite
 
@@ -143,12 +150,18 @@ Libera policy text is added to these prompts (owner requirement:
 avoid confusion/refusals). Absent or false means only "no first-pass
 signal" — it never asserts safety. `EnhanceResult` carries NSFW.
 
-### Second pass — strict vetting
+### Second pass — strict vetting, concurrent with generation
 
-New pipeline stage in `processJob` (and the enhancement-rerun
-recovery path), ordered: enhance → vet → build workflow (so the
-prompt-note payload carries the final verdict) → submit → upload.
+New pipeline stage, ordered:
 
+  enhance → build workflow (note carries everything known at submit:
+  prompt, llm_generated, job_id, reasoning, network/channel/nick) →
+  submit → [vet runs concurrently with ComfyUI] → monitor completes →
+  await vet → rewrite EXIF note (adds safety) → sha256 → upload
+
+- The vet call starts right after enhancement and overlaps the
+  10–60s generation; wall-clock cost is normally zero, worst case
+  the vet's remainder at completion.
 - Runs when the job's network is NOT in the new `[safety]`
   `skip_networks` list (default `["libera"]`; correspondence with
   imgsite's `allowed_networks` is by convention, like `upload.api_key`
@@ -170,14 +183,48 @@ prompt-note payload carries the final verdict) → submit → upload.
 - Direct-tool generations (no enhancement) skip the first pass and
   go straight to the vet.
 
+### Persistence and recovery (img-mcp migration: jobs.safety)
+
+When the vet (or the nsfw first pass) resolves, the verdict is
+written to a new `jobs.safety` column (insert/recovery-read only, like
+the provenance columns). Restart recovery reads it and never re-vets;
+if the crash happened before the verdict existed, recovery re-vets
+during the resume monitor (its input — original prompt from job
+input, enhanced prompt from the image's EXIF — is available on that
+path) and the value persists once resolved.
+
+### EXIF note rewrite (post-generation, pre-upload)
+
+The `dave_original_prompt` note node's JSON payload is rebuilt at
+upload-prep time with ALL fields — `prompt`, `llm_generated`,
+`job_id`, `enhancement_reasoning` (omitempty), `network`, `channel`,
+`nick` (omitempty provenance — new), `safety` (omitempty — new) —
+and written into the completed image by replacing the EXIF chunk
+that carries the embedded workflow (RIFF container surgery: parse
+chunks, replace the EXIF chunk, fix container size; image data and
+all other chunks untouched; never re-encoded). Production output is
+webp (`Image Saver Simple`, embed_workflow=true); a non-webp output
+logs a WARN and skips the rewrite (safety still travels in upload
+meta). Ordering is load-bearing: rewrite → sha256 → upload, so the
+stored hash and dedup match the bytes on disk.
+
 ### Plumbing
 
 `UploadMeta` gains `Safety string` — **`omitempty`** (AGENTS schema
 rule: non-omitempty tool-input fields become required in the
-advertised schema and break callers). `buildPromptNote` payload gains
-`safety` (omitempty) so the verdict survives in EXIF and re-extract
-recovery. The direct `upload_image` tool sends empty meta → column
-stays `unknown` (default-deny; admins can mark).
+advertised schema and break callers). The direct `upload_image` tool
+sends empty meta → column stays `unknown` (default-deny; admins can
+mark).
+
+### imgsite reextract healing
+
+`/admin/reextract` (and the shared `applyMergedMetadata` path) learns
+the enriched note payload: when the stored row has EMPTY provenance
+(network/channel/nick) or EMPTY safety, re-extract backfills them
+from the note; non-empty values are never overwritten (same
+preserve-and-merge policy as visibility today). This heals rows whose
+upload meta was incomplete and makes the EXIF note the durable
+recovery source the rewrite above produces.
 
 ## dave
 
@@ -203,9 +250,14 @@ imgsite (per-surface × two-site matrix):
   matrix of per-id misses, exit codes).
 img-mcp: nsfw flag parse (true/false/absent) and skip-vet mapping;
 vet verdict mapping; vet failure → unknown + job completes; missing
-config → unknown + WARN-once; direct-tool path vets; UploadMeta
-omitempty schema; note payload carries safety end-to-end
-(processJob-level test, pattern of TestProcessJobEnhanceEmbedsReasoningInNote).
+config → unknown + WARN-once; direct-tool path vets; vet overlaps
+generation (processJob-level test asserting submit is not blocked on
+the vet and upload awaits it); jobs.safety persistence + recovery
+read/re-vet; EXIF chunk surgery (payload rewritten with safety +
+provenance, other chunks/image bytes preserved, sha256 computed
+post-rewrite; non-webp WARN-skip); UploadMeta omitempty schema.
+imgsite reextract: backfills empty provenance/safety from the note,
+never overwrites non-empty.
 
 ## Rollout
 

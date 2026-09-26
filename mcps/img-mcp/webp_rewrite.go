@@ -91,6 +91,15 @@ func parseWebpChunks(data []byte) (chunks []riffChunk, trailing []byte, err erro
 		})
 		off = bodyStart + size + (size & 1)
 	}
+	if off > int64(len(data)) {
+		// A spec-violating final chunk (odd-sized body ending exactly at
+		// EOF, the RIFF-required pad byte missing) walks off one past the
+		// end; clamp so the trailing slice stays in bounds. Malformed input
+		// must degrade to what was found, never panic — the same doctrine
+		// exif.go states, and there is no recover() between here and the
+		// worker goroutine.
+		off = int64(len(data))
+	}
 	return chunks, data[off:], nil
 }
 

@@ -1243,6 +1243,14 @@ func (q *JobQueue) recoverRunningJob(_ context.Context, job *Job, comfyPromptID 
 	if len(comfyResult.Images) > 0 {
 		if note, ok := embeddedPromptNote(comfyResult.Images[0].Data); ok {
 			rewriteReasoning = note.EnhancementReasoning
+		} else {
+			// Parity with the other degrade paths (see the enhanced-prompt
+			// WARN above): silent reasoning loss is undebuggable from the
+			// gallery side, so the drop is logged where it happens.
+			loggerQueue.Warn("recovery could not read the embedded prompt note; the EXIF rewrite will drop the enhancement reasoning",
+				"job_id", job.ID,
+				"error", "no parseable dave_original_prompt payload in the completed image",
+			)
 		}
 	}
 	rewriteNote, noteErr := buildPromptNoteWithSafety(job, rewriteReasoning, jobSafety)

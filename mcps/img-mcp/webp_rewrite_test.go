@@ -220,6 +220,117 @@ func TestRewriteWebpNoteDataErrorShapes(t *testing.T) {
 	assert.Contains(t, err.Error(), davePromptNoteNodeID)
 }
 
+// TestParseWebpChunksToleratesMissingFinalPad pins the malformed-container
+// doctrine on the write side: a last chunk whose odd-sized body ends exactly
+// at EOF (RIFF requires a pad byte that is not there) must parse without a
+// panic — the chunks found are returned and the trailing slice stays empty.
+// Pre-fix, the trailing slice indexed data[len(data)+1:] and killed the
+// whole img-mcp process (no recover() in the worker).
+func TestParseWebpChunksToleratesMissingFinalPad(t *testing.T) {
+	// Hand-built container: VP8X (even body) + "LAST" with a 3-byte body
+	// and NO pad byte — spec-violating, one byte short.
+	var body []byte
+	body = append(body, "WEBP"...)
+	body = append(body, "VP8X"...)
+	body = append(body, 10, 0, 0, 0)
+	body = append(body, make([]byte, 10)...)
+	body = append(body, "LAST"...)
+	body = append(body, 3, 0, 0, 0)
+	body = append(body, "abc"...) // odd-sized, ends at EOF, pad missing
+	var total [4]byte
+	binary.LittleEndian.PutUint32(total[:], uint32(len(body)))
+	data := append(append([]byte("RIFF"), total[:]...), body...)
+
+	chunks, trailing, err := parseWebpChunks(data)
+	require.NoError(t, err, "a missing final pad byte must be tolerated, not an error")
+	require.Len(t, chunks, 2, "both chunks must be recovered")
+	assert.Equal(t, "VP8X", chunks[0].fourcc)
+	assert.Equal(t, "LAST", chunks[1].fourcc)
+	assert.Equal(t, []byte("abc"), chunks[1].body)
+	assert.Empty(t, trailing, "nothing follows the truncated final chunk")
+}
+
+// TestRewriteNoteInWebpProductionBigEndianFixture rounds the rewrite against
+// REAL production bytes: imgsite/testdata/plain.webp is a captured ComfyUI
+// webp whose EXIF TIFF is big-endian ("MM") — while every synthetic fixture
+// in this package goes through buildTestTIFF, which is hardcoded
+// little-endian. Without this test a byte-order regression in
+// rewriteTIFFPromptValue would corrupt every production image while the
+// suite stayed green.
+//
+// The fixture is read live from the imgsite package path rather than
+// embedded as a copy: both packages share this module/repo, and a live
+// reference cannot drift from the production shape the way a duplicated
+// binary fixture silently would. The big-endian assertions double as guards
+// against the fixture being swapped for a little-endian one.
+func TestRewriteNoteInWebpProductionBigEndianFixture(t *testing.T) {
+	before, err := os.ReadFile(filepath.Join("..", "..", "imgsite", "testdata", "plain.webp"))
+	require.NoError(t, err, "reading the imgsite production fixture")
+
+	exifBody, ok := webpEXIFChunk(before)
+	require.True(t, ok, "production fixture must carry an EXIF chunk")
+	require.Equal(t, []byte("MM"), exifBody[0:2],
+		"fixture TIFF must stay big-endian — that is the point of this test")
+	require.NotContains(t, string(exifBody[:6]), "Exif",
+		"production EXIF bodies carry no Exif\\0\\0 prefix — the rewrite must not invent one")
+
+	// The capture's own note (a real dave generation: shrew prompt, no
+	// provenance/safety — the pre-Task-11 payload shape).
+	origNote, ok := embeddedPromptNote(before)
+	require.True(t, ok, "production fixture must carry a note node")
+	assert.Equal(t, "shrew comin in hot", origNote.Prompt)
+
+	job := &Job{
+		ID:       "mmjob",
+		Type:     JobTypeGenerate,
+		Workflow: "test",
+		Input: JobInput{
+			Prompt:  "shrew comin in hot",
+			Network: "graped", Channel: "#test", Nick: "user1",
+		},
+	}
+	noteJSON, err := buildPromptNoteWithSafety(job, "", safetyVerdictSafe)
+	require.NoError(t, err, "buildPromptNoteWithSafety")
+
+	after, err := rewriteWebpNoteData(before, noteJSON)
+	require.NoError(t, err, "the rewrite must handle the big-endian production shape")
+
+	// Note rewritten and recoverable through the production reader.
+	got, ok := embeddedPromptNote(after)
+	require.True(t, ok, "rewritten production file must still yield its note")
+	assert.Equal(t, "shrew comin in hot", got.Prompt)
+	assert.Equal(t, "mmjob", got.JobID)
+	assert.Equal(t, "graped", got.Network)
+	assert.Equal(t, "#test", got.Channel)
+	assert.Equal(t, "user1", got.Nick)
+	assert.Equal(t, safetyVerdictSafe, got.Safety)
+
+	// The rewritten EXIF stays big-endian with no invented prefix.
+	newExif, ok := webpEXIFChunk(after)
+	require.True(t, ok)
+	assert.Equal(t, []byte("MM"), newExif[0:2], "the rewrite must preserve the TIFF byte order")
+
+	// Image and container chunks byte-identical; framing sizes correct.
+	beforeChunks := parseChunksIndependently(t, before)
+	afterChunks := parseChunksIndependently(t, after)
+	require.Len(t, afterChunks, len(beforeChunks), "chunk count must be unchanged")
+	exifSeen := false
+	for i := range beforeChunks {
+		b, a := beforeChunks[i], afterChunks[i]
+		assert.Equal(t, b.fourcc, a.fourcc, "chunk %d fourcc must be unchanged", i)
+		if b.fourcc == "EXIF" {
+			exifSeen = true
+			assert.False(t, bytes.Equal(b.body, a.body), "the EXIF body must have been replaced")
+			continue
+		}
+		assert.True(t, bytes.Equal(b.body, a.body),
+			"chunk %q must be byte-identical after the rewrite", b.fourcc)
+	}
+	require.True(t, exifSeen, "fixture must contain an EXIF chunk")
+	riffSize := binary.LittleEndian.Uint32(after[4:8])
+	assert.Equal(t, uint32(len(after)-8), riffSize, "RIFF size must match the rewritten file")
+}
+
 // TestUploadImageToolNoRewriteAndEmptyMeta pins the direct upload_image
 // tool's contract: it has no job context, so it sends an empty meta and does
 // NOT rewrite the note in the bytes it was handed — there is no verdict or

@@ -273,6 +273,9 @@ never overwrites non-empty.
 
 ## Deferred
 
-Batch vetting tool for accumulated unknowns; admin web UI; any notion
- of hiding unsafe content from the default site; image-pixel
-classification.
+Backfill tooling for pre-existing images (owner-named follow-ups):
+write provenance/safety into EXISTING site files' EXIF notes; batch
+vetting of old images via the vetting LLM; admin tooling for marking
+old files for sexual content (`-safety` CLI exists; a batch/marking
+helper would build on it). Also: admin web UI; any notion of hiding
+unsafe content from the default site; image-pixel classification.

@@ -274,7 +274,7 @@ func TestThumbRouteMatrix(t *testing.T) {
 	// matrix keys on the image id, not the content hash).
 	insertImageWithFile(t, app, "aaaa00a", loadFixture(t, "plain.webp"))
 	require.NoError(t, processThumbJob(app.db, app.store, cfg, "aaaa00a"))
-	insertImageWithFile(t, app, "bbbb00b", loadFixture(t, "enhanced.webp")) // stays pending
+	insertImageWithFile(t, app, "bbbb00b", loadFixture(t, "enhanced.webp")) // stays pending (NULL network: invisible on safe)
 	insertImageWithFile(t, app, "cccc00c", loadFixture(t, "plain.webp"), func(img *dbImage) {
 		img.Hidden = true
 		// Hidden on a DISALLOWED network (efnet), deliberately not the
@@ -282,10 +282,14 @@ func TestThumbRouteMatrix(t *testing.T) {
 		// safe host this row is hidden AND site-invisible, so the 410
 		// below can only come from the hidden check firing FIRST — a
 		// hidden-but-allowed row would 410 under either check order
-		// and discriminate nothing.
+		// and discriminate nothing. The row also stays PENDING (no
+		// processThumbJob): hidden must 410 even when the status
+		// branch below would happily serve placeholder bytes.
 		img.Network = ptrStr("efnet")
 	})
-	require.NoError(t, processThumbJob(app.db, app.store, cfg, "cccc00c"))
+	insertImageWithFile(t, app, "ffff00f", loadFixture(t, "plain.webp"))
+	// Terminal failure the way the worker records it — no processThumbJob.
+	require.NoError(t, dbUpdateThumbStatus(app.db, "ffff00f", thumbStatusFailed))
 
 	t.Run("ReadyServesImmutableJPEG", func(t *testing.T) {
 		for _, size := range []string{"small", "display"} {
@@ -299,10 +303,36 @@ func TestThumbRouteMatrix(t *testing.T) {
 			assert.True(t, bytes.HasPrefix(body, []byte{0xFF, 0xD8}), size)
 		}
 	})
-	t.Run("PendingIs404NoCache", func(t *testing.T) {
-		resp := fetchPath(t, ts, "/bbbb00b/t/small")
+	t.Run("PendingServesPlaceholderNoStore", func(t *testing.T) {
+		for _, size := range []string{"small", "display"} {
+			resp := fetchPath(t, ts, "/bbbb00b/t/"+size)
+			assert.Equal(t, 200, resp.StatusCode, size)
+			assert.Equal(t, "image/jpeg", resp.Header.Get("Content-Type"), size)
+			// no-store (not no-cache): the URL's content swaps from
+			// placeholder to real bytes without changing, so no
+			// intermediary may ever cache the placeholder.
+			assert.Equal(t, "no-store", resp.Header.Get("Cache-Control"), size)
+			assert.Equal(t, "nosniff", resp.Header.Get("X-Content-Type-Options"), size)
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			assert.True(t, bytes.HasPrefix(body, []byte{0xFF, 0xD8}), size)
+			assert.Equal(t, placeholderThumbJPEG, body, "%s: served bytes are exactly the embedded placeholder", size)
+		}
+	})
+	t.Run("PendingPlaceholderNeverLeaksExistenceOnSafeHost", func(t *testing.T) {
+		// bbbb00b is pending with a NULL network: invisible on the
+		// safe host. It must 404 there EXACTLY like an unknown id —
+		// the placeholder (and its 200) may not become an existence
+		// oracle; the siteCanSee check runs before the status branch.
+		// (The same row's default-host 200 placeholder is pinned by
+		// PendingServesPlaceholderNoStore above.)
+		status, _ := getPageHost(t, ts, "safe.example.com", "/bbbb00b/t/small")
+		assert.Equal(t, http.StatusNotFound, status)
+	})
+	t.Run("FailedIs404NoCache", func(t *testing.T) {
+		resp := fetchPath(t, ts, "/ffff00f/t/small")
 		assert.Equal(t, 404, resp.StatusCode)
-		assert.Equal(t, "no-cache", resp.Header.Get("Cache-Control"), "the JS retry path depends on this being re-checked")
+		assert.Equal(t, "no-cache", resp.Header.Get("Cache-Control"), "the JS data-orig fallback path depends on this being re-checked")
 	})
 	t.Run("HiddenIs410", func(t *testing.T) {
 		resp := fetchPath(t, ts, "/cccc00c/t/small")
@@ -327,6 +357,16 @@ func TestThumbRouteMatrix(t *testing.T) {
 		resp := fetchPath(t, ts, "/short/t/small")
 		assert.Equal(t, 404, resp.StatusCode)
 	})
+}
+
+// TestPlaceholderThumbAsset pins the embedded placeholder's shape: a
+// real baseline JPEG, 16:10 (the card img's aspect-ratio — cover never
+// crops it), and small enough to be a rounding error on the wire.
+func TestPlaceholderThumbAsset(t *testing.T) {
+	w, h := mustDecodeDims(t, placeholderThumbJPEG)
+	assert.Equal(t, 240, w)
+	assert.Equal(t, 150, h)
+	assert.Less(t, len(placeholderThumbJPEG), 8<<10, "placeholder must stay tiny (a few KB at most)")
 }
 
 func TestStaticRoute(t *testing.T) {
@@ -377,6 +417,11 @@ func TestStaticRoute(t *testing.T) {
 //     Assigning an unchanged src is a verified no-op in Chromium (no
 //     refetch, no abort), and removeAttribute+re-assign in the same task
 //     dedupes to the same no-op; the bust is the only verified restart.
+//  3. onThumbReady must target the card's img, NOT img.pending: pending
+//     thumbs serve 200 placeholder bytes, and that successful load
+//     clears `pending` within milliseconds of the card's arrival — by
+//     thumb-ready time the img is virtually never .pending. An img.pending
+//     query would early-return and strand the placeholder forever.
 func TestGalleryThumbHealInvariant(t *testing.T) {
 	app := newTestApp(t, testConfig())
 	ts := newTestServer(t, app)
@@ -407,6 +452,8 @@ func TestGalleryThumbHealInvariant(t *testing.T) {
 
 	assert.NotContains(t, handler, "classList.remove",
 		"onThumbReady must not clear pending — that is the retry-arm flag")
+	assert.NotContains(t, handler, `"img.pending"`,
+		"onThumbReady must target the card's img by data-id — the placeholder load clears .pending long before thumb-ready fires")
 	assert.Contains(t, handler, `"v=" + Date.now()`,
 		"onThumbReady must force a refetch with a cache-busting query (same-URL assign is a verified no-op in Chromium)")
 }

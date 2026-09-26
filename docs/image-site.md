@@ -362,7 +362,7 @@ timestamps. Cursor wire format: `?after=YYYY-MM-DD%20HH%3AMM%3ASS.mmm~<id>`
 | `GET /favicon.ico` | inline SVG favicon | `public, max-age=86400` |
 | `GET /<id>` | image details page (HTML) | no-cache (next-button is live) |
 | `GET /<id>/orig/<filename>` | **permanent direct link** — original bytes served directly (200) | `public, max-age=31536000, immutable` |
-| `GET /<id>/t/<size>` (`small`\|`display` — tokens mapped to the configured `thumbnails.*_width`) | thumbnail bytes served directly (200) | immutable; **404 (pending/failed) is no-cache** so the JS retry works |
+| `GET /<id>/t/<size>` (`small`\|`display` — tokens mapped to the configured `thumbnails.*_width`) | thumbnail bytes served directly (200) | ready: immutable; **pending: 200 placeholder JPEG with `no-store`** (same-URL swap to real bytes on `thumb-ready` — no intermediary may ever cache the placeholder); **failed: 404 no-cache** so the JS data-orig fallback works |
 | `GET /api/images/<id>/neighbors` | `{prev:{…}, next:{…}}` keyset neighbors | no-cache |
 | `GET /events` | SSE stream | no-cache |
 | `POST /updo` | upload (X-API-Key) | — |
@@ -664,43 +664,52 @@ Shared semantics:
   production inputs are opaque regardless (lossy VP8 webp decodes to
   `*image.YCbCr`).
 - Gallery renders pending thumbs as a shimmer placeholder; `gallery.js`
-  swaps shimmer→thumb on the `thumb-ready` SSE event, and any successful
+  swaps placeholder→thumb on the `thumb-ready` SSE event, and any successful
   load clears the shimmer (covers replayed cards and retries that land
-  after the event). Pending-thumb 404s drive an error-listener retry
-  loop: server-rendered cards (which carry `data-orig`) retry once
-  (~2s) then fall back to the original bytes; SSE-prepended cards have
-  no orig URL in the event payload, so they stay shimmer and keep
-  retrying with capped exponential backoff (2s → 30s) until the thumb
-  appears. (The earlier policy — stop retrying, drop the src, keep the
-  card non-pending — rendered a dead near-black box that the
-  `thumb-ready` swap, which targets `img.pending`, could never heal
-  whenever generation outlasted the single retry window; observed in
-  production Sep 2026.)
-- **Thumb-heal invariant** (the `thumb-ready` handler): the `pending`
-  class is the error listener's retry-arm flag and may be cleared ONLY
-  by a successful `load` (capture-phase load listener) or by the
-  `data-orig` terminal fallback — never by `onThumbReady`. The handler
-  instead FORCES a real refetch (cache-busting `?v=` query on the thumb
-  URL) and lets load/error resolution do the rest, retaining `pending`
-  throughout. This is self-healing in both orders: if the forced fetch
-  200s, the load listener clears pending (a late error from a
-  superseded in-flight 404 lands on a non-pending img and is ignored);
-  if it 404s anyway, the error listener still sees a retryable pending
-  img and re-arms the backoff chain. Rationale, engine-verified in
-  Chromium (probe: `~/dev/imgsite-debug/probe-restart.ts`; behavioral
-  harness: `repro-thumb-race.ts`): assigning an unchanged `src` is a
-  no-op (no refetch, no abort — the in-flight request keeps ownership),
-  and `removeAttribute("src")` + re-assign in the same task dedupes to
-  the same no-op; only a URL change reliably restarts the load. The
+  after the event). Pending thumbs serve 200 placeholder JPEG bytes
+  (`no-store`) instead of 404 (Sep 2026: prod logged 17-20 cosmetic /t/
+  404s/day — the live card fetches /t/small within ~150ms while the slow
+  host's encode takes ~1.6s), so the normal pending path never errors:
+  the card shows dark placeholder bytes until the swap. The error-listener
+  retry loop is fallback-only for GENUINE failures now: server-rendered
+  cards (which carry `data-orig`) retry once (~2s) then fall back to the
+  original bytes; SSE-prepended cards have no orig URL in the event
+  payload, so they stay shimmer and keep retrying with capped exponential
+  backoff (2s → 30s) until the thumb appears. (The earlier policy — stop
+  retrying, drop the src, keep the card non-pending — rendered a dead
+  near-black box that the `thumb-ready` swap could never heal whenever
+  generation outlasted the single retry window; observed in production
+  Sep 2026.)
+- **Thumb-heal invariant** (the `thumb-ready` handler): the handler
+  targets the card's `img` by the card's `data-id` — NOT via
+  `img.pending`, because the placeholder's successful load clears
+  `pending` within milliseconds of arrival (querying `.pending` would
+  strand the placeholder forever). The `pending` class itself may be
+  cleared ONLY by a successful `load` (capture-phase load listener) or
+  by the `data-orig` terminal fallback — never by `onThumbReady`. The
+  handler instead FORCES a real refetch (cache-busting `?v=` query on
+  the thumb URL) and lets load/error resolution do the rest. This is
+  self-healing in both orders: if the forced fetch 200s, the load
+  listener clears pending (a late error from a superseded in-flight
+  failure lands on a non-pending img and is ignored); if it 404s
+  anyway (genuine failure/drift), the error listener still sees a
+  retryable img when pending is set and re-arms the backoff chain.
+  Rationale, engine-verified in Chromium (probe:
+  `~/dev/imgsite-debug/probe-restart.ts`; behavioral harness:
+  `repro-thumb-race.ts`): assigning an unchanged `src` is a no-op (no
+  refetch, no abort — the in-flight request keeps ownership), and
+  `removeAttribute("src")` + re-assign in the same task dedupes to the
+  same no-op; only a URL change reliably restarts the load. The
   pre-fix handler stripped `pending` and reassigned the same URL — when
   a retry's 404 was in flight at `thumb-ready` time (watched tab, slow
   resize host), the 404 then landed on a non-pending img, the error
   listener early-returned, and the card died unrecoverably (black box,
   no retries, shimmer gone) even though the server thumb was ready.
-  Query strings are ignored by the path routes and pending 404s are
-  no-cache, so the bust only costs one immutable cache entry per race
-  event. Guarded in-repo by `TestGalleryThumbHealInvariant`
-  (server_test.go) against the served JS source.
+  Query strings are ignored by the path routes, ready responses are
+  immutable, and the placeholder is `no-store`, so the bust only costs
+  one extra immutable cache entry per race event. Guarded in-repo by
+  `TestGalleryThumbHealInvariant` (server_test.go) against the served
+  JS source.
 
 ## Live updates (events.go — SSE)
 

@@ -1,6 +1,7 @@
 // gallery.js: IntersectionObserver infinite scroll over /gallery?after=
-// fragments, DOM cap with scroll-up restore, pending-thumb retry
-// (shimmer -> thumb swap), fragment-fetch retry with backoff, and SSE
+// fragments, DOM cap with scroll-up restore, pending-thumb placeholder
+// (dark bytes -> thumb swap on thumb-ready; retry is fallback-only for
+// genuine failures), fragment-fetch retry with backoff, and SSE
 // live updates (image-new prepend, thumb-ready swap, image-hidden card
 // drop, reset reload).
 "use strict";
@@ -248,17 +249,23 @@ export function boot() {
 		{ passive: true }
 	);
 
-	// Pending thumbs 404 (no-cache) until the worker flips them ready.
-	// 'error' does not bubble, so listen in capture phase. Cards that
-	// carry a data-orig fallback (server-rendered) retry once and then
-	// switch to the original bytes. Cards WITHOUT one (SSE-prepended:
-	// the image-new payload has no filename, so the orig URL can't be
-	// built client-side) have no better end state than "still waiting",
-	// so they STAY .pending and keep retrying with capped exponential
-	// backoff. Dropping the pending class here (the old behavior) left
-	// a dead near-black box (the card img's #0d0d0f background) that
-	// the later thumb-ready swap — which targets img.pending — could
-	// never heal; generation regularly outlasts the first retry window.
+	// Pending thumbs serve 200 with placeholder JPEG bytes
+	// (Cache-Control: no-store) until the worker flips them ready, so
+	// the normal pending path never errors at all — the img loads the
+	// placeholder and the thumb-ready swap replaces it. This error
+	// listener is therefore FALLBACK-ONLY for genuine failures: a
+	// failed row (404, no-cache), ready-row/store drift, or proxy
+	// trouble. 'error' does not bubble, so listen in capture phase.
+	// Cards that carry a data-orig fallback (server-rendered) retry
+	// once and then switch to the original bytes. Cards WITHOUT one
+	// (SSE-prepended: the image-new payload has no filename, so the
+	// orig URL can't be built client-side) have no better end state
+	// than "still waiting", so they STAY .pending and keep retrying
+	// with capped exponential backoff. Dropping the pending class
+	// here (the old behavior) left a dead near-black box (the card
+	// img's #0d0d0f background) that the later thumb-ready swap could
+	// never heal; generation regularly outlasts the first retry
+	// window.
 	//
 	// While waiting between attempts the src attribute is removed and
 	// the intended thumb URL stashed in data-thumb: a src-less
@@ -296,11 +303,15 @@ export function boot() {
 		true
 	);
 
-	// A successful fetch of any kind (initial load, retry, thumb-ready
-	// swap) clears the shimmer. 'load' does not bubble either, so this
-	// also captures. Without it, a card whose thumb arrived between
-	// retries — or a replayed image-new for an image that was already
-	// ready — kept the shimmer class forever over a loaded image.
+	// A successful fetch of any kind (placeholder load, real thumb,
+	// retry, thumb-ready swap) clears the shimmer. 'load' does not
+	// bubble either, so this also captures. Without it, a card whose
+	// thumb arrived between retries — or a replayed image-new for an
+	// image that was already ready — kept the shimmer class forever
+	// over a loaded image. NOTE: this fires on the PLACEHOLDER load
+	// too — a pending card loses .pending within milliseconds of
+	// arrival. That is exactly why onThumbReady must target the card's
+	// img by data-id instead of img.pending (see its DESIGN NOTE).
 	grid.addEventListener(
 		"load",
 		(e) => {
@@ -341,9 +352,12 @@ function clampPrompt(s) {
 // buildCard mirrors the server's "cards" fragment markup (pages.go):
 // same classes and data hooks (data-id, data-ts, .pending shimmer) so
 // thumb-ready swaps and error handling treat prepended and rendered
-// cards identically. The SSE payload carries no filename, so — unlike
-// server cards — no data-orig fallback URL can be attached; see the
-// error listener above for how that degrades.
+// cards identically. With pending thumbs serving placeholder bytes the
+// .pending shimmer lasts only until that load completes; the
+// thumb-ready swap then replaces the placeholder. The SSE payload
+// carries no filename, so — unlike server cards — no data-orig
+// fallback URL can be attached; see the error listener above for how
+// that degrades on genuine failure.
 function buildCard(ev) {
 	const article = document.createElement("article");
 	article.className = "card";
@@ -422,8 +436,8 @@ function onImageNew(ev) {
 	prependCard(ev);
 }
 
-// onThumbReady heals a live card's shimmer when the worker publishes
-// thumb-ready.
+// onThumbReady heals a live card's placeholder (or shimmer) when the
+// worker publishes thumb-ready.
 //
 // DESIGN NOTE — heal invariant: the `pending` class is removed ONLY by a
 // successful `load` (the capture-phase load listener) or by the data-orig
@@ -438,35 +452,46 @@ function onImageNew(ev) {
 // card died: failed-load state, no retries armed, shimmer gone (near-black
 // box) — while the server thumb WAS ready.
 //
+// DESIGN NOTE — target by card, not by .pending: pending thumbs now
+// serve 200 placeholder bytes, and that successful load clears
+// .pending within milliseconds of the card's arrival — by the time
+// thumb-ready fires, the img is virtually never .pending anymore.
+// Querying img.pending here (the pre-placeholder shape) would
+// early-return and strand the placeholder forever. The card's img is
+// targeted by the card's data-id instead, unconditionally.
+//
 // So instead: FORCE a real refetch and let load/error resolve everything,
-// with pending deliberately retained. Mechanism — cache-busting query
-// (`?v=<ms>`): empirically verified in Chromium (playwright-core probe,
-// ~/dev/imgsite-debug/probe-restart.ts) as the ONLY one of the two
-// candidates that restarts the load when the attribute already equals the
-// target URL. The alternative — removeAttribute("src") then re-assign in
-// the same task — is a verified no-op (the final attribute value is
-// unchanged, so Chromium's image-loading update dedupes it; probe case
-// P1). Path routes ignore query strings, and pending 404s are no-cache,
-// so the bust's only cost is one extra immutable cache entry per race
-// event.
+// with the class left to the sanctioned clearers. Mechanism —
+// cache-busting query (`?v=<ms>`): empirically verified in Chromium
+// (playwright-core probe, ~/dev/imgsite-debug/probe-restart.ts) as the
+// ONLY one of the two candidates that restarts the load when the
+// attribute already equals the target URL. The alternative —
+// removeAttribute("src") then re-assign in the same task — is a
+// verified no-op (the final attribute value is unchanged, so
+// Chromium's image-loading update dedupes it; probe case P1). Path
+// routes ignore query strings, ready responses are immutable, and the
+// placeholder is no-store, so the bust's only cost is one extra
+// immutable cache entry per race event. If the img already shows the
+// real thumb (a retry landed first), the bust just re-loads the same
+// ready bytes — harmless.
 //
 // Self-healing in BOTH orders (this is the exact race that killed the old
 // code):
-//   - forced fetch 200s -> the load listener clears pending (the ONLY
-//     pending-clearing path). A stale error from the superseded in-flight
-//     404, if the engine surfaces one at all, lands on a non-pending img
-//     and the error listener early-returns — harmless.
-//   - forced fetch 404s anyway (event raced the worker flip, or a proxy
-//     served stale) -> pending is still set, so the error listener sees a
-//     retryable pending img and re-arms the capped backoff chain; the
-//     next no-cache retry lands the ready thumb and the load listener
-//     clears pending then.
+//   - forced fetch 200s -> the load listener clears pending if it was
+//     still set (the ONLY pending-clearing path). A stale error from the
+//     superseded in-flight 404, if the engine surfaces one at all, lands
+//     on a non-pending img and the error listener early-returns —
+//     harmless.
+//   - forced fetch 404s anyway (genuine failure/drift) -> the error
+//     listener sees a retryable img if it is still pending and re-arms
+//     the capped backoff chain; the next no-cache retry decides the
+//     end state then.
 function onThumbReady(ev) {
 	if (!grid || !ev || !ev.id) return;
 	const card = grid.querySelector('article.card[data-id="' + CSS.escape(ev.id) + '"]');
 	if (!card) return; // trimmed from DOM, or another page state
-	const img = card.querySelector("img.pending");
-	if (!img) return; // already swapped or already failed
+	const img = card.querySelector("img");
+	if (!img) return;
 	// Capture the target BEFORE mutating: mid-retry-wait imgs have no src
 	// attribute at all (the error listener removed it for a clean
 	// shimmer), so the stashed data-thumb is the source of truth there.

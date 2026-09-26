@@ -932,7 +932,8 @@ func TestDetailsPageOpenGraphTags(t *testing.T) {
 	assert.Contains(t, body,
 		`<meta property="og:description" content="zimage-turbo · 1920×1080 · krea2_turbo_int8_convrot.safetensors">`)
 	// Thumb is pending on this row: og:image must fall back to the
-	// absolute orig URL (/t/display would 404 for an unfurler).
+	// absolute orig URL (pending /t/display serves only placeholder
+	// bytes; failed 404s — orig is the richer unfurl either way).
 	assert.Contains(t, body, `<meta property="og:image" content="https://img.example.com/ogga001/orig/ogga001.webp">`)
 	assert.Contains(t, body, `<meta property="og:url" content="https://img.example.com/ogga001">`)
 	assert.Contains(t, body, `<meta name="twitter:card" content="summary_large_image">`)

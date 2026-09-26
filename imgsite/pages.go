@@ -735,9 +735,10 @@ type imageView struct {
 	// OpenGraph (M7): og:title is the clamped original prompt (filename
 	// fallback), og:description the params summary, og:image an
 	// ABSOLUTE display-thumb URL (orig URL when the thumb isn't ready —
-	// /t/ 404s until the worker flips the row), og:url the absolute
-	// page URL. Absolute because unfurlers (Discord, etc.) resolve
-	// og:image against og:url at best and drop relative URLs at worst.
+	// pending serves only placeholder bytes and failed 404s, so orig is
+	// the richer unfurl either way), og:url the absolute page URL.
+	// Absolute because unfurlers (Discord, etc.) resolve og:image
+	// against og:url at best and drop relative URLs at worst.
 	OGTitle       string
 	OGDescription string
 	OGImageURL    string
@@ -817,8 +818,9 @@ func buildImageView(img *dbImage, prev, next *dbImage, absBase string) imageView
 	if img.ThumbStatus == thumbStatusReady {
 		v.OGImageURL = absBase + "/" + img.ID + "/t/display"
 	} else {
-		// pending/failed: /t/display would 404 and an unfurler would
-		// render no preview at all — the original bytes always serve.
+		// pending/failed: /t/display serves only a tiny placeholder
+		// (pending) or 404s (failed) — a poor unfurl either way, so
+		// the original bytes always serve.
 		v.OGImageURL = v.AbsOrigURL
 	}
 

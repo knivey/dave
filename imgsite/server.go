@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -584,6 +586,33 @@ func (a *App) handleImageRoutes(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// placeholderThumbJPEG is served by handleThumb for PENDING rows (see
+// below). One asset serves both size tokens: it is not a thumbnail of
+// anything, just dark placeholder bytes matching the card shimmer
+// aesthetic (#0d0d0f -> #26262c vertical gradient, 240x150 = the card
+// img's 16:10 aspect-ratio so object-fit:cover never crops it).
+//
+// DESIGN NOTE (why pending answers 200 placeholder instead of 404):
+// production (Sep 2026, slow Intel Atom host) logged 17-20 purely
+// cosmetic /t/ 404s per day — the SSE live card fetches /t/small
+// within ~150ms of image-new while the thumb encode takes ~1.6s after
+// the upload commit, so every watched-tab arrival spent that window
+// hammering a 404 that self-healed on thumb-ready. A placeholder
+// closes the gap with no client changes: the card shows dark bytes
+// (indistinguishable from the shimmer at a glance) and the thumb-ready
+// swap replaces them.
+//
+// Cache-Control is no-store — deliberately NOT no-cache: the URL's
+// content swaps from placeholder to real bytes without the URL
+// changing, and no intermediary (browser cache, proxy) may ever be
+// allowed to answer the same URL with stale placeholder bytes after
+// the swap. no-store forbids caching the response at all, which is
+// the only directive that closes the reload-same-url trap. Past
+// project history: same-URL content swaps have caused repeated bugs.
+//
+//go:embed assets/placeholder-thumb.jpg
+var placeholderThumbJPEG []byte
+
 // handleThumb serves GET /<id>/t/<size>. Site-aware like handleOrigFile:
 // an id invisible on the requesting host's site 404s exactly like an
 // unknown id. The size token is "small" or "display" — NOT the raw
@@ -594,9 +623,12 @@ func (a *App) handleImageRoutes(w http.ResponseWriter, r *http.Request) {
 // therefore goes through Store.FindThumbPath: the current-config width
 // file first, then any existing <hash>-*.jpg — otherwise a width reload
 // would 404 every pre-existing ready row forever (see FindThumbPath's
-// DESIGN NOTE). A pending or failed thumbnail is a 404 with
-// Cache-Control: no-cache so the client's retry (image reload / JS
-// swap) actually re-checks.
+// DESIGN NOTE). A PENDING thumbnail serves 200 with the embedded
+// placeholder JPEG above (Cache-Control: no-store — never cached, so
+// nothing can serve stale placeholder bytes after the thumb-ready
+// swap). A FAILED thumbnail stays a 404 with Cache-Control: no-cache:
+// a placeholder would lie forever, and the JS data-orig fallback
+// covers failure.
 func (a *App) handleThumb(w http.ResponseWriter, r *http.Request, id, sizeToken string) {
 	if !validImageID(id) {
 		http.NotFound(w, r)
@@ -631,8 +663,24 @@ func (a *App) handleThumb(w http.ResponseWriter, r *http.Request, id, sizeToken 
 		http.NotFound(w, r)
 		return
 	}
+	if img.ThumbStatus == thumbStatusPending {
+		// Pending: 200 with placeholder bytes so the live-card fetch
+		// never sees a 404 during the encode window. The hidden and
+		// siteCanSee checks above stay FIRST — an invisible id must
+		// 404 exactly like an unknown id regardless of thumb state;
+		// the placeholder must never leak existence on the safe host.
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Header().Set("Cache-Control", "no-store")
+		// Explicit so HEAD probes see the true size too (the Write
+		// below suppresses body bytes on HEAD but would leave
+		// Content-Length unset otherwise).
+		w.Header().Set("Content-Length", strconv.Itoa(len(placeholderThumbJPEG)))
+		w.Write(placeholderThumbJPEG)
+		return
+	}
 	if img.ThumbStatus != thumbStatusReady {
-		// pending | failed: retryable-by-design miss.
+		// failed: 404 + no-cache — the JS retry path re-checks, and
+		// the data-orig fallback covers the terminal state.
 		w.Header().Set("Cache-Control", "no-cache")
 		http.Error(w, "thumbnail not ready", http.StatusNotFound)
 		return

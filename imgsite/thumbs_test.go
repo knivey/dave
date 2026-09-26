@@ -315,8 +315,10 @@ func TestRescanFullQueueDropsStayPending(t *testing.T) {
 }
 
 // TestUploadThenThumbRouteServesJPEG is the end-to-end M3 path: upload via
-// /updo, drive the pipeline synchronously (the test hook — the real pool
-// runs it in the background), then fetch the thumbnail route.
+// /updo, fetch during the pending window (placeholder bytes, no-store),
+// drive the pipeline synchronously (the test hook — the real pool runs it
+// in the background), then fetch the thumbnail route again for the real
+// derivative.
 func TestUploadThenThumbRouteServesJPEG(t *testing.T) {
 	app := newTestApp(t, testConfig())
 	ts := newTestServer(t, app)
@@ -330,6 +332,16 @@ func TestUploadThenThumbRouteServesJPEG(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, thumbStatusPending, img.ThumbStatus, "upload answers before any thumbnail work")
 
+	// The pending window (prod: ~1.6s on the slow host): the route
+	// answers 200 with the embedded placeholder, never a 404.
+	pending := fetchPath(t, ts, "/"+ur.ID+"/t/small")
+	require.Equal(t, 200, pending.StatusCode, "pending thumb serves placeholder bytes, not a 404")
+	assert.Equal(t, "image/jpeg", pending.Header.Get("Content-Type"))
+	assert.Equal(t, "no-store", pending.Header.Get("Cache-Control"), "placeholder must never be cached anywhere")
+	pendingBody, err := io.ReadAll(pending.Body)
+	require.NoError(t, err)
+	assert.Equal(t, placeholderThumbJPEG, pendingBody, "pending bytes are exactly the embedded placeholder")
+
 	require.NoError(t, processThumbJob(app.db, app.store, testConfig(), ur.ID))
 
 	thumb := fetchPath(t, ts, "/"+ur.ID+"/t/small")
@@ -339,6 +351,11 @@ func TestUploadThenThumbRouteServesJPEG(t *testing.T) {
 	body, err := io.ReadAll(thumb.Body)
 	require.NoError(t, err)
 	assert.True(t, bytes.HasPrefix(body, []byte{0xFF, 0xD8}), "served bytes are a real JPEG")
+	assert.NotEqual(t, placeholderThumbJPEG, body, "ready bytes must be the real derivative, not the placeholder")
+	w, h := mustDecodeDims(t, body)
+	assert.Equal(t, 480, w, "ready small derivative at the configured width (1920x1080 fixture -> 480x270)")
+	assert.Equal(t, 270, h)
+	assert.NotEqual(t, 240, w, "and not the placeholder's width")
 }
 
 // fetchPath GETs a path on the test server and returns the response with

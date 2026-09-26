@@ -23,3 +23,6 @@ Small owner-queued items, not yet scheduled:
     exotic-input notes; multi-image EXIF rewrite untested;
     AGENTS jobs.safety parenthetical + hash-ordering wording
     tightenings.
+- **img-mcp logging polish**: the vet/short-circuit log lines lack
+  `job_id` (correlation by timestamp; `safety verdict resolved` has
+  it) — surfaced during the Sep 26 prod nsfw verification.

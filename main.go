@@ -276,15 +276,15 @@ func resolvedUserFromCtx(ctx context.Context) *User {
 
 var stop_re = regexp.MustCompile("^stop$")
 var help_re = regexp.MustCompile("^help(?:\\s+(.+))?$")
-var sessions_re = regexp.MustCompile("^sessions(?:\\s+(\\S+))?$")
+var sessions_re = regexp.MustCompile("^sessions(?:\\s+(\\S+))?\\s*$") // \s*$ tolerates trailing space from tab nick-completion
 var history_re = regexp.MustCompile("^history(?:\\s+(.+))?$")
 var stats_re = regexp.MustCompile("^mystats$")
-var delete_re = regexp.MustCompile("^delete\\s+(\\d+)$")
-var resume_re = regexp.MustCompile("^resume\\s+(\\d+)$")
+var delete_re = regexp.MustCompile("^delete\\s+(\\d+)\\s*$") // \s*$ tolerates trailing space from tab nick-completion
+var resume_re = regexp.MustCompile("^resume\\s+(\\d+)\\s*$") // \s*$ tolerates trailing space from tab nick-completion
 var jobs_re = regexp.MustCompile("^jobs$")
 var support_re = regexp.MustCompile("^support$")
 var compact_re = regexp.MustCompile("^compact$")
-var clone_re = regexp.MustCompile("^clone\\s+(\\S+)$")
+var clone_re = regexp.MustCompile("^clone\\s+(\\S+)\\s*$") // \s*$ tolerates trailing space from tab nick-completion
 
 type CmdMap map[*regexp.Regexp]CmdFunc
 

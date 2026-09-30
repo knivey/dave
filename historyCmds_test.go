@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,55 @@ func makeHistoryEvent(channel, nick string) girc.Event {
 			Host:  "host",
 		},
 		Params: []string{channel},
+	}
+}
+
+// TestHistoryRegexesTolerateTrailingWhitespace guards against tab-completion
+// trailing spaces silently dropping commands: users habitually leave a
+// trailing space after any argument (e.g. "-delete 12 "), which the
+// end-anchored regexes must ignore. Mirrors handleTrigger's dispatch
+// boundary exactly (Match + extractSubmatchArgs).
+func TestHistoryRegexesTolerateTrailingWhitespace(t *testing.T) {
+	tests := []struct {
+		name    string
+		re      *regexp.Regexp
+		input   string
+		want    bool
+		wantArg string
+	}{
+		{name: "delete plain", re: delete_re, input: "delete 12", want: true, wantArg: "12"},
+		{name: "delete trailing space", re: delete_re, input: "delete 12 ", want: true, wantArg: "12"},
+		{name: "delete trailing tab", re: delete_re, input: "delete 12\t", want: true, wantArg: "12"},
+		{name: "delete no argument", re: delete_re, input: "delete", want: false},
+		{name: "delete multi word", re: delete_re, input: "delete 12 x", want: false},
+
+		{name: "resume plain", re: resume_re, input: "resume 7", want: true, wantArg: "7"},
+		{name: "resume trailing space", re: resume_re, input: "resume 7 ", want: true, wantArg: "7"},
+		{name: "resume trailing tab", re: resume_re, input: "resume 7\t", want: true, wantArg: "7"},
+		{name: "resume no argument", re: resume_re, input: "resume", want: false},
+		{name: "resume multi word", re: resume_re, input: "resume 7 x", want: false},
+
+		{name: "sessions plain", re: sessions_re, input: "sessions", want: true, wantArg: ""},
+		{name: "sessions with nick", re: sessions_re, input: "sessions alice", want: true, wantArg: "alice"},
+		{name: "sessions nick trailing space", re: sessions_re, input: "sessions alice ", want: true, wantArg: "alice"},
+		{name: "sessions bare trailing space", re: sessions_re, input: "sessions ", want: true, wantArg: ""},
+		{name: "sessions multi word", re: sessions_re, input: "sessions alice bob", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			matched := tt.re.Match([]byte(tt.input))
+			assert.Equal(t, tt.want, matched, "%s match on %q", tt.name, tt.input)
+			if !tt.want {
+				return
+			}
+			args := extractSubmatchArgs(tt.re, tt.input)
+			if tt.wantArg == "" {
+				assert.Empty(t, args, "expected no capture for %q", tt.input)
+				return
+			}
+			require.Len(t, args, 1, "expected exactly one capture group for %q", tt.input)
+			assert.Equal(t, tt.wantArg, args[0], "captured argument for %q", tt.input)
+		})
 	}
 }
 

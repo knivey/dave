@@ -13,6 +13,40 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestCloneRegexToleratesTrailingWhitespace guards against tab-completion
+// trailing spaces breaking the clone command: users completing a nick with
+// tab (e.g. "-clone Knio ") send a trailing space, which the end-anchored
+// regex must ignore. Mirrors handleTrigger's dispatch boundary exactly
+// (Match + extractSubmatchArgs).
+func TestCloneRegexToleratesTrailingWhitespace(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    bool
+		wantArg string
+	}{
+		{name: "plain nick", input: "clone Knio", want: true, wantArg: "Knio"},
+		{name: "trailing space from tab completion", input: "clone Knio ", want: true, wantArg: "Knio"},
+		{name: "multiple trailing spaces", input: "clone Knio   ", want: true, wantArg: "Knio"},
+		{name: "trailing tab", input: "clone Knio\t", want: true, wantArg: "Knio"},
+		{name: "no argument", input: "clone", want: false},
+		{name: "whitespace only argument", input: "clone ", want: false},
+		{name: "argument with internal space", input: "clone Knio extra", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			matched := clone_re.Match([]byte(tt.input))
+			assert.Equal(t, tt.want, matched, "clone_re match on %q", tt.input)
+			if !tt.want {
+				return
+			}
+			args := extractSubmatchArgs(clone_re, tt.input)
+			require.Len(t, args, 1, "expected exactly the nick capture group for %q", tt.input)
+			assert.Equal(t, tt.wantArg, args[0], "captured nick for %q", tt.input)
+		})
+	}
+}
+
 func TestSessionHasIncompleteToolCalls_NoToolCalls(t *testing.T) {
 	setupTestDB(t)
 

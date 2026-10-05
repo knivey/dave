@@ -45,7 +45,15 @@ header.site p { color: #999; margin: 0.25rem 0 0; }
    12px — legible but squint-grade on phones. 14px / 13px. */
 .card .prompt { margin: 0.5rem 0.75rem 0.25rem; font-size: 0.875rem; overflow-wrap: anywhere; }
 .card .prompt mark { background: #5b4a12; color: #ffe9a8; border-radius: 3px; padding: 0 1px; }
-.card time { display: block; margin: 0 0.75rem 0.75rem; color: #999; font-size: 0.8125rem; }
+/* Meta row: timestamp left, like count right-justified on the same
+   line (owner request, Oct 2026). The time keeps its own type floor;
+   the count is the same size, heart-tinted, and never wraps. A card
+   with zero likes ships no .likes span at all (server template
+   guards it; the SSE handler adds one when a count first moves
+   past zero). */
+.card .meta { display: flex; justify-content: space-between; align-items: baseline; gap: 0.75rem; margin: 0 0.75rem 0.75rem; }
+.card .meta time { display: block; color: #999; font-size: 0.8125rem; }
+.card .likes { color: #ff6b81; font-size: 0.8125rem; white-space: nowrap; }
 .sentinel { width: 100%; height: 1px; grid-column: 1 / -1; }
 
 /* Search box (gallery header form). No-JS search is a plain GET to
@@ -63,6 +71,12 @@ header.site .head-row > div:first-child { flex: 1; min-width: 0; }
 	width: min(20rem, 42vw);
 }
 #search-box:focus { outline: 1px solid #4a6fb5; border-color: #4a6fb5; }
+
+/* Sort nav (gallery header): quiet inline links; the current mode is
+   visually marked so the control reads as a state, not a mystery. */
+.sort-nav { padding: 0.35rem 0 0; color: #999; font-size: 0.875rem; }
+.sort-nav a { color: #7ab0ff; }
+.sort-nav a[aria-current="page"] { color: #ddd; font-weight: 600; text-decoration: underline; }
 
 /* Full-width search row on phones (mobile audit #9): the 42vw-capped
    box (164px at 390) was functional but cramped for real queries; on

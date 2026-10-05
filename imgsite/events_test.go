@@ -417,16 +417,19 @@ func TestParseSinceHeaderThenQuery(t *testing.T) {
 	assert.False(t, ok)
 }
 
-func TestSSEClientIPForwardedForWins(t *testing.T) {
+// TestClientIPForwardedForWins pins the one resolver all per-client
+// surfaces share (SSE cap, like limiter, request log): first XFF value
+// wins, comma chain dropped, blank falls back to the peer host.
+func TestClientIPForwardedForWins(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/events", nil)
 	req.RemoteAddr = "192.0.2.10:5555"
-	assert.Equal(t, "192.0.2.10", sseClientIP(req))
+	assert.Equal(t, "192.0.2.10", clientIP(req))
 
 	req.Header.Set("X-Forwarded-For", "203.0.113.7, 10.0.0.1")
-	assert.Equal(t, "203.0.113.7", sseClientIP(req), "first XFF value, rest of the chain dropped")
+	assert.Equal(t, "203.0.113.7", clientIP(req), "first XFF value, rest of the chain dropped")
 
 	req.Header.Set("X-Forwarded-For", "  ")
-	assert.Equal(t, "192.0.2.10", sseClientIP(req), "blank XFF falls back to RemoteAddr")
+	assert.Equal(t, "192.0.2.10", clientIP(req), "blank XFF falls back to RemoteAddr")
 }
 
 // --- /events HTTP tests ---

@@ -1,9 +1,11 @@
 // gallery.js: IntersectionObserver infinite scroll over /gallery?after=
 // fragments, DOM cap with scroll-up restore, pending-thumb placeholder
 // (dark bytes -> thumb swap on thumb-ready; retry is fallback-only for
-// genuine failures), fragment-fetch retry with backoff, and SSE
-// live updates (image-new prepend, thumb-ready swap, image-hidden card
-// drop, reset reload).
+// genuine failures), fragment-fetch retry with backoff, most-liked
+// sort mode (fragment URLs carry &sort=liked, arrivals buffer behind
+// the pill), and SSE live updates (image-new prepend, thumb-ready
+// swap, image-hidden card drop, image-liked count updates, reset
+// reload).
 "use strict";
 
 import { connect } from "./sse.js";
@@ -36,6 +38,18 @@ let detached = [];
 // results mode owns the grid (and restores the default on exit).
 // Cursor is opaque to this module — each mode defines its own format.
 let fragmentURLFn = null;
+
+// Most-liked sort mode (body[data-sort="liked"], set by the server on
+// /?sort=liked). Three load-bearing consequences:
+//   - fetched fragments must carry &sort=liked (defaultFragmentURL);
+//   - live image-new arrivals buffer behind the "+N new" pill —
+//     prepending into a count-sorted grid would lie about the order —
+//     and the pill RELOADS instead of flushing (see its click
+//     handler);
+//   - a card whose count rose mid-scroll can reappear on a fetched
+//     page (the mutable-sort-cursor caveat, db.go) — loadMore's
+//     append-dedupe absorbs it.
+let sortLiked = false;
 
 // Provider generation, bumped on every setFragmentURL swap. Retrying
 // loadMore chains capture it so a swap can strand their pending retry
@@ -106,13 +120,30 @@ export function rewatchSentinel() {
 	if (watchSentinelImpl) watchSentinelImpl();
 }
 
+// galleryQS returns the live gallery's sort query string — "" or
+// "sort=liked" — as the ONE source of truth every path that
+// re-fetches or re-addresses the gallery derives from:
+// defaultFragmentURL (infinite scroll), and search.js's
+// restoreGallery (its swapGrid fetch + history.replaceState). A path
+// that hardcodes "/" or "/gallery" instead stranding a mode mismatch:
+// the restored grid would carry default-mode cursors while
+// defaultFragmentURL still appends &sort=liked — every subsequent
+// page fetch 400s on the arity check and the retry chain re-400s
+// forever. Set by boot() from body[data-sort].
+export function galleryQS() {
+	return sortLiked ? "sort=liked" : "";
+}
+
 function defaultFragmentURL(cursor) {
-	return "/gallery?after=" + encodeURIComponent(cursor);
+	const qs = galleryQS();
+	const base = "/gallery?after=" + encodeURIComponent(cursor);
+	return qs ? base + "&" + qs : base;
 }
 
 export function boot() {
 	grid = document.getElementById("grid");
 	if (!grid) return;
+	sortLiked = document.body.dataset.sort === "liked";
 
 	const observer = new IntersectionObserver(
 		(entries) => {
@@ -158,7 +189,18 @@ export function boot() {
 			// sentinel). A detached sentinel means this page belongs to
 			// the previous mode's grid — dropping it is exactly right.
 			if (!sentinel.isConnected) return;
+			// Append-dedupe by data-id: a no-op in default mode, but
+			// the liked sort keys on a MUTABLE column (like_count), so
+			// a row whose count rose between page fetches can legally
+			// reappear on the next page (see db.go's mutable-sort
+			// note). Skipping an already-attached card keeps the grid
+			// honest without punishing default mode.
+			const seen = new Set(
+				Array.from(grid.querySelectorAll("article.card")).map((c) => c.dataset.id)
+			);
 			for (const card of doc.querySelectorAll("article.card")) {
+				if (seen.has(card.dataset.id)) continue;
+				seen.add(card.dataset.id);
 				grid.appendChild(card);
 			}
 			// The fetched page carries its own successor sentinel: the
@@ -415,7 +457,15 @@ function buildCard(ev) {
 	time.dataset.ts = ev.created_at;
 	time.textContent = isNaN(ts.getTime()) ? ev.created_at : ts.toLocaleString();
 
-	article.append(link, prompt, time);
+	// Meta row mirrors the server card shape (time + optional .likes
+	// span inside div.meta) so the image-liked count updater can treat
+	// prepended and rendered cards identically. New arrivals have zero
+	// likes, so no .likes span is created here.
+	const meta = document.createElement("div");
+	meta.className = "meta";
+	meta.appendChild(time);
+
+	article.append(link, prompt, meta);
 	return article;
 }
 
@@ -457,9 +507,10 @@ function updatePill() {
 
 function onImageNew(ev) {
 	if (!ev || !ev.id) return;
-	if (filterActive) {
-		// A filter owns the grid: buffer arrivals so the filtered view
-		// never lies, and surface them behind the "+N new" pill.
+	// A filter or the most-liked sort owns the grid: buffer arrivals so
+	// the ordered view never lies. (Liked mode's pill click reloads —
+	// prepending would violate the count sort; see its handler.)
+	if (filterActive || sortLiked) {
 		pendingNew.push(ev);
 		updatePill();
 		return;
@@ -583,6 +634,41 @@ function onImageHidden(ev) {
 	}
 }
 
+// setCardLikeCount syncs one card's .likes span with a count: created
+// when the count first moves past zero, textContent swapped while it
+// stays positive, removed when it falls back to zero — the same
+// present-only-when-nonzero contract the server template renders.
+function setCardLikeCount(card, count) {
+	let span = card.querySelector(".likes");
+	if (count > 0) {
+		if (!span) {
+			span = document.createElement("span");
+			span.className = "likes";
+			const meta = card.querySelector(".meta");
+			if (!meta) return; // malformed card: nothing to hang the span on
+			meta.appendChild(span);
+		}
+		span.dataset.count = String(count);
+		span.textContent = "\u2665 " + count;
+	} else if (span) {
+		span.remove();
+	}
+}
+
+// onImageLiked updates a card's count when any visitor toggles a like
+// (SSE image-liked, published after the toggle commits). The detached
+// set is swept too, mirroring onThumbReady: restore() reattaches
+// trimmed cards with zero network traffic, so one left behind would
+// show a stale count until the next full reload.
+function onImageLiked(ev) {
+	if (!grid || !ev || !ev.id || !Number.isFinite(ev.count)) return;
+	const card = grid.querySelector('article.card[data-id="' + CSS.escape(ev.id) + '"]');
+	if (card) setCardLikeCount(card, ev.count);
+	for (let i = detached.length - 1; i >= 0; i--) {
+		if (detached[i].dataset.id === ev.id) setCardLikeCount(detached[i], ev.count);
+	}
+}
+
 function setupLiveUpdates() {
 	// "+N new" pill: offered only while a filter is holding arrivals
 	// back. Clicking defers entirely to the registered clear action
@@ -599,6 +685,19 @@ function setupLiveUpdates() {
 	pill.hidden = true;
 	document.body.appendChild(pill);
 	pill.addEventListener("click", () => {
+		if (sortLiked) {
+			// Most-liked mode: flushing would prepend into a count-
+			// sorted grid and lie about the order. Reload re-sorts
+			// server-side and clears the buffer with it. Deliberately
+			// checked BEFORE filterClearFn: on a liked page whose user
+			// typed a query (search mode over a still-sortLiked module),
+			// this reloads the /search URL — preserving the user's
+			// query context — rather than exiting the search; exiting
+			// to "/?sort=liked" unilaterally would discard more context
+			// than the click promised.
+			location.reload();
+			return;
+		}
 		if (filterClearFn) {
 			filterClearFn(); // flush happens in its setFilterActive(false)
 			return;
@@ -629,6 +728,7 @@ function setupLiveUpdates() {
 			"image-new": onImageNew,
 			"thumb-ready": onThumbReady,
 			"image-hidden": onImageHidden,
+			"image-liked": onImageLiked,
 			// Overflow / replay-gap recovery: full refetch is always correct.
 			onReset: () => location.reload(),
 		},

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jmoiron/sqlx"
+	logxi "github.com/mgutz/logxi/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1134,6 +1135,42 @@ func TestAdminReextractHealsGGUFRows(t *testing.T) {
 }
 
 func ptrStr(s string) *string { return &s }
+
+// TestRequestLogResolvesClientIP pins the access log's client_ip: the
+// SAME resolver the SSE cap and like limiter key on (XFF first value,
+// else RemoteAddr host), so the log line can never disagree with what
+// the limiters actually keyed on. remote_addr stays the raw TCP peer —
+// behind Caddy that's the proxy host, and the pair together is the
+// honest picture (who connected to us vs who the deployment says the
+// client is).
+func TestRequestLogResolvesClientIP(t *testing.T) {
+	var buf bytes.Buffer
+	old := logger
+	logger = logxi.NewLogger(logxi.NewConcurrentWriter(&buf), "imgsite")
+	logger.SetLevel(logxi.LevelAll)
+	t.Cleanup(func() { logger = old })
+
+	handler := requestLogMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.RemoteAddr = "192.0.2.10:5555"
+	req.Header.Set("X-Forwarded-For", "203.0.113.7, 10.0.0.1")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusTeapot, rec.Code, "wrapper passes the response through")
+	assert.Contains(t, buf.String(), `"client_ip":"203.0.113.7"`, "first XFF value wins")
+	assert.Contains(t, buf.String(), `"remote_addr":"192.0.2.10:5555"`, "raw peer is preserved")
+
+	// No XFF: client_ip falls back to the RemoteAddr host part.
+	req2 := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req2.RemoteAddr = "198.51.100.4:9999"
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	assert.Contains(t, buf.String(), `"client_ip":"198.51.100.4"`, "no XFF falls back to the peer host")
+}
 
 func TestSafeSiteConfigAllowsNetwork(t *testing.T) {
 	ss := &SafeSiteConfig{AllowedNetworks: []string{"libera"}}

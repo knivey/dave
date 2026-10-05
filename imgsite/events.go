@@ -43,6 +43,9 @@ const (
 	eventThumbReady  = "thumb-ready"
 	eventImageHidden = "image-hidden"
 	eventReset       = "reset"
+	// eventImageLiked is the like-count change event: published after
+	// every committed toggle with the post-toggle count.
+	eventImageLiked = "image-liked"
 )
 
 // Hub tuning constants. Deliberately not config: these are
@@ -92,6 +95,14 @@ type thumbReadyEvent struct {
 // the final event vocabulary.
 type imageHiddenEvent struct {
 	ID string `json:"id"`
+}
+
+// imageLikedEvent is the image-liked payload: the post-toggle like
+// count for the id. Count is absolute (never a delta) so a subscriber
+// that missed earlier events still renders the truth.
+type imageLikedEvent struct {
+	ID    string `json:"id"`
+	Count int    `json:"count"`
 }
 
 // event is one SSE frame. ID is the monotonic sequence number used
@@ -209,15 +220,17 @@ func (h *sseHub) publishVisible(name string, payload any, safeVisible bool) uint
 }
 
 // visibleToSafe reports whether ev may be delivered to a safe-site
-// subscriber. Only the per-image events (image-new, thumb-ready) carry
-// row-derived visibility; every other event name is delivered to both
-// sites unfiltered — image-hidden above all: dropping a card that
-// isn't present is a client no-op, while withholding it would strand a
-// stale card on the safe site after an admin hides an image that site
-// could see.
+// subscriber. Only the per-image events (image-new, thumb-ready,
+// image-liked) carry row-derived visibility; every other event name is
+// delivered to both sites unfiltered — image-hidden above all: dropping
+// a card that isn't present is a client no-op, while withholding it
+// would strand a stale card on the safe site after an admin hides an
+// image that site could see. image-liked must be site-gated for the
+// same reason image-new is: the event's mere arrival names an image,
+// which is an existence leak for rows the safe host must 404.
 func visibleToSafe(ev event) bool {
 	switch ev.Name {
-	case eventImageNew, eventThumbReady:
+	case eventImageNew, eventThumbReady, eventImageLiked:
 		return ev.SafeVisible
 	default:
 		return true
@@ -451,15 +464,16 @@ func (h *sseHub) releaseIP(ip string) {
 	}
 }
 
-// sseClientIP resolves the per-connection cap key. X-Forwarded-For's
-// first value wins when present: the site is expected to sit behind
-// the operator's own reverse proxy, which appends the real client
-// there. Trusting XFF is a deployment assumption, not a security
-// boundary — a directly-exposed server lets clients forge the header
-// and dodge the cap — but the cap is a cheap guard against runaway
-// tabs/scripts, not an authentication mechanism. Without XFF, the
-// RemoteAddr host part is used.
-func sseClientIP(r *http.Request) string {
+// clientIP resolves the deployment's notion of "the client" for a
+// request: X-Forwarded-For's first value when the operator's reverse
+// proxy supplies it, else RemoteAddr's host part. THREE consumers key
+// on this one resolver so they can never disagree — the SSE per-IP
+// connection cap, the like toggle's per-IP rate bucket, and the
+// request access log's client_ip field. Trusting XFF is a deployment
+// assumption, not a security boundary — a directly-exposed server
+// lets clients forge the header and dodge the caps — but the caps are
+// cheap guards against runaway tabs/scripts, not authentication.
+func clientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		if i := strings.IndexByte(xff, ','); i >= 0 {
 			xff = xff[:i]
@@ -522,7 +536,7 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Cheap per-IP guard before any streaming state is set up.
-	ip := sseClientIP(r)
+	ip := clientIP(r)
 	if !hub.acquireIP(ip) {
 		http.Error(w, "too many event streams from this address", http.StatusTooManyRequests)
 		return

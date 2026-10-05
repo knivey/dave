@@ -481,7 +481,11 @@ func TestDetailsPageMainImageServesOriginal(t *testing.T) {
 	assert.NotContains(t, body, `t/display`, "display thumb is not the page's main image (og:image only, and this pending row falls back to orig there too)")
 	assert.Contains(t, body, `<button type="button" class="zoom-toggle`, "zoom toggle button carries the main image")
 	assert.Contains(t, body, `aria-haspopup="dialog" aria-expanded="false"`, "toggle advertises the overlay dialog and its closed state (aria-pressed is gone with the in-place toggle semantics)")
-	assert.NotContains(t, body, `aria-pressed`, "no in-place zoom state to press")
+	// The zoom element itself carries no pressed state. (Scoped to the
+	// zoom button, not the whole page: the like button legitimately
+	// uses aria-pressed for its own toggle semantics.)
+	assert.NotContains(t, body, `class="zoom-toggle nodims" id="zoom-toggle" aria-pressed`, "no in-place zoom state to press")
+	assert.NotContains(t, body, `class="zoom-toggle" id="zoom-toggle" aria-pressed`, "no in-place zoom state to press (dims variant)")
 	assert.Contains(t, body, `<div class="stage">`, "stage wraps the fit-state box between the chevron rails")
 	// The bulletproof fit pattern: the BOX owns the caps and the img
 	// fills it with contain — the img itself no longer carries the

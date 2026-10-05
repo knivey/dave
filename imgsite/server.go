@@ -82,8 +82,13 @@ type App struct {
 	db    *sqlx.DB
 	store *Store
 
-	limiter    *rateLimiter
-	configPath string
+	limiter *rateLimiter
+	// likeLimiter guards POST /{id}/like per IP (see likeRateLimiter),
+	// separately from the upload bucket: like traffic must never eat
+	// upload budget (and vice versa). Not hot-reloadable — the rate is
+	// a hardcoded constant.
+	likeLimiter *likeRateLimiter
+	configPath  string
 
 	thumbs *thumbWorker
 	events *sseHub
@@ -91,11 +96,12 @@ type App struct {
 
 func NewApp(cfg Config, db *sqlx.DB, configPath string) *App {
 	return &App{
-		config:     cfg,
-		db:         db,
-		store:      NewStore(cfg.Storage.ResolvedPath, cfg.Storage.ResolvedThumbsPath),
-		limiter:    newRateLimiter(cfg.Upload.RatePerMinute),
-		configPath: configPath,
+		config:      cfg,
+		db:          db,
+		store:       NewStore(cfg.Storage.ResolvedPath, cfg.Storage.ResolvedThumbsPath),
+		limiter:     newRateLimiter(cfg.Upload.RatePerMinute),
+		likeLimiter: newLikeRateLimiter(likesPerMinute),
+		configPath:  configPath,
 	}
 }
 
@@ -831,6 +837,15 @@ func (a *App) buildHandler() http.Handler {
 	mux.HandleFunc("POST /admin/reextract", a.handleAdminReextract)
 	mux.HandleFunc("GET /api/images/{id}/neighbors", a.handleNeighbors)
 	mux.HandleFunc("DELETE /api/images/{id}", a.handleDeleteImage)
+	// Like toggle. Registered as a wildcard pattern, unlike the GET
+	// id-keyed routes (which must go through handleImageRoutes because
+	// GET multi-segment wildcards overlap /static/{rest...} — see its
+	// DESIGN NOTE): on the POST side there is nothing to overlap. The
+	// only other POST patterns are the literals /updo, /admin/reload,
+	// and /admin/reextract, and a literal segment always wins
+	// precedence over {id}, so POST /admin/reload can never land here
+	// and the {id} shape is validated in the handler anyway.
+	mux.HandleFunc("POST /{id}/like", a.handleLikeToggle)
 	mux.HandleFunc("GET /static/", staticHandler().ServeHTTP)
 
 	var handler http.Handler = mux
@@ -853,12 +868,18 @@ func requestLogMiddleware(next http.Handler) http.Handler {
 		start := time.Now()
 		lrw := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(lrw, r)
+		// remote_addr is the raw TCP peer (the reverse proxy's IP in
+		// production); client_ip is the deployment-resolved identity
+		// (clientIP — the SAME resolver the SSE cap and like limiter
+		// key on, so the log can never disagree with what a limiter
+		// actually throttled). They diverge only when XFF is present.
 		logger.Info("http request",
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", lrw.statusCode,
 			"duration_ms", time.Since(start).Milliseconds(),
 			"remote_addr", r.RemoteAddr,
+			"client_ip", clientIP(r),
 		)
 	})
 }

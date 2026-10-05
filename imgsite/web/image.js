@@ -1,6 +1,7 @@
-// image.js: fullscreen click-to-zoom overlay on the main image, live
-// reveal of the arrival-direction chevron, and keyboard navigation on
-// the image details page.
+// image.js: fullscreen click-to-zoom overlay on the main image, the
+// like-toggle enhancement (fetch-based, over the server-rendered form),
+// live like-count updates, live reveal of the arrival-direction
+// chevron, and keyboard navigation on the image details page.
 //
 // The server renders a complete page for no-JS users (fit-state main
 // image in its aspect box, static chevrons OUTSIDE the image, "open
@@ -429,22 +430,66 @@ export function boot() {
 		});
 	}
 
-	// Live reveal only applies at the newest end of the gallery.
-	if (document.body.dataset.atEnd !== "true") return;
+	// ---- Like toggle (progressive enhancement over the form) ----
+	// The server renders a plain POST form; this layer swaps the full
+	// round trip for a fetch + in-place update. The Accept header is
+	// the ONLY thing selecting the JSON path — the no-JS form POST
+	// sends default Accepts and gets the 303 back here instead.
+	const likeForm = document.querySelector("form.like-form");
+	if (likeForm) {
+		likeForm.addEventListener("submit", (e) => {
+			e.preventDefault();
+			const btn = document.getElementById("like-btn");
+			const cnt = document.getElementById("like-count");
+			// Guard against rapid double-clicks: two cookieless POSTs
+			// in flight would each mint their own token and DOUBLE-like
+			// (the Set-Cookie only lands with the first response), and
+			// the orphan like could never be un-liked. Re-enabled in
+			// finally; the catch-path fallback below submits the form
+			// programmatically, which ignores the disabled button.
+			if (btn) btn.disabled = true;
+			fetch(likeForm.action, { method: "POST", headers: { Accept: "application/json" } })
+				.then((resp) => {
+					if (!resp.ok) throw new Error("HTTP " + resp.status);
+					return resp.json();
+				})
+				.then((data) => {
+					btn.classList.toggle("liked", !!data.liked);
+					btn.setAttribute("aria-pressed", data.liked ? "true" : "false");
+					btn.title = data.liked ? "unlike" : "like";
+					if (cnt && Number.isFinite(data.count)) cnt.textContent = String(data.count);
+				})
+				.catch(() => {
+					// Network or 5xx: degrade to the no-JS contract — a
+					// real form POST navigates back with re-rendered
+					// state (and carries the Set-Cookie either way).
+					likeForm.submit();
+				})
+				.finally(() => {
+					if (btn) btn.disabled = false;
+				});
+		});
+	}
 
+	// ---- SSE: ONE stream for the whole page ----
+	// image-liked keeps THIS image's count fresh when anyone toggles
+	// (the pressed state is never touched — only the local visitor's
+	// own toggle owns that). image-new drives the live prev-chevron
+	// reveal, which only means anything at the newest end
+	// (data-at-end); it is subscribed unconditionally anyway so the
+	// like-count handler needs no second stream (each connect() is its
+	// own EventSource and its own per-IP server slot).
 	let fetchTimer = null;
 	let revealed = false;
-
-	// First-connect replay cursor: body[data-last-event] (present
-	// whenever a hub exists) is the event id this page's neighbors were
-	// rendered at. An image-new in the render→subscribe gap would
-	// otherwise never fire the reveal — connect() replays it via
-	// ?since=<id>, and the debounced neighbors fetch reveals the
-	// chevron exactly as a live arrival would. Absent attribute →
-	// undefined → live-only first connect.
 	connect(
 		{
+			"image-liked": (ev) => {
+				if (!ev || ev.id !== currentID) return;
+				const cnt = document.getElementById("like-count");
+				if (cnt && Number.isFinite(ev.count)) cnt.textContent = String(ev.count);
+			},
 			"image-new": () => {
+				if (document.body.dataset.atEnd !== "true") return;
 				if (revealed) return;
 				// Bursts (multi-image jobs) debounce into one fetch.
 				if (fetchTimer) clearTimeout(fetchTimer);

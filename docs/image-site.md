@@ -360,13 +360,14 @@ timestamps. Cursor wire format: `?after=YYYY-MM-DD%20HH%3AMM%3ASS.mmm~<id>`
 
 | Route | What | Cache |
 |---|---|---|
-| `GET /` | gallery page (first ~48, infinite scroll) | no-cache (live) |
-| `GET /gallery?after=YYYY-MM-DD%20HH%3AMM%3ASS~<id>` | next gallery page (HTML fragment only — the `cards` partial for infinite scroll) | no-cache |
+| `GET /` | gallery page (first ~48, infinite scroll); `?sort=liked` selects the most-liked order (keyset `count~created_at~id`) | no-cache (live) |
+| `GET /gallery?after=YYYY-MM-DD%20HH%3AMM%3ASS~<id>` | next gallery page (HTML fragment only — the `cards` partial for infinite scroll); `&sort=liked` for the liked order (cursor format switches to `<count>~<created>~<id>`) | no-cache |
 | `GET /search?q=…` | search results (full HTML page — shareable link + no-JS form target) | no-cache |
 | `GET /search-fragment?q=…&after=…` | search results page (HTML fragment — first page + infinite scroll) | no-cache |
 | `GET /static/…` | embedded web/ assets (JS/CSS; no directory listings) | `public, max-age=3600` |
 | `GET /favicon.ico` | inline SVG favicon | `public, max-age=86400` |
 | `GET /<id>` | image details page (HTML) | no-cache (next-button is live) |
+| `POST /<id>/like` | like toggle (anonymous cookie identity — see "Likes"); JSON for `Accept: application/json`, 303 back to the page otherwise | no-store (JSON path) |
 | `GET /<id>/orig/<filename>` | **permanent direct link** — original bytes served directly (200) | `public, max-age=31536000, immutable` |
 | `GET /<id>/t/<size>` (`small`\|`display` — tokens mapped to the configured `thumbnails.*_width`) | thumbnail bytes served directly (200) | ready: immutable; **pending: 200 placeholder JPEG with `no-store`** (same-URL swap to real bytes on `thumb-ready` — no intermediary may ever cache the placeholder); **failed: 404 no-cache** so the JS data-orig fallback works |
 | `GET /api/images/<id>/neighbors` | `{prev:{…}, next:{…}}` keyset neighbors | no-cache |
@@ -584,6 +585,76 @@ Behavior:
   DB open failure); per-file skips and thumbnail failures never fail the
   run.
 
+## Likes (`POST /<id>/like` · likes.go · migration 004)
+
+Anonymous, cookie-token-based like toggling (owner request, Oct 2026):
+a like button on the details page, like counts on gallery cards
+(right-justified on the time line, rendered only when non-zero), and a
+`?sort=liked` gallery mode. Search results show counts too but keep
+relevance ordering — sort is gallery-only by design.
+
+**Identity.** The `imgsite_liker` cookie (16 crypto/rand bytes, hex;
+`HttpOnly; Secure; SameSite=Lax; Path=/`; ~10y) is minted on the
+visitor's FIRST like POST and never before — page GETs set no cookies,
+so visitors who never like stay cookieless. One row in `likes
+(image_id, token, created_at)` = one like; the composite PK is the
+entire dedupe story. Garbage cookie values are ignored (validated as
+exactly 32 lowercase hex chars) and re-minted. Cookies are host-scoped,
+so a visitor using both the default and the safe host holds two tokens
+and can like the same image twice — accepted: a casual anonymous
+feature, not a boundary. Likes are global per image (both hosts render
+the same count); hidden rows keep their likes like they keep
+everything else. The cookie is `Secure`: plain-HTTP deployments (local
+test rigs) won't store it, so every visit looks cookieless — likes
+still land server-side but can never be un-liked there; serve over
+HTTPS (production sits behind a TLS proxy). The same one-shot
+double-like exists for a no-JS rapid double-submit (two cookieless
+POSTs each mint a token); the JS path disables the button in flight.
+
+**Toggle.** `INSERT … ON CONFLICT (image_id, token) DO NOTHING` first:
+1 row affected = the toggle LIKED; 0 rows = already liked → `DELETE`
+un-likes. Single-connection SQLite serializes racing toggles. A
+dedicated PER-IP rate bucket (60/min, keyed like the SSE cap —
+X-Forwarded-For first, else RemoteAddr; buckets idle-pruned past 1024
+entries; like traffic never shares the upload limiter) returns 429.
+Per-IP, not per-process: a shared bucket would let one scripted client
+starve every other visitor's toggles — a remote off-switch for the
+feature. Response shape by content negotiation: JS
+(`Accept: application/json`) gets `200 {"liked":bool,"count":N}`
+(`Cache-Control: no-store`); the no-JS form POST gets `303 → /<id>`
+with the cookie riding along, and the re-rendered page paints the new
+state. Visibility rules mirror the details page exactly: unknown/
+malformed id 404, hidden 410, safe-host-invisible 404 (no existence
+leak — a GET to the path is the catch-all's 404 since `GET /` matches
+everything).
+
+**SSE.** Every committed toggle publishes `image-liked {id, count}`
+(count is absolute, never a delta) through the same per-site gate as
+`image-new` — `SafeVisible` from the row, withheld from safe-site
+subscribers on both live fan-out and ring replay. gallery.js syncs the
+card's `.likes` span (creating it when a count first moves past zero,
+removing it on fall-to-zero, sweeping the detached set like
+`onThumbReady` does); image.js keeps the open page's count fresh but
+never touches the pressed state (only the local visitor's own toggle
+owns that).
+
+**Liked sort.** `?sort=liked` on `/` and `/gallery` keys on
+`(like_count DESC, created_at DESC, id DESC)` via a correlated
+subselect; the cursor format becomes `<count>~<created_at>~<id>` (the
+modes refuse each other's cursors — 400). Like counts are MUTABLE, so
+a row whose count rose mid-scroll can reappear on a fetched page or be
+skipped: the client's append-dedupe (loadMore skips an already-
+attached data-id) absorbs reappearances and skips self-heal on the
+next full load. Live arrivals in liked mode buffer behind the "+N new"
+pill (prepending would lie about the order) and the pill RELOADS
+instead of flushing — including on a liked page whose user then typed
+a query (the reload preserves the /search context rather than exiting
+the search). Every client path that re-fetches or re-addresses the
+gallery (infinite scroll's fragment URL, search.js's gallery restore +
+`history.replaceState`) derives its sort param from one source of
+truth, `galleryQS()` in gallery.js — hardcoding either path strands a
+cursor-mode mismatch that 400s every subsequent page fetch.
+
 ## Admin deletion (`DELETE /api/images/<id>` · `imgsite -delete`)
 
 Two surfaces, one DB path: every hide funnels through `dbHideImage`'s
@@ -750,6 +821,9 @@ data: {"id":"aQ3f9xK","created_at":"2026-09-24T03:12:00Z","original_prompt":"shr
 
 event: thumb-ready
 data: {"id":"aQ3f9xK","thumb_status":"ready"}
+
+event: image-liked           (like toggle committed; count is ABSOLUTE)
+data: {"id":"aQ3f9xK","count":3}
 
 event: image-hidden          (soft delete — clients drop the card)
 data: {"id":"aQ3f9xK"}

@@ -110,6 +110,14 @@ type dbImage struct {
 
 	WorkflowJSON string `db:"workflow_json"`
 	MetaSource   string `db:"meta_source"`
+
+	// LikeCount is NOT a column on images: it is hydrated onto rows by
+	// the likes layer (hydrateLikeCounts / the liked-sort query's
+	// correlated subselect aliased like_count) after the base fetch.
+	// SELECT i.* scans leave it zero — sqlx only errors on result
+	// columns with no struct field, never the reverse — and no INSERT
+	// or UPDATE ever names it.
+	LikeCount int `db:"like_count"`
 }
 
 func initDB(dbPath string) (*sqlx.DB, error) {
@@ -310,7 +318,8 @@ func dbUpdateThumbReady(db *sqlx.DB, id string, width, height int) error {
 // hidden-filtered and site-filtered: the safe site's visibility
 // fragment rides the same WHERE as one more AND conjunct on the images
 // row. Empty after* yields the first page. Callers fetch limit+1 rows
-// to detect has-more.
+// to detect has-more. Rows come back with LikeCount hydrated (one
+// extra grouped query — card rendering needs the count on every row).
 func dbGetGalleryPage(db *sqlx.DB, afterCreatedAt, afterID string, limit int, sc siteCtx) ([]dbImage, error) {
 	frag, fargs := siteVisibilityFilter(sc)
 	var rows []dbImage
@@ -326,7 +335,72 @@ func dbGetGalleryPage(db *sqlx.DB, afterCreatedAt, afterID string, limit int, sc
 				` ORDER BY i.created_at DESC, i.id DESC LIMIT ?`,
 			append(append([]any{afterCreatedAt, afterID}, fargs...), limit)...)
 	}
-	return rows, err
+	if err != nil {
+		return nil, err
+	}
+	if err := hydrateLikeCounts(db, imagePtrs(rows)); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// imagePtrs borrows pointers to each row's embedded dbImage for the
+// batch hydrator (Go range-copy safety: &rows[i], not &loopvar).
+func imagePtrs(rows []dbImage) []*dbImage {
+	ptrs := make([]*dbImage, len(rows))
+	for i := range rows {
+		ptrs[i] = &rows[i]
+	}
+	return ptrs
+}
+
+// dbGetGalleryPageLiked returns one keyset page of the liked sort
+// (like_count DESC, created_at DESC, id DESC), hidden- and
+// site-filtered, with LikeCount hydrated. Empty after* yields the
+// first page; callers fetch limit+1 to detect has-more.
+//
+// The count is a computed column — the same correlated subselect text
+// appears in the row-value cursor predicate and the ORDER BY, while
+// the DISPLAYED count hydrates via the separate grouped IN query
+// (hydrateLikeCounts, same as the default sort) — so the row-value
+// form `(<count>, created_at, id) < (?, ?, ?)` range-seeks exactly
+// like the default mode's created/id keyset (the mutable sort column
+// rules out an index anyway; gallery scale is hundreds-to-low-
+// thousands of rows, a full scan + top-N sort).
+//
+// DESIGN NOTE (mutable sort column): like counts change between page
+// fetches, so a row whose count rose mid-scroll can reappear on the
+// next page (or be skipped if it fell). This is inherent to keyset
+// paging on a mutable column at this scale; the client's append-dedupe
+// (gallery.js loadMore skips a card whose data-id is already attached)
+// absorbs the reappearance case, and a skip self-heals on the next
+// full page load. Trading strict snapshot consistency for zero extra
+// machinery is the right call for a casual gallery.
+func dbGetGalleryPageLiked(db *sqlx.DB, afterCount int, afterCreatedAt, afterID string, limit int, sc siteCtx) ([]dbImage, error) {
+	frag, fargs := siteVisibilityFilter(sc)
+	countExpr := `(SELECT COUNT(*) FROM likes l WHERE l.image_id = i.id)`
+	var rows []dbImage
+	var err error
+	if afterCreatedAt == "" {
+		err = db.Select(&rows,
+			`SELECT i.* FROM images i WHERE i.hidden = 0`+frag+
+				` ORDER BY `+countExpr+` DESC, i.created_at DESC, i.id DESC LIMIT ?`,
+			append(append([]any{}, fargs...), limit)...)
+	} else {
+		args := append([]any{afterCount, afterCreatedAt, afterID}, fargs...)
+		args = append(args, limit)
+		err = db.Select(&rows,
+			`SELECT i.* FROM images i WHERE i.hidden = 0 AND (`+countExpr+`, i.created_at, i.id) < (?, ?, ?)`+frag+
+				` ORDER BY `+countExpr+` DESC, i.created_at DESC, i.id DESC LIMIT ?`,
+			args...)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := hydrateLikeCounts(db, imagePtrs(rows)); err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 // dbHideImage soft-deletes a row: hidden=1, nothing else. DESIGN NOTE

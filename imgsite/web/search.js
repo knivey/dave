@@ -22,6 +22,7 @@ import {
 	setFragmentURL,
 	resetPaging,
 	rewatchSentinel,
+	galleryQS,
 } from "./gallery.js";
 
 // 300ms: typical inter-key gaps at normal typing speed run 100–300ms,
@@ -119,8 +120,16 @@ export function boot() {
 
 	async function restoreGallery() {
 		const mySeq = modeSeq;
+		// Sort-aware restore: the gallery being restored to is the one
+		// the page booted in (body[data-sort] -> galleryQS). Fetching
+		// a bare "/gallery" here would restore newest-ordered cards
+		// carrying DEFAULT-mode cursors while defaultFragmentURL still
+		// appends &sort=liked — infinite scroll would 400 forever
+		// (see galleryQS). Same reasoning for the replaceState URL.
+		const qs = galleryQS();
+		const galleryPath = "/gallery" + (qs ? "?" + qs : "");
 		try {
-			if (!(await swapGrid("/gallery", mySeq))) return;
+			if (!(await swapGrid(galleryPath, mySeq))) return;
 		} catch (err) {
 			if (isAbortError(err)) return; // superseded, not failed
 			lastFetchFailed = true;
@@ -132,7 +141,7 @@ export function boot() {
 		// Clear the filter only after the live grid is back, so the
 		// pill's buffered arrivals flush into the restored gallery.
 		setFilterActive(false);
-		history.replaceState(null, "", "/");
+		history.replaceState(null, "", qs ? "/?" + qs : "/");
 		document.title = siteTitle;
 	}
 

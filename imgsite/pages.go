@@ -1,7 +1,9 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"net/http"
@@ -199,6 +201,11 @@ table.params td { border: 1px solid #2c2c31; padding: 0.35rem 0.6rem; vertical-a
 table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
 .mono { font-family: ui-monospace, monospace; }
 .provenance { color: #999; font-size: 0.9rem; }
+/* Like toggle: heart glyph + count; the liked state tints both (the
+   base button styles come from the global button rule above). */
+.like-form { margin: 0.25rem 0 0.5rem; }
+.like-btn.liked { color: #ff6b81; border-color: #7a3d4a; }
+.like-btn:active { border-color: #b5566c; }
 </style>
 </head>
 <body data-page="image" data-image-id="{{.ID}}"{{if .AtEnd}} data-at-end="true"{{end}}{{if .LastEvent}} data-last-event="{{.LastEvent}}"{{end}}>
@@ -250,6 +257,15 @@ table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
 {{if .WorkflowName}} &middot; {{.WorkflowName}}{{end}}
 {{if .ProvenanceChannel}} &middot; {{.ProvenanceChannel}}{{end}}
 </p>
+{{/* Like toggle (anonymous, cookie-token identity — see likes.go).
+     A plain POST form so the no-JS path is a full round trip: toggle
+     → 303 back here → re-rendered state. image.js intercepts the
+     submit and swaps in the fetch()-based JSON path. The count lives
+     in its own span so SSE-driven count updates (other people liking)
+     never touch the button's own state classes. */}}
+<form class="like-form" method="post" action="/{{.ID}}/like">
+<button type="submit" class="like-btn{{if .LikedByYou}} liked{{end}}" id="like-btn" aria-pressed="{{if .LikedByYou}}true{{else}}false{{end}}" title="{{if .LikedByYou}}unlike{{else}}like{{end}}">&#9829; <span id="like-count">{{.LikeCount}}</span></button>
+</form>
 
 <h2>Original prompt</h2>
 {{if .OriginalPrompt}}<p class="original">{{.OriginalPrompt}}</p>{{else}}<p class="provenance"><em>(no prompt recorded)</em></p>{{end}}
@@ -357,7 +373,12 @@ const cardsPartialSrc = `{{define "cards"}}{{range .Cards}}<article class="card"
 {{if .ThumbFailed}}<img loading="lazy" src="{{.OrigURL}}" alt="{{.PromptSnippet}}">{{else if .ThumbPending}}<img class="pending" loading="lazy" src="{{.ThumbURL}}" data-orig="{{.OrigURL}}" alt="{{.PromptSnippet}}">{{else}}<img loading="lazy" src="{{.ThumbURL}}" alt="{{.PromptSnippet}}">{{end}}
 </a>
 {{if .SnippetParts}}<p class="prompt">{{range .SnippetParts}}{{if .Hit}}<mark>{{.Text}}</mark>{{else}}{{.Text}}{{end}}{{end}}</p>{{else}}<p class="prompt">{{.PromptSnippet}}</p>{{end}}
-<time datetime="{{.CreatedRFC3339}}" data-ts="{{.CreatedRFC3339}}">{{.Timestamp}}</time>
+{{/* Meta row: timestamp left, like count right-justified on the same
+     line (owner request, Oct 2026). The likes span renders ONLY for
+     non-zero counts — a zero span on every card is noise; the SSE
+     image-liked handler creates the span client-side when a count
+     moves 0→1. */}}
+<div class="meta"><time datetime="{{.CreatedRFC3339}}" data-ts="{{.CreatedRFC3339}}">{{.Timestamp}}</time>{{if .LikeCount}}<span class="likes" data-count="{{.LikeCount}}">&#9829; {{.LikeCount}}</span>{{end}}</div>
 </article>
 {{end}}{{if .NoResults}}<p class="no-results">no results for {{.Query}}</p>{{end}}{{if .NothingSearched}}<p class="no-results">nothing searched yet — type a query</p>{{end}}{{if .EmptyGallery}}<p class="no-results">nothing here yet — images appear here as they are generated</p>{{end}}{{if .HasMore}}<div class="sentinel" data-next-cursor="{{.NextCursor}}"></div>{{end}}{{end}}`
 
@@ -378,7 +399,7 @@ const galleryPageSrc = `<!DOCTYPE html>
 {{template "head-extras" .}}<link rel="stylesheet" href="/static/style.css">
 <script type="module" src="/static/app.js"></script>
 </head>
-<body data-page="gallery" data-gallery-title="{{.Title}}"{{if .LastEvent}} data-last-event="{{.LastEvent}}"{{end}}>
+<body data-page="gallery" data-gallery-title="{{.Title}}"{{if .SortLiked}} data-sort="liked"{{end}}{{if .LastEvent}} data-last-event="{{.LastEvent}}"{{end}}>
 <header class="site">
 <div class="head-row">
 <div>
@@ -389,6 +410,14 @@ const galleryPageSrc = `<!DOCTYPE html>
 <input id="search-box" type="search" name="q" value="{{.Query}}" placeholder="search prompts…" autocomplete="off" aria-label="Search prompts">
 </form>
 </div>
+{{/* Sort mode (gallery only — search keeps relevance order): plain
+     links, so no-JS visitors get a full page load per switch.
+     aria-current marks the active mode; body[data-sort] above is what
+     the JS fragment fetcher reads to keep &sort=liked on fetched
+     pages. Search pages don't render this nav at all. */}}
+<nav class="sort-nav" aria-label="sort order">
+sort: <a href="/"{{if not .SortLiked}} aria-current="page"{{end}}>newest</a> · <a href="/?sort=liked"{{if .SortLiked}} aria-current="page"{{end}}>most liked</a>
+</nav>
 </header>
 <main>
 <div id="grid">
@@ -455,6 +484,9 @@ type galleryCard struct {
 	CreatedRFC3339 string
 	ThumbPending   bool
 	ThumbFailed    bool
+	// LikeCount is the hydrated row count; zero renders no .likes
+	// span (see the cards partial).
+	LikeCount int
 	// SnippetParts, when non-nil, replaces the plain prompt preview
 	// with a highlighted match snippet (search results only).
 	SnippetParts []snippetPart
@@ -494,6 +526,11 @@ type galleryView struct {
 	// gallery, "search: q — site" + site description on search pages.
 	OGTitle       string
 	OGDescription string
+
+	// SortLiked marks the liked sort mode: it drives the sort-nav's
+	// aria-current, the body data-sort attribute (the JS fragment
+	// fetcher appends &sort=liked from it), and the NextCursor format.
+	SortLiked bool
 }
 
 // galleryPageSize is the number of cards per keyset page; handlers fetch
@@ -517,13 +554,20 @@ func (a *App) handleGalleryPage(w http.ResponseWriter, r *http.Request) {
 	// Overlap-safe, gap-unsafe: capture first.
 	lastEvent, hasHub := a.renderEventCursor()
 	cfg := a.getConfig()
-	rows, err := dbGetGalleryPage(a.db, "", "", galleryPageSize+1, sc)
+	sortLiked := gallerySortLiked(r)
+	var rows []dbImage
+	var err error
+	if sortLiked {
+		rows, err = dbGetGalleryPageLiked(a.db, 0, "", "", galleryPageSize+1, sc)
+	} else {
+		rows, err = dbGetGalleryPage(a.db, "", "", galleryPageSize+1, sc)
+	}
 	if err != nil {
 		logger.Error("gallery page query failed", "error", err)
 		http.Error(w, "lookup failure", http.StatusInternalServerError)
 		return
 	}
-	view := buildGalleryView(cfg, rows)
+	view := buildGalleryView(cfg, rows, sortLiked)
 	if hasHub {
 		view.LastEvent = &lastEvent
 	}
@@ -549,23 +593,40 @@ func (a *App) handleGalleryPage(w http.ResponseWriter, r *http.Request) {
 // markup contract for no consumer.
 func (a *App) handleGalleryFragment(w http.ResponseWriter, r *http.Request) {
 	sc := a.resolveSite(r)
+	sortLiked := gallerySortLiked(r)
+	afterCount := 0
 	var afterCreatedAt, afterID string
 	if after := r.URL.Query().Get("after"); after != "" {
-		var ok bool
-		afterCreatedAt, afterID, ok = parseKeysetCursor(after)
-		if !ok {
-			http.Error(w, "malformed cursor", http.StatusBadRequest)
-			return
+		if sortLiked {
+			var ok bool
+			afterCount, afterCreatedAt, afterID, ok = parseLikedKeysetCursor(after)
+			if !ok {
+				http.Error(w, "malformed cursor", http.StatusBadRequest)
+				return
+			}
+		} else {
+			var ok bool
+			afterCreatedAt, afterID, ok = parseKeysetCursor(after)
+			if !ok {
+				http.Error(w, "malformed cursor", http.StatusBadRequest)
+				return
+			}
 		}
 	}
 	cfg := a.getConfig()
-	rows, err := dbGetGalleryPage(a.db, afterCreatedAt, afterID, galleryPageSize+1, sc)
+	var rows []dbImage
+	var err error
+	if sortLiked {
+		rows, err = dbGetGalleryPageLiked(a.db, afterCount, afterCreatedAt, afterID, galleryPageSize+1, sc)
+	} else {
+		rows, err = dbGetGalleryPage(a.db, afterCreatedAt, afterID, galleryPageSize+1, sc)
+	}
 	if err != nil {
 		logger.Error("gallery fragment query failed", "error", err)
 		http.Error(w, "lookup failure", http.StatusInternalServerError)
 		return
 	}
-	view := buildGalleryView(cfg, rows)
+	view := buildGalleryView(cfg, rows, sortLiked)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -574,13 +635,14 @@ func (a *App) handleGalleryFragment(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func buildGalleryView(cfg Config, rows []dbImage) galleryView {
+func buildGalleryView(cfg Config, rows []dbImage, sortLiked bool) galleryView {
 	v := galleryView{
 		Title:         cfg.Site.Title,
 		SiteTitle:     cfg.Site.Title,
 		Description:   cfg.Site.Description,
 		OGTitle:       cfg.Site.Title,
 		OGDescription: cfg.Site.Description,
+		SortLiked:     sortLiked,
 	}
 	if len(rows) > galleryPageSize {
 		v.HasMore = true
@@ -591,7 +653,14 @@ func buildGalleryView(cfg Config, rows []dbImage) galleryView {
 	}
 	if v.HasMore && len(rows) > 0 {
 		last := rows[len(rows)-1]
-		v.NextCursor = formatKeysetCursor(last.CreatedAt, last.ID)
+		if sortLiked {
+			// The hydrated count is the cursor's first component — the
+			// hydrator ran inside the query functions precisely so
+			// this formats from the row's own count.
+			v.NextCursor = formatLikedKeysetCursor(last.LikeCount, last.CreatedAt, last.ID)
+		} else {
+			v.NextCursor = formatKeysetCursor(last.CreatedAt, last.ID)
+		}
 	}
 	return v
 }
@@ -614,6 +683,7 @@ func galleryCardFromImage(cfg Config, img *dbImage) galleryCard {
 		CreatedRFC3339: rfc3339,
 		ThumbPending:   img.ThumbStatus == thumbStatusPending,
 		ThumbFailed:    img.ThumbStatus == thumbStatusFailed,
+		LikeCount:      img.LikeCount,
 	}
 }
 
@@ -638,6 +708,44 @@ func parseKeysetCursor(s string) (createdAt, id string, ok bool) {
 		return "", "", false
 	}
 	return createdAt, id, true
+}
+
+// formatLikedKeysetCursor builds the liked-sort cursor wire format:
+// "<likeCount>~YYYY-MM-DD HH:MM:SS[.mmm]~<id>". The count is the
+// mutable first component of the (count, created_at, id) keyset — see
+// dbGetGalleryPageLiked's mutable-column note.
+func formatLikedKeysetCursor(count int, createdAt, id string) string {
+	return strconv.Itoa(count) + "~" + createdAt + "~" + id
+}
+
+// parseLikedKeysetCursor validates and splits a liked-sort cursor.
+// Exactly three '~'-free parts: digits count, parseable timestamp,
+// valid id. A default-mode cursor (2 parts) is rejected — the modes
+// must never silently cross-read each other's cursors.
+func parseLikedKeysetCursor(s string) (count int, createdAt, id string, ok bool) {
+	parts := strings.Split(s, "~")
+	if len(parts) != 3 {
+		return 0, "", "", false
+	}
+	n, err := strconv.Atoi(parts[0])
+	if err != nil || n < 0 {
+		return 0, "", "", false
+	}
+	if _, ok := parseDBTime(parts[1]); !ok {
+		return 0, "", "", false
+	}
+	if !validImageID(parts[2]) {
+		return 0, "", "", false
+	}
+	return n, parts[1], parts[2], true
+}
+
+// gallerySortLiked reads the gallery's sort param: exactly "liked"
+// selects the liked sort; anything else (absent, unknown) is the
+// default newest sort. Strict matching keeps the URL contract small
+// and typo-proof rather than aliasing prefixes.
+func gallerySortLiked(r *http.Request) bool {
+	return r.URL.Query().Get("sort") == "liked"
 }
 
 // clampSnippet truncates to maxRunes (including the ellipsis) so gallery
@@ -773,6 +881,13 @@ type imageView struct {
 	PrevID  string
 	HasNext bool
 	NextID  string
+
+	// LikeCount is the image's total likes; LikedByYou is the
+	// rendering visitor's toggle state (server-rendered from the liker
+	// cookie so the button paints correctly with JS disabled). The JS
+	// enhancement keeps them fresh after toggles and image-liked SSE.
+	LikeCount  int
+	LikedByYou bool
 
 	// LastEvent is the SSE stream position captured at render time —
 	// same replay-cursor contract as galleryView.LastEvent (nil = no
@@ -1046,6 +1161,22 @@ func (a *App) handleImagePage(w http.ResponseWriter, r *http.Request, id string)
 	}
 
 	view := buildImageView(img, prev, next, a.absBaseForSite(sc, r))
+	// Like state: count always, liked-by-you when the visitor carries a
+	// liker cookie (page GETs never mint one — only the POST does).
+	// The row was just fetched, so an error here is drift, not a miss:
+	// degrade to count 0 rather than failing the whole page.
+	token, _ := likeTokenFromRequest(r)
+	count, liked, err := dbGetLikeState(a.db, img.ID, token)
+	if err != nil {
+		// ErrNoRows is benign drift (the row vanished between the
+		// lookup above and this query — no hard deletes exist, so a
+		// tripwire log would only add noise); anything else is real.
+		if !errors.Is(err, sql.ErrNoRows) {
+			logger.Error("like state lookup failed", "id", id, "error", err)
+		}
+	} else {
+		view.LikeCount, view.LikedByYou = count, liked
+	}
 	if hasHub {
 		view.LastEvent = &lastEvent
 	}

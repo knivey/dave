@@ -531,10 +531,9 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 
 		// 3. Insert fresh system row first so it gets the smallest new id.
 		freshSysRow := Message{
-			SessionID:  inputs.SessionID,
-			Role:       RoleSystem,
-			Content:    freshSystem,
-			SettingsID: session.SettingsID,
+			SessionID: inputs.SessionID,
+			Role:      RoleSystem,
+			Content:   freshSystem,
 		}
 		if err := tx.Create(&freshSysRow).Error; err != nil {
 			return fmt.Errorf("insert fresh system: %w", err)
@@ -542,10 +541,9 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 
 		// 4. Insert the summary RoleSystem row.
 		summaryRow := Message{
-			SessionID:  inputs.SessionID,
-			Role:       RoleSystem,
-			Content:    summaryMessage,
-			SettingsID: session.SettingsID,
+			SessionID: inputs.SessionID,
+			Role:      RoleSystem,
+			Content:   summaryMessage,
 		}
 		if err := tx.Create(&summaryRow).Error; err != nil {
 			return fmt.Errorf("insert summary: %w", err)
@@ -572,7 +570,6 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 				ReasoningContent:   orig.ReasoningContent,
 				MultiContent:       orig.MultiContent,
 				IsAsyncResult:      orig.IsAsyncResult,
-				SettingsID:         orig.SettingsID,
 				SourceCompactionID: &compIDForTag,
 			}
 			if err := tx.Create(&newRow).Error; err != nil {
@@ -590,9 +587,10 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 		//    aiCmds.go's recovery path: previous_response_id refers to a
 		//    server-side history that no longer matches our compacted
 		//    local history, so we must drop it and resend full history on
-		//    the next turn.
+		//    the next turn. response_model goes with it (the pair is
+		//    always written/cleared together).
 		if err := tx.Model(&Session{}).Where("id = ?", inputs.SessionID).
-			Update("response_id", nil).Error; err != nil {
+			Updates(map[string]interface{}{"response_id": nil, "response_model": nil}).Error; err != nil {
 			return fmt.Errorf("reset response_id: %w", err)
 		}
 

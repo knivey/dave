@@ -27,7 +27,9 @@ func setupSessionWithResponseID(t *testing.T, responseID string) int64 {
 	sid, err := sessionMgr.CreateSession("testnet", "#101", ensureTestUser(t, "testnet", "shrew"), "testcmd", "testservice", "testmodel")
 	require.NoError(t, err)
 	if responseID != "" {
-		require.NoError(t, sessionMgr.UpdateResponseID(sid, &responseID))
+		// "test-model" matches the cfg.Model used by this helper's callers'
+		// runners, so the response_model chain guard lets chaining proceed.
+		require.NoError(t, sessionMgr.UpdateResponseID(sid, &responseID, "test-model"))
 	}
 
 	return sid
@@ -431,11 +433,11 @@ func TestRunTurnResponses_DifferentCtxKeysParallel(t *testing.T) {
 
 	sid1, err := sessionMgr.CreateSession("testnet", "#101", ensureTestUser(t, "testnet", "alice"), "testcmd", "svc", "model")
 	require.NoError(t, err)
-	require.NoError(t, sessionMgr.UpdateResponseID(sid1, strPtrOrNil("resp-alice")))
+	require.NoError(t, sessionMgr.UpdateResponseID(sid1, strPtrOrNil("resp-alice"), "test-model"))
 
 	sid2, err := sessionMgr.CreateSession("testnet", "#101", ensureTestUser(t, "testnet", "bob"), "testcmd", "svc", "model")
 	require.NoError(t, err)
-	require.NoError(t, sessionMgr.UpdateResponseID(sid2, strPtrOrNil("resp-bob")))
+	require.NoError(t, sessionMgr.UpdateResponseID(sid2, strPtrOrNil("resp-bob"), "test-model"))
 
 	makeRunner := func(sessionID int64, nick string, userID int64) *chatRunner {
 		client := openai.NewClient(
@@ -495,13 +497,122 @@ func TestRunTurnResponses_DifferentCtxKeysParallel(t *testing.T) {
 	assert.True(t, found["resp-bob"], "missing prevID %q in %v", "resp-bob", ids)
 }
 
+// TestRunTurnResponsesSkipsChainOnModelChange covers the Layer 1 chain guard:
+// a stored response produced by a different model must never be chained —
+// cross-model previous_response_id either errors with wording we may not
+// recognize or silently drops the prior assistant history (no error, so no
+// recovery would be possible). The guard falls back to full history, exactly
+// like an expired chain. Legacy NULL response_model rows still chain and rely
+// on the isResponseIDError net.
+func TestRunTurnResponsesSkipsChainOnModelChange(t *testing.T) {
+	setupTestDB(t)
+
+	var (
+		mu      sync.Mutex
+		prevIDs []string
+		inputs  []int
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]json.RawMessage
+		json.NewDecoder(r.Body).Decode(&body)
+
+		var prevID string
+		if raw, ok := body["previous_response_id"]; ok {
+			json.Unmarshal(raw, &prevID)
+		}
+		var input []json.RawMessage
+		json.Unmarshal(body["input"], &input)
+
+		mu.Lock()
+		prevIDs = append(prevIDs, prevID)
+		inputs = append(inputs, len(input))
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(makeResponsesAPIResponse("resp-new", "ok"))
+	}))
+	defer server.Close()
+
+	seed := func(t *testing.T, responseModel *string) *Session {
+		t.Helper()
+		sid, err := sessionMgr.CreateSession("testnet", "#101", ensureTestUser(t, "testnet", "shrew"), "testcmd", "svc", "m")
+		require.NoError(t, err)
+		require.NoError(t, theDB.Model(&Session{}).Where("id = ?", sid).
+			Updates(map[string]interface{}{"response_id": "resp-old", "response_model": responseModel}).Error)
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "one"}))
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "two"}))
+		s, err := sessionMgr.GetSession(sid)
+		require.NoError(t, err)
+		return s
+	}
+
+	runTurn := func(t *testing.T, session *Session, model string) (prevID string, inputLen int) {
+		t.Helper()
+		cfg := AIConfig{
+			Model:              model,
+			ResponsesAPI:       true,
+			PreviousResponseID: true,
+			MaxHistory:         20,
+			Timeout:            10 * time.Second,
+		}
+		client := openai.NewClient(
+			option.WithAPIKey("test-key"),
+			option.WithBaseURL(server.URL+"/v1"),
+		)
+		transport := newDaveTransport(nil, nil)
+		runner := &chatRunner{
+			openaiClient: &client,
+			transport:    transport,
+			httpClient:   &http.Client{Transport: transport},
+			cfg:          cfg,
+			network:      Network{Name: "testnet"},
+			channel:      "#101",
+			nick:         "shrew",
+			userID:       ensureTestUser(t, "testnet", "shrew"),
+			sessionID:    session.ID,
+			logger:       logxi.New("test"),
+			ctx:          context.Background(),
+			outputCh:     make(chan string, 100),
+		}
+		messages, err := sessionMgr.GetMessages(session.ID, cfg.MaxHistory)
+		require.NoError(t, err)
+		runner.runTurn(newTurnContext(runner.sessionID, messages))
+
+		mu.Lock()
+		defer mu.Unlock()
+		require.NotEmpty(t, prevIDs, "expected an API call")
+		return prevIDs[len(prevIDs)-1], inputs[len(inputs)-1]
+	}
+
+	t.Run("model change skips chain and sends full history", func(t *testing.T) {
+		s := seed(t, strPtrOrNil("old-model"))
+		prevID, inputLen := runTurn(t, s, "new-model")
+		assert.Empty(t, prevID, "previous_response_id must be omitted on model change")
+		assert.Equal(t, 3, inputLen, "full history (system + 2 user messages) must be sent when the chain is skipped")
+	})
+
+	t.Run("matching model chains last message only", func(t *testing.T) {
+		s := seed(t, strPtrOrNil("same-model"))
+		prevID, inputLen := runTurn(t, s, "same-model")
+		assert.Equal(t, "resp-old", prevID, "matching model must chain")
+		assert.Equal(t, 1, inputLen, "chained turn sends only the new message")
+	})
+
+	t.Run("legacy null response_model still chains", func(t *testing.T) {
+		s := seed(t, nil)
+		prevID, _ := runTurn(t, s, "any-model")
+		assert.Equal(t, "resp-old", prevID, "NULL response_model (legacy) must still chain")
+	})
+}
+
 func TestHandleResponseIDSave_SavesToRunnerSessionNotActive(t *testing.T) {
 	setupTestDB(t)
 
 	userID := ensureTestUser(t, "testnet", "shrew")
 	sid1, err := sessionMgr.CreateSession("testnet", "#101", userID, "chat", "openai", "model-a")
 	require.NoError(t, err)
-	require.NoError(t, sessionMgr.UpdateResponseID(sid1, strPtrOrNil("resp-old")))
+	require.NoError(t, sessionMgr.UpdateResponseID(sid1, strPtrOrNil("resp-old"), "model-a"))
 
 	sid2, err := sessionMgr.CreateSession("testnet", "#101", userID, "grk", "grok", "model-b")
 	require.NoError(t, err)
@@ -539,11 +650,11 @@ func TestHandleResponseIDSave_ClearsRunnerSessionNotActive(t *testing.T) {
 	userID := ensureTestUser(t, "testnet", "shrew")
 	sid1, err := sessionMgr.CreateSession("testnet", "#101", userID, "chat", "openai", "model-a")
 	require.NoError(t, err)
-	require.NoError(t, sessionMgr.UpdateResponseID(sid1, strPtrOrNil("resp-old")))
+	require.NoError(t, sessionMgr.UpdateResponseID(sid1, strPtrOrNil("resp-old"), "model-a"))
 
 	sid2, err := sessionMgr.CreateSession("testnet", "#101", userID, "grk", "grok", "model-b")
 	require.NoError(t, err)
-	require.NoError(t, sessionMgr.UpdateResponseID(sid2, strPtrOrNil("resp-grk")))
+	require.NoError(t, sessionMgr.UpdateResponseID(sid2, strPtrOrNil("resp-grk"), "model-b"))
 
 	_, err = sessionMgr.SwitchActive("testnet", "#101", userID, sid2)
 	require.NoError(t, err)

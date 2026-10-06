@@ -181,16 +181,20 @@ func (sm *SessionManager) IsSessionActive(sessionID int64) bool {
 	return count > 0
 }
 
-func (sm *SessionManager) UpdateResponseID(sessionID int64, responseID *string) error {
-	return updateDBSessionResponseID(sessionID, responseID)
+func (sm *SessionManager) UpdateResponseID(sessionID int64, responseID *string, model string) error {
+	return updateDBSessionResponseID(sessionID, responseID, model)
 }
 
 func (sm *SessionManager) GetSession(id int64) (*Session, error) {
 	return getDBSessionByID(id)
 }
 
-// CreateSessionSettings creates a session_settings row from the given config and
-// updates the session's settings_id foreign key. Returns the settings row ID.
+// CreateSessionSettings records the creation-time config snapshot for the
+// session (what it started with) and updates the session's settings_id
+// foreign key. Provenance only — stored settings are never applied to live
+// turns; the live config always wins (see
+// docs/superpowers/specs/2026-10-06-live-config-and-usage-attribution-design.md).
+// Returns the settings row ID.
 func (sm *SessionManager) CreateSessionSettings(sessionID int64, cfg AIConfig) (int64, error) {
 	setting := SessionSetting{
 		System:           cfg.System,
@@ -208,44 +212,6 @@ func (sm *SessionManager) CreateSessionSettings(sessionID int64, cfg AIConfig) (
 		return 0, fmt.Errorf("updating session settings_id: %w", err)
 	}
 	return setting.ID, nil
-}
-
-func (sm *SessionManager) GetSessionSettings(settingsID int64) (*SessionSetting, error) {
-	var setting SessionSetting
-	if err := sm.db.Where("id = ?", settingsID).First(&setting).Error; err != nil {
-		return nil, err
-	}
-	return &setting, nil
-}
-
-// ApplySettings overlays stored settings onto a live config. Since SessionSetting
-// stores a complete snapshot, all fields always override the base config. String
-// and int zero-value fields (Model="", MaxImages=0) only override when non-empty/non-zero
-// because they may not have been meaningful values in the original config.
-// DetectImages is a plain bool and always overrides since false is a valid value.
-//
-// DESIGN NOTE: In the future, we may compare the {{.Vars.*}} template variable
-// references between stored and live settings to detect meaningful config changes,
-// rather than doing a full string comparison.
-func ApplySettings(settings *SessionSetting, baseCfg AIConfig) AIConfig {
-	cfg := baseCfg
-	if settings.System != "" {
-		cfg.System = settings.System
-	}
-	if settings.Model != "" {
-		cfg.Model = settings.Model
-	}
-	cfg.DetectImages = settings.DetectImages
-	if settings.MaxImages != 0 {
-		cfg.MaxImages = settings.MaxImages
-	}
-	if settings.MaxContextImages != 0 {
-		cfg.MaxContextImages = settings.MaxContextImages
-	}
-	if settings.ReasoningEffort != "" {
-		cfg.ReasoningEffort = settings.ReasoningEffort
-	}
-	return cfg
 }
 
 func (sm *SessionManager) DeleteSession(id int64) error {
@@ -300,18 +266,4 @@ func textContentFromMessage(msg ChatMessage) string {
 		}
 	}
 	return ""
-}
-
-func (sm *SessionManager) SetResponseIDForActive(network, channel string, userID int64, responseID string) {
-	session, err := sm.GetActiveSession(network, channel, userID)
-	if err != nil || session == nil {
-		return
-	}
-	var rid *string
-	if responseID != "" {
-		rid = &responseID
-	}
-	if err := sm.UpdateResponseID(session.ID, rid); err != nil {
-		loggerSM.Error("Failed to update response_id", "session", session.ID, "error", err)
-	}
 }

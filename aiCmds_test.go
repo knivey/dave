@@ -194,12 +194,13 @@ func TestExecuteToolCalls_MultipleWithBuiltinOnlySendsMCP(t *testing.T) {
 
 func TestRenderAPIUser(t *testing.T) {
 	tests := []struct {
-		name     string
-		template string
-		nick     string
-		channel  string
-		network  string
-		expected string
+		name      string
+		template  string
+		nick      string
+		channel   string
+		network   string
+		sessionID int64
+		expected  string
 	}{
 		{
 			name:     "simple nick",
@@ -228,6 +229,13 @@ func TestRenderAPIUser(t *testing.T) {
 			nick:     "dave",
 			expected: "testbot-dave",
 		},
+		{
+			name:      "with session id",
+			template:  "irc:{{.Nick}}:s{{.SessionID}}",
+			nick:      "erin",
+			sessionID: 1234,
+			expected:  "irc:erin:s1234",
+		},
 	}
 
 	for _, tt := range tests {
@@ -236,12 +244,13 @@ func TestRenderAPIUser(t *testing.T) {
 			require.NoError(t, err)
 
 			cr := &chatRunner{
-				cfg:     AIConfig{apiUserTmpl: tmpl},
-				nick:    tt.nick,
-				channel: tt.channel,
-				network: Network{Name: tt.network, Nick: "testbot"},
-				ctx:     context.Background(),
-				logger:  logxi.New("test"),
+				cfg:       AIConfig{apiUserTmpl: tmpl},
+				nick:      tt.nick,
+				channel:   tt.channel,
+				network:   Network{Name: tt.network, Nick: "testbot"},
+				sessionID: tt.sessionID,
+				ctx:       context.Background(),
+				logger:    logxi.New("test"),
 			}
 
 			result := cr.renderAPIUser()
@@ -260,6 +269,119 @@ func TestRenderAPIUser_NoTemplate(t *testing.T) {
 		logger:  logxi.New("test"),
 	}
 	assert.Equal(t, "", cr.renderAPIUser())
+}
+
+func TestAPIIdentityMatrix(t *testing.T) {
+	tmpl, err := template.New("api_user").Parse("user-v")
+	require.NoError(t, err)
+
+	tests := []struct {
+		name         string
+		baseURL      string
+		responsesAPI bool
+		want         apiIdentity
+	}{
+		{
+			name:    "openai chat completions",
+			baseURL: "https://api.openai.com/v1",
+			want:    apiIdentity{SafetyID: "user-v", CacheKey: "user-v"},
+		},
+		{
+			name:         "openai responses",
+			baseURL:      "https://api.openai.com/v1",
+			responsesAPI: true,
+			want:         apiIdentity{SafetyID: "user-v", CacheKey: "user-v"},
+		},
+		{
+			name:    "xai chat completions",
+			baseURL: "https://api.x.ai/v1",
+			want:    apiIdentity{SafetyID: "user-v"},
+		},
+		{
+			name:         "xai responses",
+			baseURL:      "https://api.x.ai/v1",
+			responsesAPI: true,
+			want:         apiIdentity{SafetyID: "user-v", CacheKey: "user-v"},
+		},
+		{
+			name:    "openrouter chat completions",
+			baseURL: "https://openrouter.ai/api/v1",
+			want:    apiIdentity{User: "user-v"},
+		},
+		{
+			name:         "openrouter responses",
+			baseURL:      "https://openrouter.ai/api/v1",
+			responsesAPI: true,
+			want:         apiIdentity{SafetyID: "user-v"},
+		},
+		{
+			name:    "unknown provider chat completions",
+			baseURL: "https://llm.example.com/v1",
+			want:    apiIdentity{User: "user-v"},
+		},
+		{
+			name:         "unknown provider responses",
+			baseURL:      "https://llm.example.com/v1",
+			responsesAPI: true,
+			want:         apiIdentity{User: "user-v"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cr := &chatRunner{
+				cfg:     AIConfig{apiUserTmpl: tmpl},
+				baseURL: tt.baseURL,
+				nick:    "alice",
+				channel: "#chan",
+				network: Network{Name: "testnet"},
+				ctx:     context.Background(),
+				logger:  logxi.New("test"),
+			}
+
+			assert.Equal(t, tt.want, cr.apiIdentity(tt.responsesAPI))
+		})
+	}
+
+	t.Run("no template sends nothing", func(t *testing.T) {
+		cr := &chatRunner{
+			cfg:     AIConfig{},
+			baseURL: "https://api.openai.com/v1",
+			ctx:     context.Background(),
+			logger:  logxi.New("test"),
+		}
+		assert.Equal(t, apiIdentity{}, cr.apiIdentity(true))
+		assert.Equal(t, apiIdentity{}, cr.apiIdentity(false))
+	})
+}
+
+func TestProviderServiceDetection(t *testing.T) {
+	tests := []struct {
+		name           string
+		baseURL        string
+		wantOpenAI     bool
+		wantGrok       bool
+		wantOpenRouter bool
+	}{
+		{name: "openai", baseURL: "https://api.openai.com/v1", wantOpenAI: true},
+		{name: "openai subdomain", baseURL: "https://eu.api.openai.com/v1", wantOpenAI: true},
+		{name: "azure-like host is not openai", baseURL: "https://foo.openai.azure.com/v1"},
+		{name: "grok", baseURL: "https://api.x.ai/v1", wantGrok: true},
+		{name: "grok subdomain", baseURL: "https://api.staging.x.ai/v1", wantGrok: true},
+		{name: "xai lookalike is not grok", baseURL: "https://x.ai.example.com/v1"},
+		{name: "openrouter", baseURL: "https://openrouter.ai/api/v1", wantOpenRouter: true},
+		{name: "openrouter subdomain", baseURL: "https://api.openrouter.ai/v1", wantOpenRouter: true},
+		{name: "invalid url", baseURL: "://bad"},
+		{name: "empty", baseURL: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.wantOpenAI, isOpenAIService(tt.baseURL), "isOpenAIService")
+			assert.Equal(t, tt.wantGrok, isGrokService(tt.baseURL), "isGrokService")
+			assert.Equal(t, tt.wantOpenRouter, isOpenRouterService(tt.baseURL), "isOpenRouterService")
+		})
+	}
 }
 
 func makeResponsesAPIResponse(id, text string) map[string]any {

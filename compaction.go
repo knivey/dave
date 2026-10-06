@@ -303,7 +303,7 @@ func callSummarizer(ctx context.Context, cfg AIConfig, summarizerSys string, arc
 
 	apiCtx, cancel := context.WithTimeout(ctx, summarizerCfg.Timeout)
 	defer cancel()
-	params := buildChatCompletionParams(summarizerCfg, msgs, nil, "")
+	params := buildChatCompletionParams(summarizerCfg, msgs, nil, apiIdentity{})
 	start := time.Now()
 	resp, err := openaiClient.Chat.Completions.New(apiCtx, params)
 	dur := int(time.Since(start) / time.Millisecond)

@@ -18,7 +18,7 @@
 #   toolverbose          (bool, default: true)       Show 🔧 tool call notifications in IRC
 #   paralleltoolcalls    (bool, default: true)       Enable parallel MCP tool calls
 #   parallel             (int, default: 1)           Max concurrent requests per command
-#   api_user             (string)                    Go template for API "user" field (cascades to commands). Variables: {{.Nick}}, {{.BotNick}}, {{.Channel}}, {{.Network}}, {{.Date}}, {{.Vars.*}}. Empty = not sent.
+#   api_user             (string)                    Go template for the end-user identifier field (cascades to commands). Sent as safety_identifier + prompt_cache_key on OpenAI/xAI (prompt_cache_key on xAI chat completions rides the x-grok-conv-id header), user on OpenRouter chat completions and unknown providers. Variables: {{.Nick}}, {{.BotNick}}, {{.Channel}}, {{.Network}}, {{.Date}}, {{.SessionID}}, {{.Vars.*}}. Empty = not sent.
 #   disabled_builtin_tools (string array)            Builtin LLM tools to disable for commands using this service. Cascade: command > service > root default ([]). Nil = inherit.
 #   hidden_mcp_tools     (string array)              MCP tool names to hide from the LLM. Bare names ("tool") or server-prefixed ("server.tool"). Cascade: command > service > root.
 #   hidden_mcp_tool_sets (string array)              Named tool sets from mcps.toml [hidden_mcp_tool_sets.*]. Merged with hidden_mcp_tools. Cascade: command > service > root.
@@ -42,7 +42,7 @@
 # toolverbose = true
 # paralleltoolcalls = true
 # parallel = 1
-# api_user = "dave/{{.Network}}/{{.Nick}}"
+# api_user = "dave/{{.Network}}/{{.Nick}}:s{{.SessionID}}"
 # disabled_builtin_tools = ["ban_user"]
 # hidden_mcp_tools = ["wait_for_job"]
 # hidden_mcp_tool_sets = ["img-async-management"]

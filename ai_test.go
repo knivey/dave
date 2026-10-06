@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"testing"
 
 	openai "github.com/openai/openai-go/v3"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestFormatOutput(t *testing.T) {
@@ -228,10 +230,55 @@ func TestBuildChatRequest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := buildChatCompletionParams(tt.cfg, tt.messages, nil, "testuser")
+			req := buildChatCompletionParams(tt.cfg, tt.messages, nil, apiIdentity{User: "testuser"})
 			tt.check(t, req)
 		})
 	}
+}
+
+func TestBuildChatCompletionParamsIdentityFields(t *testing.T) {
+	cfg := AIConfig{Model: "gpt-4"}
+
+	req := buildChatCompletionParams(cfg, nil, nil, apiIdentity{User: "legacy-user"})
+	assert.Equal(t, openai.String("legacy-user"), req.User, "User")
+	assert.False(t, req.SafetyIdentifier.Valid(), "SafetyIdentifier should be omitted")
+	assert.False(t, req.PromptCacheKey.Valid(), "PromptCacheKey should be omitted")
+
+	req = buildChatCompletionParams(cfg, nil, nil, apiIdentity{SafetyID: "safety-id", CacheKey: "cache-key"})
+	assert.Equal(t, openai.String("safety-id"), req.SafetyIdentifier, "SafetyIdentifier")
+	assert.Equal(t, openai.String("cache-key"), req.PromptCacheKey, "PromptCacheKey")
+	assert.False(t, req.User.Valid(), "User should be omitted")
+
+	req = buildChatCompletionParams(cfg, nil, nil, apiIdentity{})
+	assert.False(t, req.User.Valid(), "empty identity: User should be omitted")
+	assert.False(t, req.SafetyIdentifier.Valid(), "empty identity: SafetyIdentifier should be omitted")
+	assert.False(t, req.PromptCacheKey.Valid(), "empty identity: PromptCacheKey should be omitted")
+}
+
+// TestBuildChatCompletionParamsIdentityWireJSON pins the serialized request
+// body against SDK upgrades: identity fields must appear under their wire
+// names and unset fields must be absent entirely (omitzero), not sent empty.
+func TestBuildChatCompletionParamsIdentityWireJSON(t *testing.T) {
+	cfg := AIConfig{Model: "gpt-4"}
+
+	marshal := func(t *testing.T, ident apiIdentity) map[string]any {
+		t.Helper()
+		body, err := json.Marshal(buildChatCompletionParams(cfg, nil, nil, ident))
+		require.NoError(t, err)
+		var wire map[string]any
+		require.NoError(t, json.Unmarshal(body, &wire))
+		return wire
+	}
+
+	wire := marshal(t, apiIdentity{SafetyID: "safety-id", CacheKey: "cache-key"})
+	assert.Equal(t, "safety-id", wire["safety_identifier"], "safety_identifier wire name")
+	assert.Equal(t, "cache-key", wire["prompt_cache_key"], "prompt_cache_key wire name")
+	assert.NotContains(t, wire, "user", "legacy user field must stay absent")
+
+	wire = marshal(t, apiIdentity{User: "legacy-user"})
+	assert.Equal(t, "legacy-user", wire["user"], "user wire name")
+	assert.NotContains(t, wire, "safety_identifier", "safety_identifier must stay absent")
+	assert.NotContains(t, wire, "prompt_cache_key", "prompt_cache_key must stay absent")
 }
 
 func TestReasoningContent(t *testing.T) {

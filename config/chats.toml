@@ -42,7 +42,7 @@
 #   previous_response_id (bool, default: false)      Chain responses via server-side context (requires responses_api)
 #   needsusersuffix      (bool, default: false)      Append user message after system messages (auto-detected for anthropic/ models)
 #                                                Fix for: "This model does not support assistant message prefill. The conversation must end with a user message."
-#   api_user             (string, cascades from service)  Go template for API "user" field. Variables: {{.Nick}}, {{.BotNick}}, {{.Channel}}, {{.Network}}, {{.Date}}, {{.Vars.*}}. Empty = not sent.
+#   api_user             (string, cascades from service)  Go template for the end-user identifier field. Sent as safety_identifier + prompt_cache_key on OpenAI/xAI (prompt_cache_key on xAI chat completions rides the x-grok-conv-id header), user on OpenRouter chat completions and unknown providers. Variables: {{.Nick}}, {{.BotNick}}, {{.Channel}}, {{.Network}}, {{.Date}}, {{.SessionID}} (DB session id; 0 in system templates — those render before the session exists), {{.Vars.*}}. Empty = not sent.
 #   retry_on_empty       (int, default: 1)           Number of retries when API returns empty response (0 = disabled)
 #   disabled_builtin_tools (string array)            Builtin LLM tools to disable (e.g. ["ban_user", "check_ban_history"]). Cascade: command > service > root default ([]).
 #   hidden_mcp_tools     (string array)              MCP tool names to hide from the LLM. Bare names ("tool") or server-prefixed ("server.tool"). Cascade: command > service > root default ([]).
@@ -88,7 +88,7 @@
 # responses_api = false
 # previous_response_id = false
 # needsusersuffix = false
-# api_user = "irc:{{.Network}}:{{.Channel}}:{{.Nick}}"
+# api_user = "irc:{{.Network}}:{{.Channel}}:{{.Nick}}:s{{.SessionID}}"
 # retry_on_empty = 1
 # disabled_builtin_tools = ["ban_user", "check_ban_history"]
 # hidden_mcp_tools = ["wait_for_job", "cancel_job"]

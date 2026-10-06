@@ -340,14 +340,59 @@ func TestBuildResponseParams(t *testing.T) {
 		responses.ResponseInputItemParamOfMessage("hello", responses.EasyInputMessageRoleUser),
 	}
 
-	params := buildResponseParams(cfg, input, nil, "resp_prev", "testuser")
+	params := buildResponseParams(cfg, input, nil, "resp_prev", apiIdentity{User: "testuser"})
 	assert.Equal(t, "gpt-4o", params.Model, "Model")
 	assert.Equal(t, openai.String("resp_prev"), params.PreviousResponseID, "PreviousResponseID")
 }
 
+func TestBuildResponseParamsIdentityFields(t *testing.T) {
+	cfg := AIConfig{Model: "gpt-4o"}
+
+	params := buildResponseParams(cfg, nil, nil, "", apiIdentity{User: "legacy-user"})
+	assert.Equal(t, openai.String("legacy-user"), params.User, "User")
+	assert.False(t, params.SafetyIdentifier.Valid(), "SafetyIdentifier should be omitted")
+	assert.False(t, params.PromptCacheKey.Valid(), "PromptCacheKey should be omitted")
+
+	params = buildResponseParams(cfg, nil, nil, "", apiIdentity{SafetyID: "safety-id", CacheKey: "cache-key"})
+	assert.Equal(t, openai.String("safety-id"), params.SafetyIdentifier, "SafetyIdentifier")
+	assert.Equal(t, openai.String("cache-key"), params.PromptCacheKey, "PromptCacheKey")
+	assert.False(t, params.User.Valid(), "User should be omitted")
+
+	params = buildResponseParams(cfg, nil, nil, "", apiIdentity{})
+	assert.False(t, params.User.Valid(), "empty identity: User should be omitted")
+	assert.False(t, params.SafetyIdentifier.Valid(), "empty identity: SafetyIdentifier should be omitted")
+	assert.False(t, params.PromptCacheKey.Valid(), "empty identity: PromptCacheKey should be omitted")
+}
+
+// TestBuildResponseParamsIdentityWireJSON pins the serialized request body
+// against SDK upgrades: identity fields must appear under their wire names
+// and unset fields must be absent entirely (omitzero), not sent empty.
+func TestBuildResponseParamsIdentityWireJSON(t *testing.T) {
+	cfg := AIConfig{Model: "gpt-4o"}
+
+	marshal := func(t *testing.T, ident apiIdentity) map[string]any {
+		t.Helper()
+		body, err := json.Marshal(buildResponseParams(cfg, nil, nil, "", ident))
+		require.NoError(t, err)
+		var wire map[string]any
+		require.NoError(t, json.Unmarshal(body, &wire))
+		return wire
+	}
+
+	wire := marshal(t, apiIdentity{SafetyID: "safety-id", CacheKey: "cache-key"})
+	assert.Equal(t, "safety-id", wire["safety_identifier"], "safety_identifier wire name")
+	assert.Equal(t, "cache-key", wire["prompt_cache_key"], "prompt_cache_key wire name")
+	assert.NotContains(t, wire, "user", "legacy user field must stay absent")
+
+	wire = marshal(t, apiIdentity{User: "legacy-user"})
+	assert.Equal(t, "legacy-user", wire["user"], "user wire name")
+	assert.NotContains(t, wire, "safety_identifier", "safety_identifier must stay absent")
+	assert.NotContains(t, wire, "prompt_cache_key", "prompt_cache_key must stay absent")
+}
+
 func TestBuildResponseParams_NoIncludeWhenDisabled(t *testing.T) {
 	cfg := AIConfig{Model: "test-model"}
-	params := buildResponseParams(cfg, nil, nil, "", "")
+	params := buildResponseParams(cfg, nil, nil, "", apiIdentity{})
 	assert.Empty(t, params.Include,
 		"buildResponseParams should not populate Include")
 }

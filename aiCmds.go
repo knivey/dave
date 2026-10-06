@@ -204,11 +204,27 @@ func newChatRunner(network Network, client *girc.Client, cfg AIConfig) *chatRunn
 }
 
 func isGrokService(baseURL string) bool {
+	return strings.HasSuffix(baseURLHost(baseURL), ".x.ai")
+}
+
+func isOpenAIService(baseURL string) bool {
+	host := baseURLHost(baseURL)
+	return host == "api.openai.com" || strings.HasSuffix(host, ".openai.com")
+}
+
+func isOpenRouterService(baseURL string) bool {
+	host := baseURLHost(baseURL)
+	return host == "openrouter.ai" || strings.HasSuffix(host, ".openrouter.ai")
+}
+
+// baseURLHost returns the lowercased hostname of a service base URL, or ""
+// when the URL cannot be parsed.
+func baseURLHost(baseURL string) string {
 	u, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil {
-		return false
+		return ""
 	}
-	return strings.HasSuffix(strings.ToLower(u.Hostname()), ".x.ai")
+	return strings.ToLower(u.Hostname())
 }
 
 func (cr *chatRunner) setChannel(channel, nick string, userID int64) {
@@ -309,6 +325,9 @@ func (cr *chatRunner) renderAPIUser() string {
 		return ""
 	}
 	data := buildSystemPromptData(cr.network, nil, cr.channel, cr.nick)
+	// The identifier renders per-request, when the session exists (unlike the
+	// system prompt, which renders before session creation).
+	data.SessionID = cr.sessionID
 
 	var buf strings.Builder
 	if err := cr.cfg.apiUserTmpl.Execute(&buf, data); err != nil {
@@ -316,6 +335,51 @@ func (cr *chatRunner) renderAPIUser() string {
 		return ""
 	}
 	return buf.String()
+}
+
+// apiIdentity carries the rendered api_user value in the wire fields the
+// target provider supports. Empty fields are omitted from the request.
+type apiIdentity struct {
+	User     string // legacy "user" field
+	SafetyID string // safety_identifier field
+	CacheKey string // prompt_cache_key field
+}
+
+// apiIdentity routes the rendered api_user template value to the request
+// fields each provider documents.
+//
+// DESIGN NOTE: unknown/self-hosted providers keep the legacy "user" field so
+// behavior is unchanged there — strict OpenAI-compatible gateways
+// (llama.cpp-style) reject unknown request fields, and dave explicitly
+// supports such services. Field support per provider docs (Oct 2026):
+//   - OpenAI deprecated "user" in favor of safety_identifier +
+//     prompt_cache_key (both Chat Completions and Responses).
+//   - xAI mirrors OpenAI: safety_identifier on both paths; prompt_cache_key
+//     documented on the Responses API only — its Chat Completions cache
+//     routing rides the x-grok-conv-id header, which syncConvID already sends.
+//   - OpenRouter documents "user" on chat completions but safety_identifier
+//     on the Responses API.
+func (cr *chatRunner) apiIdentity(responsesAPI bool) apiIdentity {
+	rendered := cr.renderAPIUser()
+	if rendered == "" {
+		return apiIdentity{}
+	}
+	switch {
+	case isOpenAIService(cr.baseURL):
+		return apiIdentity{SafetyID: rendered, CacheKey: rendered}
+	case isGrokService(cr.baseURL):
+		if responsesAPI {
+			return apiIdentity{SafetyID: rendered, CacheKey: rendered}
+		}
+		return apiIdentity{SafetyID: rendered}
+	case isOpenRouterService(cr.baseURL):
+		if responsesAPI {
+			return apiIdentity{SafetyID: rendered}
+		}
+		return apiIdentity{User: rendered}
+	default:
+		return apiIdentity{User: rendered}
+	}
 }
 
 func (cr *chatRunner) logAPIIncident(err error, messages []ChatMessage, iteration int, apiPath string) {
@@ -795,7 +859,7 @@ func (cr *chatRunner) runTurn(turn *turnContext) bool {
 			return true
 		}
 
-		params := buildChatCompletionParams(cr.cfg, turn.Messages(), mcpTools, cr.renderAPIUser())
+		params := buildChatCompletionParams(cr.cfg, turn.Messages(), mcpTools, cr.apiIdentity(false))
 
 		if cr.cfg.Streaming {
 			var done bool
@@ -1169,7 +1233,7 @@ func (cr *chatRunner) runTurnResponses(turn *turnContext) bool {
 			return true
 		}
 
-		params := buildResponseParams(cr.cfg, input, responseTools, currentResponseID, cr.renderAPIUser())
+		params := buildResponseParams(cr.cfg, input, responseTools, currentResponseID, cr.apiIdentity(true))
 
 		if cr.cfg.Streaming {
 			r := cr.runTurnResponsesStream(ctx, params, turn, iteration, emptyRetries, maxEmptyRetries, currentResponseID, usePrevID)

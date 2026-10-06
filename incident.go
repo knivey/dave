@@ -89,6 +89,7 @@ type sanitizedAIConfig struct {
 	PresencePenalty     float32        `json:"presencepenalty,omitempty"`
 	FrequencyPenalty    float32        `json:"frequencypenalty,omitempty"`
 	ReasoningEffort     string         `json:"reasoningeffort,omitempty"`
+	ReasoningSummary    string         `json:"reasoningsummary,omitempty"`
 	ResponsesAPI        bool           `json:"responses_api"`
 	PreviousResponseID  bool           `json:"previous_response_id"`
 	NeedsUserSuffix     bool           `json:"needsusersuffix"`
@@ -114,6 +115,7 @@ func sanitizeAIConfig(cfg AIConfig) sanitizedAIConfig {
 		PresencePenalty:     cfg.PresencePenalty,
 		FrequencyPenalty:    cfg.FrequencyPenalty,
 		ReasoningEffort:     cfg.ReasoningEffort,
+		ReasoningSummary:    cfg.ReasoningSummary,
 		ResponsesAPI:        cfg.ResponsesAPI,
 		PreviousResponseID:  cfg.PreviousResponseID,
 		NeedsUserSuffix:     cfg.NeedsUserSuffix,

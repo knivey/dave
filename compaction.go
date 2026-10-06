@@ -294,6 +294,11 @@ func callSummarizer(ctx context.Context, cfg AIConfig, summarizerSys string, arc
 	summarizerCfg.Streaming = false
 	summarizerCfg.ResponsesAPI = false
 	summarizerCfg.ReasoningEffort = ""
+	// Defensive symmetry with the effort clear above: the summarizer forces
+	// Chat Completions (which never reads ReasoningSummary), but if it ever
+	// flips back to the Responses API, summary tokens would silently ride
+	// along on compaction calls (billed as output tokens).
+	summarizerCfg.ReasoningSummary = ""
 	summarizerCfg.MCPs = nil
 
 	msgs := []ChatMessage{

@@ -11,6 +11,7 @@ import (
 
 	openai "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/responses"
+	"github.com/openai/openai-go/v3/shared"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -334,6 +335,7 @@ func TestBuildResponseParams(t *testing.T) {
 		Temperature:         0.7,
 		TopP:                0.9,
 		ReasoningEffort:     "medium",
+		ReasoningSummary:    "auto",
 		PreviousResponseID:  true,
 	}
 	input := []responses.ResponseInputItemUnionParam{
@@ -343,6 +345,50 @@ func TestBuildResponseParams(t *testing.T) {
 	params := buildResponseParams(cfg, input, nil, "resp_prev", apiIdentity{User: "testuser"})
 	assert.Equal(t, "gpt-4o", params.Model, "Model")
 	assert.Equal(t, openai.String("resp_prev"), params.PreviousResponseID, "PreviousResponseID")
+	assert.Equal(t, shared.ReasoningEffort("medium"), params.Reasoning.Effort, "Reasoning.Effort")
+	assert.Equal(t, shared.ReasoningSummary("auto"), params.Reasoning.Summary, "Reasoning.Summary")
+}
+
+func TestBuildResponseParams_ReasoningSummaryOnly(t *testing.T) {
+	cfg := AIConfig{Model: "test-model", ReasoningSummary: "detailed"}
+	params := buildResponseParams(cfg, nil, nil, "", apiIdentity{})
+	assert.Equal(t, shared.ReasoningSummary("detailed"), params.Reasoning.Summary, "Reasoning.Summary")
+	assert.Empty(t, params.Reasoning.Effort, "effort should stay unset when only summary is configured")
+}
+
+func TestBuildResponseParams_NoReasoningWhenUnset(t *testing.T) {
+	cfg := AIConfig{Model: "test-model"}
+	params := buildResponseParams(cfg, nil, nil, "", apiIdentity{})
+	assert.Empty(t, params.Reasoning.Effort, "Reasoning.Effort")
+	assert.Empty(t, params.Reasoning.Summary, "Reasoning.Summary")
+}
+
+func TestBuildResponseParams_ReasoningWireJSON(t *testing.T) {
+	t.Run("summary only omits empty effort on the wire", func(t *testing.T) {
+		cfg := AIConfig{Model: "test-model", ReasoningSummary: "auto"}
+		params := buildResponseParams(cfg, nil, nil, "", apiIdentity{})
+		raw, err := json.Marshal(params)
+		require.NoError(t, err)
+		assert.Contains(t, string(raw), `"summary":"auto"`, "wire body should request reasoning summaries")
+		assert.NotContains(t, string(raw), `"effort"`, "empty effort must be omitted, not sent as \"\"")
+	})
+
+	t.Run("effort and summary both serialize", func(t *testing.T) {
+		cfg := AIConfig{Model: "test-model", ReasoningEffort: "low", ReasoningSummary: "detailed"}
+		params := buildResponseParams(cfg, nil, nil, "", apiIdentity{})
+		raw, err := json.Marshal(params)
+		require.NoError(t, err)
+		assert.Contains(t, string(raw), `"effort":"low"`)
+		assert.Contains(t, string(raw), `"summary":"detailed"`)
+	})
+
+	t.Run("unset reasoning sends no reasoning object", func(t *testing.T) {
+		cfg := AIConfig{Model: "test-model"}
+		params := buildResponseParams(cfg, nil, nil, "", apiIdentity{})
+		raw, err := json.Marshal(params)
+		require.NoError(t, err)
+		assert.NotContains(t, string(raw), `"reasoning"`)
+	})
 }
 
 func TestBuildResponseParamsIdentityFields(t *testing.T) {

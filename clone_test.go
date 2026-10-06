@@ -323,6 +323,7 @@ func TestCloneDBSession_SettingsCopied(t *testing.T) {
 		MaxImages:        3,
 		MaxContextImages: 1,
 		ReasoningEffort:  "low",
+		ReasoningSummary: "auto",
 	})
 	require.NoError(t, err)
 	require.NoError(t, theDB.Model(&Session{}).Where("id = ?", srcSid).Update("settings_id", settingsID).Error)
@@ -349,6 +350,7 @@ func TestCloneDBSession_SettingsCopied(t *testing.T) {
 	assert.Equal(t, srcSettings.Model, newSettings.Model)
 	assert.Equal(t, srcSettings.DetectImages, newSettings.DetectImages)
 	assert.Equal(t, srcSettings.MaxImages, newSettings.MaxImages)
+	assert.Equal(t, srcSettings.ReasoningSummary, newSettings.ReasoningSummary)
 }
 
 func TestCloneDBSession_WithToolCalls(t *testing.T) {

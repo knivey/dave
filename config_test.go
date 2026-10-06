@@ -1599,6 +1599,46 @@ system = "test"
 	assert.Equal(t, []string{"img-async-management"}, chat.HiddenMCPToolSets, "command should inherit root→service→command hidden_mcp_tool_sets")
 }
 
+func TestLoadChatsReasoningSummary(t *testing.T) {
+	mainTOML := `
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+	servicesTOML := `
+[myservice]
+baseurl = "http://localhost:8000/v1"
+`
+	chatsTOML := `
+[withsummary]
+service = "myservice"
+system = "test"
+responses_api = true
+reasoningeffort = "medium"
+reasoningsummary = "auto"
+
+[withoutsummary]
+service = "myservice"
+system = "test"
+responses_api = true
+`
+	dir := createTestConfigDir(t, mainTOML, map[string]string{
+		"services.toml": servicesTOML,
+		"chats.toml":    chatsTOML,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg := loadConfigDirOrDie(dir)
+
+	with := cfg.Commands.Chats["withsummary"]
+	assert.Equal(t, "auto", with.ReasoningSummary, "reasoningsummary should load from chats.toml")
+	assert.Equal(t, "medium", with.ReasoningEffort, "reasoningeffort should still load alongside reasoningsummary")
+
+	without := cfg.Commands.Chats["withoutsummary"]
+	assert.Empty(t, without.ReasoningSummary, "reasoningsummary should default to empty (not requested)")
+}
+
 func TestRegisterCommandsLocked_TriggerCollisions(t *testing.T) {
 	if logger == nil {
 		logger = logxi.New("test")

@@ -53,6 +53,7 @@ func TestDBCreateSessionSettings(t *testing.T) {
 		MaxImages:        5,
 		MaxContextImages: 3,
 		ReasoningEffort:  "high",
+		ReasoningSummary: "auto",
 	}
 
 	sid := createTestSession(t, "net", "#chan", "user", "chat", "openai", "gpt-4o")
@@ -72,6 +73,7 @@ func TestDBCreateSessionSettings(t *testing.T) {
 	assert.Equal(t, 5, settings.MaxImages)
 	assert.Equal(t, 3, settings.MaxContextImages)
 	assert.Equal(t, "high", settings.ReasoningEffort)
+	assert.Equal(t, "auto", settings.ReasoningSummary)
 
 	session, err := sessionMgr.GetSession(sid)
 	require.NoError(t, err)

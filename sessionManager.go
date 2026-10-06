@@ -203,6 +203,7 @@ func (sm *SessionManager) CreateSessionSettings(sessionID int64, cfg AIConfig) (
 		MaxImages:        cfg.MaxImages,
 		MaxContextImages: cfg.MaxContextImages,
 		ReasoningEffort:  cfg.ReasoningEffort,
+		ReasoningSummary: cfg.ReasoningSummary,
 	}
 	if err := sm.db.Create(&setting).Error; err != nil {
 		return 0, fmt.Errorf("creating session settings: %w", err)

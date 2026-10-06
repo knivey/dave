@@ -281,6 +281,7 @@ type AIConfig struct {
 	FrequencyPenalty     float32            `toml:"frequencypenalty"`
 	ParallelToolCalls    *bool              `toml:"paralleltoolcalls"`
 	ReasoningEffort      string             `toml:"reasoningeffort"`
+	ReasoningSummary     string             `toml:"reasoningsummary"`
 	ServiceTier          string             `toml:"servicetier"`
 	Verbosity            string             `toml:"verbosity"`
 	ChatTemplateKwargs   map[string]any     `toml:"chat_template_kwargs"`

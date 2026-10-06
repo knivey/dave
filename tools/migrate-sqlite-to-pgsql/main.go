@@ -39,6 +39,7 @@ type SessionSetting struct {
 	MaxImages        int
 	MaxContextImages int
 	ReasoningEffort  string
+	ReasoningSummary string
 	CreatedAt        time.Time
 }
 

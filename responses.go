@@ -184,9 +184,14 @@ func buildResponseParams(cfg AIConfig, input []responses.ResponseInputItemUnionP
 	if cfg.TopP > 0 {
 		params.TopP = openai.Float(float64(cfg.TopP))
 	}
-	if cfg.ReasoningEffort != "" {
+	// Reasoning summaries are only returned when the request asks for them via
+	// reasoning.summary ("auto"/"concise"/"detailed"); the retrieve endpoint's
+	// include parameter cannot recover them after the fact. Effort and summary
+	// are independent: either may be set without the other.
+	if cfg.ReasoningEffort != "" || cfg.ReasoningSummary != "" {
 		params.Reasoning = shared.ReasoningParam{
-			Effort: shared.ReasoningEffort(cfg.ReasoningEffort),
+			Effort:  shared.ReasoningEffort(cfg.ReasoningEffort),
+			Summary: shared.ReasoningSummary(cfg.ReasoningSummary),
 		}
 	}
 	if previousResponseID != "" {

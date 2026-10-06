@@ -886,7 +886,7 @@ func TestSwitchToSession_RestoresConvIDAndResponseID(t *testing.T) {
 	insertTestMessage(t, sidA, "system", "sys")
 	require.NoError(t, theDB.Model(&Session{}).Where("id = ?", sidA).Update("conv_id", "grok-conv-123").Error, "update conv_id")
 	respID := "resp-abc-456"
-	require.NoError(t, updateDBSessionResponseID(sidA, &respID), "updateDBSessionResponseID")
+	require.NoError(t, updateDBSessionResponseID(sidA, &respID, "model-x"), "updateDBSessionResponseID")
 
 	sidB := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sidB, "system", "sys2")

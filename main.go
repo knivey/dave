@@ -126,13 +126,6 @@ func getSessionConfig(session *Session) (AIConfig, bool) {
 	readConfig(func() {
 		cfg, ok = config.Commands.Chats[session.ChatCommand]
 	})
-	if session.SettingsID != nil {
-		settings, err := sessionMgr.GetSessionSettings(*session.SettingsID)
-		if err == nil && settings != nil {
-			cfg = ApplySettings(settings, cfg)
-			ok = true
-		}
-	}
 	return cfg, ok
 }
 

@@ -61,9 +61,10 @@ func TestDBCreateSessionSettings(t *testing.T) {
 	require.NoError(t, err)
 	require.NotZero(t, settingsID)
 
-	settings, err := sessionMgr.GetSessionSettings(settingsID)
-	require.NoError(t, err)
-	require.NotNil(t, settings)
+	// Read the row directly — GetSessionSettings was removed with the
+	// overlay; stored settings are provenance only now.
+	var settings SessionSetting
+	require.NoError(t, theDB.Where("id = ?", settingsID).First(&settings).Error)
 
 	assert.Equal(t, "You are {{.Nick}}'s helper", settings.System)
 	assert.Equal(t, "gpt-4o", settings.Model)
@@ -76,112 +77,6 @@ func TestDBCreateSessionSettings(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, session.SettingsID)
 	assert.Equal(t, settingsID, *session.SettingsID)
-}
-
-func TestDBApplySettings(t *testing.T) {
-	tests := []struct {
-		name     string
-		settings SessionSetting
-		baseCfg  AIConfig
-		expected AIConfig
-	}{
-		{
-			name: "all fields override",
-			settings: SessionSetting{
-				System:           "stored system",
-				Model:            "stored-model",
-				DetectImages:     true,
-				MaxImages:        3,
-				MaxContextImages: 2,
-				ReasoningEffort:  "low",
-			},
-			baseCfg: AIConfig{
-				Name:             "chat",
-				Service:          "openai",
-				Model:            "base-model",
-				System:           "base system",
-				DetectImages:     false,
-				MaxImages:        5,
-				MaxContextImages: 5,
-				ReasoningEffort:  "medium",
-			},
-			expected: AIConfig{
-				Name:             "chat",
-				Service:          "openai",
-				Model:            "stored-model",
-				System:           "stored system",
-				DetectImages:     true,
-				MaxImages:        3,
-				MaxContextImages: 2,
-				ReasoningEffort:  "low",
-			},
-		},
-		{
-			name: "zero values in settings override base",
-			settings: SessionSetting{
-				System:           "stored system",
-				Model:            "",
-				DetectImages:     false,
-				MaxImages:        0,
-				MaxContextImages: 0,
-				ReasoningEffort:  "",
-			},
-			baseCfg: AIConfig{
-				Name:             "chat",
-				Model:            "base-model",
-				System:           "base system",
-				DetectImages:     true,
-				MaxImages:        5,
-				MaxContextImages: 10,
-				ReasoningEffort:  "medium",
-			},
-			expected: AIConfig{
-				Name:             "chat",
-				Model:            "base-model",
-				System:           "stored system",
-				DetectImages:     false,
-				MaxImages:        5,
-				MaxContextImages: 10,
-				ReasoningEffort:  "medium",
-			},
-		},
-		{
-			name: "detect_images false in settings overrides true in base",
-			settings: SessionSetting{
-				DetectImages: false,
-				Model:        "other",
-				System:       "sys",
-			},
-			baseCfg: AIConfig{
-				Model:            "base-model",
-				System:           "base system",
-				DetectImages:     true,
-				MaxImages:        5,
-				MaxContextImages: 5,
-			},
-			expected: AIConfig{
-				Model:            "other",
-				System:           "sys",
-				DetectImages:     false,
-				MaxImages:        5,
-				MaxContextImages: 5,
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := ApplySettings(&tt.settings, tt.baseCfg)
-			assert.Equal(t, tt.expected.Model, result.Model)
-			assert.Equal(t, tt.expected.System, result.System)
-			assert.Equal(t, tt.expected.DetectImages, result.DetectImages)
-			assert.Equal(t, tt.expected.MaxImages, result.MaxImages)
-			assert.Equal(t, tt.expected.MaxContextImages, result.MaxContextImages)
-			assert.Equal(t, tt.expected.ReasoningEffort, result.ReasoningEffort)
-			assert.Equal(t, tt.expected.Name, result.Name, "Name should come from baseCfg")
-			assert.Equal(t, tt.expected.Service, result.Service, "Service should come from baseCfg")
-		})
-	}
 }
 
 func TestDBSessionSettingsNilWhenNone(t *testing.T) {
@@ -619,18 +514,87 @@ func TestSessionManagerSwitchActive(t *testing.T) {
 	assert.Equal(t, "completed", sessB.Status, "session B should be completed")
 }
 
-func TestSessionManagerUpdateResponseID(t *testing.T) {
+func TestUpdateResponseIDWritesModel(t *testing.T) {
 	setupTestDB(t)
 
 	sid := createTestSession(t, "testnet", "#chan", "user", "testcmd", "", "")
 
+	// Save: both columns written together.
 	respID := "resp-123"
-	require.NoError(t, sessionMgr.UpdateResponseID(sid, strPtrOrNil(respID)))
+	require.NoError(t, sessionMgr.UpdateResponseID(sid, strPtrOrNil(respID), "grok-4-1-fast"))
 
 	session, err := sessionMgr.GetSession(sid)
 	require.NoError(t, err)
 	require.NotNil(t, session.ResponseID)
 	assert.Equal(t, respID, *session.ResponseID)
+	require.NotNil(t, session.ResponseModel, "response_model must be written alongside response_id")
+	assert.Equal(t, "grok-4-1-fast", *session.ResponseModel)
+
+	// Overwrite: both columns replaced together.
+	require.NoError(t, sessionMgr.UpdateResponseID(sid, strPtrOrNil("resp-456"), "gpt-5"))
+	session, err = sessionMgr.GetSession(sid)
+	require.NoError(t, err)
+	require.NotNil(t, session.ResponseID)
+	assert.Equal(t, "resp-456", *session.ResponseID)
+	require.NotNil(t, session.ResponseModel)
+	assert.Equal(t, "gpt-5", *session.ResponseModel)
+
+	// Clear: both columns nulled together — the pair can never diverge.
+	require.NoError(t, sessionMgr.UpdateResponseID(sid, nil, ""))
+	session, err = sessionMgr.GetSession(sid)
+	require.NoError(t, err)
+	assert.Nil(t, session.ResponseID)
+	assert.Nil(t, session.ResponseModel)
+}
+
+// TestInsertTurnUsageAttribution verifies the per-turn attribution columns:
+// every turn_usage row records the model/service/reasoning_effort of the
+// config that actually produced it, so cost-per-model and effort-vs-
+// reasoning-token stats are a plain GROUP BY (spec:
+// docs/superpowers/specs/2026-10-06-live-config-and-usage-attribution-design.md).
+func TestInsertTurnUsageAttribution(t *testing.T) {
+	setupTestDB(t)
+
+	sid := createTestSession(t, "net", "#c", "u1", "cmd", "xai", "grok-4-1-fast")
+
+	cfg := AIConfig{
+		Name:            "chat",
+		Service:         "xai",
+		Model:           "grok-4-1-fast",
+		ReasoningEffort: "low",
+	}
+	usage := &Usage{
+		PromptTokens:            100,
+		CompletionTokens:        50,
+		TotalTokens:             150,
+		FinishReason:            "stop",
+		PromptTokensDetails:     &PromptTokensDetails{CachedTokens: 40},
+		CompletionTokensDetails: &CompletionTokensDetails{ReasoningTokens: 20},
+	}
+
+	require.NoError(t, insertDBTurnUsage(sid, cfg, usage, "stop", "responses", 1234))
+
+	var stored TurnUsage
+	require.NoError(t, theDB.Where("session_id = ?", sid).First(&stored).Error)
+	assert.Equal(t, "grok-4-1-fast", stored.Model)
+	assert.Equal(t, "xai", stored.Service)
+	assert.Equal(t, "low", stored.ReasoningEffort)
+	assert.Equal(t, 100, stored.PromptTokens)
+	assert.Equal(t, 50, stored.CompletionTokens)
+	assert.Equal(t, 40, stored.CachedTokens)
+	assert.Equal(t, 20, stored.ReasoningTokens)
+	assert.Equal(t, "stop", stored.FinishReason)
+	assert.Equal(t, "responses", stored.APIPath)
+	assert.Equal(t, 1234, stored.DurationMs)
+
+	// Empty effort must persist as '' — the "not sent" config shape — so it
+	// stays distinguishable from an explicit effort in stats.
+	cfgNoEffort := cfg
+	cfgNoEffort.ReasoningEffort = ""
+	require.NoError(t, insertDBTurnUsage(sid, cfgNoEffort, usage, "stop", "chat_completions", 10))
+	var stored2 TurnUsage
+	require.NoError(t, theDB.Where("api_path = ?", "chat_completions").First(&stored2).Error)
+	assert.Empty(t, stored2.ReasoningEffort)
 }
 
 // TestConcurrentCreateSessionIsolation verifies that concurrent CreateSession calls

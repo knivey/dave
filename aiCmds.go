@@ -136,7 +136,7 @@ func (cr *chatRunner) storeUsage(usage *Usage, apiPath string, durationMs int) {
 	if theDB == nil || usage == nil || cr.sessionID == 0 {
 		return
 	}
-	if err := insertDBTurnUsage(cr.sessionID, usage, usage.FinishReason, apiPath, durationMs); err != nil {
+	if err := insertDBTurnUsage(cr.sessionID, cr.cfg, usage, usage.FinishReason, apiPath, durationMs); err != nil {
 		cr.logger.Error("Failed to store turn usage", "error", err)
 	}
 }
@@ -501,14 +501,14 @@ func (cr *chatRunner) handleToolCallResponse(turn *turnContext, text string, too
 
 func (cr *chatRunner) handleResponseIDSave(respID, text string, toolCalls []ToolCall, currentResponseID string) string {
 	if respID != "" && (text != "" || len(toolCalls) > 0) {
-		if err := sessionMgr.UpdateResponseID(cr.sessionID, &respID); err != nil {
+		if err := sessionMgr.UpdateResponseID(cr.sessionID, &respID, cr.cfg.Model); err != nil {
 			cr.logger.Error("failed to save response_id", "session", cr.sessionID, "error", err)
 		}
 		return respID
 	}
 	if respID != "" {
 		if currentResponseID != "" {
-			if err := sessionMgr.UpdateResponseID(cr.sessionID, nil); err != nil {
+			if err := sessionMgr.UpdateResponseID(cr.sessionID, nil, ""); err != nil {
 				cr.logger.Error("failed to clear response_id", "session", cr.sessionID, "error", err)
 			}
 		}
@@ -523,7 +523,7 @@ func (cr *chatRunner) shouldRetryWithoutResponseID(usePrevID bool, err error, me
 	}
 	cr.logAPIIncident(err, messages, iteration, apiPath)
 	cr.logger.Warn("previous_response_id invalid, retrying without", "response_id", currentResponseID, "error", err)
-	if err := sessionMgr.UpdateResponseID(cr.sessionID, nil); err != nil {
+	if err := sessionMgr.UpdateResponseID(cr.sessionID, nil, ""); err != nil {
 		cr.logger.Error("failed to clear response_id on retry", "session", cr.sessionID, "error", err)
 	}
 	return messagesToResponseInputItems(messages), "", true
@@ -1209,6 +1209,18 @@ func (cr *chatRunner) runTurnResponses(turn *turnContext) bool {
 		currentResponseID = *session.ResponseID
 	}
 	usePrevID := cr.cfg.PreviousResponseID && currentResponseID != ""
+	// Layer 1 chain guard: never chain a stored response across a model
+	// change. Cross-model previous_response_id either errors with wording
+	// we may not recognize or silently drops the prior assistant history —
+	// no error, so no recovery would be possible. NULL response_model means
+	// "unknown" (legacy rows) and still chains, relying on the
+	// isResponseIDError net.
+	if usePrevID && session != nil && session.ResponseModel != nil && *session.ResponseModel != cr.cfg.Model {
+		cr.logger.Info("response chain model change, sending full history",
+			"chain_model", *session.ResponseModel, "cfg_model", cr.cfg.Model)
+		currentResponseID = ""
+		usePrevID = false
+	}
 
 	var input []responses.ResponseInputItemUnionParam
 	if usePrevID {

@@ -814,7 +814,7 @@ func tuiCmdReinject(parts []string, _ string) {
 		return
 	}
 
-	if err := sessionMgr.UpdateResponseID(sessionID, nil); err != nil {
+	if err := sessionMgr.UpdateResponseID(sessionID, nil, ""); err != nil {
 		fmt.Fprintf(logView, "[red]Failed to clear response_id: %s[white]\n", err)
 		return
 	}
@@ -890,7 +890,7 @@ func tuiCmdSystemMsg(parts []string, text string) {
 		return
 	}
 
-	if err := sessionMgr.UpdateResponseID(sessionID, nil); err != nil {
+	if err := sessionMgr.UpdateResponseID(sessionID, nil, ""); err != nil {
 		fmt.Fprintf(logView, "[red]Failed to clear response_id: %s[white]\n", err)
 		return
 	}

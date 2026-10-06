@@ -170,7 +170,10 @@ Flow:
 6. **Load chat command config**:
    - Look up `sourceSession.ChatCommand` in current config's `Chats` map.
    - If command no longer exists → send `command_gone` notice, return.
-   - If session has `settings_id`, load stored settings and overlay via `ApplySettings`.
+   - The live config is used as-is (superseded 2026-10-06: the old "overlay
+     stored settings via `ApplySettings`" step is gone — settings rows are
+     creation-time provenance only; see
+     `docs/superpowers/specs/2026-10-06-live-config-and-usage-attribution-design.md`).
 7. **Acquire session creation lock**:
    - `mu := getSessionCreationLock(network.Name, channel, callingUserID)`
    - `mu.Lock()` / `defer mu.Unlock()`

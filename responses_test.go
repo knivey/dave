@@ -434,6 +434,8 @@ func TestIsResponseIDError(t *testing.T) {
 		{"openai.Error code response_not_found", newAPIError(http.StatusBadRequest, "response_not_found", "response not found"), true},
 		{"openai.Error code invalid_previous_response_id", newAPIError(http.StatusBadRequest, "invalid_previous_response_id", "bad id"), true},
 		{"openai.Error 400 empty content", newAPIError(http.StatusBadRequest, "", "Each message must have at least one content element."), true},
+		{"openai.Error 400 reasoning items mismatch", newAPIError(http.StatusBadRequest, "", "Reasoning input items can only be provided to a reasoning or computer use model. Remove reasoning items from your input and try again."), true},
+		{"openai.Error 400 unrelated reasoning mention", newAPIError(http.StatusBadRequest, "invalid_request", "reasoning is not enabled for this model"), false},
 		{"openai.Error 400 other", newAPIError(http.StatusBadRequest, "invalid_request", "something else"), false},
 		{"openai.Error 401", newAPIError(http.StatusUnauthorized, "invalid_api_key", "bad key"), false},
 		{"openai.Error 429", newAPIError(http.StatusTooManyRequests, "rate_limit_exceeded", "slow down"), false},
@@ -442,6 +444,7 @@ func TestIsResponseIDError(t *testing.T) {
 		{"string fallback invalid_previous_response_id", fmt.Errorf(`"code":"invalid_previous_response_id"`), true},
 		{"string fallback previous_response_id not found", fmt.Errorf("previous_response_id abc not found"), true},
 		{"string fallback empty content", fmt.Errorf("Invalid request content: Each message must have at least one content element."), true},
+		{"string fallback reasoning items mismatch", fmt.Errorf("Error code: 400 - {'error': {'message': 'Reasoning input items can only be provided to a reasoning or computer use model. Remove reasoning items from your input and try again.', 'type': 'invalid_request_error'}}"), true},
 	}
 
 	for _, tt := range tests {

@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -62,9 +63,49 @@ func init() {
 	mcpToolToServer = make(map[string]string)
 }
 
-func connectMCPServer(name string, mcpCfg MCPConfig) (*MCPServer, error) {
-	ctx := context.Background()
+// --- Background retry for servers that fail their initial connect ---
+//
+// When an MCP server is unreachable while dave starts or /reloads (e.g. dave
+// boots before the img-mcp process does), initMCPClients used to just skip it.
+// The server never entered mcpServers, so its tools never registered and every
+// later tool call failed with "unknown MCP tool" until the next /reload.
+// Instead, each failed server now gets a retry loop that keeps trying with the
+// standard reconnect backoff until it connects, a /reload replaces the
+// generation, or the bot shuts down.
+//
+// Tool callers also nudge these loops: a call that misses the tool map wakes
+// every pending loop immediately (instead of waiting out its backoff sleep)
+// and briefly waits for the tool to appear, so the first command after the
+// admin brings the server up succeeds rather than erroring.
+//
+// Generation/lifecycle safety: stopMCPRetryLoops cancels the generation
+// context and then WAITS on mcpRetryWG, and every mcpServers reset/close
+// (initMCPClients, closeAndClearMCPClients, closeMCPClients) happens after
+// that wait. Combined with the loop registering only under mcpServersMu and
+// re-checking ctx after registration (unregistering itself if cancelled),
+// there is no ordering in which a retry-registered session is silently
+// dropped without being closed: either it landed while the generation was
+// alive — then the normal close paths close it — or ctx was already done and
+// the loop closes it itself.
 
+// mcpPendingServer tracks one server's live background retry loop. attempts
+// counts completed connect attempts (success or failure) and is bumped only
+// AFTER the attempt fully finished (registration included on success), so a
+// waiter that observes the counter advance knows any resulting tool
+// registration is already visible.
+type mcpPendingServer struct {
+	nudge    chan struct{}
+	attempts atomic.Int64
+}
+
+var (
+	mcpRetryMu     sync.Mutex                           // guards mcpRetryCancel and mcpPending
+	mcpRetryCancel context.CancelFunc                   // cancels the current retry generation
+	mcpRetryWG     sync.WaitGroup                       // tracks live retry loops
+	mcpPending     = make(map[string]*mcpPendingServer) // server name → its pending loop
+)
+
+func connectMCPServer(ctx context.Context, name string, mcpCfg MCPConfig) (*MCPServer, error) {
 	var clientOpts *mcp.ClientOptions
 	if mcpCfg.KeepAlive > 0 {
 		clientOpts = &mcp.ClientOptions{KeepAlive: mcpCfg.KeepAlive}
@@ -152,10 +193,28 @@ func connectMCPServer(name string, mcpCfg MCPConfig) (*MCPServer, error) {
 		}
 	}
 
+	// A ctx that expired mid-listing (background retry attempts are
+	// deadline-bounded by mcpConnectAttemptTimeout) must not yield a
+	// "connected" server with truncated or empty tools — the retry loop
+	// would register it and stop retrying, leaving the tools unavailable
+	// until the next reconnect or /reload. Fail the attempt instead; the
+	// loop treats it like any other unreachable endpoint. (Init and
+	// reconnectMCPServer call this with context.Background(), so this only
+	// fires on the bounded retry path or a caller-cancelled ctx.)
+	if ctx.Err() != nil {
+		session.Close()
+		return nil, fmt.Errorf("connect aborted during capability listing: %w", ctx.Err())
+	}
+
 	return srv, nil
 }
 
 func initMCPClients(r *ReloadReport) {
+	// Cancel retry loops from a previous generation (reload) and wait for
+	// them to exit before resetting the maps, so a dying loop can never
+	// register into the fresh state.
+	stopMCPRetryLoops()
+
 	mcpServersMu.Lock()
 	mcpServers = make(map[string]*MCPServer)
 	mcpToolToServer = make(map[string]string)
@@ -165,15 +224,21 @@ func initMCPClients(r *ReloadReport) {
 		return
 	}
 
+	retryCtx, cancel := context.WithCancel(context.Background())
+	mcpRetryMu.Lock()
+	mcpRetryCancel = cancel
+	mcpRetryMu.Unlock()
+
 	for name, mcpCfg := range config.MCPs {
 		logger.Info("connecting MCP server", "name", name, "transport", mcpCfg.Transport)
 
-		srv, err := connectMCPServer(name, mcpCfg)
+		srv, err := connectMCPServerImpl(context.Background(), name, mcpCfg)
 		if err != nil {
-			logger.Error("failed to connect MCP server", "name", name, "error", err)
+			logger.Error("failed to connect MCP server, will keep retrying in background", "name", name, "error", err)
 			if r != nil {
-				r.AddError(fmt.Sprintf("MCP %s: %s", name, err))
+				r.AddError(fmt.Sprintf("MCP %s: %s (retrying in background)", name, err))
 			}
+			startMCPRetryLoop(retryCtx, name, mcpCfg)
 			continue
 		}
 
@@ -195,7 +260,303 @@ func initMCPClients(r *ReloadReport) {
 	}
 }
 
+// startMCPRetryLoop keeps retrying a server that failed its initial connect,
+// forever, with the standard reconnect backoff, until it connects or ctx is
+// cancelled (a /reload started a new generation, or shutdown). On success the
+// server and its tools are registered exactly as initMCPClients would have.
+func startMCPRetryLoop(ctx context.Context, name string, cfg MCPConfig) {
+	p := &mcpPendingServer{nudge: make(chan struct{}, 1)}
+	mcpRetryMu.Lock()
+	mcpPending[name] = p
+	mcpRetryMu.Unlock()
+
+	mcpRetryWG.Add(1)
+	go func() {
+		// Defer order matters: the pending-map delete must run BEFORE
+		// wg.Done() so that once stopMCPRetryLoops returns, mcpPending is
+		// consistent with the dead generation.
+		defer mcpRetryWG.Done()
+		defer func() {
+			mcpRetryMu.Lock()
+			if mcpPending[name] == p {
+				delete(mcpPending, name)
+			}
+			mcpRetryMu.Unlock()
+		}()
+
+		for attempt := 1; ; attempt++ {
+			delay := reconnectBackoff(attempt)
+			select {
+			case <-ctx.Done():
+				return
+			case <-p.nudge:
+			case <-time.After(delay):
+			}
+
+			// Someone else may already have registered this server
+			// (a concurrent reconnectMCPServer, or this generation's
+			// own init racing a very late nudge): nothing to do.
+			mcpServersMu.Lock()
+			_, exists := mcpServers[name]
+			mcpServersMu.Unlock()
+			if exists {
+				return
+			}
+
+			// The attempt ctx bounds the connect itself: cancelling the
+			// generation aborts an in-flight handshake instead of leaving
+			// stopMCPRetryLoops (and thus shutdown or /reload) blocked on
+			// a hanging endpoint, and the timeout keeps a black-holed
+			// endpoint (TCP accepted, handshake never completes) from
+			// stalling the loop forever. (The stubs tests install may
+			// ignore the ctx — the register-then-notice-cancelled path
+			// below still guards that adversarial case.) The session a
+			// successful connect returns outlives this ctx; only the
+			// handshake and the tool/resource/prompt listings are bounded
+			// by it.
+			attemptCtx, cancelAttempt := context.WithTimeout(ctx, mcpConnectAttemptTimeout)
+			newSrv, err := connectMCPServerImpl(attemptCtx, name, cfg)
+			cancelAttempt()
+			if err != nil {
+				p.attempts.Add(1)
+				if ctx.Err() != nil {
+					// The generation ended mid-connect; this is
+					// not an "unreachable" event worth logging.
+					return
+				}
+				if logger != nil {
+					logger.Warn("MCP server still unreachable, will keep retrying", "name", name, "error", err, "attempt", attempt)
+				}
+				continue
+			}
+
+			mcpServersMu.Lock()
+			if _, exists := mcpServers[name]; exists {
+				// Lost the registration race; keep the winner and
+				// drop our duplicate session.
+				mcpServersMu.Unlock()
+				if newSrv.Session != nil {
+					newSrv.Session.Close()
+				}
+				p.attempts.Add(1)
+				return
+			}
+			mcpServers[name] = newSrv
+			for _, tool := range newSrv.Tools {
+				mcpToolToServer[tool.Name] = name
+			}
+			mcpServersMu.Unlock()
+
+			cancelled := ctx.Err() != nil
+			if cancelled {
+				// Cancellation raced the registration: this
+				// generation is over and the caller's map reset
+				// would silently drop our entry — unregister and
+				// close the session ourselves.
+				unregisterMCPServer(name, newSrv)
+				if logger != nil {
+					logger.Info("MCP retry registration discarded (generation ended)", "name", name)
+				}
+			}
+			p.attempts.Add(1)
+			if !cancelled && logger != nil {
+				logger.Info("MCP server connected after background retry", "name", name,
+					"tools", len(newSrv.Tools),
+					"resources", len(newSrv.Resources),
+					"prompts", len(newSrv.Prompts),
+					"attempt", attempt)
+			}
+			return
+		}
+	}()
+}
+
+// unregisterMCPServer removes a server registration made by a background
+// retry loop whose generation was cancelled mid-registration, and closes its
+// session. Pointer identity guards against removing a newer registration.
+func unregisterMCPServer(name string, srv *MCPServer) {
+	mcpServersMu.Lock()
+	if current, ok := mcpServers[name]; ok && current == srv {
+		delete(mcpServers, name)
+		for _, tool := range srv.Tools {
+			if owner, ok := mcpToolToServer[tool.Name]; ok && owner == name {
+				delete(mcpToolToServer, tool.Name)
+			}
+		}
+	}
+	mcpServersMu.Unlock()
+	if srv.Session != nil {
+		srv.Session.Close()
+	}
+}
+
+// stopMCPRetryLoops cancels the current retry generation and blocks until
+// every loop has exited, so callers may safely reset or close mcpServers
+// afterwards.
+//
+// mcpStopMu serializes concurrent callers: without it, a second caller
+// arriving while a first is still in wg.Wait() would see mcpRetryCancel
+// already nil, return immediately, and start closing/resetting maps while
+// loops of the dying generation can still be registering — exactly the leak
+// the generation design forbids. Reachable when SIGINT/TUI shutdown races an
+// in-flight /reload. mcpStopMu is NOT mcpRetryMu: loops take mcpRetryMu in
+// their exit cleanup, so holding it across the Wait would deadlock.
+var mcpStopMu sync.Mutex
+
+func stopMCPRetryLoops() {
+	mcpStopMu.Lock()
+	defer mcpStopMu.Unlock()
+	mcpRetryMu.Lock()
+	cancel := mcpRetryCancel
+	mcpRetryCancel = nil
+	mcpRetryMu.Unlock()
+	if cancel == nil {
+		return
+	}
+	cancel()
+	mcpRetryWG.Wait()
+}
+
+// nudgeMCPServer wakes the pending retry loop for one server, if any. It
+// reports whether a loop was found (the wake itself is best-effort: a nudge
+// already buffered means the loop will attempt a connect anyway).
+func nudgeMCPServer(name string) bool {
+	mcpRetryMu.Lock()
+	defer mcpRetryMu.Unlock()
+	p, ok := mcpPending[name]
+	if !ok {
+		return false
+	}
+	select {
+	case p.nudge <- struct{}{}:
+	default:
+	}
+	return true
+}
+
+const (
+	mcpToolWaitPoll = 50 * time.Millisecond
+	mcpToolWaitMax  = 15 * time.Second
+
+	// mcpConnectAttemptTimeout bounds each background-retry connect attempt
+	// (handshake + capability listings). Generous against slow-but-working
+	// endpoints, finite against black-holed ones.
+	mcpConnectAttemptTimeout = 30 * time.Second
+)
+
+// waitForPendingMCPTool handles a tool-name miss while MCP servers are still
+// pending in background retry loops (their tools are unknowable until
+// connect). It nudges the loops, waits for the nudged attempts to finish and
+// returns the owning server if one of them registered the tool. It fails fast
+// — instead of burning the whole budget — once every pending loop finished a
+// nudged attempt without producing the tool; the cap only bounds genuinely
+// slow connects.
+func waitForPendingMCPTool(ctx context.Context, toolName string) (string, bool) {
+	// Snapshot + baseline + nudge under one lock hold. The baseline MUST be
+	// read before the nudge is sent: a nudged attempt against an instantly
+	// failing endpoint can complete before a caller would otherwise sample
+	// its counter, and the fast-fail check below would then never fire,
+	// hanging the caller for the full budget.
+	mcpRetryMu.Lock()
+	if len(mcpPending) == 0 {
+		mcpRetryMu.Unlock()
+		return "", false
+	}
+	pending := make(map[string]*mcpPendingServer, len(mcpPending))
+	baseline := make(map[*mcpPendingServer]int64, len(mcpPending))
+	for name, p := range mcpPending {
+		pending[name] = p
+		baseline[p] = p.attempts.Load()
+		select {
+		case p.nudge <- struct{}{}:
+		default: // nudge already buffered; the loop will run anyway
+		}
+	}
+	mcpRetryMu.Unlock()
+
+	deadline := time.Now().Add(mcpToolWaitMax)
+	for {
+		if server, ok := mcpServerForToolFast(toolName); ok {
+			return server, true
+		}
+
+		// A loop only bumps its counter AFTER a connect attempt fully
+		// finished (registration included), so once every nudged loop
+		// has advanced and the tool is still missing, no pending
+		// server exposes it. Loops that exited (success registered the
+		// tool; cancellation ended the generation) count as advanced.
+		// Accepted wrinkle: an attempt that was already in flight when
+		// the baseline was sampled also reads as advanced, so a nudge
+		// colliding with a timer wake can fail fast one iteration
+		// early; the background loop still heals the server either way.
+		mcpRetryMu.Lock()
+		advanced := true
+		for name, p := range pending {
+			if cur, still := mcpPending[name]; !still || cur != p {
+				continue
+			}
+			if p.attempts.Load() <= baseline[p] {
+				advanced = false
+			}
+		}
+		mcpRetryMu.Unlock()
+		if advanced {
+			// Final lookup closes the register→bump race.
+			if server, ok := mcpServerForToolFast(toolName); ok {
+				return server, true
+			}
+			return "", false
+		}
+
+		if ctx.Err() != nil || time.Now().After(deadline) {
+			return "", false
+		}
+		time.Sleep(mcpToolWaitPoll)
+	}
+}
+
+// mcpServerForToolFast is the plain, non-waiting tool→server lookup.
+func mcpServerForToolFast(toolName string) (string, bool) {
+	mcpServersMu.Lock()
+	defer mcpServersMu.Unlock()
+	server, ok := mcpToolToServer[toolName]
+	return server, ok
+}
+
+// resolveMCPServerForTool is the string convenience wrapper used by call
+// sites that only need the server name ("" when unresolvable).
+func resolveMCPServerForTool(ctx context.Context, toolName string) string {
+	server, _ := mcpServerForTool(ctx, toolName)
+	return server
+}
+
+// wakePendingMCPServer ensures the tool's server is connected before a direct
+// tool command runs, and reports whether the tool is resolvable at all. While
+// the server is still pending in a background retry loop it nudges an
+// immediate reconnect and waits briefly for registration, so inject fields
+// are readable and the triggering command itself succeeds. A false return
+// means the tool is unknown or every pending server failed its nudged
+// attempt — callers should fail the command exactly as the tool call would
+// have ("unknown MCP tool"), avoiding a second bounded wait inside the call.
+func wakePendingMCPServer(ctx context.Context, toolName string) bool {
+	_, ok := mcpServerForTool(ctx, toolName)
+	return ok
+}
+
+// mcpServerForTool resolves a tool name to its owning server, tolerating
+// servers whose initial connect failed and are still pending in background
+// retry loops: those are nudged to reconnect immediately, then briefly
+// awaited. Callers should pass their request context so user cancellations
+// abort the wait.
+func mcpServerForTool(ctx context.Context, toolName string) (string, bool) {
+	if server, ok := mcpServerForToolFast(toolName); ok {
+		return server, true
+	}
+	return waitForPendingMCPTool(ctx, toolName)
+}
+
 func closeMCPClients() {
+	stopMCPRetryLoops()
 	mcpServersMu.Lock()
 	defer mcpServersMu.Unlock()
 	for name, srv := range mcpServers {
@@ -207,6 +568,7 @@ func closeMCPClients() {
 }
 
 func closeAndClearMCPClients() {
+	stopMCPRetryLoops()
 	mcpServersMu.Lock()
 	defer mcpServersMu.Unlock()
 	for name, srv := range mcpServers {
@@ -234,6 +596,13 @@ func signalMCPServer(name string) (*ReloadMCPServerResult, error) {
 	srv, ok := mcpServers[name]
 	mcpServersMu.Unlock()
 	if !ok {
+		// Not connected. If the server is pending in a background retry
+		// loop (its initial connect failed), wake the loop so an admin's
+		// /reload <name> forces an immediate reconnect attempt instead
+		// of waiting out the current backoff sleep.
+		if nudgeMCPServer(name) {
+			return nil, fmt.Errorf("MCP server %s is not connected (still retrying in background; forced an immediate attempt)", name)
+		}
 		return nil, fmt.Errorf("unknown MCP server: %s", name)
 	}
 
@@ -467,7 +836,7 @@ func reconnectMCPServer(name string, ctx context.Context) error {
 		srv.Session.Close()
 	}
 
-	newSrv, err := connectMCPServerImpl(name, mcpCfg)
+	newSrv, err := connectMCPServerImpl(context.Background(), name, mcpCfg)
 	if err != nil {
 		srv.reconnectCount++
 		if logger != nil {
@@ -499,9 +868,8 @@ func reconnectMCPServer(name string, ctx context.Context) error {
 }
 
 func getMCPServerForTool(toolName string) string {
-	mcpServersMu.Lock()
-	defer mcpServersMu.Unlock()
-	return mcpToolToServer[toolName]
+	server, _ := mcpServerForToolFast(toolName)
+	return server
 }
 
 func withMCPRetry[T any](serverName string, ctx context.Context, opDesc string, fn func(*MCPServer) (T, error)) (T, error) {
@@ -558,13 +926,10 @@ func callMCPToolWithContext(ctx context.Context, toolName string, args map[strin
 }
 
 func callMCPToolWithTimeoutContext(ctx context.Context, toolName string, args map[string]any, timeout time.Duration) (*mcp.CallToolResult, error) {
-	mcpServersMu.Lock()
-	serverName, ok := mcpToolToServer[toolName]
+	serverName, ok := mcpServerForTool(ctx, toolName)
 	if !ok {
-		mcpServersMu.Unlock()
 		return nil, fmt.Errorf("unknown MCP tool: %s", toolName)
 	}
-	mcpServersMu.Unlock()
 
 	if logger != nil {
 		logger.Info("calling MCP tool", "server", serverName, "tool", toolName, "args", args)
@@ -587,13 +952,10 @@ func callMCPToolWithTimeoutContext(ctx context.Context, toolName string, args ma
 }
 
 func callMCPToolWithTimeout(toolName string, args map[string]any, timeout time.Duration) (*mcp.CallToolResult, error) {
-	mcpServersMu.Lock()
-	serverName, ok := mcpToolToServer[toolName]
+	serverName, ok := mcpServerForTool(context.Background(), toolName)
 	if !ok {
-		mcpServersMu.Unlock()
 		return nil, fmt.Errorf("unknown MCP tool: %s", toolName)
 	}
-	mcpServersMu.Unlock()
 
 	if logger != nil {
 		logger.Info("calling MCP tool", "server", serverName, "tool", toolName, "args", args)

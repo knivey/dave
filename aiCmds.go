@@ -888,7 +888,14 @@ func (cr *chatRunner) executeToolCalls(turn *turnContext, toolCalls []ToolCall) 
 	if verbose && len(visibleTools) > 1 {
 		parts := make([]string, len(visibleTools))
 		for i, e := range visibleTools {
-			parts[i] = "[" + e.server + "] " + e.tool
+			server := e.server
+			if server == "" {
+				// Tool's server isn't registered right now (typically
+				// still pending in a background retry loop); the
+				// per-tool handling below will wake or fail it.
+				server = "(connecting)"
+			}
+			parts[i] = "[" + server + "] " + e.tool
 		}
 		cr.sendIRC(expandNotice(getNotices().Tools.CallMulti, map[string]string{
 			"tools": strings.Join(parts, ", "),
@@ -911,7 +918,21 @@ func (cr *chatRunner) executeToolCalls(turn *turnContext, toolCalls []ToolCall) 
 			}
 			continue
 		}
-		serverName := getMCPServerForTool(tc.Function.Name)
+		// Resolve via the ctx-aware path: if the tool's server is still
+		// pending in a background retry loop (initial connect failed),
+		// this nudges an immediate reconnect and waits briefly. Doing it
+		// here (before injection) matters: inject fields and hidden-tool
+		// rules are only readable from a registered tool schema, and the
+		// call below would otherwise succeed with missing provenance.
+		// Skipping the call when resolution already failed (server down
+		// or tool genuinely unknown) also avoids paying the bounded
+		// pending-wait twice for the same miss.
+		serverName := resolveMCPServerForTool(cr.ctx, tc.Function.Name)
+		if serverName == "" {
+			toolMsg := toolResultMsg(tc.ID, fmt.Sprintf("error: unknown MCP tool: %s", tc.Function.Name))
+			turn.Add(toolMsg)
+			continue
+		}
 		if isMCPToolHidden(tc.Function.Name, serverName, hiddenMCPTools) {
 			toolMsg := toolResultMsg(tc.ID, fmt.Sprintf("error: tool %q is hidden for this command", tc.Function.Name))
 			turn.Add(toolMsg)

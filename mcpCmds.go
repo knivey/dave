@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"text/template"
 
@@ -55,6 +56,20 @@ func mcpCmd(network Network, c *girc.Client, e girc.Event, cfg MCPCommandConfig,
 	var userID int64
 	if resolvedUser != nil {
 		userID = resolvedUser.ID
+	}
+
+	// Sync path only: wake the owning server before injecting scope args —
+	// inject fields can only be read from a registered tool schema, and a
+	// server whose initial connect failed may still be pending in a
+	// background retry loop. Gating on the result fails the command here
+	// (with the same notice the tool call would have produced) instead of
+	// paying the bounded pending-wait twice. The async path resolves its
+	// own tool inside mcpCmdAsync.
+	if cfg.Sync && !wakePendingMCPServer(ctx, cfg.Tool) {
+		err := fmt.Errorf("unknown MCP tool: %s", cfg.Tool)
+		sendOrDone(ctx, output, errorNotice(n.Tools.Failed, map[string]string{"error": err.Error()}))
+		log.Error("MCP tool call failed", "error", err.Error())
+		return
 	}
 
 	injectScopeArgs(toolArgs, cfg.Tool, map[string]any{
@@ -118,6 +133,16 @@ func mcpCmd(network Network, c *girc.Client, e girc.Event, cfg MCPCommandConfig,
 func mcpCmdAsync(network Network, cfg MCPCommandConfig, ctx context.Context, output chan<- string, toolArgs map[string]any, prompt string, channel string, nick string, userID int64, log logxi.Logger) {
 	n := getNotices()
 	asyncTool := cfg.GetAsyncTool()
+
+	// Same contract as the sync path: wake a pending retry loop so inject
+	// fields are readable, and fail fast with the identical notice instead
+	// of a second bounded wait inside the call below.
+	if !wakePendingMCPServer(ctx, asyncTool) {
+		err := fmt.Errorf("unknown MCP tool: %s", asyncTool)
+		sendOrDone(ctx, output, errorNotice(n.Tools.Failed, map[string]string{"error": err.Error()}))
+		log.Error("async MCP tool call failed", "error", err.Error())
+		return
+	}
 
 	injectScopeArgs(toolArgs, asyncTool, map[string]any{
 		"network": network.Name,

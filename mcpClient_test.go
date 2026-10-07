@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -720,7 +721,7 @@ func TestCallMCPToolAutoReconnect(t *testing.T) {
 	}
 
 	origConnectMCPServer := connectMCPServerImpl
-	connectMCPServerImpl = func(name string, cfg MCPConfig) (*MCPServer, error) {
+	connectMCPServerImpl = func(ctx context.Context, name string, cfg MCPConfig) (*MCPServer, error) {
 		newClient, newSession := createSession()
 		return &MCPServer{
 			Config:  cfg,
@@ -748,8 +749,6 @@ func TestCallMCPToolAutoReconnect(t *testing.T) {
 }
 
 func TestConcurrentReconnect(t *testing.T) {
-	ctx := context.Background()
-
 	type Input struct {
 		Name string `json:"name" jsonschema:"the name to greet"`
 	}
@@ -774,7 +773,7 @@ func TestConcurrentReconnect(t *testing.T) {
 	origConnectMCPServer := connectMCPServerImpl
 	defer func() { connectMCPServerImpl = origConnectMCPServer }()
 
-	connectMCPServerImpl = func(name string, cfg MCPConfig) (*MCPServer, error) {
+	connectMCPServerImpl = func(ctx context.Context, name string, cfg MCPConfig) (*MCPServer, error) {
 		server := mcp.NewServer(&mcp.Implementation{Name: "test-server", Version: "1.0.0"}, nil)
 		mcp.AddTool(server, &mcp.Tool{Name: "greet", Description: "say hi"}, func(ctx context.Context, req *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, Output, error) {
 			return nil, Output{Greeting: "Hello, " + input.Name + "!"}, nil
@@ -1283,7 +1282,7 @@ func TestMCPServerCmd_Stdio(t *testing.T) {
 	defer func() { connectMCPServerImpl = origImpl }()
 
 	var capturedCmd *exec.Cmd
-	connectMCPServerImpl = func(name string, cfg MCPConfig) (*MCPServer, error) {
+	connectMCPServerImpl = func(ctx context.Context, name string, cfg MCPConfig) (*MCPServer, error) {
 		srv := &MCPServer{
 			Config: cfg,
 		}
@@ -1296,7 +1295,7 @@ func TestMCPServerCmd_Stdio(t *testing.T) {
 	}
 
 	mcpCfg := MCPConfig{Transport: "stdio", Command: "echo", Args: []string{"test"}}
-	srv, err := connectMCPServerImpl("test", mcpCfg)
+	srv, err := connectMCPServerImpl(context.Background(), "test", mcpCfg)
 	require.NoError(t, err)
 	assert.NotNil(t, srv.cmd, "cmd should be set for stdio transport")
 	assert.NotNil(t, capturedCmd)
@@ -1308,7 +1307,7 @@ func TestMCPServerCmd_HTTP(t *testing.T) {
 	origImpl := connectMCPServerImpl
 	defer func() { connectMCPServerImpl = origImpl }()
 
-	connectMCPServerImpl = func(name string, cfg MCPConfig) (*MCPServer, error) {
+	connectMCPServerImpl = func(ctx context.Context, name string, cfg MCPConfig) (*MCPServer, error) {
 		srv := &MCPServer{
 			Config: cfg,
 		}
@@ -1316,7 +1315,7 @@ func TestMCPServerCmd_HTTP(t *testing.T) {
 	}
 
 	mcpCfg := MCPConfig{Transport: "http", URL: "http://localhost:8080/mcp"}
-	srv, err := connectMCPServerImpl("test", mcpCfg)
+	srv, err := connectMCPServerImpl(context.Background(), "test", mcpCfg)
 	require.NoError(t, err)
 	assert.Nil(t, srv.cmd, "cmd should be nil for http transport")
 }
@@ -1495,4 +1494,397 @@ func TestSignalMCPServerHTTP_AuthFailure(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, result.Warnings)
 	})
+}
+
+// --- Background retry for servers that fail their initial connect ---
+
+// setupMCPRetryTest isolates retry-loop tests: fresh server maps, a logger
+// (initMCPClients logs unguarded), and a guaranteed-dead generation on
+// cleanup. Cleanup order is LIFO, so loops are stopped BEFORE
+// saveAndResetMCPServers restores the previous maps.
+func setupMCPRetryTest(t *testing.T) {
+	t.Helper()
+	saveAndResetMCPServers(t)
+	if logger == nil {
+		logger = logxi.New("test")
+	}
+	t.Cleanup(stopMCPRetryLoops)
+}
+
+// setTestMCPs swaps the global MCP config for the duration of a test.
+func setTestMCPs(t *testing.T, mcps map[string]MCPConfig) {
+	t.Helper()
+	oldMCPs := config.MCPs
+	config.MCPs = mcps
+	t.Cleanup(func() { config.MCPs = oldMCPs })
+}
+
+func pendingAttemptCount(name string) int64 {
+	mcpRetryMu.Lock()
+	defer mcpRetryMu.Unlock()
+	if p, ok := mcpPending[name]; ok {
+		return p.attempts.Load()
+	}
+	return -1
+}
+
+func TestInitMCPClientsRetriesFailedServer(t *testing.T) {
+	setupMCPRetryTest(t)
+	setTestMCPs(t, map[string]MCPConfig{
+		"img-mcp-async": {Transport: "http", URL: "http://127.0.0.1:1/mcp", Timeout: time.Second},
+	})
+
+	var mu sync.Mutex
+	calls := 0
+	origImpl := connectMCPServerImpl
+	connectMCPServerImpl = func(ctx context.Context, name string, cfg MCPConfig) (*MCPServer, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		if calls < 2 {
+			return nil, fmt.Errorf("connection refused (test)")
+		}
+		return &MCPServer{
+			Config: cfg,
+			Tools:  []*mcp.Tool{{Name: "greet"}, {Name: "enhance_and_generate_async"}},
+		}, nil
+	}
+	t.Cleanup(func() { connectMCPServerImpl = origImpl })
+
+	r := NewReloadReport("startup")
+	initMCPClients(r)
+
+	// The initial connect failed: not registered, and the report says so
+	// (with a note that retrying continues in the background).
+	mcpServersMu.Lock()
+	_, exists := mcpServers["img-mcp-async"]
+	mcpServersMu.Unlock()
+	assert.False(t, exists, "server must not be registered after a failed initial connect")
+	require.Len(t, r.errors, 1)
+	assert.Contains(t, r.errors[0], "img-mcp-async")
+	assert.Contains(t, r.errors[0], "retrying in background")
+
+	// The background retry loop connects on the next attempt.
+	require.Eventually(t, func() bool {
+		mcpServersMu.Lock()
+		defer mcpServersMu.Unlock()
+		_, ok := mcpServers["img-mcp-async"]
+		return ok
+	}, 10*time.Second, 50*time.Millisecond, "server should connect via background retry")
+
+	mcpServersMu.Lock()
+	ownerGreet := mcpToolToServer["greet"]
+	ownerAsync := mcpToolToServer["enhance_and_generate_async"]
+	mcpServersMu.Unlock()
+	assert.Equal(t, "img-mcp-async", ownerGreet, "tools should map to the server after retry connects")
+	assert.Equal(t, "img-mcp-async", ownerAsync)
+
+	// The LLM-visible tool list picks up the late registration: a chat
+	// request that arrives after the retry succeeds sees the tools.
+	tools := getMCPTools([]string{"img-mcp-async"}, nil)
+	require.Len(t, tools, 2)
+	names := []string{tools[0].Function.Name, tools[1].Function.Name}
+	assert.ElementsMatch(t, []string{"greet", "enhance_and_generate_async"}, names)
+}
+
+func TestInitMCPClientsRetryGenerationStopsOnReload(t *testing.T) {
+	setupMCPRetryTest(t)
+	// reloadMCPClients overwrites config.MCPs; save/restore so the leaked
+	// map does not bleed into later tests.
+	setTestMCPs(t, nil)
+	mcpCfg := MCPConfig{Transport: "http", URL: "http://127.0.0.1:1/mcp", Timeout: time.Second}
+
+	origImpl := connectMCPServerImpl
+	connectMCPServerImpl = func(ctx context.Context, name string, cfg MCPConfig) (*MCPServer, error) {
+		return nil, fmt.Errorf("connection refused (test)")
+	}
+	t.Cleanup(func() { connectMCPServerImpl = origImpl })
+
+	// Generation 1 via the real reload path.
+	reloadMCPClients(map[string]MCPConfig{"img": mcpCfg}, nil)
+
+	mcpRetryMu.Lock()
+	p1, ok := mcpPending["img"]
+	mcpRetryMu.Unlock()
+	require.True(t, ok, "generation 1 should have a pending retry loop")
+
+	require.Eventually(t, func() bool { return p1.attempts.Load() >= 1 },
+		10*time.Second, 50*time.Millisecond, "generation 1 loop should attempt a connect")
+
+	// Generation 2: reload must cancel generation 1's loop before starting
+	// its own.
+	reloadMCPClients(map[string]MCPConfig{"img": mcpCfg}, nil)
+
+	mcpRetryMu.Lock()
+	p2, ok := mcpPending["img"]
+	pendingCount := len(mcpPending)
+	mcpRetryMu.Unlock()
+	require.True(t, ok, "generation 2 should have its own pending retry loop")
+	assert.NotSame(t, p1, p2, "re-load must replace the retry loop, not reuse it")
+	assert.Equal(t, 1, pendingCount, "exactly one pending loop should remain after reload")
+
+	// Generation 2's loop keeps retrying...
+	require.Eventually(t, func() bool { return p2.attempts.Load() >= 1 },
+		10*time.Second, 50*time.Millisecond, "generation 2 loop should still be running")
+
+	// ...while generation 1's loop is dead: its counter is frozen.
+	frozen := p1.attempts.Load()
+	require.Eventually(t, func() bool { return p2.attempts.Load() >= 1 && p1.attempts.Load() == frozen },
+		5*time.Second, 50*time.Millisecond)
+	assert.Equal(t, frozen, p1.attempts.Load(), "generation 1's loop must not attempt after reload")
+}
+
+// TestCallMCPToolWakesPendingRetry reproduces the reported production
+// scenario: dave starts before the MCP server, the initial connect fails, the
+// admin brings the server up later, and the next tool command must succeed —
+// the call itself wakes the sleeping retry loop instead of waiting out the
+// backoff (or worse, erroring with "unknown MCP tool").
+func TestCallMCPToolWakesPendingRetry(t *testing.T) {
+	setupMCPRetryTest(t)
+	setTestMCPs(t, map[string]MCPConfig{
+		"img": {Transport: "http", URL: "http://127.0.0.1:1/mcp", Timeout: 5 * time.Second},
+	})
+
+	ctx := context.Background()
+	type Input struct {
+		Name string `json:"name" jsonschema:"the name to greet"`
+	}
+	type Output struct {
+		Greeting string `json:"greeting" jsonschema:"the greeting"`
+	}
+	server := mcp.NewServer(&mcp.Implementation{Name: "test-server", Version: "1.0.0"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "greet", Description: "say hi"}, func(ctx context.Context, req *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, Output, error) {
+		return nil, Output{Greeting: "Hello, " + input.Name + "!"}, nil
+	})
+	t1, t2 := mcp.NewInMemoryTransports()
+	_, err := server.Connect(ctx, t1, nil)
+	require.NoError(t, err)
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
+	session, err := client.Connect(ctx, t2, nil)
+	require.NoError(t, err)
+	defer session.Close()
+
+	var mu sync.Mutex
+	up := false
+	origImpl := connectMCPServerImpl
+	connectMCPServerImpl = func(ctx context.Context, name string, cfg MCPConfig) (*MCPServer, error) {
+		mu.Lock()
+		isUp := up
+		mu.Unlock()
+		if !isUp {
+			return nil, fmt.Errorf("connection refused (test)")
+		}
+		srv := &MCPServer{Config: cfg, Client: client, Session: session}
+		for tool, err := range session.Tools(ctx, nil) {
+			if err != nil {
+				return nil, err
+			}
+			srv.Tools = append(srv.Tools, tool)
+		}
+		return srv, nil
+	}
+	t.Cleanup(func() { connectMCPServerImpl = origImpl })
+
+	initMCPClients(nil)
+
+	// Server pending in a backoff sleep (first retry ~1-1.5s out).
+	mcpServersMu.Lock()
+	_, registered := mcpServers["img"]
+	mcpServersMu.Unlock()
+	assert.False(t, registered, "server must not be registered while down")
+
+	// The admin starts the MCP server...
+	mu.Lock()
+	up = true
+	mu.Unlock()
+
+	// ...and the very next tool call nudges the loop awake and succeeds,
+	// without waiting out the backoff sleep.
+	start := time.Now()
+	result, err := callMCPTool("greet", map[string]any{"name": "shrew"})
+	elapsed := time.Since(start)
+	require.NoError(t, err, "call after server came up should succeed via nudged retry")
+	assert.Contains(t, mcpToolResultToText(result), "Hello, shrew!")
+	assert.Less(t, elapsed, 5*time.Second, "nudge should bypass the backoff sleep and the wait budget")
+}
+
+// TestCallMCPToolFailsFastWhenPendingServerDown pins the other half of the
+// nudge contract: when the server is genuinely down, the nudged attempt fails
+// quickly and the caller gets the unknown-tool error promptly instead of
+// hanging for the full wait budget.
+func TestCallMCPToolFailsFastWhenPendingServerDown(t *testing.T) {
+	setupMCPRetryTest(t)
+	setTestMCPs(t, map[string]MCPConfig{
+		"img": {Transport: "http", URL: "http://127.0.0.1:1/mcp", Timeout: time.Second},
+	})
+
+	origImpl := connectMCPServerImpl
+	connectMCPServerImpl = func(ctx context.Context, name string, cfg MCPConfig) (*MCPServer, error) {
+		return nil, fmt.Errorf("connection refused (test)")
+	}
+	t.Cleanup(func() { connectMCPServerImpl = origImpl })
+
+	initMCPClients(nil)
+
+	start := time.Now()
+	_, err := callMCPTool("greet", nil)
+	elapsed := time.Since(start)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown MCP tool")
+	assert.Less(t, elapsed, 5*time.Second, "should fail fast once the nudged attempt failed")
+}
+
+func TestSignalMCPServerNudgesPendingServer(t *testing.T) {
+	setupMCPRetryTest(t)
+	setTestMCPs(t, map[string]MCPConfig{
+		"img": {Transport: "http", URL: "http://127.0.0.1:1/mcp", Timeout: time.Second},
+	})
+
+	origImpl := connectMCPServerImpl
+	connectMCPServerImpl = func(ctx context.Context, name string, cfg MCPConfig) (*MCPServer, error) {
+		return nil, fmt.Errorf("connection refused (test)")
+	}
+	t.Cleanup(func() { connectMCPServerImpl = origImpl })
+
+	initMCPClients(nil)
+
+	// Wait for the loop to settle into a backoff sleep after one attempt.
+	require.Eventually(t, func() bool { return pendingAttemptCount("img") >= 1 },
+		10*time.Second, 50*time.Millisecond)
+
+	baseline := pendingAttemptCount("img")
+	_, err := signalMCPServer("img")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "still retrying in background", "pending servers should be reported as retrying, not unknown")
+
+	// The signal forced an immediate reconnect attempt.
+	require.Eventually(t, func() bool { return pendingAttemptCount("img") > baseline },
+		5*time.Second, 50*time.Millisecond, "signalMCPServer should nudge the pending loop")
+}
+
+func TestStopMCPRetryLoopsClearsPending(t *testing.T) {
+	setupMCPRetryTest(t)
+	setTestMCPs(t, map[string]MCPConfig{
+		"img": {Transport: "http", URL: "http://127.0.0.1:1/mcp", Timeout: time.Second},
+	})
+
+	origImpl := connectMCPServerImpl
+	connectMCPServerImpl = func(ctx context.Context, name string, cfg MCPConfig) (*MCPServer, error) {
+		return nil, fmt.Errorf("connection refused (test)")
+	}
+	t.Cleanup(func() { connectMCPServerImpl = origImpl })
+
+	initMCPClients(nil)
+
+	mcpRetryMu.Lock()
+	_, ok := mcpPending["img"]
+	mcpRetryMu.Unlock()
+	require.True(t, ok, "retry loop should be pending after failed init")
+
+	stopMCPRetryLoops()
+
+	mcpRetryMu.Lock()
+	count := len(mcpPending)
+	mcpRetryMu.Unlock()
+	assert.Zero(t, count, "stopMCPRetryLoops must remove pending entries before returning")
+
+	// A second stop is a no-op (idempotent — shutdown calls it too).
+	stopMCPRetryLoops()
+}
+
+// TestRetryLoopCancelledDuringConnectClosesSession pins the adversarial
+// lifecycle race: a retry connect that completes SUCCESSFULLY just after the
+// generation was cancelled must unregister itself and close its session —
+// never leave a registered-but-orphaned (or dropped-but-unclosed) session
+// behind. The stub deliberately ignores its ctx and returns success after
+// cancellation, which is the worst case the loop's post-registration
+// ctx re-check exists for.
+func TestRetryLoopCancelledDuringConnectClosesSession(t *testing.T) {
+	setupMCPRetryTest(t)
+	setTestMCPs(t, map[string]MCPConfig{
+		"img": {Transport: "http", URL: "http://127.0.0.1:1/mcp", Timeout: time.Second},
+	})
+
+	ctx := context.Background()
+	type Input struct {
+		Name string `json:"name" jsonschema:"the name to greet"`
+	}
+	type Output struct {
+		Greeting string `json:"greeting" jsonschema:"the greeting"`
+	}
+	server := mcp.NewServer(&mcp.Implementation{Name: "test-server", Version: "1.0.0"}, nil)
+	mcp.AddTool(server, &mcp.Tool{Name: "greet", Description: "say hi"}, func(ctx context.Context, req *mcp.CallToolRequest, input Input) (*mcp.CallToolResult, Output, error) {
+		return nil, Output{Greeting: "Hello, " + input.Name + "!"}, nil
+	})
+	t1, t2 := mcp.NewInMemoryTransports()
+	_, err := server.Connect(ctx, t1, nil)
+	require.NoError(t, err)
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
+	session, err := client.Connect(ctx, t2, nil)
+	require.NoError(t, err)
+
+	var (
+		stage       atomic.Int32 // 0 = init attempt fails; 1 = retry attempt blocks
+		enteredOnce sync.Once
+		entered     = make(chan struct{})
+		release     = make(chan struct{})
+	)
+	origImpl := connectMCPServerImpl
+	connectMCPServerImpl = func(callCtx context.Context, name string, cfg MCPConfig) (*MCPServer, error) {
+		if stage.Load() == 0 {
+			return nil, fmt.Errorf("connection refused (test)")
+		}
+		enteredOnce.Do(func() { close(entered) }) // retry attempt is now "in flight"
+		// Wait for the generation to be cancelled FIRST (deterministic
+		// cancel-before-success ordering), then still succeed — the
+		// exact interleaving the design comment guards against.
+		<-callCtx.Done()
+		<-release
+		srv := &MCPServer{Config: cfg, Client: client, Session: session}
+		for tool, err := range session.Tools(context.Background(), nil) {
+			if err != nil {
+				return nil, err
+			}
+			srv.Tools = append(srv.Tools, tool)
+		}
+		return srv, nil
+	}
+	t.Cleanup(func() { connectMCPServerImpl = origImpl })
+
+	initMCPClients(nil) // init connect fails → retry loop starts
+
+	// Force the loop into its (blocked) retry attempt.
+	stage.Store(1)
+	require.True(t, nudgeMCPServer("img"))
+	<-entered
+
+	// End the generation while the attempt is in flight.
+	stopDone := make(chan struct{})
+	go func() {
+		defer close(stopDone)
+		stopMCPRetryLoops()
+	}()
+
+	// Now let the cancelled attempt "succeed".
+	close(release)
+	<-stopDone // stopMCPRetryLoops only returns once the loop fully exited
+
+	mcpServersMu.Lock()
+	_, registered := mcpServers["img"]
+	toolOwner, toolMapped := mcpToolToServer["greet"]
+	mcpServersMu.Unlock()
+	assert.False(t, registered, "a success registered after cancellation must self-unregister")
+	assert.False(t, toolMapped, "tool mapping must be removed with the registration")
+	assert.Empty(t, toolOwner)
+
+	mcpRetryMu.Lock()
+	pendingCount := len(mcpPending)
+	mcpRetryMu.Unlock()
+	assert.Zero(t, pendingCount)
+
+	// The session the loop created must have been closed.
+	callCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err = session.CallTool(callCtx, &mcp.CallToolParams{Name: "greet"})
+	assert.Error(t, err, "session must be closed after the self-unregistration")
 }

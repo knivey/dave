@@ -25,13 +25,6 @@ func ContextExists(network, channel string, userID int64) bool {
 	return sessionMgr.ContextExists(network, channel, userID)
 }
 
-func SetContextResponseID(network, channel string, userID int64, responseID string) {
-	if theDB == nil {
-		return
-	}
-	sessionMgr.SetResponseIDForActive(network, channel, userID, responseID)
-}
-
 func LoadContextStore() {
 	if theDB == nil {
 		return

@@ -44,13 +44,21 @@ func (c *DatabaseConfig) SetDefaults() {
 }
 
 type Session struct {
-	ID             int64   `gorm:"primaryKey;autoIncrement"`
-	Network        string  `gorm:"not null;index:idx_sessions_user"`
-	Channel        string  `gorm:"not null;index:idx_sessions_user"`
-	ChatCommand    string  `gorm:"column:chat_command;not null"`
-	FirstMessage   string  `gorm:"column:first_message;not null;default:''"`
-	ConvID         *string `gorm:"column:conv_id;index:idx_sessions_conv_id"`
-	ResponseID     *string `gorm:"column:response_id;index:idx_sessions_response_id"`
+	ID           int64   `gorm:"primaryKey;autoIncrement"`
+	Network      string  `gorm:"not null;index:idx_sessions_user"`
+	Channel      string  `gorm:"not null;index:idx_sessions_user"`
+	ChatCommand  string  `gorm:"column:chat_command;not null"`
+	FirstMessage string  `gorm:"column:first_message;not null;default:''"`
+	ConvID       *string `gorm:"column:conv_id;index:idx_sessions_conv_id"`
+	ResponseID   *string `gorm:"column:response_id;index:idx_sessions_response_id"`
+	// ResponseModel is the model that produced ResponseID. Responses API
+	// chains (previous_response_id) must never cross a model switch: the
+	// provider either errors with wording we may not recognize or — worse —
+	// silently drops the prior assistant history. runTurnResponses skips
+	// chaining when this differs from the live config's model. NULL means
+	// "unknown" (legacy rows) and chains as before, relying on the
+	// isResponseIDError net. Written/cleared atomically with response_id.
+	ResponseModel  *string `gorm:"column:response_model"`
 	Service        string  `gorm:"not null;default:''"`
 	Model          string  `gorm:"not null;default:''"`
 	Status         string  `gorm:"not null;default:'active';index:idx_sessions_status"`
@@ -71,6 +79,7 @@ type SessionSetting struct {
 	MaxImages        int
 	MaxContextImages int
 	ReasoningEffort  string
+	ReasoningSummary string
 	CreatedAt        time.Time
 }
 
@@ -84,7 +93,10 @@ type Message struct {
 	ReasoningContent *string `gorm:"type:text"`
 	MultiContent     *string `gorm:"type:text"`
 	IsAsyncResult    bool    `gorm:"default:false"`
-	SettingsID       *int64  `gorm:"index:idx_messages_settings"`
+	// Note: the DB still has a nullable settings_id column from an abandoned
+	// per-message settings-tracking design; it is deliberately absent from
+	// this struct and never written. Do not re-add without reading the spec:
+	// docs/superpowers/specs/2026-10-06-live-config-and-usage-attribution-design.md
 	// Archived: when true, this message has been compacted into a summary and is
 	// no longer included in the active history sent to the LLM. Originals are
 	// preserved for the history viewer and future reconstruction. CompactionID
@@ -147,8 +159,15 @@ type PendingJob struct {
 }
 
 type TurnUsage struct {
-	ID               int64  `gorm:"primaryKey;autoIncrement"`
+	ID int64 `gorm:"primaryKey;autoIncrement"`
+	// Model/Service/ReasoningEffort attribute the turn to the effective
+	// config that produced it (denormalized per-turn so stats survive any
+	// number of config reloads — see spec 2026-10-06-live-config-and-usage-
+	// attribution-design.md). Rows predating the columns read as '' (unknown).
 	SessionID        int64  `gorm:"not null;index:idx_turn_usage_session_id"`
+	Model            string `gorm:"not null;default:''"`
+	Service          string `gorm:"not null;default:''"`
+	ReasoningEffort  string `gorm:"not null;default:''"`
 	PromptTokens     int    `gorm:"not null;default:0"`
 	CompletionTokens int    `gorm:"not null;default:0"`
 	CachedTokens     int    `gorm:"not null;default:0"`
@@ -303,9 +322,17 @@ func updateDBSessionConvID(sessionID int64, convID string) error {
 		Update("conv_id", convID).Error
 }
 
-func updateDBSessionResponseID(sessionID int64, responseID *string) error {
+// updateDBSessionResponseID writes response_id and response_model in a
+// single UPDATE so the pair can never diverge (e.g. a /reinject clear racing
+// a turn's save). A non-nil responseID saves both; nil clears both — the
+// model argument is ignored on clear, which is why callers pass "" there.
+func updateDBSessionResponseID(sessionID int64, responseID *string, model string) error {
+	if responseID == nil {
+		return theDB.Model(&Session{}).Where("id = ?", sessionID).
+			Updates(map[string]interface{}{"response_id": nil, "response_model": nil}).Error
+	}
 	return theDB.Model(&Session{}).Where("id = ?", sessionID).
-		Update("response_id", responseID).Error
+		Updates(map[string]interface{}{"response_id": *responseID, "response_model": model}).Error
 }
 
 func insertDBMessage(sessionID int64, role, content string, toolCallsJSON *string, toolCallID *string, reasoningContent *string, multiContentJSON *string) error {
@@ -325,7 +352,7 @@ func insertDBMessage(sessionID int64, role, content string, toolCallsJSON *strin
 		Update("last_active", time.Now()).Error
 }
 
-func insertDBTurnUsage(sessionID int64, usage *Usage, finishReason, apiPath string, durationMs int) error {
+func insertDBTurnUsage(sessionID int64, cfg AIConfig, usage *Usage, finishReason, apiPath string, durationMs int) error {
 	if usage == nil || sessionID == 0 {
 		return nil
 	}
@@ -338,6 +365,9 @@ func insertDBTurnUsage(sessionID int64, usage *Usage, finishReason, apiPath stri
 	}
 	turnUsage := TurnUsage{
 		SessionID:        sessionID,
+		Model:            cfg.Model,
+		Service:          cfg.Service,
+		ReasoningEffort:  cfg.ReasoningEffort,
 		PromptTokens:     int(usage.PromptTokens),
 		CompletionTokens: int(usage.CompletionTokens),
 		CachedTokens:     cachedTokens,

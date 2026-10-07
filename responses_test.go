@@ -11,6 +11,7 @@ import (
 
 	openai "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/responses"
+	"github.com/openai/openai-go/v3/shared"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -334,20 +335,110 @@ func TestBuildResponseParams(t *testing.T) {
 		Temperature:         0.7,
 		TopP:                0.9,
 		ReasoningEffort:     "medium",
+		ReasoningSummary:    "auto",
 		PreviousResponseID:  true,
 	}
 	input := []responses.ResponseInputItemUnionParam{
 		responses.ResponseInputItemParamOfMessage("hello", responses.EasyInputMessageRoleUser),
 	}
 
-	params := buildResponseParams(cfg, input, nil, "resp_prev", "testuser")
+	params := buildResponseParams(cfg, input, nil, "resp_prev", apiIdentity{User: "testuser"})
 	assert.Equal(t, "gpt-4o", params.Model, "Model")
 	assert.Equal(t, openai.String("resp_prev"), params.PreviousResponseID, "PreviousResponseID")
+	assert.Equal(t, shared.ReasoningEffort("medium"), params.Reasoning.Effort, "Reasoning.Effort")
+	assert.Equal(t, shared.ReasoningSummary("auto"), params.Reasoning.Summary, "Reasoning.Summary")
+}
+
+func TestBuildResponseParams_ReasoningSummaryOnly(t *testing.T) {
+	cfg := AIConfig{Model: "test-model", ReasoningSummary: "detailed"}
+	params := buildResponseParams(cfg, nil, nil, "", apiIdentity{})
+	assert.Equal(t, shared.ReasoningSummary("detailed"), params.Reasoning.Summary, "Reasoning.Summary")
+	assert.Empty(t, params.Reasoning.Effort, "effort should stay unset when only summary is configured")
+}
+
+func TestBuildResponseParams_NoReasoningWhenUnset(t *testing.T) {
+	cfg := AIConfig{Model: "test-model"}
+	params := buildResponseParams(cfg, nil, nil, "", apiIdentity{})
+	assert.Empty(t, params.Reasoning.Effort, "Reasoning.Effort")
+	assert.Empty(t, params.Reasoning.Summary, "Reasoning.Summary")
+}
+
+func TestBuildResponseParams_ReasoningWireJSON(t *testing.T) {
+	t.Run("summary only omits empty effort on the wire", func(t *testing.T) {
+		cfg := AIConfig{Model: "test-model", ReasoningSummary: "auto"}
+		params := buildResponseParams(cfg, nil, nil, "", apiIdentity{})
+		raw, err := json.Marshal(params)
+		require.NoError(t, err)
+		assert.Contains(t, string(raw), `"summary":"auto"`, "wire body should request reasoning summaries")
+		assert.NotContains(t, string(raw), `"effort"`, "empty effort must be omitted, not sent as \"\"")
+	})
+
+	t.Run("effort and summary both serialize", func(t *testing.T) {
+		cfg := AIConfig{Model: "test-model", ReasoningEffort: "low", ReasoningSummary: "detailed"}
+		params := buildResponseParams(cfg, nil, nil, "", apiIdentity{})
+		raw, err := json.Marshal(params)
+		require.NoError(t, err)
+		assert.Contains(t, string(raw), `"effort":"low"`)
+		assert.Contains(t, string(raw), `"summary":"detailed"`)
+	})
+
+	t.Run("unset reasoning sends no reasoning object", func(t *testing.T) {
+		cfg := AIConfig{Model: "test-model"}
+		params := buildResponseParams(cfg, nil, nil, "", apiIdentity{})
+		raw, err := json.Marshal(params)
+		require.NoError(t, err)
+		assert.NotContains(t, string(raw), `"reasoning"`)
+	})
+}
+
+func TestBuildResponseParamsIdentityFields(t *testing.T) {
+	cfg := AIConfig{Model: "gpt-4o"}
+
+	params := buildResponseParams(cfg, nil, nil, "", apiIdentity{User: "legacy-user"})
+	assert.Equal(t, openai.String("legacy-user"), params.User, "User")
+	assert.False(t, params.SafetyIdentifier.Valid(), "SafetyIdentifier should be omitted")
+	assert.False(t, params.PromptCacheKey.Valid(), "PromptCacheKey should be omitted")
+
+	params = buildResponseParams(cfg, nil, nil, "", apiIdentity{SafetyID: "safety-id", CacheKey: "cache-key"})
+	assert.Equal(t, openai.String("safety-id"), params.SafetyIdentifier, "SafetyIdentifier")
+	assert.Equal(t, openai.String("cache-key"), params.PromptCacheKey, "PromptCacheKey")
+	assert.False(t, params.User.Valid(), "User should be omitted")
+
+	params = buildResponseParams(cfg, nil, nil, "", apiIdentity{})
+	assert.False(t, params.User.Valid(), "empty identity: User should be omitted")
+	assert.False(t, params.SafetyIdentifier.Valid(), "empty identity: SafetyIdentifier should be omitted")
+	assert.False(t, params.PromptCacheKey.Valid(), "empty identity: PromptCacheKey should be omitted")
+}
+
+// TestBuildResponseParamsIdentityWireJSON pins the serialized request body
+// against SDK upgrades: identity fields must appear under their wire names
+// and unset fields must be absent entirely (omitzero), not sent empty.
+func TestBuildResponseParamsIdentityWireJSON(t *testing.T) {
+	cfg := AIConfig{Model: "gpt-4o"}
+
+	marshal := func(t *testing.T, ident apiIdentity) map[string]any {
+		t.Helper()
+		body, err := json.Marshal(buildResponseParams(cfg, nil, nil, "", ident))
+		require.NoError(t, err)
+		var wire map[string]any
+		require.NoError(t, json.Unmarshal(body, &wire))
+		return wire
+	}
+
+	wire := marshal(t, apiIdentity{SafetyID: "safety-id", CacheKey: "cache-key"})
+	assert.Equal(t, "safety-id", wire["safety_identifier"], "safety_identifier wire name")
+	assert.Equal(t, "cache-key", wire["prompt_cache_key"], "prompt_cache_key wire name")
+	assert.NotContains(t, wire, "user", "legacy user field must stay absent")
+
+	wire = marshal(t, apiIdentity{User: "legacy-user"})
+	assert.Equal(t, "legacy-user", wire["user"], "user wire name")
+	assert.NotContains(t, wire, "safety_identifier", "safety_identifier must stay absent")
+	assert.NotContains(t, wire, "prompt_cache_key", "prompt_cache_key must stay absent")
 }
 
 func TestBuildResponseParams_NoIncludeWhenDisabled(t *testing.T) {
 	cfg := AIConfig{Model: "test-model"}
-	params := buildResponseParams(cfg, nil, nil, "", "")
+	params := buildResponseParams(cfg, nil, nil, "", apiIdentity{})
 	assert.Empty(t, params.Include,
 		"buildResponseParams should not populate Include")
 }
@@ -389,6 +480,8 @@ func TestIsResponseIDError(t *testing.T) {
 		{"openai.Error code response_not_found", newAPIError(http.StatusBadRequest, "response_not_found", "response not found"), true},
 		{"openai.Error code invalid_previous_response_id", newAPIError(http.StatusBadRequest, "invalid_previous_response_id", "bad id"), true},
 		{"openai.Error 400 empty content", newAPIError(http.StatusBadRequest, "", "Each message must have at least one content element."), true},
+		{"openai.Error 400 reasoning items mismatch", newAPIError(http.StatusBadRequest, "", "Reasoning input items can only be provided to a reasoning or computer use model. Remove reasoning items from your input and try again."), true},
+		{"openai.Error 400 unrelated reasoning mention", newAPIError(http.StatusBadRequest, "invalid_request", "reasoning is not enabled for this model"), false},
 		{"openai.Error 400 other", newAPIError(http.StatusBadRequest, "invalid_request", "something else"), false},
 		{"openai.Error 401", newAPIError(http.StatusUnauthorized, "invalid_api_key", "bad key"), false},
 		{"openai.Error 429", newAPIError(http.StatusTooManyRequests, "rate_limit_exceeded", "slow down"), false},
@@ -397,6 +490,7 @@ func TestIsResponseIDError(t *testing.T) {
 		{"string fallback invalid_previous_response_id", fmt.Errorf(`"code":"invalid_previous_response_id"`), true},
 		{"string fallback previous_response_id not found", fmt.Errorf("previous_response_id abc not found"), true},
 		{"string fallback empty content", fmt.Errorf("Invalid request content: Each message must have at least one content element."), true},
+		{"string fallback reasoning items mismatch", fmt.Errorf("Error code: 400 - {'error': {'message': 'Reasoning input items can only be provided to a reasoning or computer use model. Remove reasoning items from your input and try again.', 'type': 'invalid_request_error'}}"), true},
 	}
 
 	for _, tt := range tests {

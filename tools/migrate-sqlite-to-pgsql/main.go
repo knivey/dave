@@ -13,21 +13,22 @@ import (
 )
 
 type Session struct {
-	ID           int64   `gorm:"primaryKey;autoIncrement"`
-	Network      string  `gorm:"not null"`
-	Channel      string  `gorm:"not null"`
-	Nick         string  `gorm:"not null"`
-	ChatCommand  string  `gorm:"column:chat_command;not null"`
-	FirstMessage string  `gorm:"column:first_message;not null;default:''"`
-	ConvID       *string `gorm:"column:conv_id"`
-	ResponseID   *string `gorm:"column:response_id"`
-	Service      string  `gorm:"not null;default:''"`
-	Model        string  `gorm:"not null;default:''"`
-	Status       string  `gorm:"not null;default:'active'"`
-	CreatedAt    time.Time
-	LastActive   time.Time      `gorm:"column:last_active"`
-	DeletedAt    gorm.DeletedAt `gorm:"index"`
-	SettingsID   *int64         `gorm:"index:idx_sessions_settings"`
+	ID            int64   `gorm:"primaryKey;autoIncrement"`
+	Network       string  `gorm:"not null"`
+	Channel       string  `gorm:"not null"`
+	Nick          string  `gorm:"not null"`
+	ChatCommand   string  `gorm:"column:chat_command;not null"`
+	FirstMessage  string  `gorm:"column:first_message;not null;default:''"`
+	ConvID        *string `gorm:"column:conv_id"`
+	ResponseID    *string `gorm:"column:response_id"`
+	ResponseModel *string `gorm:"column:response_model"`
+	Service       string  `gorm:"not null;default:''"`
+	Model         string  `gorm:"not null;default:''"`
+	Status        string  `gorm:"not null;default:'active'"`
+	CreatedAt     time.Time
+	LastActive    time.Time      `gorm:"column:last_active"`
+	DeletedAt     gorm.DeletedAt `gorm:"index"`
+	SettingsID    *int64         `gorm:"index:idx_sessions_settings"`
 }
 
 type SessionSetting struct {
@@ -38,6 +39,7 @@ type SessionSetting struct {
 	MaxImages        int
 	MaxContextImages int
 	ReasoningEffort  string
+	ReasoningSummary string
 	CreatedAt        time.Time
 }
 
@@ -51,8 +53,9 @@ type Message struct {
 	ReasoningContent *string `gorm:"type:text"`
 	MultiContent     *string `gorm:"type:text"`
 	IsAsyncResult    bool    `gorm:"default:false"`
-	SettingsID       *int64  `gorm:"index:idx_messages_settings"`
-	CreatedAt        time.Time
+	// settings_id deliberately absent — dead column, never written (see
+	// db.go's Message struct note).
+	CreatedAt time.Time
 }
 
 type PendingJob struct {
@@ -71,8 +74,13 @@ type PendingJob struct {
 }
 
 type TurnUsage struct {
-	ID               int64  `gorm:"primaryKey;autoIncrement"`
-	SessionID        int64  `gorm:"not null"`
+	ID        int64 `gorm:"primaryKey;autoIncrement"`
+	SessionID int64 `gorm:"not null"`
+	// Model/Service/ReasoningEffort mirror the main TurnUsage attribution
+	// columns (db.go) — keep the copies in sync.
+	Model            string `gorm:"not null;default:''"`
+	Service          string `gorm:"not null;default:''"`
+	ReasoningEffort  string `gorm:"not null;default:''"`
 	PromptTokens     int    `gorm:"not null;default:0"`
 	CompletionTokens int    `gorm:"not null;default:0"`
 	CachedTokens     int    `gorm:"not null;default:0"`

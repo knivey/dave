@@ -294,6 +294,11 @@ func callSummarizer(ctx context.Context, cfg AIConfig, summarizerSys string, arc
 	summarizerCfg.Streaming = false
 	summarizerCfg.ResponsesAPI = false
 	summarizerCfg.ReasoningEffort = ""
+	// Defensive symmetry with the effort clear above: the summarizer forces
+	// Chat Completions (which never reads ReasoningSummary), but if it ever
+	// flips back to the Responses API, summary tokens would silently ride
+	// along on compaction calls (billed as output tokens).
+	summarizerCfg.ReasoningSummary = ""
 	summarizerCfg.MCPs = nil
 
 	msgs := []ChatMessage{
@@ -303,7 +308,7 @@ func callSummarizer(ctx context.Context, cfg AIConfig, summarizerSys string, arc
 
 	apiCtx, cancel := context.WithTimeout(ctx, summarizerCfg.Timeout)
 	defer cancel()
-	params := buildChatCompletionParams(summarizerCfg, msgs, nil, "")
+	params := buildChatCompletionParams(summarizerCfg, msgs, nil, apiIdentity{})
 	start := time.Now()
 	resp, err := openaiClient.Chat.Completions.New(apiCtx, params)
 	dur := int(time.Since(start) / time.Millisecond)
@@ -531,10 +536,9 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 
 		// 3. Insert fresh system row first so it gets the smallest new id.
 		freshSysRow := Message{
-			SessionID:  inputs.SessionID,
-			Role:       RoleSystem,
-			Content:    freshSystem,
-			SettingsID: session.SettingsID,
+			SessionID: inputs.SessionID,
+			Role:      RoleSystem,
+			Content:   freshSystem,
 		}
 		if err := tx.Create(&freshSysRow).Error; err != nil {
 			return fmt.Errorf("insert fresh system: %w", err)
@@ -542,10 +546,9 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 
 		// 4. Insert the summary RoleSystem row.
 		summaryRow := Message{
-			SessionID:  inputs.SessionID,
-			Role:       RoleSystem,
-			Content:    summaryMessage,
-			SettingsID: session.SettingsID,
+			SessionID: inputs.SessionID,
+			Role:      RoleSystem,
+			Content:   summaryMessage,
 		}
 		if err := tx.Create(&summaryRow).Error; err != nil {
 			return fmt.Errorf("insert summary: %w", err)
@@ -572,7 +575,6 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 				ReasoningContent:   orig.ReasoningContent,
 				MultiContent:       orig.MultiContent,
 				IsAsyncResult:      orig.IsAsyncResult,
-				SettingsID:         orig.SettingsID,
 				SourceCompactionID: &compIDForTag,
 			}
 			if err := tx.Create(&newRow).Error; err != nil {
@@ -590,9 +592,10 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 		//    aiCmds.go's recovery path: previous_response_id refers to a
 		//    server-side history that no longer matches our compacted
 		//    local history, so we must drop it and resend full history on
-		//    the next turn.
+		//    the next turn. response_model goes with it (the pair is
+		//    always written/cleared together).
 		if err := tx.Model(&Session{}).Where("id = ?", inputs.SessionID).
-			Update("response_id", nil).Error; err != nil {
+			Updates(map[string]interface{}{"response_id": nil, "response_model": nil}).Error; err != nil {
 			return fmt.Errorf("reset response_id: %w", err)
 		}
 

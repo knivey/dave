@@ -281,6 +281,7 @@ type AIConfig struct {
 	FrequencyPenalty     float32            `toml:"frequencypenalty"`
 	ParallelToolCalls    *bool              `toml:"paralleltoolcalls"`
 	ReasoningEffort      string             `toml:"reasoningeffort"`
+	ReasoningSummary     string             `toml:"reasoningsummary"`
 	ServiceTier          string             `toml:"servicetier"`
 	Verbosity            string             `toml:"verbosity"`
 	ChatTemplateKwargs   map[string]any     `toml:"chat_template_kwargs"`
@@ -339,11 +340,15 @@ type SystemPromptData struct {
 	Network   string
 	ChanNicks string
 	Date      string
+	// SessionID is the DB session id. Only meaningful in api_user templates,
+	// which render per-request once the session exists; system-prompt
+	// templates render before session creation and always see 0.
+	SessionID int64
 	Vars      map[string]string
 }
 
 func validateTemplate(tmpl *template.Template) error {
-	dummy := SystemPromptData{Nick: "dummy", BotNick: "dummy", Channel: "dummy", Network: "dummy", ChanNicks: `["dummy1","dummy2"]`, Date: "2025-01-01", Vars: map[string]string{"example": "test"}}
+	dummy := SystemPromptData{Nick: "dummy", BotNick: "dummy", Channel: "dummy", Network: "dummy", ChanNicks: `["dummy1","dummy2"]`, Date: "2025-01-01", SessionID: 42, Vars: map[string]string{"example": "test"}}
 	var buf strings.Builder
 	return tmpl.Execute(&buf, dummy)
 }

@@ -145,7 +145,7 @@ func TestTuiCmdReinject_Success(t *testing.T) {
 	require.NoError(t, err)
 
 	respID := "resp_abc123"
-	require.NoError(t, sessionMgr.UpdateResponseID(sid, &respID))
+	require.NoError(t, sessionMgr.UpdateResponseID(sid, &respID, ""))
 
 	prevChats := config.Commands.Chats
 	config.Commands.Chats = map[string]AIConfig{
@@ -186,7 +186,7 @@ func TestTuiCmdSystemMsg_TemplateRendering(t *testing.T) {
 	require.NoError(t, err)
 
 	respID := "resp_xyz"
-	require.NoError(t, sessionMgr.UpdateResponseID(sid, &respID))
+	require.NoError(t, sessionMgr.UpdateResponseID(sid, &respID, ""))
 
 	tuiCmdSystemMsg(
 		[]string{"/systemmsg", fmt.Sprintf("%d", sid), "Channel: {{.Channel}}, Nick: {{.Nick}}"},

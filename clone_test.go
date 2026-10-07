@@ -323,6 +323,7 @@ func TestCloneDBSession_SettingsCopied(t *testing.T) {
 		MaxImages:        3,
 		MaxContextImages: 1,
 		ReasoningEffort:  "low",
+		ReasoningSummary: "auto",
 	})
 	require.NoError(t, err)
 	require.NoError(t, theDB.Model(&Session{}).Where("id = ?", srcSid).Update("settings_id", settingsID).Error)
@@ -339,15 +340,17 @@ func TestCloneDBSession_SettingsCopied(t *testing.T) {
 	require.NotNil(t, newSession.SettingsID, "cloned session should have settings_id")
 	assert.NotEqual(t, settingsID, *newSession.SettingsID, "settings should be a new copy, not shared")
 
-	srcSettings, err := sessionMgr.GetSessionSettings(settingsID)
-	require.NoError(t, err)
-	newSettings, err := sessionMgr.GetSessionSettings(*newSession.SettingsID)
-	require.NoError(t, err)
+	// Read the settings rows directly — GetSessionSettings was removed along
+	// with the overlay (settings are provenance only now).
+	var srcSettings, newSettings SessionSetting
+	require.NoError(t, theDB.Where("id = ?", settingsID).First(&srcSettings).Error)
+	require.NoError(t, theDB.Where("id = ?", *newSession.SettingsID).First(&newSettings).Error)
 
 	assert.Equal(t, srcSettings.System, newSettings.System)
 	assert.Equal(t, srcSettings.Model, newSettings.Model)
 	assert.Equal(t, srcSettings.DetectImages, newSettings.DetectImages)
 	assert.Equal(t, srcSettings.MaxImages, newSettings.MaxImages)
+	assert.Equal(t, srcSettings.ReasoningSummary, newSettings.ReasoningSummary)
 }
 
 func TestCloneDBSession_WithToolCalls(t *testing.T) {

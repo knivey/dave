@@ -157,15 +157,21 @@ func parseSDKResponseOutput(resp responses.Response) (text string, reasoning str
 	return text, reasoning, toolCalls
 }
 
-func buildResponseParams(cfg AIConfig, input []responses.ResponseInputItemUnionParam, tools []responses.ToolUnionParam, previousResponseID string, user string) responses.ResponseNewParams {
+func buildResponseParams(cfg AIConfig, input []responses.ResponseInputItemUnionParam, tools []responses.ToolUnionParam, previousResponseID string, ident apiIdentity) responses.ResponseNewParams {
 	params := responses.ResponseNewParams{
 		Model: cfg.Model,
 		Input: responses.ResponseNewParamsInputUnion{
 			OfInputItemList: input,
 		},
 	}
-	if user != "" {
-		params.User = openai.String(user)
+	if ident.User != "" {
+		params.User = openai.String(ident.User)
+	}
+	if ident.SafetyID != "" {
+		params.SafetyIdentifier = openai.String(ident.SafetyID)
+	}
+	if ident.CacheKey != "" {
+		params.PromptCacheKey = openai.String(ident.CacheKey)
 	}
 	if cfg.MaxCompletionTokens > 0 {
 		params.MaxOutputTokens = openai.Int(int64(cfg.MaxCompletionTokens))
@@ -178,9 +184,14 @@ func buildResponseParams(cfg AIConfig, input []responses.ResponseInputItemUnionP
 	if cfg.TopP > 0 {
 		params.TopP = openai.Float(float64(cfg.TopP))
 	}
-	if cfg.ReasoningEffort != "" {
+	// Reasoning summaries are only returned when the request asks for them via
+	// reasoning.summary ("auto"/"concise"/"detailed"); the retrieve endpoint's
+	// include parameter cannot recover them after the fact. Effort and summary
+	// are independent: either may be set without the other.
+	if cfg.ReasoningEffort != "" || cfg.ReasoningSummary != "" {
 		params.Reasoning = shared.ReasoningParam{
-			Effort: shared.ReasoningEffort(cfg.ReasoningEffort),
+			Effort:  shared.ReasoningEffort(cfg.ReasoningEffort),
+			Summary: shared.ReasoningSummary(cfg.ReasoningSummary),
 		}
 	}
 	if previousResponseID != "" {
@@ -246,6 +257,16 @@ func sdkResponseUsageToUsage(u responses.ResponseUsage, status string) *Usage {
 // Layer 1 prevention: we avoid saving empty-output response IDs (in aiCmds.go).
 // This check is the Layer 2 safety net in case something slips through.
 // Do not remove this condition without understanding the full two-layer design.
+//
+// DESIGN NOTE — "Reasoning input items can only be provided to a reasoning or
+// computer use model": the observed cross-model chain failure (reasoning →
+// non-reasoning). Retrying without previous_response_id sends our full
+// history, which never contains reasoning input items (encrypted reasoning
+// content is intentionally dropped), so the retry succeeds. Layer 1
+// prevention: runTurnResponses refuses to chain when the stored
+// response_model differs from the live config's model (sessions.response_model,
+// written atomically alongside response_id). This check is the Layer 2 net
+// for NULL-model legacy rows and provider wording variance (e.g. xAI).
 func isResponseIDError(err error) bool {
 	if err == nil {
 		return false
@@ -263,6 +284,9 @@ func isResponseIDError(err error) bool {
 		case apiErr.StatusCode == http.StatusBadRequest &&
 			strings.Contains(apiErr.Message, "Each message must have at least one content element"):
 			return true
+		case apiErr.StatusCode == http.StatusBadRequest &&
+			strings.Contains(apiErr.Message, "Reasoning input items can only be provided to a reasoning or computer use model"):
+			return true
 		}
 		return false
 	}
@@ -271,5 +295,6 @@ func isResponseIDError(err error) bool {
 	return strings.Contains(s, `"code":"response_not_found"`) ||
 		strings.Contains(s, `"code":"invalid_previous_response_id"`) ||
 		strings.Contains(s, "previous_response_id") && strings.Contains(s, "not found") ||
-		strings.Contains(s, "Each message must have at least one content element")
+		strings.Contains(s, "Each message must have at least one content element") ||
+		strings.Contains(s, "Reasoning input items can only be provided to a reasoning or computer use model")
 }

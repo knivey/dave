@@ -376,7 +376,7 @@ func TestCompactSession_EndToEnd(t *testing.T) {
 	}
 	// Set a response_id so we can verify it gets cleared.
 	rid := "resp_test_123"
-	require.NoError(t, sessionMgr.UpdateResponseID(sid, &rid))
+	require.NoError(t, sessionMgr.UpdateResponseID(sid, &rid, "m"))
 
 	cfg := AIConfig{
 		Service:   "stubsvc",
@@ -417,10 +417,12 @@ func TestCompactSession_EndToEnd(t *testing.T) {
 	assert.GreaterOrEqual(t, archivedCount, res.ArchivedCount+1,
 		"archived count includes at minimum the original system row")
 
-	// Session response_id reset.
+	// Session response_id reset — response_model goes with it (the pair is
+	// always written/cleared together).
 	session, err := sessionMgr.GetSession(sid)
 	require.NoError(t, err)
 	assert.Nil(t, session.ResponseID, "response_id must be cleared post-compaction")
+	assert.Nil(t, session.ResponseModel, "response_model must be cleared post-compaction")
 
 	// Compactions table populated.
 	comps, err := getCompactionsForSession(sid)

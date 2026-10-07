@@ -44,6 +44,25 @@
 #   prefix_min    = (int) minimum chars before prefix token
 #                   matching kicks in                             default: 2
 #
+# [reactions]  (optional — omit the section entirely for the built-in
+#               default quick bar)
+#   enabled = (bool) false disables the whole feature (no chip row,
+#             quick bar, full-picker trigger, or toggle endpoints)
+#             without touching stored rows; absent/true keeps it on.
+#                                                      default: true
+#
+# [[reactions.emoji]]  (array of tables: the CURATED QUICK BAR — the
+#             first page of reactions in the "＋" popup. NOT a
+#             whitelist: ANY emoji can be reacted via the full-catalog
+#             picker; off-bar emojis still chip once reacted. Ordered
+#             (grid order); at most 48 entries.)
+#   glyph    = (string) the emoji itself, 1-32 non-ASCII runes — it
+#              IS the reaction key (stored in the DB, percent-encoded
+#              in the toggle URL, rendered as its own glyph)
+#   category = (string) optional grouping for the quick-bar grid,
+#              ≤24 runes, grouped by first appearance; no category =
+#              a leading header-less group.               default: ""
+#
 # [site]
 #   title       = (string) site title                      default: "dave's image dump"
 #   description = (string) site description                 default: "generations from IRC"
@@ -67,7 +86,10 @@
 #                      REQUIRED when the section is present   no default
 #
 # Reloadable via SIGHUP or POST /admin/reload (X-API-Key):
-#   site.*, safe_site.*, thumbnails.* (except workers), search.*, upload.*
+#   site.*, safe_site.*, thumbnails.* (except workers), search.*, upload.*,
+#   reactions.* (curating the quick bar never migrates data — rows
+#   key on the emoji; emojis removed from the bar stay reactable and
+#   keep their counts)
 # Everything else requires a restart.
 
 # ---------------------------------------------------------------------------
@@ -102,6 +124,20 @@
 # [search]
 # snippet_chars = 160
 # prefix_min = 2
+#
+# [reactions]
+# enabled = true
+#
+# [[reactions.emoji]]
+# glyph = "\U0001F525"
+# category = "hype"
+#
+# [[reactions.emoji]]
+# glyph = "\U0001F602"
+# category = "laughs"
+#
+# [[reactions.emoji]]
+# glyph = "\U0001F62E"
 #
 # [site]
 # title = "dave's image dump"

@@ -1,22 +1,26 @@
 package main
 
-// likes.go — anonymous image likes: the DB layer (this file) and, in
-// later milestones of the same feature, the cookie identity + POST
-// toggle handler. Design summary (full version in docs/image-site.md
-// "Likes"):
+// likes.go — anonymous image likes AND dislikes: the DB layer (this
+// file) and the cookie identity + POST toggle handlers. Design
+// summary (full version in docs/image-site.md "Likes"):
 //
-//   - Identity is a cookie token minted on the visitor's FIRST like
-//     and never before — browsers that never like carry no cookie.
-//   - One row in likes = one like; the (image_id, token) PK is the
-//     entire dedupe mechanism.
-//   - Toggling is INSERT ... ON CONFLICT DO NOTHING first: one row
-//     affected means the toggle LIKED; zero rows means this token had
-//     already liked, so the toggle UN-likes via DELETE.
-//   - Likes are global per image (not per logical site): the count is
-//     a property of the row, and both hosts render the same number.
-//     Host-scoped cookies mean a visitor using BOTH the default and
-//     the safe host holds two tokens and could like twice — accepted,
-//     this is a casual anonymous feature, not a boundary.
+//   - Identity is a cookie token minted on the visitor's FIRST vote
+//     POST and never before — browsers that never vote carry no
+//     cookie.
+//   - One row in likes = one vote; the (image_id, token) PK is the
+//     entire dedupe mechanism. The vote column says WHICH stance the
+//     token holds (voteLike / voteDislike), so like and dislike are
+//     mutually exclusive for free: a token cannot hold two rows.
+//   - Toggling is one guarded upsert: INSERT ... ON CONFLICT DO
+//     UPDATE SET vote = excluded.vote WHERE likes.vote <> excluded.vote.
+//     One row affected means the token now holds this stance (fresh
+//     insert, or a SWITCH from the opposite one); zero rows means it
+//     already held it, so the toggle retracts to neutral via DELETE.
+//   - Votes are global per image (not per logical site): the counts
+//     are properties of the row, and both hosts render the same
+//     numbers. Host-scoped cookies mean a visitor using BOTH the
+//     default and the safe host holds two tokens and could like twice
+//     — accepted, this is a casual anonymous feature, not a boundary.
 
 import (
 	crand "crypto/rand"
@@ -30,65 +34,102 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-// dbToggleLike flips token's like on id and returns the post-toggle
-// state: whether the caller now likes the image and its new count.
+// Vote values: the stance a token's single row expresses. Zero is
+// never stored — it is the "no row" state dbGetVoteState reports for
+// a token that has not voted (COALESCE in SQL, myVote in Go).
+const (
+	voteLike    = 1
+	voteDislike = -1
+)
+
+// dbToggleVote flips token's stance on id toward vote and returns the
+// post-toggle state: whether the caller now holds that stance (false
+// = retracted to neutral) plus the image's fresh like and dislike
+// counts.
 //
-// The insert-first order makes the toggle idempotent under the DB's
-// single connection: two racing toggles from the same token both fail
-// the INSERT, both run the DELETE, and the second DELETE affects zero
-// rows — the reported state (unliked, count as-of-then) is coherent
-// either way.
-func dbToggleLike(db *sqlx.DB, id, token string) (liked bool, count int, err error) {
+// The guarded-upsert form keeps the whole decision inside one
+// statement, so the semantics survive racing toggles from the same
+// token under SQLite's single-writer serialization: a fresh vote
+// inserts (1 row), a switch from the opposite stance updates (1 row),
+// and a repeat of the held stance affects 0 rows and falls through to
+// the DELETE — the reported state (retracted, counts as-of-then) is
+// coherent either way. created_at rides the DO UPDATE so the stamp
+// always says when the CURRENT stance landed, not when the token
+// first voted at all.
+func dbToggleVote(db *sqlx.DB, id, token string, vote int) (held bool, likeCount, dislikeCount int, err error) {
 	now := formatDBTimeNow()
 	res, err := db.Exec(
-		`INSERT INTO likes (image_id, token, created_at) VALUES (?, ?, ?)
-		 ON CONFLICT (image_id, token) DO NOTHING`,
-		id, token, now)
+		`INSERT INTO likes (image_id, token, created_at, vote) VALUES (?, ?, ?, ?)
+		 ON CONFLICT (image_id, token) DO UPDATE SET vote = excluded.vote, created_at = excluded.created_at
+		 WHERE likes.vote <> excluded.vote`,
+		id, token, now, vote)
 	if err != nil {
-		return false, 0, err
+		return false, 0, 0, err
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return false, 0, err
+		return false, 0, 0, err
 	}
-	liked = n > 0
-	if !liked {
+	held = n > 0
+	if !held {
 		if _, err := db.Exec(`DELETE FROM likes WHERE image_id = ? AND token = ?`, id, token); err != nil {
-			return false, 0, err
+			return false, 0, 0, err
 		}
 	}
-	if err := db.Get(&count, `SELECT COUNT(*) FROM likes WHERE image_id = ?`, id); err != nil {
-		return false, 0, err
+	if likeCount, dislikeCount, err = dbVoteCounts(db, id); err != nil {
+		return false, 0, 0, err
 	}
-	return liked, count, nil
+	return held, likeCount, dislikeCount, nil
 }
 
-// dbGetLikeState returns an image's like count and whether token has
-// already liked it, in one round trip. Unknown image ids surface as
-// sql.ErrNoRows (the FROM images anchor refuses to fabricate a state
-// for a row that does not exist); production callers always look the
-// row up first, so this is a defensive tripwire, not a code path.
-func dbGetLikeState(db *sqlx.DB, id, token string) (count int, liked bool, err error) {
+// dbVoteCounts returns an image's like and dislike counts in one
+// round trip. Like dbGetVoteState, the FROM images anchor refuses to
+// fabricate counts for a row that does not exist.
+func dbVoteCounts(db *sqlx.DB, id string) (likeCount, dislikeCount int, err error) {
+	var c struct {
+		Likes    int `db:"likes"`
+		Dislikes int `db:"dislikes"`
+	}
+	err = db.Get(&c, `
+		SELECT (SELECT COUNT(*) FROM likes l WHERE l.image_id = i.id AND l.vote = 1) AS likes,
+		       (SELECT COUNT(*) FROM likes l WHERE l.image_id = i.id AND l.vote = -1) AS dislikes
+		FROM images i WHERE i.id = ?`, id)
+	if err != nil {
+		return 0, 0, err
+	}
+	return c.Likes, c.Dislikes, nil
+}
+
+// dbGetVoteState returns an image's like count, dislike count, and
+// the token's own stance (voteLike / voteDislike / 0 = not voted), in
+// one round trip. Unknown image ids surface as sql.ErrNoRows (the
+// FROM images anchor refuses to fabricate a state for a row that does
+// not exist); production callers always look the row up first, so
+// this is a defensive tripwire, not a code path.
+func dbGetVoteState(db *sqlx.DB, id, token string) (likeCount, dislikeCount, myVote int, err error) {
 	var state struct {
-		Count int  `db:"cnt"`
-		Liked bool `db:"liked"`
+		Likes    int `db:"likes"`
+		Dislikes int `db:"dislikes"`
+		Mine     int `db:"mine"`
 	}
 	err = db.Get(&state, `
-		SELECT (SELECT COUNT(*) FROM likes l WHERE l.image_id = i.id) AS cnt,
-		       EXISTS(SELECT 1 FROM likes l WHERE l.image_id = i.id AND l.token = ?) AS liked
+		SELECT (SELECT COUNT(*) FROM likes l WHERE l.image_id = i.id AND l.vote = 1) AS likes,
+		       (SELECT COUNT(*) FROM likes l WHERE l.image_id = i.id AND l.vote = -1) AS dislikes,
+		       COALESCE((SELECT l.vote FROM likes l WHERE l.image_id = i.id AND l.token = ?), 0) AS mine
 		FROM images i WHERE i.id = ?`, token, id)
 	if err != nil {
-		return 0, false, err
+		return 0, 0, 0, err
 	}
-	return state.Count, state.Liked, nil
+	return state.Likes, state.Dislikes, state.Mine, nil
 }
 
-// hydrateLikeCounts batch-fills LikeCount on the given rows with one
-// grouped query. Rows whose ids have no likes keep the zero value —
-// absence in the GROUP BY result means zero, not "unknown". Callers
-// pass page-sized slices (tens of rows), far under SQLite's parameter
-// limit, so no chunking exists.
-func hydrateLikeCounts(db *sqlx.DB, imgs []*dbImage) error {
+// hydrateVoteCounts batch-fills LikeCount and DislikeCount on the
+// given rows with one grouped query (keyed by image AND vote, so both
+// tallies come back from a single pass). Rows whose ids have no votes
+// keep the zero values — absence in the GROUP BY result means zero,
+// not "unknown". Callers pass page-sized slices (tens of rows), far
+// under SQLite's parameter limit, so no chunking exists.
+func hydrateVoteCounts(db *sqlx.DB, imgs []*dbImage) error {
 	if len(imgs) == 0 {
 		return nil
 	}
@@ -99,27 +140,39 @@ func hydrateLikeCounts(db *sqlx.DB, imgs []*dbImage) error {
 		args[i] = img.ID
 	}
 	rows, err := db.Query(
-		`SELECT image_id, COUNT(*) FROM likes WHERE image_id IN (`+strings.Join(placeholders, ",")+`)
-		 GROUP BY image_id`,
+		`SELECT image_id, vote, COUNT(*) FROM likes WHERE image_id IN (`+strings.Join(placeholders, ",")+`)
+		 GROUP BY image_id, vote`,
 		args...)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
-	counts := make(map[string]int, len(imgs))
+	type voteTally struct{ likes, dislikes int }
+	counts := make(map[string]voteTally, len(imgs))
 	for rows.Next() {
 		var id string
-		var n int
-		if err := rows.Scan(&id, &n); err != nil {
+		var vote, n int
+		if err := rows.Scan(&id, &vote, &n); err != nil {
 			return err
 		}
-		counts[id] = n
+		t := counts[id]
+		// The column CHECK pins the domain to ±1; the explicit
+		// voteDislike compare (over a blind else) keeps an
+		// out-of-domain value from silently inflating the dislike
+		// tally if that CHECK is ever widened.
+		if vote == voteLike {
+			t.likes = n
+		} else if vote == voteDislike {
+			t.dislikes = n
+		}
+		counts[id] = t
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
 	for _, img := range imgs {
-		img.LikeCount = counts[img.ID]
+		img.LikeCount = counts[img.ID].likes
+		img.DislikeCount = counts[img.ID].dislikes
 	}
 	return nil
 }
@@ -131,19 +184,20 @@ func formatDBTimeNow() string {
 }
 
 // publishImageLiked fans out image-liked for a toggle that just
-// committed (the handler calls this only after dbToggleLike returned,
-// honoring the hub's commit-before-publish ordering). The count is
+// committed (the handler calls this only after dbToggleVote returned,
+// honoring the hub's commit-before-publish ordering). Both counts are
 // absolute, so a client that missed earlier toggles still converges.
 // Per-site visibility is computed once from the row — the same
 // safeSiteCtx(siteCanSee) folding publishImageNew uses — and rides the
 // ring entry for replay filtering.
-func (a *App) publishImageLiked(img *dbImage, count int) {
+func (a *App) publishImageLiked(img *dbImage, likes, dislikes int) {
 	if a.events == nil {
 		return
 	}
 	a.events.publishVisible(eventImageLiked, imageLikedEvent{
-		ID:    img.ID,
-		Count: count,
+		ID:       img.ID,
+		Likes:    likes,
+		Dislikes: dislikes,
 	}, siteCanSee(safeSiteCtx(a.getConfig().SafeSite), img))
 }
 
@@ -259,79 +313,103 @@ func (l *likeRateLimiter) allow(ip string) bool {
 	return rl.allow()
 }
 
-// likeResponse is the JSON shape the JS enhancement consumes.
+// likeResponse is the JSON shape the JS enhancement consumes. Both
+// stance booleans describe the CALLER's post-toggle state (exactly one
+// can be true — like and dislike are mutually exclusive per token;
+// both false = retracted to neutral), and both counts are the image's
+// absolute post-toggle tallies.
 type likeResponse struct {
-	Liked bool `json:"liked"`
-	Count int  `json:"count"`
+	Liked    bool `json:"liked"`
+	Disliked bool `json:"disliked"`
+	Likes    int  `json:"likes"`
+	Dislikes int  `json:"dislikes"`
 }
 
-// handleLikeToggle implements POST /{id}/like — the like toggle for
-// both the JS enhancement (Accept: application/json → 200 + JSON) and
-// the no-JS form path (303 back to the details page, which re-renders
-// the button's new state server-side). Visibility rules mirror the
-// details page exactly: unknown/malformed id 404, hidden 410, and an
-// id invisible on the requesting site's host 404s with no existence
-// hint (same order as handleImagePage: hidden check first, so a hidden
-// row discriminates 410 on both hosts).
+// handleLikeToggle implements POST /{id}/like; handleDislikeToggle is
+// the same handler bound to POST /{id}/dislike (voteHandler(-1)). The
+// vote toggle serves both the JS enhancement (Accept:
+// application/json → 200 + JSON) and the no-JS form path (303 back to
+// the details page, which re-renders the buttons' new state
+// server-side). Visibility rules mirror the details page exactly:
+// unknown/malformed id 404, hidden 410, and an id invisible on the
+// requesting site's host 404s with no existence hint (same order as
+// handleImagePage: hidden check first, so a hidden row discriminates
+// 410 on both hosts).
 func (a *App) handleLikeToggle(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if !validImageID(id) {
-		http.NotFound(w, r)
-		return
-	}
-	sc := a.resolveSite(r)
-	img, ok := a.lookupImage(w, r, id)
-	if !ok {
-		return
-	}
-	if img.Hidden {
-		http.Error(w, "gone", http.StatusGone)
-		return
-	}
-	if !siteCanSee(sc, img) {
-		http.NotFound(w, r)
-		return
-	}
-	if !a.likeLimiter.allow(clientIP(r)) {
-		http.Error(w, "too many like requests", http.StatusTooManyRequests)
-		return
-	}
+	a.handleVoteToggle(voteLike)(w, r)
+}
 
-	token, minted := likeTokenFromRequest(r)
-	liked, count, err := dbToggleLike(a.db, id, token)
-	if err != nil {
-		logger.Error("like toggle failed", "id", id, "error", err)
-		http.Error(w, "storage failure", http.StatusInternalServerError)
-		return
-	}
+// handleDislikeToggle implements POST /{id}/dislike — see
+// handleLikeToggle for the shared contract.
+func (a *App) handleDislikeToggle(w http.ResponseWriter, r *http.Request) {
+	a.handleVoteToggle(voteDislike)(w, r)
+}
 
-	// Publish only after the toggle committed (the hub's ordering
-	// rule: a subscriber acting on the event must see the new count on
-	// re-query). Nil-hub-safe.
-	a.publishImageLiked(img, count)
-
-	if minted {
-		// Set-Cookie must precede http.Redirect/Encode, both of which
-		// write the response immediately.
-		http.SetCookie(w, &http.Cookie{
-			Name:     likeCookieName,
-			Value:    token,
-			Path:     "/",
-			MaxAge:   likeCookieMaxAge,
-			HttpOnly: true,
-			Secure:   true,
-			SameSite: http.SameSiteLaxMode,
-		})
-	}
-
-	if strings.Contains(r.Header.Get("Accept"), "application/json") {
-		w.Header().Set("Content-Type", "application/json")
-		// A toggle response must never be replayed from any cache.
-		w.Header().Set("Cache-Control", "no-store")
-		if err := json.NewEncoder(w).Encode(likeResponse{Liked: liked, Count: count}); err != nil {
-			logger.Error("writing like response", "id", id, "error", err)
+// handleVoteToggle is the parameterized vote toggle both route
+// handlers delegate to.
+func (a *App) handleVoteToggle(vote int) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if !validImageID(id) {
+			http.NotFound(w, r)
+			return
 		}
-		return
+		sc := a.resolveSite(r)
+		img, ok := a.lookupImage(w, r, id)
+		if !ok {
+			return
+		}
+		if img.Hidden {
+			http.Error(w, "gone", http.StatusGone)
+			return
+		}
+		if !siteCanSee(sc, img) {
+			http.NotFound(w, r)
+			return
+		}
+		if !a.likeLimiter.allow(clientIP(r)) {
+			http.Error(w, "too many like requests", http.StatusTooManyRequests)
+			return
+		}
+
+		token, minted := likeTokenFromRequest(r)
+		held, likes, dislikes, err := dbToggleVote(a.db, id, token, vote)
+		if err != nil {
+			logger.Error("vote toggle failed", "id", id, "vote", vote, "error", err)
+			http.Error(w, "storage failure", http.StatusInternalServerError)
+			return
+		}
+
+		// Publish only after the toggle committed (the hub's ordering
+		// rule: a subscriber acting on the event must see the new
+		// counts on re-query). Nil-hub-safe.
+		a.publishImageLiked(img, likes, dislikes)
+
+		if minted {
+			// Set-Cookie must precede http.Redirect/Encode, both of which
+			// write the response immediately.
+			http.SetCookie(w, &http.Cookie{
+				Name:     likeCookieName,
+				Value:    token,
+				Path:     "/",
+				MaxAge:   likeCookieMaxAge,
+				HttpOnly: true,
+				Secure:   true,
+				SameSite: http.SameSiteLaxMode,
+			})
+		}
+
+		if strings.Contains(r.Header.Get("Accept"), "application/json") {
+			w.Header().Set("Content-Type", "application/json")
+			// A toggle response must never be replayed from any cache.
+			w.Header().Set("Cache-Control", "no-store")
+			resp := likeResponse{Liked: vote == voteLike && held, Disliked: vote == voteDislike && held,
+				Likes: likes, Dislikes: dislikes}
+			if err := json.NewEncoder(w).Encode(resp); err != nil {
+				logger.Error("writing vote response", "id", id, "error", err)
+			}
+			return
+		}
+		http.Redirect(w, r, "/"+id, http.StatusSeeOther)
 	}
-	http.Redirect(w, r, "/"+id, http.StatusSeeOther)
 }

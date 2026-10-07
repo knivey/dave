@@ -111,13 +111,19 @@ type dbImage struct {
 	WorkflowJSON string `db:"workflow_json"`
 	MetaSource   string `db:"meta_source"`
 
-	// LikeCount is NOT a column on images: it is hydrated onto rows by
-	// the likes layer (hydrateLikeCounts / the liked-sort query's
-	// correlated subselect aliased like_count) after the base fetch.
-	// SELECT i.* scans leave it zero — sqlx only errors on result
-	// columns with no struct field, never the reverse — and no INSERT
-	// or UPDATE ever names it.
-	LikeCount int `db:"like_count"`
+	// LikeCount/DislikeCount are NOT columns on images: they are
+	// hydrated onto rows by the likes layer (hydrateVoteCounts) after
+	// the base fetch. SELECT i.* scans leave them zero — sqlx only
+	// errors on result columns with no struct field, never the
+	// reverse — and no INSERT or UPDATE ever names them.
+	LikeCount    int `db:"like_count"`
+	DislikeCount int `db:"dislike_count"`
+
+	// Reactions is the emoji → count tally, hydrated by the reactions
+	// layer (hydrateReactionCounts). Nil = no reactions; every
+	// consumer treats nil and empty identically. No db tag: it is
+	// never scanned from a result set.
+	Reactions map[string]int `db:"-"`
 }
 
 func initDB(dbPath string) (*sqlx.DB, error) {
@@ -318,8 +324,9 @@ func dbUpdateThumbReady(db *sqlx.DB, id string, width, height int) error {
 // hidden-filtered and site-filtered: the safe site's visibility
 // fragment rides the same WHERE as one more AND conjunct on the images
 // row. Empty after* yields the first page. Callers fetch limit+1 rows
-// to detect has-more. Rows come back with LikeCount hydrated (one
-// extra grouped query — card rendering needs the count on every row).
+// to detect has-more. Rows come back with LikeCount/DislikeCount
+// hydrated (one extra grouped query — card rendering needs both
+// counts on every row).
 func dbGetGalleryPage(db *sqlx.DB, afterCreatedAt, afterID string, limit int, sc siteCtx) ([]dbImage, error) {
 	frag, fargs := siteVisibilityFilter(sc)
 	var rows []dbImage
@@ -338,7 +345,10 @@ func dbGetGalleryPage(db *sqlx.DB, afterCreatedAt, afterID string, limit int, sc
 	if err != nil {
 		return nil, err
 	}
-	if err := hydrateLikeCounts(db, imagePtrs(rows)); err != nil {
+	if err := hydrateVoteCounts(db, imagePtrs(rows)); err != nil {
+		return nil, err
+	}
+	if err := hydrateReactionCounts(db, imagePtrs(rows)); err != nil {
 		return nil, err
 	}
 	return rows, nil
@@ -355,21 +365,25 @@ func imagePtrs(rows []dbImage) []*dbImage {
 }
 
 // dbGetGalleryPageLiked returns one keyset page of the liked sort
-// (like_count DESC, created_at DESC, id DESC), hidden- and
-// site-filtered, with LikeCount hydrated. Empty after* yields the
-// first page; callers fetch limit+1 to detect has-more.
+// (score DESC, created_at DESC, id DESC), hidden- and site-filtered,
+// with LikeCount/DislikeCount hydrated. Empty after* yields the first
+// page; callers fetch limit+1 to detect has-more.
 //
-// The count is a computed column — the same correlated subselect text
-// appears in the row-value cursor predicate and the ORDER BY, while
-// the DISPLAYED count hydrates via the separate grouped IN query
-// (hydrateLikeCounts, same as the default sort) — so the row-value
-// form `(<count>, created_at, id) < (?, ?, ?)` range-seeks exactly
-// like the default mode's created/id keyset (the mutable sort column
-// rules out an index anyway; gallery scale is hundreds-to-low-
-// thousands of rows, a full scan + top-N sort).
+// The score is the NET vote — likes minus dislikes (owner choice, Oct
+// 2026: dislikes demote) — computed as COALESCE(SUM(vote), 0) over
+// the image's vote rows (vote is +1/-1, so the sum IS likes −
+// dislikes and the empty-set COALESCE pins unrated rows at 0). The
+// same correlated subselect text appears in the row-value cursor
+// predicate and the ORDER BY, while the DISPLAYED counts hydrate via
+// the separate grouped IN query (hydrateVoteCounts, same as the
+// default sort) — so the row-value form `(<score>, created_at, id) <
+// (?, ?, ?)` range-seeks exactly like the default mode's created/id
+// keyset (the mutable sort column rules out an index anyway; gallery
+// scale is hundreds-to-low-thousands of rows, a full scan + top-N
+// sort).
 //
-// DESIGN NOTE (mutable sort column): like counts change between page
-// fetches, so a row whose count rose mid-scroll can reappear on the
+// DESIGN NOTE (mutable sort column): scores change between page
+// fetches, so a row whose score rose mid-scroll can reappear on the
 // next page (or be skipped if it fell). This is inherent to keyset
 // paging on a mutable column at this scale; the client's append-dedupe
 // (gallery.js loadMore skips a card whose data-id is already attached)
@@ -378,26 +392,29 @@ func imagePtrs(rows []dbImage) []*dbImage {
 // machinery is the right call for a casual gallery.
 func dbGetGalleryPageLiked(db *sqlx.DB, afterCount int, afterCreatedAt, afterID string, limit int, sc siteCtx) ([]dbImage, error) {
 	frag, fargs := siteVisibilityFilter(sc)
-	countExpr := `(SELECT COUNT(*) FROM likes l WHERE l.image_id = i.id)`
+	scoreExpr := `(SELECT COALESCE(SUM(l.vote), 0) FROM likes l WHERE l.image_id = i.id)`
 	var rows []dbImage
 	var err error
 	if afterCreatedAt == "" {
 		err = db.Select(&rows,
 			`SELECT i.* FROM images i WHERE i.hidden = 0`+frag+
-				` ORDER BY `+countExpr+` DESC, i.created_at DESC, i.id DESC LIMIT ?`,
+				` ORDER BY `+scoreExpr+` DESC, i.created_at DESC, i.id DESC LIMIT ?`,
 			append(append([]any{}, fargs...), limit)...)
 	} else {
 		args := append([]any{afterCount, afterCreatedAt, afterID}, fargs...)
 		args = append(args, limit)
 		err = db.Select(&rows,
-			`SELECT i.* FROM images i WHERE i.hidden = 0 AND (`+countExpr+`, i.created_at, i.id) < (?, ?, ?)`+frag+
-				` ORDER BY `+countExpr+` DESC, i.created_at DESC, i.id DESC LIMIT ?`,
+			`SELECT i.* FROM images i WHERE i.hidden = 0 AND (`+scoreExpr+`, i.created_at, i.id) < (?, ?, ?)`+frag+
+				` ORDER BY `+scoreExpr+` DESC, i.created_at DESC, i.id DESC LIMIT ?`,
 			args...)
 	}
 	if err != nil {
 		return nil, err
 	}
-	if err := hydrateLikeCounts(db, imagePtrs(rows)); err != nil {
+	if err := hydrateVoteCounts(db, imagePtrs(rows)); err != nil {
+		return nil, err
+	}
+	if err := hydrateReactionCounts(db, imagePtrs(rows)); err != nil {
 		return nil, err
 	}
 	return rows, nil

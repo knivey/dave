@@ -1,11 +1,11 @@
 // gallery.js: IntersectionObserver infinite scroll over /gallery?after=
 // fragments, DOM cap with scroll-up restore, pending-thumb placeholder
 // (dark bytes -> thumb swap on thumb-ready; retry is fallback-only for
-// genuine failures), fragment-fetch retry with backoff, most-liked
-// sort mode (fragment URLs carry &sort=liked, arrivals buffer behind
-// the pill), and SSE live updates (image-new prepend, thumb-ready
-// swap, image-hidden card drop, image-liked count updates, reset
-// reload).
+// genuine failures), fragment-fetch retry with backoff, top-rated
+// (net-score) sort mode (fragment URLs carry &sort=liked, arrivals
+// buffer behind the pill), and SSE live updates (image-new prepend,
+// thumb-ready swap, image-hidden card drop, image-liked tally
+// updates, image-reacted badge rebuilds, reset reload).
 "use strict";
 
 import { connect } from "./sse.js";
@@ -40,8 +40,10 @@ let detached = [];
 // Cursor is opaque to this module — each mode defines its own format.
 let fragmentURLFn = null;
 
-// Most-liked sort mode (body[data-sort="liked"], set by the server on
-// /?sort=liked). Three load-bearing consequences:
+// Top-rated sort mode (body[data-sort="liked"], set by the server on
+// /?sort=liked). The rank is the NET score (likes − dislikes — see
+// db.go), but the URL/attr keep the historical "liked" name. Three
+// load-bearing consequences:
 //   - fetched fragments must carry &sort=liked (defaultFragmentURL);
 //   - live image-new arrivals buffer behind the "+N new" pill —
 //     prepending into a count-sorted grid would lie about the order —
@@ -191,7 +193,7 @@ export function boot() {
 			// the previous mode's grid — dropping it is exactly right.
 			if (!sentinel.isConnected) return;
 			// Append-dedupe by data-id: a no-op in default mode, but
-			// the liked sort keys on a MUTABLE column (like_count), so
+			// the liked sort keys on a MUTABLE column (net score), so
 			// a row whose count rose between page fetches can legally
 			// reappear on the next page (see db.go's mutable-sort
 			// note). Skipping an already-attached card keeps the grid
@@ -306,7 +308,7 @@ export function boot() {
 	// Liked-mode wrinkle (accepted): restored cards sit at their
 	// detach-time position, which concurrent likes may have made stale
 	// — the same mutable-count caveat loadMore's append-dedupe
-	// documents (like_count is a moving sort key, db.go). The counts
+	// documents (net score is a moving sort key, db.go). The counts
 	// themselves stay correct either way: onImageLiked sweeps the
 	// detached set while the cards wait here. The duplicate shape the
 	// same mutability could otherwise produce — an un-like dropping a
@@ -482,10 +484,11 @@ function buildCard(ev) {
 	time.dataset.ts = ev.created_at;
 	time.textContent = isNaN(ts.getTime()) ? ev.created_at : ts.toLocaleString();
 
-	// Meta row mirrors the server card shape (time + optional .likes
-	// span inside div.meta) so the image-liked count updater can treat
-	// prepended and rendered cards identically. New arrivals have zero
-	// likes, so no .likes span is created here.
+	// Meta row mirrors the server card shape (time + optional .counts
+	// wrapper inside div.meta) so the image-liked/image-reacted
+	// updaters can treat prepended and rendered cards identically.
+	// New arrivals have zero votes and reactions, so no counts spans
+	// are created here.
 	const meta = document.createElement("div");
 	meta.className = "meta";
 	meta.appendChild(time);
@@ -532,7 +535,7 @@ function updatePill() {
 
 function onImageNew(ev) {
 	if (!ev || !ev.id) return;
-	// A filter or the most-liked sort owns the grid: buffer arrivals so
+	// A filter or the top-rated sort owns the grid: buffer arrivals so
 	// the ordered view never lies. (Liked mode's pill click reloads —
 	// prepending would violate the count sort; see its handler.)
 	if (filterActive || sortLiked) {
@@ -659,38 +662,173 @@ function onImageHidden(ev) {
 	}
 }
 
-// setCardLikeCount syncs one card's .likes span with a count: created
-// when the count first moves past zero, textContent swapped while it
-// stays positive, removed when it falls back to zero — the same
-// present-only-when-nonzero contract the server template renders.
-function setCardLikeCount(card, count) {
-	let span = card.querySelector(".likes");
+// setCardCounts syncs one card's .likes/.dislikes spans (inside the
+// .counts wrapper) with the tallies: each span created when its count
+// first moves past zero, textContent swapped while it stays positive,
+// removed when it falls back to zero — the same
+// present-only-when-nonzero contract the server template renders. The
+// wrapper itself is created on the first non-zero tally of any kind
+// (vote or reaction) and dropped only when BOTH vote tallies and the
+// reaction strip are gone, exactly mirroring the template's
+// {{if or .LikeCount .DislikeCount .TopReactions}} guard.
+function setCardCounts(card, likes, dislikes) {
+	let wrap = card.querySelector(".counts");
+	if (likes <= 0 && dislikes <= 0) {
+		// Votes fell to zero: the SPANS must go even when the wrapper
+		// survives to host a reaction strip — skipping this (the
+		// pre-reactions shape, where wrap.remove() took the spans
+		// along) stranded a stale "♥ 1" next to live badges forever.
+		if (wrap) {
+			setTallySpan(wrap, "likes", "\u2665", 0);
+			setTallySpan(wrap, "dislikes", "\uD83D\uDC94", 0);
+			if (!wrap.querySelector(".reacts")) wrap.remove();
+		}
+		return;
+	}
+	if (!wrap) {
+		wrap = document.createElement("span");
+		wrap.className = "counts";
+		const meta = card.querySelector(".meta");
+		if (!meta) return; // malformed card: nothing to hang the wrapper on
+		meta.appendChild(wrap);
+	}
+	setTallySpan(wrap, "likes", "\u2665", likes);
+	setTallySpan(wrap, "dislikes", "\uD83D\uDC94", dislikes);
+}
+
+// setTallySpan manages ONE tally span inside the .counts wrapper:
+// create-on-first-nonzero, textContent swap, remove-on-zero.
+function setTallySpan(wrap, className, glyph, count) {
+	let span = wrap.querySelector("." + className);
 	if (count > 0) {
 		if (!span) {
 			span = document.createElement("span");
-			span.className = "likes";
-			const meta = card.querySelector(".meta");
-			if (!meta) return; // malformed card: nothing to hang the span on
-			meta.appendChild(span);
+			span.className = className;
+			wrap.appendChild(span);
 		}
 		span.dataset.count = String(count);
-		span.textContent = "\u2665 " + count;
+		span.textContent = glyph + " " + count;
 	} else if (span) {
 		span.remove();
 	}
 }
 
-// onImageLiked updates a card's count when any visitor toggles a like
-// (SSE image-liked, published after the toggle commits). The detached
-// set is swept too, mirroring onThumbReady: restore() reattaches
-// trimmed cards with zero network traffic, so one left behind would
-// show a stale count until the next full reload.
+// topBadges picks the card's badge list from a tally map whose keys
+// ARE the emoji (rendered as their own glyphs — any emoji can be
+// reacted, there is no configured whitelist): top 4 by count
+// (cardReactionBadges), ties broken codepoint-lexicographically
+// (emojiKeyLess — server parity with Go's emojiLess), plus whether
+// more non-zero keys did not fit — the caller renders a "…"
+// overflow marker. Mirrors topCardReactions server-side.
+function topBadges(tally) {
+	if (!tally) return { list: [], more: false };
+	const all = [];
+	for (const emoji of Object.keys(tally)) {
+		const n = tally[emoji];
+		if (Number.isFinite(n) && n > 0) {
+			all.push({ emoji, count: n });
+		}
+	}
+	all.sort((a, b) => (b.count - a.count) || (emojiKeyLess(a.emoji, b.emoji) ? -1 : 1));
+	return { list: all.slice(0, cardReactionBadges), more: all.length > cardReactionBadges };
+}
+
+// emojiKeyLess: codepoint-lexicographic compare (Array.from iterates
+// code points, not UTF-16 units) — matches Go's emojiLess so badge
+// order is identical on both sides.
+function emojiKeyLess(a, b) {
+	const ca = Array.from(a), cb = Array.from(b);
+	const n = Math.min(ca.length, cb.length);
+	for (let i = 0; i < n; i++) {
+		if (ca[i] !== cb[i]) return ca[i] < cb[i];
+	}
+	return ca.length < cb.length;
+}
+
+// cardReactionBadges mirrors the server's constant (reactions.go):
+// how many reaction badges a card shows before the "…" marker.
+const cardReactionBadges = 4;
+
+// setCardReactions rebuilds one card's .reacts strip (inside the
+// .counts wrapper, after the vote spans) from a tally map whose keys
+// ARE the emoji (rendered directly — no glyph lookup). Rebuild-not-
+// diff: the top-4 membership and the overflow marker can change on
+// any toggle, so replacing the strip's children is the simple
+// correct move. The strip drops when no configured emoji has a
+// count; the wrapper drops with it only when the vote spans are gone
+// too (shared lifecycle with setCardCounts — see its comment).
+function setCardReactions(card, tally) {
+	let wrap = card.querySelector(".counts");
+	const { list: badges, more } = topBadges(tally);
+	if (badges.length === 0 && !more) {
+		if (wrap) {
+			const strip = wrap.querySelector(".reacts");
+			if (strip) strip.remove();
+			if (!wrap.querySelector(".likes") && !wrap.querySelector(".dislikes")) wrap.remove();
+		}
+		return;
+	}
+	if (!wrap) {
+		wrap = document.createElement("span");
+		wrap.className = "counts";
+		const meta = card.querySelector(".meta");
+		if (!meta) return; // malformed card: nothing to hang the wrapper on
+		meta.appendChild(wrap);
+	}
+	let strip = wrap.querySelector(".reacts");
+	if (!strip) {
+		strip = document.createElement("span");
+		strip.className = "reacts";
+		wrap.appendChild(strip);
+	}
+	const parts = [];
+	for (const b of badges) {
+		const s = document.createElement("span");
+		s.className = "react";
+		s.dataset.emoji = b.emoji;
+		s.textContent = b.emoji + " " + b.count;
+		parts.push(s);
+	}
+	if (more) {
+		// Overflow marker: more non-zero configured emojis than the
+		// badge cap — same contract as the server template's
+		// {{if .MoreReactions}} span.
+		const s = document.createElement("span");
+		s.className = "react more";
+		s.title = "more reactions";
+		s.textContent = "…";
+		parts.push(s);
+	}
+	strip.replaceChildren(...parts);
+}
+
+// onImageLiked updates a card's tallies when any visitor toggles a
+// vote (SSE image-liked, published after the toggle commits — likes
+// AND dislikes ride one event because every toggle can move both).
+// The detached set is swept too, mirroring onThumbReady: restore()
+// reattaches trimmed cards with zero network traffic, so one left
+// behind would show stale counts until the next full reload.
 function onImageLiked(ev) {
-	if (!grid || !ev || !ev.id || !Number.isFinite(ev.count)) return;
+	if (!grid || !ev || !ev.id) return;
+	if (!Number.isFinite(ev.likes) || !Number.isFinite(ev.dislikes)) return;
 	const card = grid.querySelector('article.card[data-id="' + CSS.escape(ev.id) + '"]');
-	if (card) setCardLikeCount(card, ev.count);
+	if (card) setCardCounts(card, ev.likes, ev.dislikes);
 	for (let i = detached.length - 1; i >= 0; i--) {
-		if (detached[i].dataset.id === ev.id) setCardLikeCount(detached[i], ev.count);
+		if (detached[i].dataset.id === ev.id) setCardCounts(detached[i], ev.likes, ev.dislikes);
+	}
+}
+
+// onImageReacted rebuilds a card's reaction badges when any visitor
+// toggles a reaction (SSE image-reacted, published after the commit
+// with the FULL absolute tally map — dormant names arrive too and are
+// filtered by topBadges' glyph lookup). Detached sweep like the
+// other card updaters.
+function onImageReacted(ev) {
+	if (!grid || !ev || !ev.id || !ev.reactions) return;
+	const card = grid.querySelector('article.card[data-id="' + CSS.escape(ev.id) + '"]');
+	if (card) setCardReactions(card, ev.reactions);
+	for (let i = detached.length - 1; i >= 0; i--) {
+		if (detached[i].dataset.id === ev.id) setCardReactions(detached[i], ev.reactions);
 	}
 }
 
@@ -711,7 +849,7 @@ function setupLiveUpdates() {
 	document.body.appendChild(pill);
 	pill.addEventListener("click", () => {
 		if (sortLiked) {
-			// Most-liked mode: flushing would prepend into a count-
+			// Top-rated mode: flushing would prepend into a score-
 			// sorted grid and lie about the order. Reload re-sorts
 			// server-side and clears the buffer with it. Deliberately
 			// checked BEFORE filterClearFn: on a liked page whose user
@@ -754,6 +892,7 @@ function setupLiveUpdates() {
 			"thumb-ready": onThumbReady,
 			"image-hidden": onImageHidden,
 			"image-liked": onImageLiked,
+			"image-reacted": onImageReacted,
 			// Overflow / replay-gap recovery: full refetch is always correct.
 			onReset: () => location.reload(),
 		},

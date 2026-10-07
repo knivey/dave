@@ -200,7 +200,8 @@ description = "generations from IRC"
 Reloadable via SIGHUP: `site.*`, `safe_site.*`, `thumbnails.*` (except
 worker count), `search.*`, `upload.*` (`max_bytes` is read per request;
 `rate_per_minute` is applied when the upload limiter is retuned at
-reload). Not reloadable
+reload), `reactions.*` (the preset is read per request — curating it
+never migrates data). Not reloadable
 (restart required): `server.*`, `database.*`, `storage.*`, `auth.*`.
 Same pattern as img-mcp.
 
@@ -360,14 +361,16 @@ timestamps. Cursor wire format: `?after=YYYY-MM-DD%20HH%3AMM%3ASS.mmm~<id>`
 
 | Route | What | Cache |
 |---|---|---|
-| `GET /` | gallery page (first ~48, infinite scroll); `?sort=liked` selects the most-liked order (keyset `count~created_at~id`) | no-cache (live) |
-| `GET /gallery?after=YYYY-MM-DD%20HH%3AMM%3ASS~<id>` | next gallery page (HTML fragment only — the `cards` partial for infinite scroll); `&sort=liked` for the liked order (cursor format switches to `<count>~<created>~<id>`) | no-cache |
+| `GET /` | gallery page (first ~48, infinite scroll); `?sort=liked` selects the top-rated order (net score = likes − dislikes; keyset `score~created_at~id`, score may be negative) | no-cache (live) |
+| `GET /gallery?after=YYYY-MM-DD%20HH%3AMM%3ASS~<id>` | next gallery page (HTML fragment only — the `cards` partial for infinite scroll); `&sort=liked` for the rated order (cursor format switches to `<score>~<created>~<id>`) | no-cache |
 | `GET /search?q=…` | search results (full HTML page — shareable link + no-JS form target) | no-cache |
 | `GET /search-fragment?q=…&after=…` | search results page (HTML fragment — first page + infinite scroll) | no-cache |
 | `GET /static/…` | embedded web/ assets (JS/CSS; no directory listings) | `public, max-age=3600` |
 | `GET /favicon.ico` | inline SVG favicon | `public, max-age=86400` |
 | `GET /<id>` | image details page (HTML) | no-cache (next-button is live) |
 | `POST /<id>/like` | like toggle (anonymous cookie identity — see "Likes"); JSON for `Accept: application/json`, 303 back to the page otherwise | no-store (JSON path) |
+| `POST /<id>/dislike` | dislike toggle — same contract as the like toggle; like and dislike are mutually exclusive per token (a dislike switches a held like and vice versa) | no-store (JSON path) |
+| `POST /<id>/react/<emoji>` | emoji reaction toggle — same identity/visibility/limits contract; `<emoji>` is the raw emoji itself (percent-encoded, any emoji — no catalog membership); multi-emoji per visitor; JSON `{emoji,reacted,reactions,mine}` | no-store (JSON path) |
 | `GET /<id>/orig/<filename>` | **permanent direct link** — original bytes served directly (200) | `public, max-age=31536000, immutable` |
 | `GET /<id>/t/<size>` (`small`\|`display` — tokens mapped to the configured `thumbnails.*_width`) | thumbnail bytes served directly (200) | ready: immutable; **pending: 200 placeholder JPEG with `no-store`** (same-URL swap to real bytes on `thumb-ready` — no intermediary may ever cache the placeholder); **failed: 404 no-cache** so the JS data-orig fallback works |
 | `GET /api/images/<id>/neighbors` | `{prev:{…}, next:{…}}` keyset neighbors | no-cache |
@@ -585,75 +588,185 @@ Behavior:
   DB open failure); per-file skips and thumbnail failures never fail the
   run.
 
-## Likes (`POST /<id>/like` · likes.go · migration 004)
+## Likes & dislikes (`POST /{id}/like` + `POST /{id}/dislike` · likes.go · migrations 004 + 005)
 
-Anonymous, cookie-token-based like toggling (owner request, Oct 2026):
-a like button on the details page, like counts on gallery cards
-(right-justified on the time line, rendered only when non-zero), and a
-`?sort=liked` gallery mode. Search results show counts too but keep
-relevance ordering — sort is gallery-only by design.
+Anonymous, cookie-token-based vote toggling (likes Oct 2026,
+dislikes Oct 2026): like and dislike buttons on the details page, vote
+tallies on gallery cards (right-justified on the time line, each
+rendered only when non-zero), and a `?sort=liked` gallery mode ranked
+by NET SCORE. Search results show tallies too but keep relevance
+ordering — sort is gallery-only by design.
 
 **Identity.** The `imgsite_liker` cookie (16 crypto/rand bytes, hex;
 `HttpOnly; Secure; SameSite=Lax; Path=/`; ~10y) is minted on the
-visitor's FIRST like POST and never before — page GETs set no cookies,
-so visitors who never like stay cookieless. One row in `likes
-(image_id, token, created_at)` = one like; the composite PK is the
-entire dedupe story. Garbage cookie values are ignored (validated as
-exactly 32 lowercase hex chars) and re-minted. Cookies are host-scoped,
-so a visitor using both the default and the safe host holds two tokens
-and can like the same image twice — accepted: a casual anonymous
-feature, not a boundary. Likes are global per image (both hosts render
-the same count); hidden rows keep their likes like they keep
-everything else. The cookie is `Secure`: plain-HTTP deployments (local
-test rigs) won't store it, so every visit looks cookieless — likes
-still land server-side but can never be un-liked there; serve over
-HTTPS (production sits behind a TLS proxy). The same one-shot
-double-like exists for a no-JS rapid double-submit (two cookieless
-POSTs each mint a token); the JS path disables the button in flight.
+visitor's FIRST vote POST and never before — page GETs set no
+cookies, so visitors who never vote stay cookieless. One row in
+`likes (image_id, token, created_at, vote)` = one vote; the composite
+PK is the entire dedupe story AND the mutual-exclusivity story: a
+token cannot hold two rows, so it can never like and dislike the same
+image at once. `vote` is `+1` (like) or `-1` (dislike); migration 005
+added it with `DEFAULT 1`, restating what every pre-dislikes row
+already meant. Garbage cookie values are ignored (validated as
+exactly 32 lowercase hex chars) and re-minted. Cookies are
+host-scoped, so a visitor using both the default and the safe host
+holds two tokens and could vote twice on the same image — accepted:
+a casual anonymous feature, not a boundary. Votes are global per
+image (both hosts render the same tallies); hidden rows keep their
+votes like they keep everything else. The cookie is `Secure`:
+plain-HTTP deployments (local test rigs) won't store it, so every
+visit looks cookieless — votes still land server-side but can never
+be retracted there; serve over HTTPS (production sits behind a TLS
+proxy). The same one-shot double-vote exists for a no-JS rapid
+double-submit (two cookieless POSTs each mint a token); the JS path
+disables BOTH buttons while a toggle is in flight.
 
-**Toggle.** `INSERT … ON CONFLICT (image_id, token) DO NOTHING` first:
-1 row affected = the toggle LIKED; 0 rows = already liked → `DELETE`
-un-likes. Single-connection SQLite serializes racing toggles. A
-dedicated PER-IP rate bucket (60/min, keyed like the SSE cap —
-X-Forwarded-For first, else RemoteAddr; buckets idle-pruned past 1024
-entries; like traffic never shares the upload limiter) returns 429.
-Per-IP, not per-process: a shared bucket would let one scripted client
-starve every other visitor's toggles — a remote off-switch for the
-feature. Response shape by content negotiation: JS
-(`Accept: application/json`) gets `200 {"liked":bool,"count":N}`
-(`Cache-Control: no-store`); the no-JS form POST gets `303 → /<id>`
+**Toggle.** One guarded upsert decides the direction:
+`INSERT … ON CONFLICT (image_id, token) DO UPDATE SET vote =
+excluded.vote WHERE likes.vote <> excluded.vote`. One row affected =
+the token now holds this stance (fresh insert, or a SWITCH from the
+opposite one — disliking a liked image releases the like and lands
+the dislike atomically); zero rows = it already held it, so the
+toggle retracts to neutral via DELETE. `created_at` rides the DO
+UPDATE so the stamp says when the CURRENT stance landed. A dedicated
+PER-IP rate bucket (60/min, keyed like the SSE cap — X-Forwarded-For
+first, else RemoteAddr; buckets idle-pruned past 1024 entries; vote
+traffic never shares the upload limiter) returns 429 — shared by BOTH
+endpoints, per-IP and not per-process (a shared bucket would let one
+scripted client starve every other visitor's toggles). Response shape
+by content negotiation: JS (`Accept: application/json`) gets
+`200 {"liked":bool,"disliked":bool,"likes":N,"dislikes":M}` (exactly
+one stance boolean can be true; both false = neutral;
+`Cache-Control: no-store`); the no-JS form POST gets `303 → /<id>`
 with the cookie riding along, and the re-rendered page paints the new
-state. Visibility rules mirror the details page exactly: unknown/
-malformed id 404, hidden 410, safe-host-invisible 404 (no existence
-leak — a GET to the path is the catch-all's 404 since `GET /` matches
-everything).
+state. The details page's form carries two submit buttons with
+`formaction` attributes (one per endpoint), so Enter submits the like
+button (implicit submission picks the first) and the JS layer reads
+`e.submitter` to fetch the clicked one's target. Visibility rules
+mirror the details page exactly: unknown/malformed id 404, hidden
+410, safe-host-invisible 404 (no existence leak — a GET to the path
+is the catch-all's 404 since `GET /` matches everything).
 
-**SSE.** Every committed toggle publishes `image-liked {id, count}`
-(count is absolute, never a delta) through the same per-site gate as
-`image-new` — `SafeVisible` from the row, withheld from safe-site
-subscribers on both live fan-out and ring replay. gallery.js syncs the
-card's `.likes` span (creating it when a count first moves past zero,
-removing it on fall-to-zero, sweeping the detached set like
-`onThumbReady` does); image.js keeps the open page's count fresh but
-never touches the pressed state (only the local visitor's own toggle
-owns that).
+**SSE.** Every committed toggle publishes `image-liked
+{id, likes, dislikes}` (both tallies absolute, never deltas — one
+event covers either direction because every toggle can move both)
+through the same per-site gate as `image-new` — `SafeVisible` from
+the row, withheld from safe-site subscribers on both live fan-out and
+ring replay. gallery.js syncs the card's `.counts` wrapper (creating
+the `.likes`/`.dislikes` spans inside it when a tally first moves
+past zero, removing them on fall-to-zero, dropping the wrapper when
+both return to zero, sweeping the detached set like `onThumbReady`
+does); image.js keeps the open page's tallies fresh but never touches
+the pressed states (only the local visitor's own toggle owns those).
 
-**Liked sort.** `?sort=liked` on `/` and `/gallery` keys on
-`(like_count DESC, created_at DESC, id DESC)` via a correlated
-subselect; the cursor format becomes `<count>~<created_at>~<id>` (the
-modes refuse each other's cursors — 400). Like counts are MUTABLE, so
-a row whose count rose mid-scroll can reappear on a fetched page or be
+**Top-rated sort.** `?sort=liked` on `/` and `/gallery` keys on the
+NET SCORE — `COALESCE(SUM(vote), 0)`, i.e. likes − dislikes, so
+dislikes demote and unrated rows sit at zero — via a correlated
+subselect; the cursor format becomes `<score>~<created_at>~<id>` with
+a possibly-negative first component (the modes refuse each other's
+cursors — 400; the URL/attr keep the historical `liked` name while
+the visible label reads "top rated"). Scores are MUTABLE, so a row
+whose score rose mid-scroll can reappear on a fetched page or be
 skipped: the client's append-dedupe (loadMore skips an already-
 attached data-id) absorbs reappearances and skips self-heal on the
-next full load. Live arrivals in liked mode buffer behind the "+N new"
+next full load. Live arrivals in rated mode buffer behind the "+N new"
 pill (prepending would lie about the order) and the pill RELOADS
-instead of flushing — including on a liked page whose user then typed
+instead of flushing — including on a rated page whose user then typed
 a query (the reload preserves the /search context rather than exiting
 the search). Every client path that re-fetches or re-addresses the
 gallery (infinite scroll's fragment URL, search.js's gallery restore +
 `history.replaceState`) derives its sort param from one source of
 truth, `galleryQS()` in gallery.js — hardcoding either path strands a
 cursor-mode mismatch that 400s every subsequent page fetch.
+
+## Reactions (`POST /<id>/react/<emoji>` · reactions.go · migrations 006 + 007)
+
+Discord/Slack-style emoji reactions (owner request, Oct 2026), the
+third anonymous-feedback channel alongside likes/dislikes. Cardinality
+is the difference: a token may hold MANY different reactions on one
+image — one row per `(image_id, token, emoji)` in `reactions`, the
+composite PK being the whole dedupe story per emoji — and toggling one
+emoji never touches the others or the token's like/dislike vote.
+
+**The key IS the emoji.** Any emoji can be reacted: the `emoji` column
+stores the raw emoji string (migration 007 translated the feature's
+first days of ASCII name keys to their emoji and dropped
+unconvertible custom names), and the toggle URL carries it
+percent-encoded. `validReactionEmoji` is a shape tripwire, not a
+catalog: valid UTF-8, 1–32 runes, ≤128 bytes, and NO ASCII at all —
+words, digits, and path games 404; ZWJ sequences and skin-tone
+variants pass (non-ASCII by construction).
+
+**Identity & limits.** The same `imgsite_liker` cookie, the same
+per-IP 60/min bucket as the vote endpoints (one identity surface, one
+abuse budget), the same visibility contract (unknown id 404, hidden
+410, safe-host-invisible 404, GET is the catch-all's 404), the same
+cookie-mint-on-first-POST and no-JS 303-back shape.
+
+**The quick bar is config; the catalog is PicMo.** `[[reactions.emoji]]`
+array-of-tables (`glyph` = the emoji key itself, `category` = optional
+≤24-rune grouping), hot-reloadable via SIGHUP / `POST /admin/reload`,
+at most 48 entries, validated by `loadConfig` (unique emojis, key
+shape, category size). The list is the curated FIRST PAGE — the "＋"
+`<details>` popup renders it grouped by first-appearance category —
+NOT a whitelist: off-bar emojis react fine (via the full picker) and
+chip once they exist. Curating never migrates data; emojis removed
+from the bar keep their counts and stay reactable. Section absent =
+built-in default bar (a categorized 30: hype/laughs/feels/meh/gross/
+spicy — 🤢 🤮 🤨 😒 😤 ❌ 😏 🤤 😈 🍑 🍆 💦 🥵 among them);
+`reactions.enabled = false` (a pointer — absent means true) makes
+`normalize` drop the list so every surface hides together, rows
+untouched.
+
+**Full-catalog picker.** The "⋯" trigger (hidden until image.js
+boots) opens the vendored **PicMo** picker (MIT, `web/vendor/` —
+byte-identical upstream files, no bundler, `go build` stays
+self-contained): categories, search, skin tones, recents. It is fed
+via `createPicker`'s `emojiData` + `messages` options from the
+vendored emojibase-data 15.3.2 dataset (the full `data.json` schema
+is exactly what PicMo 5.x ingests) — the options path that bypasses
+its internal CDN fetches, so nothing phones home. The module, CSS,
+and ~700KB dataset load lazily on first open only; no-JS visitors
+keep the quick bar and plain POSTs.
+
+**Toggle.** The pre-dislikes insert-first pattern, scoped to one
+emoji: `INSERT … ON CONFLICT (image_id, token, emoji) DO NOTHING`;
+1 row = reacted, 0 rows = already held → `DELETE` removes it. JS gets
+`200 {emoji, reacted, reactions, mine}` where `reactions` is the
+image's FULL absolute tally map and `mine` is the caller's full
+holdings map (the details JS rebuilds the whole chip row, and pressed
+states for non-toggled emojis cannot be derived from a delta); the
+no-JS path is a 303 back to the page.
+
+**Surfaces.** Details page: the row lists only EXISTING reactions —
+chips for tally keys with a non-zero count, quick-bar and off-bar
+alike, in count-desc order with codepoint-lexicographic ties
+(`emojiLess`, the ONE true chip order — the JS rebuild produces
+exactly it, so live updates never reshuffle what the server painted)
+— capped at 20 rendered chips with a "+N" note (an abuse bound:
+any-emoji keys have no configured set limiting the row, and elided
+keys stay removable because re-picking the emoji in the full picker
+POSTs a toggle regardless of what the UI showed) — then the "＋"
+quick-bar popup and the "⋯" PicMo trigger. A held
+emoji always has count ≥ 1, so its chip is always present and removal
+is always one click. image.js rebuilds the row from `reactions` +
+`mine` (chips appear/vanish as counts cross the 0 boundary; pressed
+states are a local Set seeded from the render and replaced by
+response `mine`), re-syncs quick-bar marks, and closes popups on
+pick + outside-click. Cards: the top 4 reaction keys by count (no
+whitelist — whatever visitors actually reacted), codepoint ties, as
+compact badges in the meta line's `.counts` wrapper next to the vote
+tallies, with a `…` overflow marker when more non-zero keys did not
+fit; the wrapper lifecycle is coordinated (votes and reactions each
+manage their own spans; wrapper drops only when everything is zero).
+Search cards badge identically; tallies never reorder search results.
+
+**SSE.** Every committed toggle publishes `image-reacted
+{id, reactions}` — the full absolute tally — through the same
+per-site `SafeVisible` gate as `image-new` / `image-liked` (the event
+names an image, so it must not leak existence on the safe host).
+gallery.js rebuilds the card's badge strip including the overflow
+marker (`onImageReacted`, detached-set sweep); image.js rebuilds the
+open page's chip row while pressed states stay local.
 
 ## Admin deletion (`DELETE /api/images/<id>` · `imgsite -delete`)
 

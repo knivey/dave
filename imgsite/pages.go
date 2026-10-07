@@ -8,6 +8,7 @@ import (
 	"html/template"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -201,11 +202,42 @@ table.params td { border: 1px solid #2c2c31; padding: 0.35rem 0.6rem; vertical-a
 table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
 .mono { font-family: ui-monospace, monospace; }
 .provenance { color: #999; font-size: 0.9rem; }
-/* Like toggle: heart glyph + count; the liked state tints both (the
-   base button styles come from the global button rule above). */
-.like-form { margin: 0.25rem 0 0.5rem; }
+/* Vote toggles: heart glyph + count, broken-heart glyph + count; the
+   pressed state tints each (the base button styles come from the
+   global button rule above). Dislike gets its own hue so the two
+   stances read apart at a glance (like keeps the warm pink, dislike a
+   cool slate). */
+.like-form { margin: 0.25rem 0 0.5rem; display: flex; gap: 0.5rem; }
 .like-btn.liked { color: #ff6b81; border-color: #7a3d4a; }
 .like-btn:active { border-color: #b5566c; }
+.dislike-btn.disliked { color: #7f96ad; border-color: #3d4a58; }
+.dislike-btn:active { border-color: #5a7290; }
+/* Reactions: the row lists only EXISTING reactions as chips (pressed
+   = warm amber); the "+" summary opens a native <details> picker
+   whose .react-menu overlays as a grouped, scrollable grid of the
+   curated quick bar (.react-cat headers, first-appearance order).
+   The "⋯" button after it opens the vendored full-catalog PicMo
+   picker (hidden until image.js boots). #picmo-pop is the container
+   image.js renders PicMo into — absolutely positioned off the form,
+   above everything except the zoom overlay. */
+.react-form { margin: 0 0 0.5rem; display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; position: relative; }
+.react-chip.reacted { color: #ffd27f; border-color: #7a6a3d; }
+.react-chip:active, .react-opt:active { border-color: #b5994d; }
+.react-picker { position: relative; }
+.react-picker > summary { list-style: none; display: inline-block; background: #2a2a30; color: #ddd; border: 1px solid #3c3c44; border-radius: 6px; padding: 0.25rem 0.7rem; cursor: pointer; user-select: none; font: inherit; line-height: 1.2; }
+.react-picker > summary::-webkit-details-marker { display: none; }
+.react-picker > summary:hover { background: #35353d; }
+.react-picker[open] > summary { background: #35353d; border-color: #4a6fb5; }
+.react-menu { position: absolute; top: calc(100% + 0.45rem); left: 0; z-index: 20; max-width: min(24rem, 92vw); max-height: 17rem; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(2.3rem, 1fr)); gap: 0.25rem; background: #1d1d21; border: 1px solid #3c3c44; border-radius: 8px; padding: 0.5rem; box-shadow: 0 10px 28px rgba(0,0,0,0.55); }
+.react-cat { grid-column: 1 / -1; font-size: 0.75rem; color: #999; text-transform: uppercase; letter-spacing: 0.06em; padding: 0.3rem 0.1rem 0.1rem; }
+.react-cat:first-child { padding-top: 0; }
+.react-opt { font-size: 1.3rem; padding: 0.3rem 0.45rem; line-height: 1.2; }
+.react-opt.mine { color: #ffd27f; border-color: #7a6a3d; }
+.react-more { line-height: 1.2; color: #999; }
+.react-more:hover { color: #ddd; }
+.react-overflow { color: #999; font-size: 0.8125rem; align-self: center; white-space: nowrap; }
+#picmo-pop { position: absolute; top: calc(100% + 0.45rem); left: 0; z-index: 30; }
+#picmo-pop[hidden] { display: none; }
 </style>
 </head>
 <body data-page="image" data-image-id="{{.ID}}"{{if .AtEnd}} data-at-end="true"{{end}}{{if .LastEvent}} data-last-event="{{.LastEvent}}"{{end}}>
@@ -257,15 +289,49 @@ table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
 {{if .WorkflowName}} &middot; {{.WorkflowName}}{{end}}
 {{if .ProvenanceChannel}} &middot; {{.ProvenanceChannel}}{{end}}
 </p>
-{{/* Like toggle (anonymous, cookie-token identity — see likes.go).
-     A plain POST form so the no-JS path is a full round trip: toggle
-     → 303 back here → re-rendered state. image.js intercepts the
-     submit and swaps in the fetch()-based JSON path. The count lives
-     in its own span so SSE-driven count updates (other people liking)
-     never touch the button's own state classes. */}}
+{{/* Vote toggles (anonymous, cookie-token identity — see likes.go).
+     Like and dislike are mutually exclusive per visitor: one POST
+     form with two submit buttons, each carrying its own formaction,
+     so the no-JS path is a full round trip (toggle → 303 back here →
+     re-rendered state) and Enter submits the FIRST button (implicit
+     submission = like, matching the form's action). image.js
+     intercepts the submit and swaps in the fetch()-based JSON path
+     against the clicked button's formaction. Counts live in their
+     own spans so SSE-driven count updates (other people voting)
+     never touch the buttons' own state classes. */}}
 <form class="like-form" method="post" action="/{{.ID}}/like">
-<button type="submit" class="like-btn{{if .LikedByYou}} liked{{end}}" id="like-btn" aria-pressed="{{if .LikedByYou}}true{{else}}false{{end}}" title="{{if .LikedByYou}}unlike{{else}}like{{end}}">&#9829; <span id="like-count">{{.LikeCount}}</span></button>
+<button type="submit" class="like-btn{{if .LikedByYou}} liked{{end}}" id="like-btn" formaction="/{{.ID}}/like" aria-pressed="{{if .LikedByYou}}true{{else}}false{{end}}" title="{{if .LikedByYou}}unlike{{else}}like{{end}}">&#9829; <span id="like-count">{{.LikeCount}}</span></button>
+<button type="submit" class="dislike-btn{{if .DislikedByYou}} disliked{{end}}" id="dislike-btn" formaction="/{{.ID}}/dislike" aria-pressed="{{if .DislikedByYou}}true{{else}}false{{end}}" title="{{if .DislikedByYou}}remove dislike{{else}}dislike{{end}}">&#128148; <span id="dislike-count">{{.DislikeCount}}</span></button>
 </form>
+{{/* Reactions (anonymous, cookie-token identity — see reactions.go).
+      ANY emoji is reactable; the row lists only EXISTING reactions
+      (count > 0) as clickable chips, the "+" picker is the curated
+      quick bar (a native <details> popup, grouped by config
+      category), and the "⋯" button after it opens the vendored
+      full-catalog PicMo picker (JS-only: hidden attribute until
+      image.js boots, so no-JS visitors keep the quick bar + plain
+      POSTs and Enter implicit-submits the FIRST chip or nothing
+      while the row is empty — the summaries are not submit
+      buttons). image.js intercepts submits (e.submitter tells it
+      which emoji), rebuilds the row from the response's full tally +
+      mine map, and closes popups on pick; image-reacted SSE keeps
+      the row fresh while pressed states stay local. The reaction key
+      IS the emoji: formaction URLs carry it percent-encoded
+      (html/template attribute escaping handles that). */}}
+{{if .PickerGroups}}
+<form class="react-form" method="post">
+{{range .ReactionButtons}}{{if .Count}}<button type="submit" class="react-chip{{if .Mine}} reacted{{end}}" data-emoji="{{.Emoji}}" formaction="/{{$.ID}}/react/{{.Emoji}}" aria-pressed="{{if .Mine}}true{{else}}false{{end}}">{{.Emoji}} <span class="react-count" data-emoji="{{.Emoji}}">{{.Count}}</span></button>
+{{end}}{{end}}{{if .OverflowChips}}<span class="react-overflow" title="more reactions">+{{.OverflowChips}}</span>
+{{end}}<details class="react-picker" id="react-picker">
+<summary class="react-picker-btn" title="add a reaction">&#65291;</summary>
+<div class="react-menu">
+{{range .PickerGroups}}{{if .Name}}<div class="react-cat">{{.Name}}</div>
+{{end}}{{range .Buttons}}<button type="submit" class="react-opt{{if .Mine}} mine{{end}}" data-emoji="{{.Emoji}}" formaction="/{{$.ID}}/react/{{.Emoji}}" aria-pressed="{{if .Mine}}true{{else}}false{{end}}">{{.Emoji}}</button>
+{{end}}{{end}}</div>
+</details>
+<button type="button" class="react-more" id="react-more" hidden title="full emoji picker">&#8943;</button>
+</form>
+{{end}}
 
 <h2>Original prompt</h2>
 {{if .OriginalPrompt}}<p class="original">{{.OriginalPrompt}}</p>{{else}}<p class="provenance"><em>(no prompt recorded)</em></p>{{end}}
@@ -373,12 +439,19 @@ const cardsPartialSrc = `{{define "cards"}}{{range .Cards}}<article class="card"
 {{if .ThumbFailed}}<img loading="lazy" src="{{.OrigURL}}" alt="{{.PromptSnippet}}">{{else if .ThumbPending}}<img class="pending" loading="lazy" src="{{.ThumbURL}}" data-orig="{{.OrigURL}}" alt="{{.PromptSnippet}}">{{else}}<img loading="lazy" src="{{.ThumbURL}}" alt="{{.PromptSnippet}}">{{end}}
 </a>
 {{if .SnippetParts}}<p class="prompt">{{range .SnippetParts}}{{if .Hit}}<mark>{{.Text}}</mark>{{else}}{{.Text}}{{end}}{{end}}</p>{{else}}<p class="prompt">{{.PromptSnippet}}</p>{{end}}
-{{/* Meta row: timestamp left, like count right-justified on the same
-     line (owner request, Oct 2026). The likes span renders ONLY for
-     non-zero counts — a zero span on every card is noise; the SSE
-     image-liked handler creates the span client-side when a count
-     moves 0→1. */}}
-<div class="meta"><time datetime="{{.CreatedRFC3339}}" data-ts="{{.CreatedRFC3339}}">{{.Timestamp}}</time>{{if .LikeCount}}<span class="likes" data-count="{{.LikeCount}}">&#9829; {{.LikeCount}}</span>{{end}}</div>
+{{/* Meta row: timestamp left, vote counts + reaction badges
+     right-justified on the same line (owner request, Oct 2026). The
+     .counts wrapper owns the right side as ONE flex child (likes,
+     dislikes, and the .reacts badges inside), so the meta row's
+     space-between stays two-sided however many spans exist. Each
+     vote span renders ONLY for its non-zero count — zero spans on
+     every card are noise; the SSE image-liked handler manages the
+     spans (and the wrapper) client-side when a count moves 0→1. The
+     reaction badges are the top 4 keys by count (any emoji — no
+     whitelist), with a "…" marker when more did not fit
+     (topCardReactions); the SSE image-reacted handler rebuilds
+     them. */}}
+<div class="meta"><time datetime="{{.CreatedRFC3339}}" data-ts="{{.CreatedRFC3339}}">{{.Timestamp}}</time>{{if or .LikeCount .DislikeCount .TopReactions}}<span class="counts">{{if .LikeCount}}<span class="likes" data-count="{{.LikeCount}}">&#9829; {{.LikeCount}}</span>{{end}}{{if .DislikeCount}}<span class="dislikes" data-count="{{.DislikeCount}}">&#128148; {{.DislikeCount}}</span>{{end}}{{if .TopReactions}}<span class="reacts">{{range .TopReactions}}<span class="react" data-emoji="{{.Emoji}}">{{.Emoji}} {{.Count}}</span>{{end}}{{if .MoreReactions}}<span class="react more" title="more reactions">&#8230;</span>{{end}}</span>{{end}}</span>{{end}}</div>
 </article>
 {{end}}{{if .NoResults}}<p class="no-results">no results for {{.Query}}</p>{{end}}{{if .NothingSearched}}<p class="no-results">nothing searched yet — type a query</p>{{end}}{{if .EmptyGallery}}<p class="no-results">nothing here yet — images appear here as they are generated</p>{{end}}{{if .HasMore}}<div class="sentinel" data-next-cursor="{{.NextCursor}}"></div>{{end}}{{end}}`
 
@@ -416,7 +489,7 @@ const galleryPageSrc = `<!DOCTYPE html>
      the JS fragment fetcher reads to keep &sort=liked on fetched
      pages. Search pages don't render this nav at all. */}}
 <nav class="sort-nav" aria-label="sort order">
-sort: <a href="/"{{if not .SortLiked}} aria-current="page"{{end}}>newest</a> · <a href="/?sort=liked"{{if .SortLiked}} aria-current="page"{{end}}>most liked</a>
+sort: <a href="/"{{if not .SortLiked}} aria-current="page"{{end}}>newest</a> · <a href="/?sort=liked"{{if .SortLiked}} aria-current="page"{{end}}>top rated</a>
 </nav>
 </header>
 <main>
@@ -484,9 +557,18 @@ type galleryCard struct {
 	CreatedRFC3339 string
 	ThumbPending   bool
 	ThumbFailed    bool
-	// LikeCount is the hydrated row count; zero renders no .likes
-	// span (see the cards partial).
-	LikeCount int
+	// LikeCount/DislikeCount are the hydrated row tallies; zero
+	// renders no span for that count (see the cards partial).
+	LikeCount    int
+	DislikeCount int
+	// TopReactions is the card's badge slice: reaction keys with
+	// non-zero counts, top N by count with codepoint-lexicographic
+	// ties (topCardReactions — any emoji, no whitelist).
+	// MoreReactions says additional keys have non-zero counts that
+	// did not fit — the template renders a "…" overflow marker. Nil
+	// renders nothing.
+	TopReactions  []reactionBadge
+	MoreReactions bool
 	// SnippetParts, when non-nil, replaces the plain prompt preview
 	// with a highlighted match snippet (search results only).
 	SnippetParts []snippetPart
@@ -531,6 +613,30 @@ type galleryView struct {
 	// aria-current, the body data-sort attribute (the JS fragment
 	// fetcher appends &sort=liked from it), and the NextCursor format.
 	SortLiked bool
+}
+
+// reactionBadge is one gallery-card reaction badge: the emoji key
+// (rendered as its own glyph) + its count.
+type reactionBadge struct {
+	Emoji string
+	Count int
+}
+
+// reactionButton is one chip's state on the details page: the emoji
+// key (rendered as its own glyph), the image's count for it, and
+// whether the rendering visitor's token holds it (pressed state).
+type reactionButton struct {
+	Emoji string
+	Count int
+	Mine  bool
+}
+
+// reactionGroup is one quick-bar picker category: entries in
+// configured order, grouped by the category's first appearance.
+// Name empty = the leading header-less group (uncategorized entries).
+type reactionGroup struct {
+	Name    string
+	Buttons []reactionButton
 }
 
 // galleryPageSize is the number of cards per keyset page; handlers fetch
@@ -654,10 +760,11 @@ func buildGalleryView(cfg Config, rows []dbImage, sortLiked bool) galleryView {
 	if v.HasMore && len(rows) > 0 {
 		last := rows[len(rows)-1]
 		if sortLiked {
-			// The hydrated count is the cursor's first component — the
+			// The row's net score (likes − dislikes, matching the
+			// SQL sort key) is the cursor's first component — the
 			// hydrator ran inside the query functions precisely so
-			// this formats from the row's own count.
-			v.NextCursor = formatLikedKeysetCursor(last.LikeCount, last.CreatedAt, last.ID)
+			// this computes from the row's own tallies.
+			v.NextCursor = formatLikedKeysetCursor(last.LikeCount-last.DislikeCount, last.CreatedAt, last.ID)
 		} else {
 			v.NextCursor = formatKeysetCursor(last.CreatedAt, last.ID)
 		}
@@ -674,7 +781,7 @@ func galleryCardFromImage(cfg Config, img *dbImage) galleryCard {
 	if t, ok := parseDBTime(created); ok {
 		rfc3339 = t.UTC().Format(time.RFC3339)
 	}
-	return galleryCard{
+	card := galleryCard{
 		ID:             img.ID,
 		ThumbURL:       "/" + img.ID + "/t/small",
 		OrigURL:        "/" + img.ID + "/orig/" + url.PathEscape(img.Filename),
@@ -684,7 +791,10 @@ func galleryCardFromImage(cfg Config, img *dbImage) galleryCard {
 		ThumbPending:   img.ThumbStatus == thumbStatusPending,
 		ThumbFailed:    img.ThumbStatus == thumbStatusFailed,
 		LikeCount:      img.LikeCount,
+		DislikeCount:   img.DislikeCount,
 	}
+	card.TopReactions, card.MoreReactions = topCardReactions(cfg, img.Reactions)
+	return card
 }
 
 // formatKeysetCursor builds the plan's cursor wire format:
@@ -711,24 +821,27 @@ func parseKeysetCursor(s string) (createdAt, id string, ok bool) {
 }
 
 // formatLikedKeysetCursor builds the liked-sort cursor wire format:
-// "<likeCount>~YYYY-MM-DD HH:MM:SS[.mmm]~<id>". The count is the
-// mutable first component of the (count, created_at, id) keyset — see
-// dbGetGalleryPageLiked's mutable-column note.
+// "<score>~YYYY-MM-DD HH:MM:SS[.mmm]~<id>". The score is the mutable
+// first component of the (score, created_at, id) keyset — see
+// dbGetGalleryPageLiked's mutable-column note. It can be NEGATIVE
+// (likes − dislikes), which strconv.Itoa/Atoi both round-trip fine.
 func formatLikedKeysetCursor(count int, createdAt, id string) string {
 	return strconv.Itoa(count) + "~" + createdAt + "~" + id
 }
 
 // parseLikedKeysetCursor validates and splits a liked-sort cursor.
-// Exactly three '~'-free parts: digits count, parseable timestamp,
-// valid id. A default-mode cursor (2 parts) is rejected — the modes
-// must never silently cross-read each other's cursors.
+// Exactly three '~'-free parts: an optionally-negative score (net
+// likes − dislikes — negative totals are legal in this sort),
+// parseable timestamp, valid id. A default-mode cursor (2 parts) is
+// rejected — the modes must never silently cross-read each other's
+// cursors.
 func parseLikedKeysetCursor(s string) (count int, createdAt, id string, ok bool) {
 	parts := strings.Split(s, "~")
 	if len(parts) != 3 {
 		return 0, "", "", false
 	}
 	n, err := strconv.Atoi(parts[0])
-	if err != nil || n < 0 {
+	if err != nil {
 		return 0, "", "", false
 	}
 	if _, ok := parseDBTime(parts[1]); !ok {
@@ -882,12 +995,34 @@ type imageView struct {
 	HasNext bool
 	NextID  string
 
-	// LikeCount is the image's total likes; LikedByYou is the
-	// rendering visitor's toggle state (server-rendered from the liker
-	// cookie so the button paints correctly with JS disabled). The JS
-	// enhancement keeps them fresh after toggles and image-liked SSE.
-	LikeCount  int
-	LikedByYou bool
+	// LikeCount/DislikeCount are the image's total tallies;
+	// LikedByYou/DislikedByYou are the rendering visitor's stance
+	// (server-rendered from the liker cookie so the buttons paint
+	// correctly with JS disabled — exactly one can be set, the votes
+	// are mutually exclusive). The JS enhancement keeps them fresh
+	// after toggles and image-liked SSE.
+	LikeCount     int
+	DislikeCount  int
+	LikedByYou    bool
+	DislikedByYou bool
+
+	// ReactionButtons is the details-page quick-bar data: one entry
+	// per configured emoji (key = the emoji itself) with its count and
+	// the visitor's pressed state. The template splits it two ways —
+	// the chip row renders only count>0 entries, the picker popup
+	// renders all of them grouped by category (PickerGroups; both set
+	// by handleImagePage from dbGetReactionState; nil when the
+	// feature is disabled renders no form). Reactions OUTSIDE the
+	// quick bar still exist: chips render from the full tally in
+	// handleImagePage (see there), and the full-catalog PicMo picker
+	// (vendored, JS-only) can toggle any emoji.
+	ReactionButtons []reactionButton
+	// OverflowChips is how many existing reactions were elided by
+	// maxDetailChips — rendered as a "+N" note after the chips.
+	OverflowChips int
+	// PickerGroups is ReactionButtons grouped by the category's first
+	// appearance for the quick-bar <details> grid.
+	PickerGroups []reactionGroup
 
 	// LastEvent is the SSE stream position captured at render time —
 	// same replay-cursor contract as galleryView.LastEvent (nil = no
@@ -1161,21 +1296,95 @@ func (a *App) handleImagePage(w http.ResponseWriter, r *http.Request, id string)
 	}
 
 	view := buildImageView(img, prev, next, a.absBaseForSite(sc, r))
-	// Like state: count always, liked-by-you when the visitor carries a
-	// liker cookie (page GETs never mint one — only the POST does).
-	// The row was just fetched, so an error here is drift, not a miss:
-	// degrade to count 0 rather than failing the whole page.
+	cfg := a.getConfig()
+	// Vote state: counts always, the visitor's own stance when they
+	// carry a liker cookie (page GETs never mint one — only the POST
+	// does). The row was just fetched, so an error here is drift, not
+	// a miss: degrade to counts 0 rather than failing the whole page.
 	token, _ := likeTokenFromRequest(r)
-	count, liked, err := dbGetLikeState(a.db, img.ID, token)
+	likes, dislikes, myVote, err := dbGetVoteState(a.db, img.ID, token)
 	if err != nil {
 		// ErrNoRows is benign drift (the row vanished between the
 		// lookup above and this query — no hard deletes exist, so a
 		// tripwire log would only add noise); anything else is real.
 		if !errors.Is(err, sql.ErrNoRows) {
-			logger.Error("like state lookup failed", "id", id, "error", err)
+			logger.Error("vote state lookup failed", "id", id, "error", err)
 		}
 	} else {
-		view.LikeCount, view.LikedByYou = count, liked
+		view.LikeCount, view.DislikeCount = likes, dislikes
+		view.LikedByYou, view.DislikedByYou = myVote == voteLike, myVote == voteDislike
+	}
+	// Reaction state (details page). The quick bar comes from this
+	// request's config snapshot (PickerGroups: configured order,
+	// categories by first appearance — that ordering belongs to the
+	// PICKER alone). The CHIPS render every tally key with count>0 —
+	// quick-bar entries AND any off-bar emoji visitors reacted via
+	// the full-catalog picker — in the same order the JS rebuild
+	// uses (count desc, then emojiLess codepoint ties), so a live
+	// update never reshuffles what the server painted. Disabled
+	// feature renders no form; errors degrade to "no reactions",
+	// same as the vote block.
+	if cfg.Reactions.reactionsEnabled() {
+		tally, mine, err := dbGetReactionState(a.db, img.ID, token)
+		if err != nil {
+			logger.Error("reaction state lookup failed", "id", id, "error", err)
+		} else {
+			view.ReactionButtons = make([]reactionButton, 0, len(tally)+len(cfg.Reactions.Emojis))
+			for _, e := range cfg.Reactions.Emojis {
+				if tally[e.Glyph] > 0 {
+					view.ReactionButtons = append(view.ReactionButtons,
+						reactionButton{Emoji: e.Glyph, Count: tally[e.Glyph], Mine: mine[e.Glyph]})
+				}
+			}
+			// Off-bar chips: existing reactions the config doesn't list.
+			inBar := make(map[string]bool, len(cfg.Reactions.Emojis))
+			for _, e := range cfg.Reactions.Emojis {
+				inBar[e.Glyph] = true
+			}
+			keys := make([]string, 0, len(tally))
+			for emoji, n := range tally {
+				if n > 0 && !inBar[emoji] {
+					keys = append(keys, emoji)
+				}
+			}
+			for _, emoji := range keys {
+				view.ReactionButtons = append(view.ReactionButtons,
+					reactionButton{Emoji: emoji, Count: tally[emoji], Mine: mine[emoji]})
+			}
+			// The one true chip order: count desc, codepoint ties —
+			// exactly what image.js's rebuild produces from a tally.
+			sort.Slice(view.ReactionButtons, func(i, j int) bool {
+				bi, bj := view.ReactionButtons[i], view.ReactionButtons[j]
+				if bi.Count != bj.Count {
+					return bi.Count > bj.Count
+				}
+				return emojiLess(bi.Emoji, bj.Emoji)
+			})
+			// Abuse bound: cap the rendered row (any-emoji keys have
+			// no configured set to bound them). Elided keys stay
+			// removable via a PicMo re-pick; see maxDetailChips.
+			if len(view.ReactionButtons) > maxDetailChips {
+				view.OverflowChips = len(view.ReactionButtons) - maxDetailChips
+				view.ReactionButtons = view.ReactionButtons[:maxDetailChips]
+			}
+			// Picker groups: configured entries only (configured
+			// order preserved), uncategorized leading (empty header).
+			for _, e := range cfg.Reactions.Emojis {
+				b := reactionButton{Emoji: e.Glyph, Count: tally[e.Glyph], Mine: mine[e.Glyph]}
+				var g *reactionGroup
+				for i := range view.PickerGroups {
+					if view.PickerGroups[i].Name == e.Category {
+						g = &view.PickerGroups[i]
+						break
+					}
+				}
+				if g == nil {
+					view.PickerGroups = append(view.PickerGroups, reactionGroup{Name: e.Category})
+					g = &view.PickerGroups[len(view.PickerGroups)-1]
+				}
+				g.Buttons = append(g.Buttons, b)
+			}
+		}
 	}
 	if hasHub {
 		view.LastEvent = &lastEvent

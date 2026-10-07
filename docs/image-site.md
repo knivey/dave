@@ -715,7 +715,10 @@ skin tones, recents. It is fed via `createPicker`'s `emojiData` +
 `messages` options from the vendored emojibase-data 15.3.2 dataset
 (the full `data.json` schema is exactly what PicMo 5.x ingests) — the
 options path that bypasses its internal CDN fetches, so nothing
-phones home. The module, CSS, and ~700KB dataset load lazily on
+phones home. Picks arrive as the `emoji:select` EVENT on the returned
+picker (`picker.addEventListener` — PicMo 5 has NO `onEmojiSelect`
+option; passing one is silently ignored), payload
+`{emoji, hexcode, label}`. The module, CSS, and ~700KB dataset load lazily on
 first open only. The button itself is type=button (JS-required), but
 it renders for everyone; no-JS visitors can still toggle via the
 chips (plain POSTs, 303 back).

@@ -16,6 +16,7 @@
 #   frequencypenalty     (float, default: 0)             -2.0 to 2.0, penalize repetition
 #   timeout              (duration, default: 60s)        Overall API call timeout. Cascade: command > service > 60s
 #   streamtimeout        (duration, default: timeout)    Max idle time between stream chunks. Cascade: command > service > timeout
+#   load_notice          (bool, default: true for type = "llama" services, else false) Before the request, probe the service's /v1/models and send a "loading model" IRC notice when the requested model is not loaded yet (llama-server built-in router / llama-swap). Notice text: [llm] model_load in notices.toml. Cascade: command > service > type default.
 #   toolverbose          (bool, default: true)           Show 🔧 tool call notifications (cascades from service)
 #   paralleltoolcalls    (bool, default: true)           Enable parallel MCP tool calls (cascades from service)
 #
@@ -41,6 +42,7 @@
 # frequencypenalty = 0.0
 # timeout = "60s"
 # streamtimeout = "30s"
+# load_notice = true
 # toolverbose = true
 # paralleltoolcalls = true
 

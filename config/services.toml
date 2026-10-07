@@ -15,6 +15,7 @@
 #   maximagesize         (string, default: "1024x1024") Max image dimensions "WxH"
 #   timeout              (duration, default: 60s)    Overall API call timeout (cascades to commands)
 #   streamtimeout        (duration, default: timeout) Max idle time between stream chunks
+#   load_notice          (bool, default: true when type = "llama", else false) Before each turn, GET /v1/models and send an IRC notice when the requested model is not loaded yet (llama-server router status: unloaded/loading/sleeping; llama-swap status-less list: model absent). Fails open — no notice when the endpoint errors. Set false to disable for llama services, true to enable for others. Cascades to commands.
 #   toolverbose          (bool, default: true)       Show 🔧 tool call notifications in IRC
 #   paralleltoolcalls    (bool, default: true)       Enable parallel MCP tool calls
 #   parallel             (int, default: 1)           Max concurrent requests per command
@@ -39,6 +40,7 @@
 # maximagesize = "1024x1024"
 # timeout = "90s"
 # streamtimeout = "45s"
+# load_notice = true
 # toolverbose = true
 # paralleltoolcalls = true
 # parallel = 1

@@ -132,6 +132,9 @@ func TestSetNoticesDefaults(t *testing.T) {
 	assert.NotEmpty(t, n.Users.ResolvePersistent)
 	assert.Contains(t, n.Users.ResolveTransient, "{nick}")
 	assert.Contains(t, n.Users.ResolvePersistent, "{nick}")
+	assert.NotEmpty(t, n.LLM.ModelLoad)
+	assert.Contains(t, n.LLM.ModelLoad, "{nick}")
+	assert.Contains(t, n.LLM.ModelLoad, "{model}")
 	assert.NotEmpty(t, n.Support)
 }
 

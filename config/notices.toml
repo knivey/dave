@@ -114,6 +114,9 @@
 #   resolve_transient  (string)  Sent (as warnMsg) when resolveUser exhausts its retries on transient DB errors. Placeholders: {nick}
 #   resolve_persistent (string)  Sent (as warnMsg) when resolveUser fell back to creating a flagged placeholder row, or when even that fallback failed. Placeholders: {nick}
 #
+# [llm] options:
+#   model_load         (string)  Sent before a request when the service's /v1/models reports the requested model is not loaded yet (llama-server router status, or absent from a status-less list like llama-swap's). Enabled per service/command via load_notice (default: on for type = "llama"). Placeholders: {nick}, {model}
+#
 # support           (string)     Support message
 #
 # Example with all options set to defaults:
@@ -227,6 +230,9 @@
 # [users]
 # resolve_transient = "internal hiccup tracking your identity, try again in a moment ({nick})"
 # resolve_persistent = "internal data conflict for {nick} — using temporary tracking, admin should investigate"
+#
+# [llm]
+# model_load = "\x0306⏳ {nick}: loading model {model} on the server, this may take a while...\x0f"
 #
 # support = "If you enjoy using dave, consider supporting development at https://patreon.com/shrew269 ❤️"
 

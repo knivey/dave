@@ -68,6 +68,14 @@ func completion(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx
 	apiCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel()
 
+	// Model-load probe for legacy completions (llama-server router /
+	// llama-swap): same pre-request check the chat path does in runTurn.
+	if cfg.LoadNotice != nil && *cfg.LoadNotice {
+		sendModelLoadNotice(ctx, nil, logger, svcBaseURL, svcKey, cfg.Model, e.Source.Name, func(msg string) {
+			sendToOutput(msg, output, ctx)
+		})
+	}
+
 	resp, err := aiClient.Completions.New(apiCtx, openai.CompletionNewParams{
 		Model: openai.CompletionNewParamsModel(cfg.Model),
 		Prompt: openai.CompletionNewParamsPromptUnion{
@@ -864,6 +872,11 @@ StreamLoop:
 }
 
 func (cr *chatRunner) runTurn(turn *turnContext) bool {
+	// Pre-turn model-load probe (llama-server router / llama-swap): if the
+	// service reports our model is not loaded yet, tell the user before the
+	// request blocks on the load. No-op unless load_notice resolved true.
+	cr.maybeNotifyModelLoad()
+
 	if cr.cfg.ResponsesAPI {
 		return cr.runTurnResponses(turn)
 	}

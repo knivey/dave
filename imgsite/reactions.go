@@ -14,12 +14,13 @@ package main
 //     1 row affected means the toggle REACTED; zero rows means this
 //     token already had that reaction, so the toggle REMOVES it via
 //     DELETE.
-//   - Which emojis exist is CONFIG ([reactions], hot-reloadable —
-//     see config.go). Rows key on the stable ASCII name; the glyph is
-//     rendered from the live config, so curation never migrates data.
-//     Rows for removed names stay dormant and revive if the name
-//     returns. `reactions.enabled = false` hides every surface and
-//     404s the endpoints without touching stored rows.
+//   - The config list ([[reactions.emoji]]) is a CURATED QUICK
+//     BAR, not a whitelist: ANY emoji can be reacted (the
+//     full-catalog PicMo picker covers the rest), the row key IS the
+//     emoji string itself, and off-bar emojis chip once they exist —
+//     so curation never migrates data. `reactions.enabled = false`
+//     hides every surface and 404s the endpoints without touching
+//     stored rows.
 
 import (
 	"encoding/json"
@@ -35,6 +36,16 @@ import (
 // ellipsis that says more exist (owner request, Oct 2026: more than
 // two, with an overflow marker).
 const cardReactionBadges = 4
+
+// maxDetailChips bounds how many existing-reaction chips the details
+// page renders. With any-emoji keys there is no configured set to
+// bound the row, and a scripted client (fresh token per POST against
+// the shared 60/min/IP bucket) could otherwise inflate the page and
+// every image-reacted tally without limit. Elided keys stay
+// removable: a PicMo re-pick of the same emoji toggles it off (the
+// POST toggles regardless of what the UI showed), so the cap never
+// strands a reaction. JS renderReactionRow slices identically.
+const maxDetailChips = 20
 
 // dbToggleReaction flips token's reaction of emoji on id and returns
 // whether the caller now holds that reaction, plus the image's full
@@ -95,14 +106,14 @@ func dbGetReactionState(db *sqlx.DB, id, token string) (tally map[string]int, mi
 	tally = make(map[string]int)
 	mine = make(map[string]bool)
 	for rows.Next() {
-		var name string
+		var key string
 		var n, isMine int
-		if err := rows.Scan(&name, &n, &isMine); err != nil {
+		if err := rows.Scan(&key, &n, &isMine); err != nil {
 			return nil, nil, err
 		}
-		tally[name] = n
+		tally[key] = n
 		if isMine == 1 {
-			mine[name] = true
+			mine[key] = true
 		}
 	}
 	return tally, mine, rows.Err()
@@ -161,39 +172,59 @@ func hydrateReactionCounts(db *sqlx.DB, imgs []*dbImage) error {
 }
 
 // topCardReactions picks the card-badge slice from a hydrated tally:
-// configured emojis only, top N by count (cardReactionBadges),
-// configured order breaking ties, plus whether MORE configured
-// emojis have non-zero counts than fit — the template renders a "…"
-// overflow marker in that case. Dormant rows (names no longer
-// configured) are invisible by construction — the badge can only
-// show a glyph the config supplies. reactionsEnabled is re-checked
-// defensively: normalize already nils the list when disabled, so
-// this only matters for configs that bypassed loadConfig (struct
+// the top N (cardReactionBadges) reaction keys by count, ties broken
+// by codepoint-lexicographic order (deterministic with no configured
+// ordering to lean on with any-emoji keys), plus whether MORE
+// keys have non-zero counts than fit — the template renders a "…"
+// overflow marker in that case. There is NO whitelist: badges surface
+// whatever visitors actually reacted. reactionsEnabled is re-checked
+// defensively: normalize already nils the list when disabled, so this
+// only matters for configs that bypassed loadConfig (struct
 // literals in tests, future callers).
 func topCardReactions(cfg Config, tally map[string]int) (badges []reactionBadge, more bool) {
 	if !cfg.Reactions.reactionsEnabled() {
 		return nil, false
 	}
-	for _, e := range cfg.Reactions.Emojis {
-		if n := tally[e.Name]; n > 0 {
-			badges = append(badges, reactionBadge{Name: e.Name, Glyph: e.Glyph, Count: n})
+	for emoji, n := range tally {
+		if n > 0 {
+			badges = append(badges, reactionBadge{Emoji: emoji, Count: n})
 		}
 	}
-	// Stable sort by count desc; configured order survives ties.
-	sort.SliceStable(badges, func(i, j int) bool { return badges[i].Count > badges[j].Count })
+	sort.Slice(badges, func(i, j int) bool {
+		if badges[i].Count != badges[j].Count {
+			return badges[i].Count > badges[j].Count
+		}
+		return emojiLess(badges[i].Emoji, badges[j].Emoji)
+	})
 	if len(badges) > cardReactionBadges {
 		badges, more = badges[:cardReactionBadges], true
 	}
 	return badges, more
 }
 
+// emojiLess compares two emoji keys codepoint-lexicographically —
+// the deterministic tie-break every ordered reaction surface uses
+// (card badges server-side, topBadges client-side). Rune-by-rune
+// rather than Go string < so it matches JS [...a] code-point
+// iteration (UTF-16 surrogates would otherwise order astral emoji
+// differently on the two sides).
+func emojiLess(a, b string) bool {
+	ra, rb := []rune(a), []rune(b)
+	for i := 0; i < len(ra) && i < len(rb); i++ {
+		if ra[i] != rb[i] {
+			return ra[i] < rb[i]
+		}
+	}
+	return len(ra) < len(rb)
+}
+
 // publishImageReacted fans out image-reacted for a toggle that just
 // committed (the handler calls this only after dbToggleReaction
 // returned, honoring the hub's commit-before-publish ordering). The
-// tally is the FULL absolute map (all stored emoji names, including
-// ones the current config no longer lists — the client filters
-// through its embedded glyph map), so a subscriber that missed
-// earlier events still converges. Per-site visibility computed once
+// tally is the FULL absolute map (every stored emoji key — the key
+// IS its own glyph, so clients render it directly with no lookup),
+// so a subscriber that missed earlier events still converges.
+// Per-site visibility computed once
 // from the row, same as publishImageLiked.
 func (a *App) publishImageReacted(img *dbImage, tally map[string]int) {
 	if a.events == nil {
@@ -223,11 +254,12 @@ type reactionResponse struct {
 // application/json → 200 + JSON) and the no-JS form path (303 back
 // to the details page). Shares the vote endpoints' contract exactly:
 // identity cookie, per-IP bucket, visibility gates, response
-// negotiation. An emoji name outside the live configured set 404s —
-// the set is public in the page markup, so this is correctness (no
-// toggling invisible things), not secrecy. When the feature is
-// disabled the endpoint 404s for every emoji, keeping the route
-// shape stable across config flips.
+// negotiation. {emoji} is the raw emoji string itself (percent-
+// encoded on the wire): ANY emoji passes validReactionEmoji's shape
+// check — there is no catalog membership, the full-catalog picker
+// can toggle whatever it offers. ASCII keys (words, digits, path
+// games) 404. When the feature is disabled the endpoint 404s for
+// every emoji, keeping the route shape stable across config flips.
 func (a *App) handleReactionToggle(w http.ResponseWriter, r *http.Request) {
 	cfg := a.getConfig()
 	if !cfg.Reactions.reactionsEnabled() {
@@ -240,7 +272,7 @@ func (a *App) handleReactionToggle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	emoji := r.PathValue("emoji")
-	if _, ok := cfg.Reactions.reactionByName(emoji); !ok {
+	if !validReactionEmoji(emoji) {
 		http.NotFound(w, r)
 		return
 	}

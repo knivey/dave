@@ -526,55 +526,85 @@ export function boot() {
 		if (dc && Number.isFinite(data.dislikes)) dc.textContent = String(data.dislikes);
 	});
 
-	// ---- Reaction row + picker (details page) ----
-	// The server renders the row as EXISTING reactions only (count>0
-	// chips) plus a native <details> picker with the full configured
-	// grid. A toggle can move ANY emoji across the 0-boundary, so the
-	// JS layer REBUILDS the chip row from full tallies instead of
-	// patching counts: chips appear when a count first goes positive
-	// and vanish when it empties.
+	// ---- Reaction row + pickers (details page) ----
+	// ANY emoji is reactable. The server renders the row as EXISTING
+	// reactions only (count>0 chips) plus the curated quick-bar
+	// <details> picker; the "⋯" button (hidden until JS boots) opens
+	// the vendored full-catalog PicMo picker. A toggle can move ANY
+	// emoji across the 0-boundary, so the JS layer REBUILDS the chip
+	// row from full tallies instead of patching counts.
 	//
 	// myReactions is the local visitor's holdings — seeded from the
-	// server-rendered pressed chips (a held emoji always has count≥1,
+	// server-rendered pressed chips (a held emoji always has count>=1,
 	// so it always HAS a chip), replaced wholesale by the toggle
 	// response's authoritative mine map, and used to keep pressed
 	// states through SSE rebuilds (events never carry identity).
+	//
+	// maxDetailChips mirrors the server's constant (reactions.go):
+	// the rendered chip row is bounded, with a "+N" note for the
+	// elided tail.
+	const maxDetailChips = 20;
 	let myReactions = new Set(
 		Array.from(document.querySelectorAll(".react-chip.reacted")).map((b) => b.dataset.emoji)
 	);
-	let reactionGlyphs = null;
-	try {
-		reactionGlyphs = JSON.parse(document.body.dataset.reactions || "null");
-	} catch {
-		reactionGlyphs = null; // malformed embed: row never rebuilds client-side
-	}
 	const picker = document.getElementById("react-picker");
 
+	// emojiKeyLess: codepoint-lexicographic compare (matching Go's
+	// emojiLess) so rebuild order is identical to the server's chip
+	// order — count desc, then this on ties.
+	function emojiKeyLess(a, b) {
+		const ca = Array.from(a), cb = Array.from(b);
+		const n = Math.min(ca.length, cb.length);
+		for (let i = 0; i < n; i++) {
+			if (ca[i] !== cb[i]) return ca[i] < cb[i];
+		}
+		return ca.length < cb.length;
+	}
+
 	function renderReactionRow(tally) {
-		if (!reactForm || !reactionGlyphs) return;
+		if (!reactForm) return;
 		tally = tally || {};
-		// Drop the old chips, keep the picker (it is re-synced below).
-		for (const chip of Array.from(reactForm.querySelectorAll(".react-chip"))) chip.remove();
+		// Sorted keys: count desc, codepoint ties — server parity.
+		const entries = Object.keys(tally)
+			.filter((k) => Number.isFinite(tally[k]) && tally[k] > 0)
+			.map((k) => [k, tally[k]]);
+		entries.sort((a, b) => (b[1] - a[1]) || (emojiKeyLess(a[0], b[0]) ? -1 : 1));
+		// Same abuse bound the server renders under (maxDetailChips):
+		// elide the tail, note the count. Elided keys stay removable
+		// via a PicMo re-pick (the POST toggles regardless of what
+		// the UI showed).
+		let overflow = 0;
+		if (entries.length > maxDetailChips) {
+			overflow = entries.length - maxDetailChips;
+			entries.length = maxDetailChips;
+		}
+		// Drop the old chips, keep the pickers (re-synced below).
+		for (const chip of Array.from(reactForm.querySelectorAll(".react-chip, .react-overflow"))) chip.remove();
 		const anchor = reactForm.querySelector(".react-picker");
-		for (const name of Object.keys(reactionGlyphs)) {
-			const n = tally[name];
-			if (!(Number.isFinite(n) && n > 0)) continue;
+		for (const [emoji, n] of entries) {
 			const chip = document.createElement("button");
 			chip.type = "submit";
-			chip.className = "react-chip" + (myReactions.has(name) ? " reacted" : "");
-			chip.dataset.emoji = name;
-			chip.formAction = "/" + currentID + "/react/" + name;
-			chip.setAttribute("aria-pressed", myReactions.has(name) ? "true" : "false");
-			chip.title = name;
-			chip.textContent = reactionGlyphs[name] + " ";
+			chip.className = "react-chip" + (myReactions.has(emoji) ? " reacted" : "");
+			chip.dataset.emoji = emoji;
+			chip.formAction = "/" + currentID + "/react/" + encodeURIComponent(emoji);
+			chip.setAttribute("aria-pressed", myReactions.has(emoji) ? "true" : "false");
+			chip.textContent = emoji + " ";
 			const cnt = document.createElement("span");
 			cnt.className = "react-count";
-			cnt.dataset.emoji = name;
+			cnt.dataset.emoji = emoji;
 			cnt.textContent = String(n);
 			chip.appendChild(cnt);
 			reactForm.insertBefore(chip, anchor);
 		}
-		// Picker options: every configured emoji, held ones marked.
+		if (overflow > 0) {
+			const note = document.createElement("span");
+			note.className = "react-overflow";
+			note.title = "more reactions";
+			note.textContent = "+" + overflow;
+			reactForm.insertBefore(note, anchor);
+		}
+		// Quick-bar picker options: every configured emoji, held ones
+		// marked. (Off-bar emojis are chips only — PicMo covers them.)
 		for (const opt of reactForm.querySelectorAll(".react-opt")) {
 			const mine = myReactions.has(opt.dataset.emoji);
 			opt.classList.toggle("mine", mine);
@@ -582,11 +612,11 @@ export function boot() {
 		}
 	}
 
-	enhanceToggleForm(reactForm, (data) => {
+	function applyReactionResponse(data) {
 		// {emoji, reacted, reactions, mine}: mine is the authoritative
 		// full holdings map — replace the local set with it (not a
-		// delta), then rebuild the row so 0↔1 boundary moves add/drop
-		// chips. A pick from the popup closes it.
+		// delta), then rebuild the row so 0<->1 boundary moves add/drop
+		// chips. Picks from either popup close both.
 		if (data.mine) {
 			myReactions = new Set(Object.keys(data.mine).filter((k) => data.mine[k]));
 		} else if (data.emoji) {
@@ -595,16 +625,126 @@ export function boot() {
 		}
 		renderReactionRow(data.reactions);
 		if (picker && picker.open) picker.removeAttribute("open");
-	});
+		hidePicmo();
+	}
 
-	// Outside-click closes the picker (native <details> only closes
-	// on its own summary/option interactions).
-	if (picker) {
+	enhanceToggleForm(reactForm, applyReactionResponse);
+
+	// toggleReactionEmoji POSTs one emoji toggle (PicMo has no form
+	// button to intercept — this is the same wire the forms use,
+	// sharing the disable-all guard and the no-JS-equivalent fallback
+	// shape).
+	async function toggleReactionEmoji(emoji) {
+		setTogglesDisabled(true);
+		try {
+			const resp = await fetch("/" + currentID + "/react/" + encodeURIComponent(emoji), {
+				method: "POST",
+				headers: { Accept: "application/json" },
+			});
+			if (!resp.ok) throw new Error("HTTP " + resp.status);
+			applyReactionResponse(await resp.json());
+		} catch {
+			// Network/5xx: degrade toward the no-JS contract — a real
+			// navigation back re-renders state (Set-Cookie rides either
+			// way). PicMo picks cannot form-submit, so reload instead.
+			location.reload();
+		} finally {
+			setTogglesDisabled(false);
+		}
+	}
+
+	// Outside-click closes the quick-bar picker (native <details>
+	// only closes on its own interactions) and PicMo.
+	if (picker || document.getElementById("react-more")) {
 		document.addEventListener("click", (e) => {
-			if (picker.open && !picker.contains(e.target)) picker.removeAttribute("open");
+			if (picker && picker.open && !picker.contains(e.target)) picker.removeAttribute("open");
+			if (picmoPop && !picmoPop.hidden && !picmoPop.contains(e.target) && !e.target.closest("#react-more")) hidePicmo();
 		});
 	}
 
+	// ---- PicMo: vendored full-catalog picker (web/vendor/) ----
+	// Lazy by construction: the module, its CSS, and the emojibase
+	// dataset only load when the "⋯" button is first clicked, and the
+	// button itself ships hidden (no-JS never sees it). Data is fed
+	// via createPicker's emojiData+messages options — the path that
+	// bypasses PicMo's internal CDN fetches, so nothing phones home.
+	let picmoPop = null;
+	let picmoPicker = null;
+	// picmoLoading serializes the first-open dataset load: the "⋯"
+	// button lives inside .react-form, so setTogglesDisabled(false)
+	// from any OTHER toggle's finally would re-enable it mid-load,
+	// and a second click racing the ~700KB fetch could create a
+	// duplicate picker div with no close path. The promise — not the
+	// disabled state — is the guard.
+	let picmoLoading = null;
+	function hidePicmo() {
+		if (picmoPop) picmoPop.hidden = true;
+	}
+	const moreBtn = document.getElementById("react-more");
+	if (moreBtn && reactForm) {
+		moreBtn.removeAttribute("hidden");
+		moreBtn.addEventListener("click", async () => {
+			if (picmoPop && !picmoPop.hidden) {
+				hidePicmo();
+				return;
+			}
+			if (!picmoPop) {
+				if (picmoLoading) {
+					// Another click is already loading: wait for it, then
+					// just show the (single) picker it created.
+					await picmoLoading;
+					if (!picmoPop) return; // that load failed
+				} else {
+					moreBtn.disabled = true; // visual busy state only
+					picmoLoading = loadPicmo();
+					try {
+						await picmoLoading;
+					} finally {
+						picmoLoading = null;
+						moreBtn.disabled = false;
+					}
+					if (!picmoPop) return; // load failed — quick bar still works
+				}
+			}
+			picmoPop.hidden = false;
+			if (picker && picker.open) picker.removeAttribute("open");
+		});
+
+		// loadPicmo imports the vendored picker + dataset exactly once
+		// and creates the (single) picker instance; callers only toggle
+		// its container's visibility.
+		async function loadPicmo() {
+			try {
+				const [{ createPicker, darkTheme }, messages, emojiData] = await Promise.all([
+					import("/static/vendor/picmo.js"),
+					fetch("/static/vendor/emojibase-data/en/messages.json").then((r) => r.json()),
+					fetch("/static/vendor/emojibase-data/en/data.json").then((r) => r.json()),
+				]);
+				const link = document.createElement("link");
+				link.rel = "stylesheet";
+				link.href = "/static/vendor/picmo.css";
+				document.head.appendChild(link);
+				picmoPop = document.createElement("div");
+				picmoPop.id = "picmo-pop";
+				picmoPop.hidden = true;
+				reactForm.appendChild(picmoPop);
+				picmoPicker = createPicker({
+					rootElement: picmoPop,
+					theme: darkTheme,
+					messages,
+					emojiData,
+					onEmojiSelect: (selection) => {
+						if (selection && selection.emoji) toggleReactionEmoji(selection.emoji);
+					},
+				});
+			} catch (err) {
+				console.warn("imgsite: full emoji picker failed to load", err);
+			}
+		}
+				picmoPop.hidden = false;
+			if (picker && picker.open) picker.removeAttribute("open");
+		});
+	}
 	// ---- SSE: ONE stream for the whole page ----
 	// image-liked keeps THIS image's tallies fresh when anyone votes,
 	// image-reacted the same for reaction counts (the pressed states

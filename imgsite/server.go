@@ -848,8 +848,9 @@ func (a *App) buildHandler() http.Handler {
 	mux.HandleFunc("POST /{id}/like", a.handleLikeToggle)
 	mux.HandleFunc("POST /{id}/dislike", a.handleDislikeToggle)
 	// Reaction toggle: same wildcard-pattern reasoning, one more path
-	// segment ({emoji} is the configured ASCII name, validated against
-	// the live preset in the handler).
+	// segment ({emoji} is the raw emoji, percent-encoded on the wire;
+	// the handler shape-checks it — any emoji passes, there is no
+	// catalog membership).
 	mux.HandleFunc("POST /{id}/react/{emoji}", a.handleReactionToggle)
 	mux.HandleFunc("GET /static/", staticHandler().ServeHTTP)
 

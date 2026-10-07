@@ -114,11 +114,10 @@ type imageLikedEvent struct {
 }
 
 // imageReactedEvent is the image-reacted payload: the id plus its
-// full absolute reaction tally (emoji name → count; absent = zero).
+// full absolute reaction tally (emoji key → count; absent = zero).
 // The whole map rides one event so any toggle converges the client's
-// row regardless of which emojis it missed. Names not in the live
-// config can appear (dormant rows); clients filter through the
-// glyph map embedded in the page.
+// row regardless of which emojis it missed. Keys are the raw emoji
+// strings themselves — clients render them directly, no lookup.
 type imageReactedEvent struct {
 	ID        string         `json:"id"`
 	Reactions map[string]int `json:"reactions"`

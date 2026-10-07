@@ -45,19 +45,23 @@
 #                   matching kicks in                             default: 2
 #
 # [reactions]  (optional — omit the section entirely for the built-in
-#               default emoji set)
-#   enabled = (bool) false disables the whole feature (no button row,
-#             card badges, or toggle endpoints) without touching
-#             stored rows; absent/true keeps it on.      default: true
+#               default quick bar)
+#   enabled = (bool) false disables the whole feature (no chip row,
+#             quick bar, full-picker trigger, or toggle endpoints)
+#             without touching stored rows; absent/true keeps it on.
+#                                                      default: true
 #
-# [[reactions.emoji]]  (array of tables; ordered — the order is the
-#             details-page button order and the card-badge tie-break
-#             order; at most 12 entries)
-#   name  = (string) stable ASCII key, 1-24 chars of [a-z0-9_], not
-#           all digits (JS key-order parity) — stored in the DB and
-#           embedded in the toggle URL, so it must never change
-#           meaning; the glyph is what's displayed
-#   glyph = (string) 1-16 UTF-8 runes shown on every surface
+# [[reactions.emoji]]  (array of tables: the CURATED QUICK BAR — the
+#             first page of reactions in the "＋" popup. NOT a
+#             whitelist: ANY emoji can be reacted via the full-catalog
+#             picker; off-bar emojis still chip once reacted. Ordered
+#             (grid order); at most 48 entries.)
+#   glyph    = (string) the emoji itself, 1-32 non-ASCII runes — it
+#              IS the reaction key (stored in the DB, percent-encoded
+#              in the toggle URL, rendered as its own glyph)
+#   category = (string) optional grouping for the quick-bar grid,
+#              ≤24 runes, grouped by first appearance; no category =
+#              a leading header-less group.               default: ""
 #
 # [site]
 #   title       = (string) site title                      default: "dave's image dump"
@@ -83,8 +87,9 @@
 #
 # Reloadable via SIGHUP or POST /admin/reload (X-API-Key):
 #   site.*, safe_site.*, thumbnails.* (except workers), search.*, upload.*,
-#   reactions.* (curating the set never migrates data — rows key on
-#   the name; names removed from the set simply stop rendering)
+#   reactions.* (curating the quick bar never migrates data — rows
+#   key on the emoji; emojis removed from the bar stay reactable and
+#   keep their counts)
 # Everything else requires a restart.
 
 # ---------------------------------------------------------------------------
@@ -124,15 +129,14 @@
 # enabled = true
 #
 # [[reactions.emoji]]
-# name = "fire"
 # glyph = "\U0001F525"
+# category = "hype"
 #
 # [[reactions.emoji]]
-# name = "laugh"
 # glyph = "\U0001F602"
+# category = "laughs"
 #
 # [[reactions.emoji]]
-# name = "wow"
 # glyph = "\U0001F62E"
 #
 # [site]

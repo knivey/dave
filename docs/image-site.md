@@ -370,7 +370,7 @@ timestamps. Cursor wire format: `?after=YYYY-MM-DD%20HH%3AMM%3ASS.mmm~<id>`
 | `GET /<id>` | image details page (HTML) | no-cache (next-button is live) |
 | `POST /<id>/like` | like toggle (anonymous cookie identity — see "Likes"); JSON for `Accept: application/json`, 303 back to the page otherwise | no-store (JSON path) |
 | `POST /<id>/dislike` | dislike toggle — same contract as the like toggle; like and dislike are mutually exclusive per token (a dislike switches a held like and vice versa) | no-store (JSON path) |
-| `POST /<id>/react/<emoji>` | emoji reaction toggle — same identity/visibility/limits contract; `<emoji>` is a configured ASCII name; multi-emoji per visitor; JSON `{emoji,reacted,reactions,mine}` | no-store (JSON path) |
+| `POST /<id>/react/<emoji>` | emoji reaction toggle — same identity/visibility/limits contract; `<emoji>` is the raw emoji itself (percent-encoded, any emoji — no catalog membership); multi-emoji per visitor; JSON `{emoji,reacted,reactions,mine}` | no-store (JSON path) |
 | `GET /<id>/orig/<filename>` | **permanent direct link** — original bytes served directly (200) | `public, max-age=31536000, immutable` |
 | `GET /<id>/t/<size>` (`small`\|`display` — tokens mapped to the configured `thumbnails.*_width`) | thumbnail bytes served directly (200) | ready: immutable; **pending: 200 placeholder JPEG with `no-store`** (same-URL swap to real bytes on `thumb-ready` — no intermediary may ever cache the placeholder); **failed: 404 no-cache** so the JS data-orig fallback works |
 | `GET /api/images/<id>/neighbors` | `{prev:{…}, next:{…}}` keyset neighbors | no-cache |
@@ -678,7 +678,7 @@ gallery (infinite scroll's fragment URL, search.js's gallery restore +
 truth, `galleryQS()` in gallery.js — hardcoding either path strands a
 cursor-mode mismatch that 400s every subsequent page fetch.
 
-## Reactions (`POST /<id>/react/<emoji>` · reactions.go · migration 006)
+## Reactions (`POST /<id>/react/<emoji>` · reactions.go · migrations 006 + 007)
 
 Discord/Slack-style emoji reactions (owner request, Oct 2026), the
 third anonymous-feedback channel alongside likes/dislikes. Cardinality
@@ -687,79 +687,86 @@ image — one row per `(image_id, token, emoji)` in `reactions`, the
 composite PK being the whole dedupe story per emoji — and toggling one
 emoji never touches the others or the token's like/dislike vote.
 
+**The key IS the emoji.** Any emoji can be reacted: the `emoji` column
+stores the raw emoji string (migration 007 translated the feature's
+first days of ASCII name keys to their emoji and dropped
+unconvertible custom names), and the toggle URL carries it
+percent-encoded. `validReactionEmoji` is a shape tripwire, not a
+catalog: valid UTF-8, 1–32 runes, ≤128 bytes, and NO ASCII at all —
+words, digits, and path games 404; ZWJ sequences and skin-tone
+variants pass (non-ASCII by construction).
+
 **Identity & limits.** The same `imgsite_liker` cookie, the same
 per-IP 60/min bucket as the vote endpoints (one identity surface, one
 abuse budget), the same visibility contract (unknown id 404, hidden
 410, safe-host-invisible 404, GET is the catch-all's 404), the same
 cookie-mint-on-first-POST and no-JS 303-back shape.
 
-The preset is config.** `[[reactions.emoji]]` array-of-tables
-(`name` = stable ASCII key, 1–24 chars of `[a-z0-9_]`, NOT all digits
-(pure-digit strings are integer-like JS object keys that iterate in
-numeric order, breaking the client's configured-order tie-break
-parity); `glyph` = 1–16 UTF-8 runes), hot-reloadable via SIGHUP /
-`POST /admin/reload`, at most 12 entries, validated by `loadConfig`
-(unique names, shape). Rows key on the NAME — the glyph is rendered
-from the live config, so curating the set never migrates data; names
-removed from the set leave dormant rows that stop rendering
-everywhere and revive if the name returns. Section absent =
-built-in default set — a robust 12 (fire, laugh, skull, poop, eyes,
-clown, wow, thinking, pleading, pray, sparkles, art) chosen to fill
-the picker grid;
+**The quick bar is config; the catalog is PicMo.** `[[reactions.emoji]]`
+array-of-tables (`glyph` = the emoji key itself, `category` = optional
+≤24-rune grouping), hot-reloadable via SIGHUP / `POST /admin/reload`,
+at most 48 entries, validated by `loadConfig` (unique emojis, key
+shape, category size). The list is the curated FIRST PAGE — the "＋"
+`<details>` popup renders it grouped by first-appearance category —
+NOT a whitelist: off-bar emojis react fine (via the full picker) and
+chip once they exist. Curating never migrates data; emojis removed
+from the bar keep their counts and stay reactable. Section absent =
+built-in default bar (a categorized 30: hype/laughs/feels/meh/gross/
+spicy — 🤢 🤮 🤨 😒 😤 ❌ 😏 🤤 😈 🍑 🍆 💦 🥵 among them);
 `reactions.enabled = false` (a pointer — absent means true) makes
-`normalize` drop the preset list entirely, so every surface (endpoints,
-details row, card badges, glyph embed) hides together without each
-one re-checking the flag, while stored rows stay untouched. An emoji
-name outside the live set 404s on the toggle endpoint.
+`normalize` drop the list so every surface hides together, rows
+untouched.
+
+**Full-catalog picker.** The "⋯" trigger (hidden until image.js
+boots) opens the vendored **PicMo** picker (MIT, `web/vendor/` —
+byte-identical upstream files, no bundler, `go build` stays
+self-contained): categories, search, skin tones, recents. It is fed
+via `createPicker`'s `emojiData` + `messages` options from the
+vendored emojibase-data 15.3.2 dataset (the full `data.json` schema
+is exactly what PicMo 5.x ingests) — the options path that bypasses
+its internal CDN fetches, so nothing phones home. The module, CSS,
+and ~700KB dataset load lazily on first open only; no-JS visitors
+keep the quick bar and plain POSTs.
 
 **Toggle.** The pre-dislikes insert-first pattern, scoped to one
 emoji: `INSERT … ON CONFLICT (image_id, token, emoji) DO NOTHING`;
 1 row = reacted, 0 rows = already held → `DELETE` removes it. JS gets
 `200 {emoji, reacted, reactions, mine}` where `reactions` is the
 image's FULL absolute tally map and `mine` is the caller's full
-holdings map (the JS rebuilds the chip row from the response, and
-pressed states for emojis other than the toggled one cannot be
-derived from a delta); the no-JS path is a 303 back to the page.
+holdings map (the details JS rebuilds the whole chip row, and pressed
+states for non-toggled emojis cannot be derived from a delta); the
+no-JS path is a 303 back to the page.
 
-**Surfaces.** Details page (owner redesign, Oct 2026): the row lists
-only EXISTING reactions — one clickable chip per configured emoji
-with a non-zero count (pressed when the visitor holds it; a held
+**Surfaces.** Details page: the row lists only EXISTING reactions —
+chips for tally keys with a non-zero count, quick-bar and off-bar
+alike, in count-desc order with codepoint-lexicographic ties
+(`emojiLess`, the ONE true chip order — the JS rebuild produces
+exactly it, so live updates never reshuffle what the server painted)
+— capped at 20 rendered chips with a "+N" note (an abuse bound:
+any-emoji keys have no configured set limiting the row, and elided
+keys stay removable because re-picking the emoji in the full picker
+POSTs a toggle regardless of what the UI showed) — then the "＋"
+quick-bar popup and the "⋯" PicMo trigger. A held
 emoji always has count ≥ 1, so its chip is always present and removal
-is always reachable) — followed by a native `<details>` "+" picker
-whose `.react-menu` overlays as a grid of the FULL configured set
-(held options marked). No-JS visitors get an expanding picker and
-plain POSTs; Enter implicit-submits the first chip (or nothing while
-the row is empty — the summary is not a submit button). image.js
-intercepts submits via `e.submitter`, disables ALL toggle buttons
-across BOTH forms during any in-flight POST (the cookieless
-double-mint hazard is shared), rebuilds the chip row from
-`reactions` + `mine` (chips appear/vanish as counts cross the 0
-boundary), re-syncs picker marks, and closes the picker on pick plus
-outside-click. Cards: the top 4 configured emojis by count
-(`topCardReactions`, configured order breaking ties) as compact
-badges in the meta line's `.counts` wrapper next to the vote tallies,
-with a `…` overflow marker (`.react.more`) when more non-zero
-configured emojis did not fit — the wrapper is shared, so its
-lifecycle is coordinated: votes and reactions each manage their own
-spans, and the wrapper drops only when everything is zero (mirroring
-the template's `{{if or …}}` guard). Every page embeds the preset as
-`body[data-reactions]` (attribute-escaped JSON, configured key order
-preserved) so gallery.js can rebuild badges from SSE events and
-tie-break in the same configured order the server uses. Search cards
-badge identically (shared partial + hydration); reaction tallies
-never reorder search results.
+is always one click. image.js rebuilds the row from `reactions` +
+`mine` (chips appear/vanish as counts cross the 0 boundary; pressed
+states are a local Set seeded from the render and replaced by
+response `mine`), re-syncs quick-bar marks, and closes popups on
+pick + outside-click. Cards: the top 4 reaction keys by count (no
+whitelist — whatever visitors actually reacted), codepoint ties, as
+compact badges in the meta line's `.counts` wrapper next to the vote
+tallies, with a `…` overflow marker when more non-zero keys did not
+fit; the wrapper lifecycle is coordinated (votes and reactions each
+manage their own spans; wrapper drops only when everything is zero).
+Search cards badge identically; tallies never reorder search results.
 
 **SSE.** Every committed toggle publishes `image-reacted
-{id, reactions}` — the full absolute tally (all stored names,
-including dormant ones; clients filter through the glyph map) —
-through the same per-site `SafeVisible` gate as `image-new` /
-`image-liked` (the event names an image, so it must not leak
-existence on the safe host). gallery.js rebuilds the card's badge
-strip including the overflow marker (`onImageReacted`, detached-set
-sweep like the other card updaters); image.js rebuilds the open
-page's chip row from the tally while pressed states stay local
-(seeded from the server render, replaced by toggle responses'
-`mine`).
+{id, reactions}` — the full absolute tally — through the same
+per-site `SafeVisible` gate as `image-new` / `image-liked` (the event
+names an image, so it must not leak existence on the safe host).
+gallery.js rebuilds the card's badge strip including the overflow
+marker (`onImageReacted`, detached-set sweep); image.js rebuilds the
+open page's chip row while pressed states stay local.
 
 ## Admin deletion (`DELETE /api/images/<id>` · `imgsite -delete`)
 

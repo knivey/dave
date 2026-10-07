@@ -1,0 +1,21 @@
+Vendored third-party assets (served under /static/vendor/, loaded
+lazily by the details-page reaction picker):
+
+- picmo.js, picmo.css — PicMo 5.8.5 (MIT)
+  https://github.com/joeattardi/picmo  ·  https://picmojs.com
+  Byte-identical upstream dist files; no local patches. The picker is
+  fed emojiData + messages directly (the createPicker options path
+  that bypasses its internal CDN fetches), so nothing phones home.
+
+- emojibase-data/en/data.json, messages.json — Emojibase Data 15.3.2
+  (MIT)  https://github.com/milesj/emojibase
+  Full (non-compact) English dataset: the per-entry schema (emoji,
+  label, version, order, group, tags, skins, hexcode) is exactly what
+  PicMo 5.x ingests — no transform layer needed.
+
+Upgrades: refresh both from the same era (picmo 5.x pairs with
+emojibase-data <= 15.x schemas) and re-run the picker smoke test.
+
+Note: picmo.js retains a //# sourceMappingURL=index.js.map comment
+(no .map vendored) — devtools logs a harmless 404 when the picker is
+inspected; left in place to keep the file byte-identical to upstream.

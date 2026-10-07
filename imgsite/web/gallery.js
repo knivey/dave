@@ -54,13 +54,6 @@ let fragmentURLFn = null;
 //     append-dedupe absorbs it.
 let sortLiked = false;
 
-// Configured reaction glyphs (name → glyph) from body[data-reactions],
-// parsed once at boot; null when the feature is off. The JSON's key
-// order IS the configured order (the server marshals it ordered) —
-// the card badge picker iterates it so count ties keep the preset
-// order, matching topCardReactions server-side.
-let reactionGlyphs = null;
-
 // Provider generation, bumped on every setFragmentURL swap. Retrying
 // loadMore chains capture it so a swap can strand their pending retry
 // timers (see setFragmentURL).
@@ -154,11 +147,6 @@ export function boot() {
 	grid = document.getElementById("grid");
 	if (!grid) return;
 	sortLiked = document.body.dataset.sort === "liked";
-	try {
-		reactionGlyphs = JSON.parse(document.body.dataset.reactions || "null");
-	} catch {
-		reactionGlyphs = null; // malformed embed: badges just never render
-	}
 
 	const observer = new IntersectionObserver(
 		(entries) => {
@@ -725,24 +713,36 @@ function setTallySpan(wrap, className, glyph, count) {
 	}
 }
 
-// topBadges picks the card's reaction badge list from a tally map:
-// configured emojis only (glyphs come from reactionGlyphs — dormant
-// names can't render), top 4 by count (cardReactionBadges), configured
-// order breaking ties (Object key order is the configured order and
-// Array#sort is stable), plus whether more non-zero configured emojis
-// did not fit — the caller renders a "…" overflow marker. Mirrors
-// topCardReactions server-side.
+// topBadges picks the card's badge list from a tally map whose keys
+// ARE the emoji (rendered as their own glyphs — any emoji can be
+// reacted, there is no configured whitelist): top 4 by count
+// (cardReactionBadges), ties broken codepoint-lexicographically
+// (emojiKeyLess — server parity with Go's emojiLess), plus whether
+// more non-zero keys did not fit — the caller renders a "…"
+// overflow marker. Mirrors topCardReactions server-side.
 function topBadges(tally) {
-	if (!reactionGlyphs || !tally) return { list: [], more: false };
+	if (!tally) return { list: [], more: false };
 	const all = [];
-	for (const name of Object.keys(reactionGlyphs)) {
-		const n = tally[name];
+	for (const emoji of Object.keys(tally)) {
+		const n = tally[emoji];
 		if (Number.isFinite(n) && n > 0) {
-			all.push({ name, glyph: reactionGlyphs[name], count: n });
+			all.push({ emoji, count: n });
 		}
 	}
-	all.sort((a, b) => b.count - a.count);
+	all.sort((a, b) => (b.count - a.count) || (emojiKeyLess(a.emoji, b.emoji) ? -1 : 1));
 	return { list: all.slice(0, cardReactionBadges), more: all.length > cardReactionBadges };
+}
+
+// emojiKeyLess: codepoint-lexicographic compare (Array.from iterates
+// code points, not UTF-16 units) — matches Go's emojiLess so badge
+// order is identical on both sides.
+function emojiKeyLess(a, b) {
+	const ca = Array.from(a), cb = Array.from(b);
+	const n = Math.min(ca.length, cb.length);
+	for (let i = 0; i < n; i++) {
+		if (ca[i] !== cb[i]) return ca[i] < cb[i];
+	}
+	return ca.length < cb.length;
 }
 
 // cardReactionBadges mirrors the server's constant (reactions.go):
@@ -750,9 +750,10 @@ function topBadges(tally) {
 const cardReactionBadges = 4;
 
 // setCardReactions rebuilds one card's .reacts strip (inside the
-// .counts wrapper, after the vote spans) from a tally map. Rebuild-
-// not-diff: the top-4 membership and the overflow marker can change
-// on any toggle, so replacing the strip's children is the simple
+// .counts wrapper, after the vote spans) from a tally map whose keys
+// ARE the emoji (rendered directly — no glyph lookup). Rebuild-not-
+// diff: the top-4 membership and the overflow marker can change on
+// any toggle, so replacing the strip's children is the simple
 // correct move. The strip drops when no configured emoji has a
 // count; the wrapper drops with it only when the vote spans are gone
 // too (shared lifecycle with setCardCounts — see its comment).
@@ -784,8 +785,8 @@ function setCardReactions(card, tally) {
 	for (const b of badges) {
 		const s = document.createElement("span");
 		s.className = "react";
-		s.dataset.emoji = b.name;
-		s.textContent = b.glyph + " " + b.count;
+		s.dataset.emoji = b.emoji;
+		s.textContent = b.emoji + " " + b.count;
 		parts.push(s);
 	}
 	if (more) {

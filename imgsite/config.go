@@ -22,10 +22,13 @@ type Config struct {
 	Upload     UploadConfig     `toml:"upload"`
 	Search     SearchConfig     `toml:"search"`
 	Site       SiteConfig       `toml:"site"`
-	// Reactions carries the emoji-reaction preset. An absent section
-	// runs the built-in default set (normalize fills it); Enabled is
-	// a pointer so "reactions.enabled = false" (explicit disable)
-	// stays distinguishable from an absent section (default true).
+	// Reactions carries the quick-bar preset. An absent section runs
+	// the built-in default set (normalize fills it); Enabled is a
+	// pointer so "reactions.enabled = false" (explicit disable,
+	// hiding every surface without touching rows) stays
+	// distinguishable from an absent section (default true).
+	// Reactions themselves are NOT limited to this list — any emoji
+	// can be reacted via the full-catalog picker; see reactions.go.
 	Reactions ReactionConfig `toml:"reactions"`
 	// SafeSite is nil unless a [safe_site] section is present; nil is
 	// single-site behavior identical to today. Pointer (not value) so
@@ -110,13 +113,17 @@ type ReactionConfig struct {
 	Emojis  []ReactionEmoji `toml:"emoji"`
 }
 
-// ReactionEmoji is one preset entry: Name is the stable ASCII key
-// stored in the reactions table (and carried in the toggle URL);
-// Glyph is what every render surface displays. Split so curating the
-// glyph never needs a data migration — rows key on the name only.
+// ReactionEmoji is one quick-bar entry: Glyph IS the reaction key —
+// the emoji string stored in the reactions table, embedded
+// percent-encoded in the toggle URL, and rendered as its own glyph
+// (any emoji from the full-catalog picker can also be reacted without
+// appearing here; this list is the curated first page only).
+// Category is optional quick-bar picker grouping: display-only,
+// grouped by first appearance, uncategorized entries render in a
+// leading header-less group.
 type ReactionEmoji struct {
-	Name  string `toml:"name"`
-	Glyph string `toml:"glyph"`
+	Glyph    string `toml:"glyph"`
+	Category string `toml:"category"`
 }
 
 const (
@@ -136,10 +143,10 @@ const (
 	defaultPrefixMin      = 2
 	defaultSiteTitle      = "dave's image dump"
 	defaultSiteDesc       = "generations from IRC"
-	// maxReactionEmojis caps the preset so the details-page button
-	// row and every card's badge space stay bounded no matter how
-	// enthusiastic the curation gets.
-	maxReactionEmojis = 12
+	// maxReactionEmojis caps the preset so the picker stays a curated
+	// grid (now scrollable and categorized — the cap bounds config
+	// accidents, not ambition; the owner default alone carries 30).
+	maxReactionEmojis = 48
 )
 
 // placeholderAPIKeyPrefix is the prefix of the placeholder secret shipped
@@ -268,25 +275,50 @@ func defaultString(val, def string) string {
 	return val
 }
 
-// defaultReactionEmojis is the built-in preset for an IRC-adjacent
-// AI-art gallery — a robust spread (owner request, Oct 2026: the
-// picker popup handles a large grid, so the default fills the whole
-// cap): quick verdicts (fire/poop), meme flavor (skull/clown/eyes),
-// engagement asks (pleading/pray), and art-appropriate ones
-// (sparkles/art). Order is the picker-grid and tie-break order.
+// defaultReactionEmojis is the built-in QUICK BAR for an IRC-adjacent
+// AI-art gallery — a robust, categorized 30 (owner request, Oct 2026:
+// the full-catalog PicMo picker exists, the quick bar is the curated
+// first page). Reactions are NOT limited to this set: any emoji from
+// the catalog can be reacted, rows key on the emoji itself. The flat
+// order is the quick-bar chip order; Category groups the quick-bar
+// picker grid (first appearance).
 var defaultReactionEmojis = []ReactionEmoji{
-	{Name: "fire", Glyph: "\U0001F525"},     // 🔥
-	{Name: "laugh", Glyph: "\U0001F602"},    // 😂
-	{Name: "skull", Glyph: "\U0001F480"},    // 💀
-	{Name: "poop", Glyph: "\U0001F4A9"},     // 💩
-	{Name: "eyes", Glyph: "\U0001F440"},     // 👀
-	{Name: "clown", Glyph: "\U0001F921"},    // 🤡
-	{Name: "wow", Glyph: "\U0001F62E"},      // 😮
-	{Name: "thinking", Glyph: "\U0001F914"}, // 🤔
-	{Name: "pleading", Glyph: "\U0001F97A"}, // 🥺
-	{Name: "pray", Glyph: "\U0001F64F"},     // 🙏
-	{Name: "sparkles", Glyph: "\U00002728"}, // ✨
-	{Name: "art", Glyph: "\U0001F3A8"},      // 🎨
+	// hype
+	{Glyph: "\U0001F525", Category: "hype"}, // 🔥 fire
+	{Glyph: "\U00002728", Category: "hype"}, // ✨ sparkles
+	{Glyph: "\U0001F680", Category: "hype"}, // 🚀 rocket
+	{Glyph: "\U0001F4AF", Category: "hype"}, // 💯 hundred
+	{Glyph: "\U0001F64F", Category: "hype"}, // 🙏 pray
+	{Glyph: "\U0001F3A8", Category: "hype"}, // 🎨 art
+	// laughs
+	{Glyph: "\U0001F602", Category: "laughs"}, // 😂 laugh
+	{Glyph: "\U0001F480", Category: "laughs"}, // 💀 skull
+	{Glyph: "\U0001F921", Category: "laughs"}, // 🤡 clown
+	{Glyph: "\U0001F60F", Category: "laughs"}, // 😏 smirk
+	// feels
+	{Glyph: "\U0001F62E", Category: "feels"}, // 😮 wow
+	{Glyph: "\U0001F914", Category: "feels"}, // 🤔 thinking
+	{Glyph: "\U0001F92F", Category: "feels"}, // 🤯 mindblown
+	{Glyph: "\U0001F97A", Category: "feels"}, // 🥺 pleading
+	{Glyph: "\U0001F62D", Category: "feels"}, // 😭 cry
+	{Glyph: "\U0001F440", Category: "feels"}, // 👀 eyes
+	{Glyph: "\U0001F924", Category: "feels"}, // 🤤 drool
+	// meh
+	{Glyph: "\U0001F4A9", Category: "meh"}, // 💩 poop
+	{Glyph: "\U0001F612", Category: "meh"}, // 😒 unamused
+	{Glyph: "\U0001F928", Category: "meh"}, // 🤨 eyebrow
+	{Glyph: "\U0001F5FF", Category: "meh"}, // 🗿 moai
+	{Glyph: "\U0001F624", Category: "meh"}, // 😤 huff
+	{Glyph: "\U0000274C", Category: "meh"}, // ❌ cross
+	// gross
+	{Glyph: "\U0001F622", Category: "gross"}, // 🤢 sick
+	{Glyph: "\U0001F92E", Category: "gross"}, // 🤮 vomit
+	{Glyph: "\U0001F975", Category: "gross"}, // 🥵 hot
+	// spicy
+	{Glyph: "\U0001F351", Category: "spicy"}, // 🍑 peach
+	{Glyph: "\U0001F346", Category: "spicy"}, // 🍆 eggplant
+	{Glyph: "\U0001F4A6", Category: "spicy"}, // 💦 squirt
+	{Glyph: "\U0001F608", Category: "spicy"}, // 😈 devil
 }
 
 // reactionsEnabled reports whether the reaction feature is on: the
@@ -295,15 +327,16 @@ func (rc ReactionConfig) reactionsEnabled() bool {
 	return rc.Enabled == nil || *rc.Enabled
 }
 
-// normalize validates a loaded preset and fills the default set when
-// none was configured. Runs inside loadConfig, so an invalid preset
-// fails startup AND a SIGHUP reload (running config stays live).
+// normalize validates a loaded quick bar and fills the default set
+// when none was configured. Runs inside loadConfig, so an invalid
+// preset fails startup AND a SIGHUP reload (running config stays
+// live).
 func (rc *ReactionConfig) normalize() error {
 	if !rc.reactionsEnabled() {
 		// Disabled: drop any configured list too, so EVERY surface
-		// (endpoints, details row, card badges, glyph embed) agrees
-		// without each one having to remember the flag. Rows on disk
-		// are untouched.
+		// (endpoints, details row, card badges) agrees without each
+		// one having to remember the flag. Rows on disk are
+		// untouched.
 		rc.Emojis = nil
 		return nil
 	}
@@ -316,56 +349,52 @@ func (rc *ReactionConfig) normalize() error {
 	}
 	seen := make(map[string]bool, len(rc.Emojis))
 	for _, e := range rc.Emojis {
-		if !validReactionName(e.Name) {
-			return fmt.Errorf("reactions.emoji name %q: must be 1-24 chars of [a-z0-9_] (it rides the toggle URL)", e.Name)
+		if !validReactionEmoji(e.Glyph) {
+			return fmt.Errorf("reactions.emoji glyph %q: must be 1-32 non-ASCII runes (the reaction key itself)", e.Glyph)
 		}
-		if !utf8.ValidString(e.Glyph) || e.Glyph == "" || utf8.RuneCountInString(e.Glyph) > 16 {
-			return fmt.Errorf("reactions.emoji %q: glyph must be 1-16 valid UTF-8 runes", e.Name)
+		cat := []rune(e.Category)
+		if len(cat) > 24 {
+			return fmt.Errorf("reactions.emoji glyph %q: category must be at most 24 runes", e.Glyph)
 		}
-		if seen[e.Name] {
-			return fmt.Errorf("reactions.emoji name %q: duplicated", e.Name)
+		for _, r := range cat {
+			if r < 0x20 || r == 0x7f {
+				return fmt.Errorf("reactions.emoji glyph %q: category must not contain control characters", e.Glyph)
+			}
 		}
-		seen[e.Name] = true
+		if seen[e.Glyph] {
+			return fmt.Errorf("reactions.emoji glyph %q: duplicated", e.Glyph)
+		}
+		seen[e.Glyph] = true
 	}
 	return nil
 }
 
-// validReactionName pins the stored key shape: lowercase ASCII
-// letters, digits, underscore, 1-24 chars — and NOT all digits: JS
-// objects iterate integer-like keys (pure digit strings) in ascending
-// numeric order BEFORE insertion order, which would silently break
-// the client's configured-order badge tie-break parity with the
-// server's ordered glyph embed. Path-safe by construction (the
-// toggle URL embeds it) and impossible to confuse with an image id
-// (which is exactly 7 chars of [0-9A-Za-z] — case differs, but more
-// to the point these live under /{id}/react/{name}, a distinct path
-// shape).
-func validReactionName(s string) bool {
-	if len(s) < 1 || len(s) > 24 {
+// validReactionEmoji pins the reactable-key shape: valid UTF-8, 1-32
+// runes, at most 128 bytes, and NO ASCII at all (every rune > U+007F).
+// The reaction key IS the emoji string — stored in the table, embedded
+// percent-encoded in the toggle URL, and rendered as its own glyph —
+// so the check is a tripwire against junk (words, whitespace, path
+// games), not a catalog membership test: ANY emoji passes, including
+// ZWJ sequences and skin-tone variants (all non-ASCII by
+// construction). ASCII includes the digits, which also keeps tally
+// maps free of JS integer-like keys that iterate out of insertion
+// order.
+func validReactionEmoji(s string) bool {
+	if s == "" || len(s) > 128 {
 		return false
 	}
-	hasNonDigit := false
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '_' {
+	if !utf8.ValidString(s) {
+		return false
+	}
+	if utf8.RuneCountInString(s) > 32 {
+		return false
+	}
+	for _, r := range s {
+		if r <= 0x7F {
 			return false
 		}
-		if c < '0' || c > '9' {
-			hasNonDigit = true
-		}
 	}
-	return hasNonDigit
-}
-
-// reactionByName looks one preset entry up (config generation's
-// snapshot — callers hold a Config value).
-func (rc ReactionConfig) reactionByName(name string) (ReactionEmoji, bool) {
-	for _, e := range rc.Emojis {
-		if e.Name == name {
-			return e, true
-		}
-	}
-	return ReactionEmoji{}, false
+	return true
 }
 
 // resolvePath joins a relative path onto baseDir (the binary directory),

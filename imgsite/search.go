@@ -819,7 +819,6 @@ func buildSearchView(cfg Config, q string, res searchResult) galleryView {
 		HasMore:       res.HasMore,
 		OGTitle:       searchPageTitle(cfg, q),
 		OGDescription: cfg.Site.Description,
-		ReactionsJSON: reactionsGlyphJSON(cfg),
 	}
 	if res.HasMore {
 		v.NextCursor = formatSearchCursor(res.Next)

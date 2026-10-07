@@ -837,7 +837,7 @@ func (a *App) buildHandler() http.Handler {
 	mux.HandleFunc("POST /admin/reextract", a.handleAdminReextract)
 	mux.HandleFunc("GET /api/images/{id}/neighbors", a.handleNeighbors)
 	mux.HandleFunc("DELETE /api/images/{id}", a.handleDeleteImage)
-	// Like toggle. Registered as a wildcard pattern, unlike the GET
+	// Vote toggles. Registered as wildcard patterns, unlike the GET
 	// id-keyed routes (which must go through handleImageRoutes because
 	// GET multi-segment wildcards overlap /static/{rest...} — see its
 	// DESIGN NOTE): on the POST side there is nothing to overlap. The
@@ -846,6 +846,7 @@ func (a *App) buildHandler() http.Handler {
 	// precedence over {id}, so POST /admin/reload can never land here
 	// and the {id} shape is validated in the handler anyway.
 	mux.HandleFunc("POST /{id}/like", a.handleLikeToggle)
+	mux.HandleFunc("POST /{id}/dislike", a.handleDislikeToggle)
 	mux.HandleFunc("GET /static/", staticHandler().ServeHTTP)
 
 	var handler http.Handler = mux

@@ -671,13 +671,13 @@ func runSearch(db *sqlx.DB, q string, cur searchCursor, limit, prefixMin, snippe
 	}
 	res = stitchSearchPage(t1, t2, t3, cur, limit)
 	// Card counts: search hits ride the same shared cards partial as
-	// the gallery, so their like counts hydrate the same way (one
-	// grouped query over the page's rows).
+	// the gallery, so their like/dislike counts hydrate the same way
+	// (one grouped query over the page's rows).
 	ptrs := make([]*dbImage, len(res.Hits))
 	for i := range res.Hits {
 		ptrs[i] = &res.Hits[i].img
 	}
-	if err := hydrateLikeCounts(db, ptrs); err != nil {
+	if err := hydrateVoteCounts(db, ptrs); err != nil {
 		return searchResult{}, err
 	}
 	return res, nil

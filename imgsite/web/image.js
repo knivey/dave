@@ -1,7 +1,8 @@
 // image.js: fullscreen click-to-zoom overlay on the main image, the
-// like-toggle enhancement (fetch-based, over the server-rendered form),
-// live like-count updates, live reveal of the arrival-direction
-// chevron, and keyboard navigation on the image details page.
+// vote-toggle enhancement (fetch-based like/dislike over the
+// server-rendered form), live like/dislike count updates, live reveal
+// of the arrival-direction chevron, and keyboard navigation on the
+// image details page.
 //
 // The server renders a complete page for no-JS users (fit-state main
 // image in its aspect box, static chevrons OUTSIDE the image, "open
@@ -454,54 +455,77 @@ export function boot() {
 		});
 	}
 
-	// ---- Like toggle (progressive enhancement over the form) ----
-	// The server renders a plain POST form; this layer swaps the full
-	// round trip for a fetch + in-place update. The Accept header is
-	// the ONLY thing selecting the JSON path — the no-JS form POST
-	// sends default Accepts and gets the 303 back here instead.
+	// ---- Vote toggles (progressive enhancement over the form) ----
+	// The server renders one plain POST form with two submit buttons
+	// (like / dislike, each with its own formaction); this layer swaps
+	// the full round trip for a fetch + in-place update. e.submitter
+	// says which button activated the submit (click OR Enter — the
+	// browser reports the implicit-submission button, the first one in
+	// the form, which is the like button and matches the form's
+	// action). The Accept header is the ONLY thing selecting the JSON
+	// path — the no-JS form POST sends default Accepts and gets the
+	// 303 back here instead.
 	const likeForm = document.querySelector("form.like-form");
 	if (likeForm) {
 		likeForm.addEventListener("submit", (e) => {
 			e.preventDefault();
-			const btn = document.getElementById("like-btn");
-			const cnt = document.getElementById("like-count");
-			// Guard against rapid double-clicks: two cookieless POSTs
-			// in flight would each mint their own token and DOUBLE-like
-			// (the Set-Cookie only lands with the first response), and
-			// the orphan like could never be un-liked. Re-enabled in
-			// finally; the catch-path fallback below submits the form
-			// programmatically, which ignores the disabled button.
-			if (btn) btn.disabled = true;
-			fetch(likeForm.action, { method: "POST", headers: { Accept: "application/json" } })
+			const likeBtn = document.getElementById("like-btn");
+			const dislikeBtn = document.getElementById("dislike-btn");
+			const btn = e.submitter || likeBtn;
+			// Guard against rapid double-clicks ACROSS BOTH buttons: two
+			// cookieless POSTs in flight would each mint their own token
+			// and DOUBLE-vote (the Set-Cookie only lands with the first
+			// response), and the orphan vote could never be retracted.
+			// Re-enabled in finally; the catch-path fallback below
+			// submits the form programmatically, which ignores disabled
+			// buttons.
+			if (likeBtn) likeBtn.disabled = true;
+			if (dislikeBtn) dislikeBtn.disabled = true;
+			fetch((btn && btn.formAction) || likeForm.action, { method: "POST", headers: { Accept: "application/json" } })
 				.then((resp) => {
 					if (!resp.ok) throw new Error("HTTP " + resp.status);
 					return resp.json();
 				})
 				.then((data) => {
-					btn.classList.toggle("liked", !!data.liked);
-					btn.setAttribute("aria-pressed", data.liked ? "true" : "false");
-					btn.title = data.liked ? "unlike" : "like";
-					if (cnt && Number.isFinite(data.count)) cnt.textContent = String(data.count);
+					if (likeBtn) {
+						likeBtn.classList.toggle("liked", !!data.liked);
+						likeBtn.setAttribute("aria-pressed", data.liked ? "true" : "false");
+						likeBtn.title = data.liked ? "unlike" : "like";
+					}
+					if (dislikeBtn) {
+						dislikeBtn.classList.toggle("disliked", !!data.disliked);
+						dislikeBtn.setAttribute("aria-pressed", data.disliked ? "true" : "false");
+						dislikeBtn.title = data.disliked ? "remove dislike" : "dislike";
+					}
+					const lc = document.getElementById("like-count");
+					if (lc && Number.isFinite(data.likes)) lc.textContent = String(data.likes);
+					const dc = document.getElementById("dislike-count");
+					if (dc && Number.isFinite(data.dislikes)) dc.textContent = String(data.dislikes);
 				})
 				.catch(() => {
 					// Network or 5xx: degrade to the no-JS contract — a
-					// real form POST navigates back with re-rendered
-					// state (and carries the Set-Cookie either way).
+					// real form POST navigates back with re-rendered state
+					// (and carries the Set-Cookie either way). The no-JS
+					// fallback must hit the CLICKED button's endpoint: the
+					// programmatic submit() uses the form's action, so point
+					// it at the intent first.
+					if (btn && btn.formAction) likeForm.action = btn.formAction;
 					likeForm.submit();
 				})
 				.finally(() => {
-					if (btn) btn.disabled = false;
+					if (likeBtn) likeBtn.disabled = false;
+					if (dislikeBtn) dislikeBtn.disabled = false;
 				});
 		});
 	}
 
 	// ---- SSE: ONE stream for the whole page ----
-	// image-liked keeps THIS image's count fresh when anyone toggles
-	// (the pressed state is never touched — only the local visitor's
-	// own toggle owns that). image-new drives the live prev-chevron
+	// image-liked keeps THIS image's tallies fresh when anyone votes
+	// (the pressed states are never touched — only the local visitor's
+	// own toggle owns those). image-new drives the live prev-chevron
 	// reveal, which only means anything at the newest end
 	// (data-at-end); it is subscribed unconditionally anyway so the
-	// like-count handler needs no second stream (each connect() is its
+	// count handler needs no second stream (each connect() is its
 	// own EventSource and its own per-IP server slot).
 	let fetchTimer = null;
 	let revealed = false;
@@ -509,8 +533,10 @@ export function boot() {
 		{
 			"image-liked": (ev) => {
 				if (!ev || ev.id !== currentID) return;
-				const cnt = document.getElementById("like-count");
-				if (cnt && Number.isFinite(ev.count)) cnt.textContent = String(ev.count);
+				const lc = document.getElementById("like-count");
+				if (lc && Number.isFinite(ev.likes)) lc.textContent = String(ev.likes);
+				const dc = document.getElementById("dislike-count");
+				if (dc && Number.isFinite(ev.dislikes)) dc.textContent = String(ev.dislikes);
 			},
 			"image-new": () => {
 				if (document.body.dataset.atEnd !== "true") return;

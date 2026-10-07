@@ -43,8 +43,11 @@ const (
 	eventThumbReady  = "thumb-ready"
 	eventImageHidden = "image-hidden"
 	eventReset       = "reset"
-	// eventImageLiked is the like-count change event: published after
-	// every committed toggle with the post-toggle count.
+	// eventImageLiked is the vote-tally change event: published after
+	// every committed like OR dislike toggle with the post-toggle
+	// counts. (Name kept from the likes-only era; a dislike changes
+	// the same tallies, so the event reads "this image's vote state
+	// changed".)
 	eventImageLiked = "image-liked"
 )
 
@@ -98,11 +101,12 @@ type imageHiddenEvent struct {
 }
 
 // imageLikedEvent is the image-liked payload: the post-toggle like
-// count for the id. Count is absolute (never a delta) so a subscriber
-// that missed earlier events still renders the truth.
+// AND dislike counts for the id. Both are absolute (never deltas) so
+// a subscriber that missed earlier events still renders the truth.
 type imageLikedEvent struct {
-	ID    string `json:"id"`
-	Count int    `json:"count"`
+	ID       string `json:"id"`
+	Likes    int    `json:"likes"`
+	Dislikes int    `json:"dislikes"`
 }
 
 // event is one SSE frame. ID is the monotonic sequence number used

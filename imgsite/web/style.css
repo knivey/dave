@@ -45,15 +45,20 @@ header.site p { color: #999; margin: 0.25rem 0 0; }
    12px — legible but squint-grade on phones. 14px / 13px. */
 .card .prompt { margin: 0.5rem 0.75rem 0.25rem; font-size: 0.875rem; overflow-wrap: anywhere; }
 .card .prompt mark { background: #5b4a12; color: #ffe9a8; border-radius: 3px; padding: 0 1px; }
-/* Meta row: timestamp left, like count right-justified on the same
-   line (owner request, Oct 2026). The time keeps its own type floor;
-   the count is the same size, heart-tinted, and never wraps. A card
-   with zero likes ships no .likes span at all (server template
-   guards it; the SSE handler adds one when a count first moves
-   past zero). */
+/* Meta row: timestamp left, vote counts right-justified on the same
+   line (owner request, Oct 2026). The .counts wrapper is the single
+   flex child on the right (likes + dislikes inside it, own gap), so
+   space-between stays two-sided however many count spans exist. The
+   time keeps its own type floor; counts are the same size,
+   heart-tinted / broken-heart-tinted, and never wrap. A card with a
+   zero tally ships no span for it at all (server template guards it;
+   the SSE handler adds one when a count first moves past zero, and
+   drops the wrapper when both fall back to zero). */
 .card .meta { display: flex; justify-content: space-between; align-items: baseline; gap: 0.75rem; margin: 0 0.75rem 0.75rem; }
 .card .meta time { display: block; color: #999; font-size: 0.8125rem; }
+.card .counts { display: flex; align-items: baseline; gap: 0.5rem; margin-left: auto; white-space: nowrap; }
 .card .likes { color: #ff6b81; font-size: 0.8125rem; white-space: nowrap; }
+.card .dislikes { color: #7f96ad; font-size: 0.8125rem; white-space: nowrap; }
 .sentinel { width: 100%; height: 1px; grid-column: 1 / -1; }
 
 /* Search box (gallery header form). No-JS search is a plain GET to

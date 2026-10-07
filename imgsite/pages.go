@@ -201,11 +201,16 @@ table.params td { border: 1px solid #2c2c31; padding: 0.35rem 0.6rem; vertical-a
 table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
 .mono { font-family: ui-monospace, monospace; }
 .provenance { color: #999; font-size: 0.9rem; }
-/* Like toggle: heart glyph + count; the liked state tints both (the
-   base button styles come from the global button rule above). */
-.like-form { margin: 0.25rem 0 0.5rem; }
+/* Vote toggles: heart glyph + count, broken-heart glyph + count; the
+   pressed state tints each (the base button styles come from the
+   global button rule above). Dislike gets its own hue so the two
+   stances read apart at a glance (like keeps the warm pink, dislike a
+   cool slate). */
+.like-form { margin: 0.25rem 0 0.5rem; display: flex; gap: 0.5rem; }
 .like-btn.liked { color: #ff6b81; border-color: #7a3d4a; }
 .like-btn:active { border-color: #b5566c; }
+.dislike-btn.disliked { color: #7f96ad; border-color: #3d4a58; }
+.dislike-btn:active { border-color: #5a7290; }
 </style>
 </head>
 <body data-page="image" data-image-id="{{.ID}}"{{if .AtEnd}} data-at-end="true"{{end}}{{if .LastEvent}} data-last-event="{{.LastEvent}}"{{end}}>
@@ -257,14 +262,19 @@ table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
 {{if .WorkflowName}} &middot; {{.WorkflowName}}{{end}}
 {{if .ProvenanceChannel}} &middot; {{.ProvenanceChannel}}{{end}}
 </p>
-{{/* Like toggle (anonymous, cookie-token identity — see likes.go).
-     A plain POST form so the no-JS path is a full round trip: toggle
-     → 303 back here → re-rendered state. image.js intercepts the
-     submit and swaps in the fetch()-based JSON path. The count lives
-     in its own span so SSE-driven count updates (other people liking)
-     never touch the button's own state classes. */}}
+{{/* Vote toggles (anonymous, cookie-token identity — see likes.go).
+     Like and dislike are mutually exclusive per visitor: one POST
+     form with two submit buttons, each carrying its own formaction,
+     so the no-JS path is a full round trip (toggle → 303 back here →
+     re-rendered state) and Enter submits the FIRST button (implicit
+     submission = like, matching the form's action). image.js
+     intercepts the submit and swaps in the fetch()-based JSON path
+     against the clicked button's formaction. Counts live in their
+     own spans so SSE-driven count updates (other people voting)
+     never touch the buttons' own state classes. */}}
 <form class="like-form" method="post" action="/{{.ID}}/like">
-<button type="submit" class="like-btn{{if .LikedByYou}} liked{{end}}" id="like-btn" aria-pressed="{{if .LikedByYou}}true{{else}}false{{end}}" title="{{if .LikedByYou}}unlike{{else}}like{{end}}">&#9829; <span id="like-count">{{.LikeCount}}</span></button>
+<button type="submit" class="like-btn{{if .LikedByYou}} liked{{end}}" id="like-btn" formaction="/{{.ID}}/like" aria-pressed="{{if .LikedByYou}}true{{else}}false{{end}}" title="{{if .LikedByYou}}unlike{{else}}like{{end}}">&#9829; <span id="like-count">{{.LikeCount}}</span></button>
+<button type="submit" class="dislike-btn{{if .DislikedByYou}} disliked{{end}}" id="dislike-btn" formaction="/{{.ID}}/dislike" aria-pressed="{{if .DislikedByYou}}true{{else}}false{{end}}" title="{{if .DislikedByYou}}remove dislike{{else}}dislike{{end}}">&#128148; <span id="dislike-count">{{.DislikeCount}}</span></button>
 </form>
 
 <h2>Original prompt</h2>
@@ -373,12 +383,15 @@ const cardsPartialSrc = `{{define "cards"}}{{range .Cards}}<article class="card"
 {{if .ThumbFailed}}<img loading="lazy" src="{{.OrigURL}}" alt="{{.PromptSnippet}}">{{else if .ThumbPending}}<img class="pending" loading="lazy" src="{{.ThumbURL}}" data-orig="{{.OrigURL}}" alt="{{.PromptSnippet}}">{{else}}<img loading="lazy" src="{{.ThumbURL}}" alt="{{.PromptSnippet}}">{{end}}
 </a>
 {{if .SnippetParts}}<p class="prompt">{{range .SnippetParts}}{{if .Hit}}<mark>{{.Text}}</mark>{{else}}{{.Text}}{{end}}{{end}}</p>{{else}}<p class="prompt">{{.PromptSnippet}}</p>{{end}}
-{{/* Meta row: timestamp left, like count right-justified on the same
-     line (owner request, Oct 2026). The likes span renders ONLY for
-     non-zero counts — a zero span on every card is noise; the SSE
-     image-liked handler creates the span client-side when a count
+{{/* Meta row: timestamp left, vote counts right-justified on the same
+     line (owner request, Oct 2026). The .counts wrapper owns the
+     right side as ONE flex child (likes and dislikes inside it), so
+     the meta row's space-between stays two-sided however many count
+     spans exist. Each span renders ONLY for its non-zero count — zero
+     spans on every card are noise; the SSE image-liked handler
+     manages the spans (and the wrapper) client-side when a count
      moves 0→1. */}}
-<div class="meta"><time datetime="{{.CreatedRFC3339}}" data-ts="{{.CreatedRFC3339}}">{{.Timestamp}}</time>{{if .LikeCount}}<span class="likes" data-count="{{.LikeCount}}">&#9829; {{.LikeCount}}</span>{{end}}</div>
+<div class="meta"><time datetime="{{.CreatedRFC3339}}" data-ts="{{.CreatedRFC3339}}">{{.Timestamp}}</time>{{if or .LikeCount .DislikeCount}}<span class="counts">{{if .LikeCount}}<span class="likes" data-count="{{.LikeCount}}">&#9829; {{.LikeCount}}</span>{{end}}{{if .DislikeCount}}<span class="dislikes" data-count="{{.DislikeCount}}">&#128148; {{.DislikeCount}}</span>{{end}}</span>{{end}}</div>
 </article>
 {{end}}{{if .NoResults}}<p class="no-results">no results for {{.Query}}</p>{{end}}{{if .NothingSearched}}<p class="no-results">nothing searched yet — type a query</p>{{end}}{{if .EmptyGallery}}<p class="no-results">nothing here yet — images appear here as they are generated</p>{{end}}{{if .HasMore}}<div class="sentinel" data-next-cursor="{{.NextCursor}}"></div>{{end}}{{end}}`
 
@@ -416,7 +429,7 @@ const galleryPageSrc = `<!DOCTYPE html>
      the JS fragment fetcher reads to keep &sort=liked on fetched
      pages. Search pages don't render this nav at all. */}}
 <nav class="sort-nav" aria-label="sort order">
-sort: <a href="/"{{if not .SortLiked}} aria-current="page"{{end}}>newest</a> · <a href="/?sort=liked"{{if .SortLiked}} aria-current="page"{{end}}>most liked</a>
+sort: <a href="/"{{if not .SortLiked}} aria-current="page"{{end}}>newest</a> · <a href="/?sort=liked"{{if .SortLiked}} aria-current="page"{{end}}>top rated</a>
 </nav>
 </header>
 <main>
@@ -484,9 +497,10 @@ type galleryCard struct {
 	CreatedRFC3339 string
 	ThumbPending   bool
 	ThumbFailed    bool
-	// LikeCount is the hydrated row count; zero renders no .likes
-	// span (see the cards partial).
-	LikeCount int
+	// LikeCount/DislikeCount are the hydrated row tallies; zero
+	// renders no span for that count (see the cards partial).
+	LikeCount    int
+	DislikeCount int
 	// SnippetParts, when non-nil, replaces the plain prompt preview
 	// with a highlighted match snippet (search results only).
 	SnippetParts []snippetPart
@@ -654,10 +668,11 @@ func buildGalleryView(cfg Config, rows []dbImage, sortLiked bool) galleryView {
 	if v.HasMore && len(rows) > 0 {
 		last := rows[len(rows)-1]
 		if sortLiked {
-			// The hydrated count is the cursor's first component — the
+			// The row's net score (likes − dislikes, matching the
+			// SQL sort key) is the cursor's first component — the
 			// hydrator ran inside the query functions precisely so
-			// this formats from the row's own count.
-			v.NextCursor = formatLikedKeysetCursor(last.LikeCount, last.CreatedAt, last.ID)
+			// this computes from the row's own tallies.
+			v.NextCursor = formatLikedKeysetCursor(last.LikeCount-last.DislikeCount, last.CreatedAt, last.ID)
 		} else {
 			v.NextCursor = formatKeysetCursor(last.CreatedAt, last.ID)
 		}
@@ -684,6 +699,7 @@ func galleryCardFromImage(cfg Config, img *dbImage) galleryCard {
 		ThumbPending:   img.ThumbStatus == thumbStatusPending,
 		ThumbFailed:    img.ThumbStatus == thumbStatusFailed,
 		LikeCount:      img.LikeCount,
+		DislikeCount:   img.DislikeCount,
 	}
 }
 
@@ -711,24 +727,27 @@ func parseKeysetCursor(s string) (createdAt, id string, ok bool) {
 }
 
 // formatLikedKeysetCursor builds the liked-sort cursor wire format:
-// "<likeCount>~YYYY-MM-DD HH:MM:SS[.mmm]~<id>". The count is the
-// mutable first component of the (count, created_at, id) keyset — see
-// dbGetGalleryPageLiked's mutable-column note.
+// "<score>~YYYY-MM-DD HH:MM:SS[.mmm]~<id>". The score is the mutable
+// first component of the (score, created_at, id) keyset — see
+// dbGetGalleryPageLiked's mutable-column note. It can be NEGATIVE
+// (likes − dislikes), which strconv.Itoa/Atoi both round-trip fine.
 func formatLikedKeysetCursor(count int, createdAt, id string) string {
 	return strconv.Itoa(count) + "~" + createdAt + "~" + id
 }
 
 // parseLikedKeysetCursor validates and splits a liked-sort cursor.
-// Exactly three '~'-free parts: digits count, parseable timestamp,
-// valid id. A default-mode cursor (2 parts) is rejected — the modes
-// must never silently cross-read each other's cursors.
+// Exactly three '~'-free parts: an optionally-negative score (net
+// likes − dislikes — negative totals are legal in this sort),
+// parseable timestamp, valid id. A default-mode cursor (2 parts) is
+// rejected — the modes must never silently cross-read each other's
+// cursors.
 func parseLikedKeysetCursor(s string) (count int, createdAt, id string, ok bool) {
 	parts := strings.Split(s, "~")
 	if len(parts) != 3 {
 		return 0, "", "", false
 	}
 	n, err := strconv.Atoi(parts[0])
-	if err != nil || n < 0 {
+	if err != nil {
 		return 0, "", "", false
 	}
 	if _, ok := parseDBTime(parts[1]); !ok {
@@ -882,12 +901,16 @@ type imageView struct {
 	HasNext bool
 	NextID  string
 
-	// LikeCount is the image's total likes; LikedByYou is the
-	// rendering visitor's toggle state (server-rendered from the liker
-	// cookie so the button paints correctly with JS disabled). The JS
-	// enhancement keeps them fresh after toggles and image-liked SSE.
-	LikeCount  int
-	LikedByYou bool
+	// LikeCount/DislikeCount are the image's total tallies;
+	// LikedByYou/DislikedByYou are the rendering visitor's stance
+	// (server-rendered from the liker cookie so the buttons paint
+	// correctly with JS disabled — exactly one can be set, the votes
+	// are mutually exclusive). The JS enhancement keeps them fresh
+	// after toggles and image-liked SSE.
+	LikeCount     int
+	DislikeCount  int
+	LikedByYou    bool
+	DislikedByYou bool
 
 	// LastEvent is the SSE stream position captured at render time —
 	// same replay-cursor contract as galleryView.LastEvent (nil = no
@@ -1161,21 +1184,22 @@ func (a *App) handleImagePage(w http.ResponseWriter, r *http.Request, id string)
 	}
 
 	view := buildImageView(img, prev, next, a.absBaseForSite(sc, r))
-	// Like state: count always, liked-by-you when the visitor carries a
-	// liker cookie (page GETs never mint one — only the POST does).
-	// The row was just fetched, so an error here is drift, not a miss:
-	// degrade to count 0 rather than failing the whole page.
+	// Vote state: counts always, the visitor's own stance when they
+	// carry a liker cookie (page GETs never mint one — only the POST
+	// does). The row was just fetched, so an error here is drift, not
+	// a miss: degrade to counts 0 rather than failing the whole page.
 	token, _ := likeTokenFromRequest(r)
-	count, liked, err := dbGetLikeState(a.db, img.ID, token)
+	likes, dislikes, myVote, err := dbGetVoteState(a.db, img.ID, token)
 	if err != nil {
 		// ErrNoRows is benign drift (the row vanished between the
 		// lookup above and this query — no hard deletes exist, so a
 		// tripwire log would only add noise); anything else is real.
 		if !errors.Is(err, sql.ErrNoRows) {
-			logger.Error("like state lookup failed", "id", id, "error", err)
+			logger.Error("vote state lookup failed", "id", id, "error", err)
 		}
 	} else {
-		view.LikeCount, view.LikedByYou = count, liked
+		view.LikeCount, view.DislikeCount = likes, dislikes
+		view.LikedByYou, view.DislikedByYou = myVote == voteLike, myVote == voteDislike
 	}
 	if hasHub {
 		view.LastEvent = &lastEvent

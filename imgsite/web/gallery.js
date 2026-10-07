@@ -1,11 +1,11 @@
 // gallery.js: IntersectionObserver infinite scroll over /gallery?after=
 // fragments, DOM cap with scroll-up restore, pending-thumb placeholder
 // (dark bytes -> thumb swap on thumb-ready; retry is fallback-only for
-// genuine failures), fragment-fetch retry with backoff, most-liked
-// sort mode (fragment URLs carry &sort=liked, arrivals buffer behind
-// the pill), and SSE live updates (image-new prepend, thumb-ready
-// swap, image-hidden card drop, image-liked count updates, reset
-// reload).
+// genuine failures), fragment-fetch retry with backoff, top-rated
+// (net-score) sort mode (fragment URLs carry &sort=liked, arrivals
+// buffer behind the pill), and SSE live updates (image-new prepend,
+// thumb-ready swap, image-hidden card drop, image-liked tally
+// updates, reset reload).
 "use strict";
 
 import { connect } from "./sse.js";
@@ -40,8 +40,10 @@ let detached = [];
 // Cursor is opaque to this module — each mode defines its own format.
 let fragmentURLFn = null;
 
-// Most-liked sort mode (body[data-sort="liked"], set by the server on
-// /?sort=liked). Three load-bearing consequences:
+// Top-rated sort mode (body[data-sort="liked"], set by the server on
+// /?sort=liked). The rank is the NET score (likes − dislikes — see
+// db.go), but the URL/attr keep the historical "liked" name. Three
+// load-bearing consequences:
 //   - fetched fragments must carry &sort=liked (defaultFragmentURL);
 //   - live image-new arrivals buffer behind the "+N new" pill —
 //     prepending into a count-sorted grid would lie about the order —
@@ -191,7 +193,7 @@ export function boot() {
 			// the previous mode's grid — dropping it is exactly right.
 			if (!sentinel.isConnected) return;
 			// Append-dedupe by data-id: a no-op in default mode, but
-			// the liked sort keys on a MUTABLE column (like_count), so
+			// the liked sort keys on a MUTABLE column (net score), so
 			// a row whose count rose between page fetches can legally
 			// reappear on the next page (see db.go's mutable-sort
 			// note). Skipping an already-attached card keeps the grid
@@ -306,7 +308,7 @@ export function boot() {
 	// Liked-mode wrinkle (accepted): restored cards sit at their
 	// detach-time position, which concurrent likes may have made stale
 	// — the same mutable-count caveat loadMore's append-dedupe
-	// documents (like_count is a moving sort key, db.go). The counts
+	// documents (net score is a moving sort key, db.go). The counts
 	// themselves stay correct either way: onImageLiked sweeps the
 	// detached set while the cards wait here. The duplicate shape the
 	// same mutability could otherwise produce — an un-like dropping a
@@ -482,10 +484,10 @@ function buildCard(ev) {
 	time.dataset.ts = ev.created_at;
 	time.textContent = isNaN(ts.getTime()) ? ev.created_at : ts.toLocaleString();
 
-	// Meta row mirrors the server card shape (time + optional .likes
-	// span inside div.meta) so the image-liked count updater can treat
-	// prepended and rendered cards identically. New arrivals have zero
-	// likes, so no .likes span is created here.
+	// Meta row mirrors the server card shape (time + optional .counts
+	// wrapper inside div.meta) so the image-liked tally updater can
+	// treat prepended and rendered cards identically. New arrivals
+	// have zero votes, so no counts spans are created here.
 	const meta = document.createElement("div");
 	meta.className = "meta";
 	meta.appendChild(time);
@@ -532,7 +534,7 @@ function updatePill() {
 
 function onImageNew(ev) {
 	if (!ev || !ev.id) return;
-	// A filter or the most-liked sort owns the grid: buffer arrivals so
+	// A filter or the top-rated sort owns the grid: buffer arrivals so
 	// the ordered view never lies. (Liked mode's pill click reloads —
 	// prepending would violate the count sort; see its handler.)
 	if (filterActive || sortLiked) {
@@ -659,38 +661,61 @@ function onImageHidden(ev) {
 	}
 }
 
-// setCardLikeCount syncs one card's .likes span with a count: created
-// when the count first moves past zero, textContent swapped while it
-// stays positive, removed when it falls back to zero — the same
-// present-only-when-nonzero contract the server template renders.
-function setCardLikeCount(card, count) {
-	let span = card.querySelector(".likes");
+// setCardCounts syncs one card's .likes/.dislikes spans (inside the
+// .counts wrapper) with the tallies: each span created when its count
+// first moves past zero, textContent swapped while it stays positive,
+// removed when it falls back to zero — the same
+// present-only-when-nonzero contract the server template renders. The
+// wrapper itself is created on the first non-zero tally of either
+// kind and dropped when both return to zero, exactly mirroring the
+// template's {{if or .LikeCount .DislikeCount}} guard.
+function setCardCounts(card, likes, dislikes) {
+	let wrap = card.querySelector(".counts");
+	if (likes <= 0 && dislikes <= 0) {
+		if (wrap) wrap.remove();
+		return;
+	}
+	if (!wrap) {
+		wrap = document.createElement("span");
+		wrap.className = "counts";
+		const meta = card.querySelector(".meta");
+		if (!meta) return; // malformed card: nothing to hang the wrapper on
+		meta.appendChild(wrap);
+	}
+	setTallySpan(wrap, "likes", "\u2665", likes);
+	setTallySpan(wrap, "dislikes", "\uD83D\uDC94", dislikes);
+}
+
+// setTallySpan manages ONE tally span inside the .counts wrapper:
+// create-on-first-nonzero, textContent swap, remove-on-zero.
+function setTallySpan(wrap, className, glyph, count) {
+	let span = wrap.querySelector("." + className);
 	if (count > 0) {
 		if (!span) {
 			span = document.createElement("span");
-			span.className = "likes";
-			const meta = card.querySelector(".meta");
-			if (!meta) return; // malformed card: nothing to hang the span on
-			meta.appendChild(span);
+			span.className = className;
+			wrap.appendChild(span);
 		}
 		span.dataset.count = String(count);
-		span.textContent = "\u2665 " + count;
+		span.textContent = glyph + " " + count;
 	} else if (span) {
 		span.remove();
 	}
 }
 
-// onImageLiked updates a card's count when any visitor toggles a like
-// (SSE image-liked, published after the toggle commits). The detached
-// set is swept too, mirroring onThumbReady: restore() reattaches
-// trimmed cards with zero network traffic, so one left behind would
-// show a stale count until the next full reload.
+// onImageLiked updates a card's tallies when any visitor toggles a
+// vote (SSE image-liked, published after the toggle commits — likes
+// AND dislikes ride one event because every toggle can move both).
+// The detached set is swept too, mirroring onThumbReady: restore()
+// reattaches trimmed cards with zero network traffic, so one left
+// behind would show stale counts until the next full reload.
 function onImageLiked(ev) {
-	if (!grid || !ev || !ev.id || !Number.isFinite(ev.count)) return;
+	if (!grid || !ev || !ev.id) return;
+	if (!Number.isFinite(ev.likes) || !Number.isFinite(ev.dislikes)) return;
 	const card = grid.querySelector('article.card[data-id="' + CSS.escape(ev.id) + '"]');
-	if (card) setCardLikeCount(card, ev.count);
+	if (card) setCardCounts(card, ev.likes, ev.dislikes);
 	for (let i = detached.length - 1; i >= 0; i--) {
-		if (detached[i].dataset.id === ev.id) setCardLikeCount(detached[i], ev.count);
+		if (detached[i].dataset.id === ev.id) setCardCounts(detached[i], ev.likes, ev.dislikes);
 	}
 }
 
@@ -711,7 +736,7 @@ function setupLiveUpdates() {
 	document.body.appendChild(pill);
 	pill.addEventListener("click", () => {
 		if (sortLiked) {
-			// Most-liked mode: flushing would prepend into a count-
+			// Top-rated mode: flushing would prepend into a score-
 			// sorted grid and lie about the order. Reload re-sorts
 			// server-side and clears the buffer with it. Deliberately
 			// checked BEFORE filterClearFn: on a liked page whose user

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
 )
@@ -21,6 +22,11 @@ type Config struct {
 	Upload     UploadConfig     `toml:"upload"`
 	Search     SearchConfig     `toml:"search"`
 	Site       SiteConfig       `toml:"site"`
+	// Reactions carries the emoji-reaction preset. An absent section
+	// runs the built-in default set (normalize fills it); Enabled is
+	// a pointer so "reactions.enabled = false" (explicit disable)
+	// stays distinguishable from an absent section (default true).
+	Reactions ReactionConfig `toml:"reactions"`
 	// SafeSite is nil unless a [safe_site] section is present; nil is
 	// single-site behavior identical to today. Pointer (not value) so
 	// absence stays distinguishable from an empty-but-present section,
@@ -92,6 +98,27 @@ type SafeSiteConfig struct {
 	AllowedNetworks []string `toml:"allowed_networks"`
 }
 
+// ReactionConfig is the emoji-reaction preset (reactions.go). Enabled
+// is a POINTER: nil (section absent, or the key unwritten) means true,
+// so the lightest config runs the built-in default set; an explicit
+// `enabled = false` turns the whole feature off (no button row,
+// endpoints 404, no card badges) without touching stored rows.
+// Emojis is ordered — the array-of-tables order is the button-row
+// order and the card-badge tie-break order.
+type ReactionConfig struct {
+	Enabled *bool           `toml:"enabled"`
+	Emojis  []ReactionEmoji `toml:"emoji"`
+}
+
+// ReactionEmoji is one preset entry: Name is the stable ASCII key
+// stored in the reactions table (and carried in the toggle URL);
+// Glyph is what every render surface displays. Split so curating the
+// glyph never needs a data migration — rows key on the name only.
+type ReactionEmoji struct {
+	Name  string `toml:"name"`
+	Glyph string `toml:"glyph"`
+}
+
 const (
 	defaultServerName     = "imgsite"
 	defaultServerAddr     = ":8081"
@@ -109,6 +136,10 @@ const (
 	defaultPrefixMin      = 2
 	defaultSiteTitle      = "dave's image dump"
 	defaultSiteDesc       = "generations from IRC"
+	// maxReactionEmojis caps the preset so the details-page button
+	// row and every card's badge space stay bounded no matter how
+	// enthusiastic the curation gets.
+	maxReactionEmojis = 12
 )
 
 // placeholderAPIKeyPrefix is the prefix of the placeholder secret shipped
@@ -219,6 +250,14 @@ func loadConfig(configFile string) (Config, error) {
 		}
 	}
 
+	// [reactions]: absent section = built-in default set (Enabled
+	// carries over as true); enabled=false disables the feature while
+	// keeping stored rows; a present non-empty list is used verbatim.
+	// This runs before the SafeSite block's return paths can skip it.
+	if err := cfg.Reactions.normalize(); err != nil {
+		return cfg, err
+	}
+
 	return cfg, nil
 }
 
@@ -227,6 +266,97 @@ func defaultString(val, def string) string {
 		return def
 	}
 	return val
+}
+
+// defaultReactionEmojis is the built-in preset for an IRC-adjacent
+// AI-art gallery: quick visceral verdicts, meme-flavored. Order is
+// the button-row order.
+var defaultReactionEmojis = []ReactionEmoji{
+	{Name: "fire", Glyph: "\U0001F525"},  // 🔥
+	{Name: "laugh", Glyph: "\U0001F602"}, // 😂
+	{Name: "wow", Glyph: "\U0001F62E"},   // 😮
+	{Name: "skull", Glyph: "\U0001F480"}, // 💀
+	{Name: "poop", Glyph: "\U0001F4A9"},  // 💩
+	{Name: "eyes", Glyph: "\U0001F440"},  // 👀
+}
+
+// reactionsEnabled reports whether the reaction feature is on: the
+// absent key (nil pointer) is the default TRUE.
+func (rc ReactionConfig) reactionsEnabled() bool {
+	return rc.Enabled == nil || *rc.Enabled
+}
+
+// normalize validates a loaded preset and fills the default set when
+// none was configured. Runs inside loadConfig, so an invalid preset
+// fails startup AND a SIGHUP reload (running config stays live).
+func (rc *ReactionConfig) normalize() error {
+	if !rc.reactionsEnabled() {
+		// Disabled: drop any configured list too, so EVERY surface
+		// (endpoints, details row, card badges, glyph embed) agrees
+		// without each one having to remember the flag. Rows on disk
+		// are untouched.
+		rc.Emojis = nil
+		return nil
+	}
+	if len(rc.Emojis) == 0 {
+		rc.Emojis = append([]ReactionEmoji(nil), defaultReactionEmojis...)
+		return nil
+	}
+	if len(rc.Emojis) > maxReactionEmojis {
+		return fmt.Errorf("reactions.emoji: at most %d entries, got %d", maxReactionEmojis, len(rc.Emojis))
+	}
+	seen := make(map[string]bool, len(rc.Emojis))
+	for _, e := range rc.Emojis {
+		if !validReactionName(e.Name) {
+			return fmt.Errorf("reactions.emoji name %q: must be 1-24 chars of [a-z0-9_] (it rides the toggle URL)", e.Name)
+		}
+		if !utf8.ValidString(e.Glyph) || e.Glyph == "" || utf8.RuneCountInString(e.Glyph) > 16 {
+			return fmt.Errorf("reactions.emoji %q: glyph must be 1-16 valid UTF-8 runes", e.Name)
+		}
+		if seen[e.Name] {
+			return fmt.Errorf("reactions.emoji name %q: duplicated", e.Name)
+		}
+		seen[e.Name] = true
+	}
+	return nil
+}
+
+// validReactionName pins the stored key shape: lowercase ASCII
+// letters, digits, underscore, 1-24 chars — and NOT all digits: JS
+// objects iterate integer-like keys (pure digit strings) in ascending
+// numeric order BEFORE insertion order, which would silently break
+// the client's configured-order badge tie-break parity with the
+// server's ordered glyph embed. Path-safe by construction (the
+// toggle URL embeds it) and impossible to confuse with an image id
+// (which is exactly 7 chars of [0-9A-Za-z] — case differs, but more
+// to the point these live under /{id}/react/{name}, a distinct path
+// shape).
+func validReactionName(s string) bool {
+	if len(s) < 1 || len(s) > 24 {
+		return false
+	}
+	hasNonDigit := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '_' {
+			return false
+		}
+		if c < '0' || c > '9' {
+			hasNonDigit = true
+		}
+	}
+	return hasNonDigit
+}
+
+// reactionByName looks one preset entry up (config generation's
+// snapshot — callers hold a Config value).
+func (rc ReactionConfig) reactionByName(name string) (ReactionEmoji, bool) {
+	for _, e := range rc.Emojis {
+		if e.Name == name {
+			return e, true
+		}
+	}
+	return ReactionEmoji{}, false
 }
 
 // resolvePath joins a relative path onto baseDir (the binary directory),

@@ -118,6 +118,12 @@ type dbImage struct {
 	// reverse — and no INSERT or UPDATE ever names them.
 	LikeCount    int `db:"like_count"`
 	DislikeCount int `db:"dislike_count"`
+
+	// Reactions is the emoji → count tally, hydrated by the reactions
+	// layer (hydrateReactionCounts). Nil = no reactions; every
+	// consumer treats nil and empty identically. No db tag: it is
+	// never scanned from a result set.
+	Reactions map[string]int `db:"-"`
 }
 
 func initDB(dbPath string) (*sqlx.DB, error) {
@@ -342,6 +348,9 @@ func dbGetGalleryPage(db *sqlx.DB, afterCreatedAt, afterID string, limit int, sc
 	if err := hydrateVoteCounts(db, imagePtrs(rows)); err != nil {
 		return nil, err
 	}
+	if err := hydrateReactionCounts(db, imagePtrs(rows)); err != nil {
+		return nil, err
+	}
 	return rows, nil
 }
 
@@ -403,6 +412,9 @@ func dbGetGalleryPageLiked(db *sqlx.DB, afterCount int, afterCreatedAt, afterID 
 		return nil, err
 	}
 	if err := hydrateVoteCounts(db, imagePtrs(rows)); err != nil {
+		return nil, err
+	}
+	if err := hydrateReactionCounts(db, imagePtrs(rows)); err != nil {
 		return nil, err
 	}
 	return rows, nil

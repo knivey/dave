@@ -1,8 +1,8 @@
 // image.js: fullscreen click-to-zoom overlay on the main image, the
-// vote-toggle enhancement (fetch-based like/dislike over the
-// server-rendered form), live like/dislike count updates, live reveal
-// of the arrival-direction chevron, and keyboard navigation on the
-// image details page.
+// vote + reaction toggle enhancements (fetch-based like/dislike/
+// emoji over the server-rendered forms), live like/dislike/reaction
+// count updates, live reveal of the arrival-direction chevron, and
+// keyboard navigation on the image details page.
 //
 // The server renders a complete page for no-JS users (fit-state main
 // image in its aspect box, static chevrons OUTSIDE the image, "open
@@ -455,74 +455,100 @@ export function boot() {
 		});
 	}
 
-	// ---- Vote toggles (progressive enhancement over the form) ----
-	// The server renders one plain POST form with two submit buttons
-	// (like / dislike, each with its own formaction); this layer swaps
-	// the full round trip for a fetch + in-place update. e.submitter
-	// says which button activated the submit (click OR Enter — the
-	// browser reports the implicit-submission button, the first one in
-	// the form, which is the like button and matches the form's
-	// action). The Accept header is the ONLY thing selecting the JSON
-	// path — the no-JS form POST sends default Accepts and gets the
-	// 303 back here instead.
+	// ---- Vote + reaction toggles (progressive enhancement over the forms) ----
+	// The server renders the vote form (two submit buttons, like /
+	// dislike) and the reaction form (one submit button per configured
+	// emoji), each button carrying its own formaction; this layer
+	// swaps the full round trip for a fetch + in-place update.
+	// e.submitter says which button activated the submit (click OR
+	// Enter — the browser reports the implicit-submission button, the
+	// first one in the form). The Accept header is the ONLY thing
+	// selecting the JSON path — the no-JS form POST sends default
+	// Accepts and gets the 303 back here instead.
+	//
+	// ALL toggle buttons across BOTH forms disable during any in-flight
+	// toggle: two cookieless POSTs racing would each mint their own
+	// token and DOUBLE-vote (the Set-Cookie only lands with the first
+	// response), and the orphan could never be retracted — the hazard
+	// is shared because the identity is.
 	const likeForm = document.querySelector("form.like-form");
-	if (likeForm) {
-		likeForm.addEventListener("submit", (e) => {
+	const reactForm = document.querySelector("form.react-form");
+	const allToggleButtons = () =>
+		Array.from(document.querySelectorAll("form.like-form button, form.react-form button"));
+	const setTogglesDisabled = (on) => {
+		for (const b of allToggleButtons()) b.disabled = on;
+	};
+
+	function enhanceToggleForm(form, applyResponse) {
+		if (!form) return;
+		form.addEventListener("submit", (e) => {
 			e.preventDefault();
-			const likeBtn = document.getElementById("like-btn");
-			const dislikeBtn = document.getElementById("dislike-btn");
-			const btn = e.submitter || likeBtn;
-			// Guard against rapid double-clicks ACROSS BOTH buttons: two
-			// cookieless POSTs in flight would each mint their own token
-			// and DOUBLE-vote (the Set-Cookie only lands with the first
-			// response), and the orphan vote could never be retracted.
-			// Re-enabled in finally; the catch-path fallback below
-			// submits the form programmatically, which ignores disabled
-			// buttons.
-			if (likeBtn) likeBtn.disabled = true;
-			if (dislikeBtn) dislikeBtn.disabled = true;
-			fetch((btn && btn.formAction) || likeForm.action, { method: "POST", headers: { Accept: "application/json" } })
+			const first = form.querySelector("button[type=submit]");
+			const btn = e.submitter || first;
+			setTogglesDisabled(true);
+			fetch((btn && btn.formAction) || form.action, { method: "POST", headers: { Accept: "application/json" } })
 				.then((resp) => {
 					if (!resp.ok) throw new Error("HTTP " + resp.status);
 					return resp.json();
 				})
-				.then((data) => {
-					if (likeBtn) {
-						likeBtn.classList.toggle("liked", !!data.liked);
-						likeBtn.setAttribute("aria-pressed", data.liked ? "true" : "false");
-						likeBtn.title = data.liked ? "unlike" : "like";
-					}
-					if (dislikeBtn) {
-						dislikeBtn.classList.toggle("disliked", !!data.disliked);
-						dislikeBtn.setAttribute("aria-pressed", data.disliked ? "true" : "false");
-						dislikeBtn.title = data.disliked ? "remove dislike" : "dislike";
-					}
-					const lc = document.getElementById("like-count");
-					if (lc && Number.isFinite(data.likes)) lc.textContent = String(data.likes);
-					const dc = document.getElementById("dislike-count");
-					if (dc && Number.isFinite(data.dislikes)) dc.textContent = String(data.dislikes);
-				})
+				.then((data) => applyResponse(data))
 				.catch(() => {
 					// Network or 5xx: degrade to the no-JS contract — a
 					// real form POST navigates back with re-rendered state
-					// (and carries the Set-Cookie either way). The no-JS
-					// fallback must hit the CLICKED button's endpoint: the
+					// (and carries the Set-Cookie either way). The
 					// programmatic submit() uses the form's action, so point
-					// it at the intent first.
-					if (btn && btn.formAction) likeForm.action = btn.formAction;
-					likeForm.submit();
+					// it at the clicked button's endpoint first.
+					if (btn && btn.formAction) form.action = btn.formAction;
+					form.submit();
 				})
 				.finally(() => {
-					if (likeBtn) likeBtn.disabled = false;
-					if (dislikeBtn) dislikeBtn.disabled = false;
+					setTogglesDisabled(false);
 				});
 		});
 	}
 
+	enhanceToggleForm(likeForm, (data) => {
+		const likeBtn = document.getElementById("like-btn");
+		const dislikeBtn = document.getElementById("dislike-btn");
+		if (likeBtn) {
+			likeBtn.classList.toggle("liked", !!data.liked);
+			likeBtn.setAttribute("aria-pressed", data.liked ? "true" : "false");
+			likeBtn.title = data.liked ? "unlike" : "like";
+		}
+		if (dislikeBtn) {
+			dislikeBtn.classList.toggle("disliked", !!data.disliked);
+			dislikeBtn.setAttribute("aria-pressed", data.disliked ? "true" : "false");
+			dislikeBtn.title = data.disliked ? "remove dislike" : "dislike";
+		}
+		const lc = document.getElementById("like-count");
+		if (lc && Number.isFinite(data.likes)) lc.textContent = String(data.likes);
+		const dc = document.getElementById("dislike-count");
+		if (dc && Number.isFinite(data.dislikes)) dc.textContent = String(data.dislikes);
+	});
+
+	enhanceToggleForm(reactForm, (data) => {
+		// {emoji, reacted, reactions}: the toggled emoji's button flips
+		// its pressed state; every count span re-renders from the full
+		// absolute tally (any toggle can move only one emoji's count,
+		// but re-rendering from the map needs no per-span reasoning).
+		const btn = reactForm && reactForm.querySelector('button[data-emoji="' + (data.emoji || "") + '"]');
+		if (btn) {
+			btn.classList.toggle("reacted", !!data.reacted);
+			btn.setAttribute("aria-pressed", data.reacted ? "true" : "false");
+		}
+		if (data.reactions) {
+			for (const span of document.querySelectorAll(".react-count")) {
+				const n = data.reactions[span.dataset.emoji];
+				if (Number.isFinite(n)) span.textContent = String(n);
+			}
+		}
+	});
+
 	// ---- SSE: ONE stream for the whole page ----
-	// image-liked keeps THIS image's tallies fresh when anyone votes
-	// (the pressed states are never touched — only the local visitor's
-	// own toggle owns those). image-new drives the live prev-chevron
+	// image-liked keeps THIS image's tallies fresh when anyone votes,
+	// image-reacted the same for reaction counts (the pressed states
+	// are never touched — only the local visitor's own toggle owns
+	// those). image-new drives the live prev-chevron
 	// reveal, which only means anything at the newest end
 	// (data-at-end); it is subscribed unconditionally anyway so the
 	// count handler needs no second stream (each connect() is its
@@ -537,6 +563,16 @@ export function boot() {
 				if (lc && Number.isFinite(ev.likes)) lc.textContent = String(ev.likes);
 				const dc = document.getElementById("dislike-count");
 				if (dc && Number.isFinite(ev.dislikes)) dc.textContent = String(ev.dislikes);
+			},
+			"image-reacted": (ev) => {
+				// Full absolute tally: refresh every reaction count
+				// span (pressed states are only ever the local
+				// visitor's — never touched here).
+				if (!ev || ev.id !== currentID || !ev.reactions) return;
+				for (const span of document.querySelectorAll(".react-count")) {
+					const n = ev.reactions[span.dataset.emoji];
+					if (Number.isFinite(n)) span.textContent = String(n);
+				}
 			},
 			"image-new": () => {
 				if (document.body.dataset.atEnd !== "true") return;

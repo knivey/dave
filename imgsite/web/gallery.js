@@ -5,7 +5,7 @@
 // (net-score) sort mode (fragment URLs carry &sort=liked, arrivals
 // buffer behind the pill), and SSE live updates (image-new prepend,
 // thumb-ready swap, image-hidden card drop, image-liked tally
-// updates, reset reload).
+// updates, image-reacted badge rebuilds, reset reload).
 "use strict";
 
 import { connect } from "./sse.js";
@@ -53,6 +53,13 @@ let fragmentURLFn = null;
 //     page (the mutable-sort-cursor caveat, db.go) — loadMore's
 //     append-dedupe absorbs it.
 let sortLiked = false;
+
+// Configured reaction glyphs (name → glyph) from body[data-reactions],
+// parsed once at boot; null when the feature is off. The JSON's key
+// order IS the configured order (the server marshals it ordered) —
+// the card badge picker iterates it so count ties keep the preset
+// order, matching topCardReactions server-side.
+let reactionGlyphs = null;
 
 // Provider generation, bumped on every setFragmentURL swap. Retrying
 // loadMore chains capture it so a swap can strand their pending retry
@@ -147,6 +154,11 @@ export function boot() {
 	grid = document.getElementById("grid");
 	if (!grid) return;
 	sortLiked = document.body.dataset.sort === "liked";
+	try {
+		reactionGlyphs = JSON.parse(document.body.dataset.reactions || "null");
+	} catch {
+		reactionGlyphs = null; // malformed embed: badges just never render
+	}
 
 	const observer = new IntersectionObserver(
 		(entries) => {
@@ -485,9 +497,10 @@ function buildCard(ev) {
 	time.textContent = isNaN(ts.getTime()) ? ev.created_at : ts.toLocaleString();
 
 	// Meta row mirrors the server card shape (time + optional .counts
-	// wrapper inside div.meta) so the image-liked tally updater can
-	// treat prepended and rendered cards identically. New arrivals
-	// have zero votes, so no counts spans are created here.
+	// wrapper inside div.meta) so the image-liked/image-reacted
+	// updaters can treat prepended and rendered cards identically.
+	// New arrivals have zero votes and reactions, so no counts spans
+	// are created here.
 	const meta = document.createElement("div");
 	meta.className = "meta";
 	meta.appendChild(time);
@@ -666,13 +679,22 @@ function onImageHidden(ev) {
 // first moves past zero, textContent swapped while it stays positive,
 // removed when it falls back to zero — the same
 // present-only-when-nonzero contract the server template renders. The
-// wrapper itself is created on the first non-zero tally of either
-// kind and dropped when both return to zero, exactly mirroring the
-// template's {{if or .LikeCount .DislikeCount}} guard.
+// wrapper itself is created on the first non-zero tally of any kind
+// (vote or reaction) and dropped only when BOTH vote tallies and the
+// reaction strip are gone, exactly mirroring the template's
+// {{if or .LikeCount .DislikeCount .TopReactions}} guard.
 function setCardCounts(card, likes, dislikes) {
 	let wrap = card.querySelector(".counts");
 	if (likes <= 0 && dislikes <= 0) {
-		if (wrap) wrap.remove();
+		// Votes fell to zero: the SPANS must go even when the wrapper
+		// survives to host a reaction strip — skipping this (the
+		// pre-reactions shape, where wrap.remove() took the spans
+		// along) stranded a stale "♥ 1" next to live badges forever.
+		if (wrap) {
+			setTallySpan(wrap, "likes", "\u2665", 0);
+			setTallySpan(wrap, "dislikes", "\uD83D\uDC94", 0);
+			if (!wrap.querySelector(".reacts")) wrap.remove();
+		}
 		return;
 	}
 	if (!wrap) {
@@ -703,6 +725,70 @@ function setTallySpan(wrap, className, glyph, count) {
 	}
 }
 
+// topBadges picks the card's reaction badge list from a tally map:
+// configured emojis only (glyphs come from reactionGlyphs — dormant
+// names can't render), top 2 by count, configured order breaking ties
+// (Object key order is the configured order and Array#sort is
+// stable). Mirrors topCardReactions server-side.
+function topBadges(tally) {
+	if (!reactionGlyphs || !tally) return [];
+	const out = [];
+	for (const name of Object.keys(reactionGlyphs)) {
+		const n = tally[name];
+		if (Number.isFinite(n) && n > 0) {
+			out.push({ name, glyph: reactionGlyphs[name], count: n });
+		}
+	}
+	out.sort((a, b) => b.count - a.count);
+	return out.slice(0, cardReactionBadges);
+}
+
+// cardReactionBadges mirrors the server's constant (reactions.go):
+// how many reaction badges a card shows.
+const cardReactionBadges = 2;
+
+// setCardReactions rebuilds one card's .reacts strip (inside the
+// .counts wrapper, after the vote spans) from a tally map. Rebuild-
+// not-diff: the top-2 membership can change on any toggle, so
+// replacing the strip's children is the simple correct move. The
+// strip drops when no configured emoji has a count; the wrapper
+// drops with it only when the vote spans are gone too (shared
+// lifecycle with setCardCounts — see its comment).
+function setCardReactions(card, tally) {
+	let wrap = card.querySelector(".counts");
+	const badges = topBadges(tally);
+	if (badges.length === 0) {
+		if (wrap) {
+			const strip = wrap.querySelector(".reacts");
+			if (strip) strip.remove();
+			if (!wrap.querySelector(".likes") && !wrap.querySelector(".dislikes")) wrap.remove();
+		}
+		return;
+	}
+	if (!wrap) {
+		wrap = document.createElement("span");
+		wrap.className = "counts";
+		const meta = card.querySelector(".meta");
+		if (!meta) return; // malformed card: nothing to hang the wrapper on
+		meta.appendChild(wrap);
+	}
+	let strip = wrap.querySelector(".reacts");
+	if (!strip) {
+		strip = document.createElement("span");
+		strip.className = "reacts";
+		wrap.appendChild(strip);
+	}
+	const parts = [];
+	for (const b of badges) {
+		const s = document.createElement("span");
+		s.className = "react";
+		s.dataset.emoji = b.name;
+		s.textContent = b.glyph + " " + b.count;
+		parts.push(s);
+	}
+	strip.replaceChildren(...parts);
+}
+
 // onImageLiked updates a card's tallies when any visitor toggles a
 // vote (SSE image-liked, published after the toggle commits — likes
 // AND dislikes ride one event because every toggle can move both).
@@ -716,6 +802,20 @@ function onImageLiked(ev) {
 	if (card) setCardCounts(card, ev.likes, ev.dislikes);
 	for (let i = detached.length - 1; i >= 0; i--) {
 		if (detached[i].dataset.id === ev.id) setCardCounts(detached[i], ev.likes, ev.dislikes);
+	}
+}
+
+// onImageReacted rebuilds a card's reaction badges when any visitor
+// toggles a reaction (SSE image-reacted, published after the commit
+// with the FULL absolute tally map — dormant names arrive too and are
+// filtered by topBadges' glyph lookup). Detached sweep like the
+// other card updaters.
+function onImageReacted(ev) {
+	if (!grid || !ev || !ev.id || !ev.reactions) return;
+	const card = grid.querySelector('article.card[data-id="' + CSS.escape(ev.id) + '"]');
+	if (card) setCardReactions(card, ev.reactions);
+	for (let i = detached.length - 1; i >= 0; i--) {
+		if (detached[i].dataset.id === ev.id) setCardReactions(detached[i], ev.reactions);
 	}
 }
 
@@ -779,6 +879,7 @@ function setupLiveUpdates() {
 			"thumb-ready": onThumbReady,
 			"image-hidden": onImageHidden,
 			"image-liked": onImageLiked,
+			"image-reacted": onImageReacted,
 			// Overflow / replay-gap recovery: full refetch is always correct.
 			onReset: () => location.reload(),
 		},

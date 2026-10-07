@@ -49,6 +49,10 @@ const (
 	// the same tallies, so the event reads "this image's vote state
 	// changed".)
 	eventImageLiked = "image-liked"
+	// eventImageReacted is the reaction-tally change event: published
+	// after every committed reaction toggle with the image's FULL
+	// post-toggle tally map (all stored emoji names).
+	eventImageReacted = "image-reacted"
 )
 
 // Hub tuning constants. Deliberately not config: these are
@@ -107,6 +111,17 @@ type imageLikedEvent struct {
 	ID       string `json:"id"`
 	Likes    int    `json:"likes"`
 	Dislikes int    `json:"dislikes"`
+}
+
+// imageReactedEvent is the image-reacted payload: the id plus its
+// full absolute reaction tally (emoji name → count; absent = zero).
+// The whole map rides one event so any toggle converges the client's
+// row regardless of which emojis it missed. Names not in the live
+// config can appear (dormant rows); clients filter through the
+// glyph map embedded in the page.
+type imageReactedEvent struct {
+	ID        string         `json:"id"`
+	Reactions map[string]int `json:"reactions"`
 }
 
 // event is one SSE frame. ID is the monotonic sequence number used
@@ -225,16 +240,17 @@ func (h *sseHub) publishVisible(name string, payload any, safeVisible bool) uint
 
 // visibleToSafe reports whether ev may be delivered to a safe-site
 // subscriber. Only the per-image events (image-new, thumb-ready,
-// image-liked) carry row-derived visibility; every other event name is
-// delivered to both sites unfiltered — image-hidden above all: dropping
-// a card that isn't present is a client no-op, while withholding it
-// would strand a stale card on the safe site after an admin hides an
-// image that site could see. image-liked must be site-gated for the
+// image-liked, image-reacted) carry row-derived visibility; every
+// other event name is delivered to both sites unfiltered —
+// image-hidden above all: dropping a card that isn't present is a
+// client no-op, while withholding it would strand a stale card on
+// the safe site after an admin hides an image that site could see.
+// image-liked and image-reacted must be site-gated for the
 // same reason image-new is: the event's mere arrival names an image,
 // which is an existence leak for rows the safe host must 404.
 func visibleToSafe(ev event) bool {
 	switch ev.Name {
-	case eventImageNew, eventThumbReady, eventImageLiked:
+	case eventImageNew, eventThumbReady, eventImageLiked, eventImageReacted:
 		return ev.SafeVisible
 	default:
 		return true

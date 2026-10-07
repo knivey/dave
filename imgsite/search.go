@@ -680,6 +680,9 @@ func runSearch(db *sqlx.DB, q string, cur searchCursor, limit, prefixMin, snippe
 	if err := hydrateVoteCounts(db, ptrs); err != nil {
 		return searchResult{}, err
 	}
+	if err := hydrateReactionCounts(db, ptrs); err != nil {
+		return searchResult{}, err
+	}
 	return res, nil
 }
 
@@ -816,6 +819,7 @@ func buildSearchView(cfg Config, q string, res searchResult) galleryView {
 		HasMore:       res.HasMore,
 		OGTitle:       searchPageTitle(cfg, q),
 		OGDescription: cfg.Site.Description,
+		ReactionsJSON: reactionsGlyphJSON(cfg),
 	}
 	if res.HasMore {
 		v.NextCursor = formatSearchCursor(res.Next)

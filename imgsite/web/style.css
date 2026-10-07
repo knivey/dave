@@ -59,6 +59,11 @@ header.site p { color: #999; margin: 0.25rem 0 0; }
 .card .counts { display: flex; align-items: baseline; gap: 0.5rem; margin-left: auto; white-space: nowrap; }
 .card .likes { color: #ff6b81; font-size: 0.8125rem; white-space: nowrap; }
 .card .dislikes { color: #7f96ad; font-size: 0.8125rem; white-space: nowrap; }
+/* Reaction badges: the top configured emojis by count (JS rebuilds
+   them from image-reacted SSE via the body[data-reactions] glyph
+   map). Own separator gap so a badge strip reads as one group next
+   to the vote tallies. */
+.card .reacts { display: flex; align-items: baseline; gap: 0.4rem; padding-left: 0.35rem; border-left: 1px solid #2c2c31; font-size: 0.8125rem; white-space: nowrap; }
 .sentinel { width: 100%; height: 1px; grid-column: 1 / -1; }
 
 /* Search box (gallery header form). No-JS search is a plain GET to

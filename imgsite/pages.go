@@ -211,9 +211,14 @@ table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
 .like-btn:active { border-color: #b5566c; }
 .dislike-btn.disliked { color: #7f96ad; border-color: #3d4a58; }
 .dislike-btn:active { border-color: #5a7290; }
+/* Reaction row: wraps when the preset is wide; the pressed state is
+   a warm amber so it reads apart from both vote buttons. */
+.react-form { margin: 0 0 0.5rem; display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.react-btn.reacted { color: #ffd27f; border-color: #7a6a3d; }
+.react-btn:active { border-color: #b5994d; }
 </style>
 </head>
-<body data-page="image" data-image-id="{{.ID}}"{{if .AtEnd}} data-at-end="true"{{end}}{{if .LastEvent}} data-last-event="{{.LastEvent}}"{{end}}>
+<body data-page="image" data-image-id="{{.ID}}"{{if .AtEnd}} data-at-end="true"{{end}}{{if .LastEvent}} data-last-event="{{.LastEvent}}"{{end}}{{if .ReactionsJSON}} data-reactions="{{.ReactionsJSON}}"{{end}}>
 <nav class="topnav">
 <a href="/">&larr; gallery</a>
 <span class="spacer"></span>
@@ -276,6 +281,19 @@ table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
 <button type="submit" class="like-btn{{if .LikedByYou}} liked{{end}}" id="like-btn" formaction="/{{.ID}}/like" aria-pressed="{{if .LikedByYou}}true{{else}}false{{end}}" title="{{if .LikedByYou}}unlike{{else}}like{{end}}">&#9829; <span id="like-count">{{.LikeCount}}</span></button>
 <button type="submit" class="dislike-btn{{if .DislikedByYou}} disliked{{end}}" id="dislike-btn" formaction="/{{.ID}}/dislike" aria-pressed="{{if .DislikedByYou}}true{{else}}false{{end}}" title="{{if .DislikedByYou}}remove dislike{{else}}dislike{{end}}">&#128148; <span id="dislike-count">{{.DislikeCount}}</span></button>
 </form>
+{{/* Reaction row (anonymous, cookie-token identity — see
+      reactions.go). One button per configured emoji, each carrying
+      its own formaction (/{{.ID}}/react/<name>); Enter inside this
+      form implicit-submits the FIRST emoji. Unlike the vote tallies,
+      counts render at zero too — the buttons ARE the affordance.
+      image.js intercepts the submit (e.submitter tells it which
+      emoji) and image-reacted SSE keeps every button's count fresh;
+      pressed states are only ever the local visitor's. */}}
+{{if .ReactionButtons}}
+<form class="react-form" method="post">
+{{range .ReactionButtons}}<button type="submit" class="react-btn{{if .Mine}} reacted{{end}}" data-emoji="{{.Name}}" formaction="/{{$.ID}}/react/{{.Name}}" aria-pressed="{{if .Mine}}true{{else}}false{{end}}" title="{{.Name}}">{{.Glyph}} <span class="react-count" data-emoji="{{.Name}}">{{.Count}}</span></button>
+{{end}}</form>
+{{end}}
 
 <h2>Original prompt</h2>
 {{if .OriginalPrompt}}<p class="original">{{.OriginalPrompt}}</p>{{else}}<p class="provenance"><em>(no prompt recorded)</em></p>{{end}}
@@ -383,15 +401,18 @@ const cardsPartialSrc = `{{define "cards"}}{{range .Cards}}<article class="card"
 {{if .ThumbFailed}}<img loading="lazy" src="{{.OrigURL}}" alt="{{.PromptSnippet}}">{{else if .ThumbPending}}<img class="pending" loading="lazy" src="{{.ThumbURL}}" data-orig="{{.OrigURL}}" alt="{{.PromptSnippet}}">{{else}}<img loading="lazy" src="{{.ThumbURL}}" alt="{{.PromptSnippet}}">{{end}}
 </a>
 {{if .SnippetParts}}<p class="prompt">{{range .SnippetParts}}{{if .Hit}}<mark>{{.Text}}</mark>{{else}}{{.Text}}{{end}}{{end}}</p>{{else}}<p class="prompt">{{.PromptSnippet}}</p>{{end}}
-{{/* Meta row: timestamp left, vote counts right-justified on the same
-     line (owner request, Oct 2026). The .counts wrapper owns the
-     right side as ONE flex child (likes and dislikes inside it), so
-     the meta row's space-between stays two-sided however many count
-     spans exist. Each span renders ONLY for its non-zero count — zero
-     spans on every card are noise; the SSE image-liked handler
-     manages the spans (and the wrapper) client-side when a count
-     moves 0→1. */}}
-<div class="meta"><time datetime="{{.CreatedRFC3339}}" data-ts="{{.CreatedRFC3339}}">{{.Timestamp}}</time>{{if or .LikeCount .DislikeCount}}<span class="counts">{{if .LikeCount}}<span class="likes" data-count="{{.LikeCount}}">&#9829; {{.LikeCount}}</span>{{end}}{{if .DislikeCount}}<span class="dislikes" data-count="{{.DislikeCount}}">&#128148; {{.DislikeCount}}</span>{{end}}</span>{{end}}</div>
+{{/* Meta row: timestamp left, vote counts + reaction badges
+     right-justified on the same line (owner request, Oct 2026). The
+     .counts wrapper owns the right side as ONE flex child (likes,
+     dislikes, and the .reacts badges inside), so the meta row's
+     space-between stays two-sided however many spans exist. Each
+     vote span renders ONLY for its non-zero count — zero spans on
+     every card are noise; the SSE image-liked handler manages the
+     spans (and the wrapper) client-side when a count moves 0→1. The
+     reaction badges are the top 2 configured emojis by count
+     (topCardReactions); the SSE image-reacted handler rebuilds
+     them. */}}
+<div class="meta"><time datetime="{{.CreatedRFC3339}}" data-ts="{{.CreatedRFC3339}}">{{.Timestamp}}</time>{{if or .LikeCount .DislikeCount .TopReactions}}<span class="counts">{{if .LikeCount}}<span class="likes" data-count="{{.LikeCount}}">&#9829; {{.LikeCount}}</span>{{end}}{{if .DislikeCount}}<span class="dislikes" data-count="{{.DislikeCount}}">&#128148; {{.DislikeCount}}</span>{{end}}{{if .TopReactions}}<span class="reacts">{{range .TopReactions}}<span class="react" data-emoji="{{.Name}}">{{.Glyph}} {{.Count}}</span>{{end}}</span>{{end}}</span>{{end}}</div>
 </article>
 {{end}}{{if .NoResults}}<p class="no-results">no results for {{.Query}}</p>{{end}}{{if .NothingSearched}}<p class="no-results">nothing searched yet — type a query</p>{{end}}{{if .EmptyGallery}}<p class="no-results">nothing here yet — images appear here as they are generated</p>{{end}}{{if .HasMore}}<div class="sentinel" data-next-cursor="{{.NextCursor}}"></div>{{end}}{{end}}`
 
@@ -412,7 +433,7 @@ const galleryPageSrc = `<!DOCTYPE html>
 {{template "head-extras" .}}<link rel="stylesheet" href="/static/style.css">
 <script type="module" src="/static/app.js"></script>
 </head>
-<body data-page="gallery" data-gallery-title="{{.Title}}"{{if .SortLiked}} data-sort="liked"{{end}}{{if .LastEvent}} data-last-event="{{.LastEvent}}"{{end}}>
+<body data-page="gallery" data-gallery-title="{{.Title}}"{{if .SortLiked}} data-sort="liked"{{end}}{{if .LastEvent}} data-last-event="{{.LastEvent}}"{{end}}{{if .ReactionsJSON}} data-reactions="{{.ReactionsJSON}}"{{end}}>
 <header class="site">
 <div class="head-row">
 <div>
@@ -460,7 +481,7 @@ const searchPageSrc = `<!DOCTYPE html>
 {{template "head-extras" .}}<link rel="stylesheet" href="/static/style.css">
 <script type="module" src="/static/app.js"></script>
 </head>
-<body data-page="gallery" data-gallery-title="{{.SiteTitle}}"{{if .LastEvent}} data-last-event="{{.LastEvent}}"{{end}}>
+<body data-page="gallery" data-gallery-title="{{.SiteTitle}}"{{if .LastEvent}} data-last-event="{{.LastEvent}}"{{end}}{{if .ReactionsJSON}} data-reactions="{{.ReactionsJSON}}"{{end}}>
 <header class="site">
 <div class="head-row">
 <div>
@@ -501,6 +522,10 @@ type galleryCard struct {
 	// renders no span for that count (see the cards partial).
 	LikeCount    int
 	DislikeCount int
+	// TopReactions is the card's badge slice: configured emojis with
+	// non-zero counts, top N by count, configured order breaking ties
+	// (topCardReactions). Nil renders nothing.
+	TopReactions []reactionBadge
 	// SnippetParts, when non-nil, replaces the plain prompt preview
 	// with a highlighted match snippet (search results only).
 	SnippetParts []snippetPart
@@ -545,6 +570,30 @@ type galleryView struct {
 	// aria-current, the body data-sort attribute (the JS fragment
 	// fetcher appends &sort=liked from it), and the NextCursor format.
 	SortLiked bool
+
+	// ReactionsJSON is the configured preset as a marshaled
+	// name→glyph map, embedded as body[data-reactions] so the JS
+	// layers can map SSE reaction names to glyphs and keep the
+	// configured order for badge tie-breaks. Empty when the feature
+	// is disabled (attribute omitted).
+	ReactionsJSON string
+}
+
+// reactionBadge is one gallery-card reaction badge (glyph + count).
+type reactionBadge struct {
+	Name  string
+	Glyph string
+	Count int
+}
+
+// reactionButton is one details-page reaction button's state: the
+// preset entry, the image's count for it, and whether the rendering
+// visitor's token holds it (server-rendered pressed state).
+type reactionButton struct {
+	Name  string
+	Glyph string
+	Count int
+	Mine  bool
 }
 
 // galleryPageSize is the number of cards per keyset page; handlers fetch
@@ -657,6 +706,7 @@ func buildGalleryView(cfg Config, rows []dbImage, sortLiked bool) galleryView {
 		OGTitle:       cfg.Site.Title,
 		OGDescription: cfg.Site.Description,
 		SortLiked:     sortLiked,
+		ReactionsJSON: reactionsGlyphJSON(cfg),
 	}
 	if len(rows) > galleryPageSize {
 		v.HasMore = true
@@ -700,7 +750,37 @@ func galleryCardFromImage(cfg Config, img *dbImage) galleryCard {
 		ThumbFailed:    img.ThumbStatus == thumbStatusFailed,
 		LikeCount:      img.LikeCount,
 		DislikeCount:   img.DislikeCount,
+		TopReactions:   topCardReactions(cfg, img.Reactions),
 	}
+}
+
+// reactionsGlyphJSON marshals the configured preset as the JSON the
+// page templates embed in body[data-reactions]: {"name":"glyph",…}.
+// Key order follows the configured order (encoding/json keeps map
+// keys sorted, so it marshals an ordered slice of single-entry maps'
+// struct instead — a hand-built buffer preserves order deliberately:
+// the JS badge tie-break iterates the parsed object's key order).
+// Empty string when the feature is disabled.
+func reactionsGlyphJSON(cfg Config) string {
+	if !cfg.Reactions.reactionsEnabled() || len(cfg.Reactions.Emojis) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, e := range cfg.Reactions.Emojis {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		// json.Marshal per entry: correct string escaping without
+		// hand-rolling it; the glyphs are arbitrary configured text.
+		k, _ := json.Marshal(e.Name)
+		v, _ := json.Marshal(e.Glyph)
+		b.Write(k)
+		b.WriteByte(':')
+		b.Write(v)
+	}
+	b.WriteByte('}')
+	return b.String()
 }
 
 // formatKeysetCursor builds the plan's cursor wire format:
@@ -911,6 +991,14 @@ type imageView struct {
 	DislikeCount  int
 	LikedByYou    bool
 	DislikedByYou bool
+
+	// ReactionButtons is the details-page reaction row: one entry per
+	// configured emoji with its count and the visitor's pressed state
+	// (set by handleImagePage from dbGetReactionState; nil when the
+	// feature is disabled renders no form). ReactionsJSON is the
+	// preset glyph map for the page's body[data-reactions].
+	ReactionButtons []reactionButton
+	ReactionsJSON   string
 
 	// LastEvent is the SSE stream position captured at render time —
 	// same replay-cursor contract as galleryView.LastEvent (nil = no
@@ -1184,6 +1272,7 @@ func (a *App) handleImagePage(w http.ResponseWriter, r *http.Request, id string)
 	}
 
 	view := buildImageView(img, prev, next, a.absBaseForSite(sc, r))
+	cfg := a.getConfig()
 	// Vote state: counts always, the visitor's own stance when they
 	// carry a liker cookie (page GETs never mint one — only the POST
 	// does). The row was just fetched, so an error here is drift, not
@@ -1200,6 +1289,23 @@ func (a *App) handleImagePage(w http.ResponseWriter, r *http.Request, id string)
 	} else {
 		view.LikeCount, view.DislikeCount = likes, dislikes
 		view.LikedByYou, view.DislikedByYou = myVote == voteLike, myVote == voteDislike
+	}
+	// Reaction state (details-page button row): the preset comes from
+	// this request's config snapshot, the counts and pressed states
+	// from the same token's rows. Disabled feature renders no row.
+	// Degrade to "no reactions" on error, same as the vote block.
+	view.ReactionsJSON = reactionsGlyphJSON(cfg)
+	if cfg.Reactions.reactionsEnabled() {
+		tally, mine, err := dbGetReactionState(a.db, img.ID, token)
+		if err != nil {
+			logger.Error("reaction state lookup failed", "id", id, "error", err)
+		} else {
+			view.ReactionButtons = make([]reactionButton, 0, len(cfg.Reactions.Emojis))
+			for _, e := range cfg.Reactions.Emojis {
+				view.ReactionButtons = append(view.ReactionButtons,
+					reactionButton{Name: e.Name, Glyph: e.Glyph, Count: tally[e.Name], Mine: mine[e.Name]})
+			}
+		}
 	}
 	if hasHub {
 		view.LastEvent = &lastEvent

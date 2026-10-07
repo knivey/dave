@@ -44,6 +44,21 @@
 #   prefix_min    = (int) minimum chars before prefix token
 #                   matching kicks in                             default: 2
 #
+# [reactions]  (optional — omit the section entirely for the built-in
+#               default emoji set)
+#   enabled = (bool) false disables the whole feature (no button row,
+#             card badges, or toggle endpoints) without touching
+#             stored rows; absent/true keeps it on.      default: true
+#
+# [[reactions.emoji]]  (array of tables; ordered — the order is the
+#             details-page button order and the card-badge tie-break
+#             order; at most 12 entries)
+#   name  = (string) stable ASCII key, 1-24 chars of [a-z0-9_], not
+#           all digits (JS key-order parity) — stored in the DB and
+#           embedded in the toggle URL, so it must never change
+#           meaning; the glyph is what's displayed
+#   glyph = (string) 1-16 UTF-8 runes shown on every surface
+#
 # [site]
 #   title       = (string) site title                      default: "dave's image dump"
 #   description = (string) site description                 default: "generations from IRC"
@@ -67,7 +82,9 @@
 #                      REQUIRED when the section is present   no default
 #
 # Reloadable via SIGHUP or POST /admin/reload (X-API-Key):
-#   site.*, safe_site.*, thumbnails.* (except workers), search.*, upload.*
+#   site.*, safe_site.*, thumbnails.* (except workers), search.*, upload.*,
+#   reactions.* (curating the set never migrates data — rows key on
+#   the name; names removed from the set simply stop rendering)
 # Everything else requires a restart.
 
 # ---------------------------------------------------------------------------
@@ -102,6 +119,21 @@
 # [search]
 # snippet_chars = 160
 # prefix_min = 2
+#
+# [reactions]
+# enabled = true
+#
+# [[reactions.emoji]]
+# name = "fire"
+# glyph = "\U0001F525"
+#
+# [[reactions.emoji]]
+# name = "laugh"
+# glyph = "\U0001F602"
+#
+# [[reactions.emoji]]
+# name = "wow"
+# glyph = "\U0001F62E"
 #
 # [site]
 # title = "dave's image dump"

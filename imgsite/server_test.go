@@ -532,8 +532,8 @@ func TestGalleryLoadMoreReArmsSentinel(t *testing.T) {
 //     BATCHES AT THE TAIL — the array then reads in the exact order
 //     restore() prepends in. The previous `batch.concat(detached)`
 //     built it oldest-batch-first and restore() reattached cards as
-//     [B2, B1, rest] — scrambling gallery order after any deep scroll
-//   - scroll-back (latent only while the sentinel bug kept trim()
+//     [B2, B1, rest] — scrambling gallery order after any deep
+//     scroll-back (latent only while the sentinel bug kept trim()
 //     unreachable; first observed live once paging was repaired).
 //   - MODE GATING: restore() must be length-gated ONLY. The mode guard
 //     lives in resetPaging at swapGrid's edges (search.js drops the
@@ -576,6 +576,44 @@ func TestGalleryTrimRestoreOrdering(t *testing.T) {
 		"restore must stay length-gated (a no-op when nothing is detached)")
 	assert.NotContains(t, rhandler, "filterActive",
 		"restore must not be filter-gated — resetPaging at swapGrid's edges is the mode guard, so detached cards always belong to the grid currently attached (results and liked modes included)")
+}
+
+// TestSearchSwapGridResetPagingBeforeReplace pins the OTHER half of the
+// trim/restore mode-agnostic invariant (source-level; behavioral pin is
+// the browser harness at ~/dev/imgsite-results-restore/verify.ts):
+// search.js's swapGrid must call resetPaging() BEFORE
+// grid.replaceChildren(...). That synchronous, back-to-back pair is
+// what guarantees everything left in gallery.js's `detached` set was
+// trimmed from the grid currently attached — a stale set surviving a
+// grid swap is exactly the cross-mode contamination restore() would
+// then reintroduce when the user scrolls back up. Deleting the call or
+// moving it after the swap must fail here, not just in the browser
+// harness.
+func TestSearchSwapGridResetPagingBeforeReplace(t *testing.T) {
+	app := newTestApp(t, testConfig())
+	ts := newTestServer(t, app)
+
+	resp := fetchPath(t, ts, "/static/search.js")
+	require.Equal(t, 200, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	js := string(body)
+
+	start := strings.Index(js, "\tasync function swapGrid(")
+	require.NotEqual(t, -1, start, "swapGrid not found in served search.js")
+	rest := js[start:]
+	end := strings.Index(rest[len("\tasync function swapGrid("):], "\n\t}")
+	require.NotEqual(t, -1, end, "swapGrid body end not found in served search.js")
+	handler := rest[:end+len("\n\t}")]
+
+	assert.Contains(t, handler, "resetPaging();",
+		"swapGrid must drop the detached set on EVERY grid swap (query entered AND gallery restored) — it is the mode guard restore() relies on")
+	rIdx := strings.Index(handler, "resetPaging();")
+	cIdx := strings.Index(handler, "grid.replaceChildren(")
+	require.NotEqual(t, -1, rIdx)
+	require.NotEqual(t, -1, cIdx)
+	assert.Less(t, rIdx, cIdx,
+		"resetPaging must run BEFORE replaceChildren — the pair stays synchronous so no callback can observe a swapped grid with a stale detached set")
 }
 
 // TestGalleryMobileCSSPins pins the gallery-layer mobile fixes in the

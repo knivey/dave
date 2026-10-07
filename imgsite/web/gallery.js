@@ -195,10 +195,18 @@ export function boot() {
 			// a row whose count rose between page fetches can legally
 			// reappear on the next page (see db.go's mutable-sort
 			// note). Skipping an already-attached card keeps the grid
-			// honest without punishing default mode.
+			// honest without punishing default mode. The set is seeded
+			// from the DETACHED cards too: an un-like can drop a
+			// trimmed top card's key back below the cursor, and its
+			// reappearance on a fetched page would append a twin while
+			// the original waits in `detached` — restore() would then
+			// prepend a duplicate data-id. Skipping it here keeps the
+			// detached original the single copy (it reattaches on
+			// scroll-back with its live like-count span intact).
 			const seen = new Set(
 				Array.from(grid.querySelectorAll("article.card")).map((c) => c.dataset.id)
 			);
+			for (const d of detached) seen.add(d.dataset.id);
 			for (const card of doc.querySelectorAll("article.card")) {
 				if (seen.has(card.dataset.id)) continue;
 				seen.add(card.dataset.id);
@@ -300,7 +308,11 @@ export function boot() {
 	// — the same mutable-count caveat loadMore's append-dedupe
 	// documents (like_count is a moving sort key, db.go). The counts
 	// themselves stay correct either way: onImageLiked sweeps the
-	// detached set while the cards wait here.
+	// detached set while the cards wait here. The duplicate shape the
+	// same mutability could otherwise produce — an un-like dropping a
+	// detached card's key below the cursor so a fetched page re-serves
+	// it — is closed by loadMore seeding its dedupe set from
+	// `detached`.
 	function restore() {
 		if (detached.length === 0) return;
 		const doc = document.documentElement;

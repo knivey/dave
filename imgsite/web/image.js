@@ -345,6 +345,30 @@ export function boot() {
 		overlay.addEventListener("pointerup", (e) => onPointerEnd(e, true));
 		overlay.addEventListener("pointercancel", (e) => onPointerEnd(e, false));
 
+		// Viewport geometry can change under an open overlay (phone
+		// rotation, desktop window resize): a gesture's base snapshot
+		// went stale mid-gesture, and every later clamp/pinch
+		// computation bounded the pan against geometry that no longer
+		// exists — worst case a zoomed image parked at a clamp extreme
+		// before the change hangs off-screen after it. Refresh the
+		// snapshot IN PLACE (no gesture restart: the pinch anchor lives
+		// in element coordinates, which the box change does not
+		// invalidate — only its x0/y0 origin mapping does) and re-clamp
+		// the standing transform against the fresh box even when no
+		// gesture is active. resize also fires for rotation in
+		// Chromium; orientationchange is kept for engines where it
+		// fires separately — a double-fire is harmless, clampT is a
+		// pure bound.
+		function refreshBaseBox() {
+			if (!isOpen()) return;
+			const b = baseBox();
+			if (gesture && gesture.base) gesture.base = b;
+			clampT(b);
+			applyZoom();
+		}
+		window.addEventListener("resize", refreshBaseBox);
+		window.addEventListener("orientationchange", refreshBaseBox);
+
 		// hitClose: pointer capture retargets pointer events to the
 		// overlay, so e.target cannot identify the ✕ — hit-test the
 		// release point instead.

@@ -24,13 +24,14 @@ let filterActive = false;
 let filterClearFn = null;
 let pendingNew = [];
 
-// Detached (trimmed) gallery cards in their original grid order —
-// newest first, exactly as they were attached. trim() moves cards here
-// instead of discarding them so restore() can put them back with zero
-// network traffic. Module-scoped (not boot-local) because search.js's
-// filter-exit path replaces the grid wholesale and must drop the
-// stale detached set (resetPaging) — restored gallery pages come from
-// a fresh fetch, never from pre-filter trimmings.
+// Detached (trimmed) cards in their original grid order — exactly as
+// they were attached. trim() moves cards here instead of discarding
+// them so restore() can put them back with zero network traffic.
+// Module-scoped (not boot-local) because search.js's grid swaps must
+// drop the stale detached set (resetPaging) on BOTH edges — entering a
+// query AND restoring the gallery. That is the invariant which lets
+// restore() stay mode-agnostic: anything still in here was trimmed
+// from the grid currently attached.
 let detached = [];
 
 // fetch-URL provider for infinite scroll. Default fetches the live
@@ -272,24 +273,36 @@ export function boot() {
 	}
 
 	// restore reattaches every retained card once the user scrolls back
-	// to the top, prepending them in array order — newest batch first,
-	// so the grid ends up newest-first again (the same order the pages
-	// were attached in; see trim()'s ORDERING note). The scroll offset
-	// is shifted by the height the prepend added, keeping the currently
-	// visible cards in view instead of jumping to the new top. Skipped
-	// while a search filter owns the grid: reattaching live-gallery
-	// cards into filtered results would lie about the filter (the same
-	// rule as live prepends); search.js's exit path refetches the
-	// gallery instead.
+	// to the top, prepending them in array order — first-trimmed batch
+	// first, so the grid ends up in the exact order the pages were
+	// attached in (newest-first in the gallery, rank-first in search
+	// results; see trim()'s ORDERING note). The scroll offset is
+	// shifted by the height the prepend added, keeping the currently
+	// visible cards in view instead of jumping to the new top.
 	//
-	// Results-mode asymmetry (accepted): trim() is NOT filter-gated, so
-	// in results mode the top-ranked cards still detach once the grid
-	// passes DOM_CAP — and with restore() gated off, scrolling back up
-	// cannot recover them; they stay detached until the next query
-	// swap's resetPaging drops them. Acceptable at realistic query
-	// sizes: trimming only begins past 200 attached result cards.
+	// Mode-agnostic by construction: trim()/restore() run in EVERY
+	// mode (default, search results, liked sort). The mode guard is
+	// resetPaging at swapGrid's EDGES (search.js) — it drops the whole
+	// detached set both when a query takes over the grid and when the
+	// gallery is restored — so anything still in `detached` was trimmed
+	// from the grid CURRENTLY attached, and reattaching it can never
+	// leak one mode's cards into another's grid. (swapGrid runs
+	// resetPaging and replaceChildren back-to-back, synchronously; the
+	// only async window, between enterResultsMode and the fetch
+	// resolving, still shows the old grid — matching the old detached
+	// set — so a restore firing there is also correct.) A filterActive
+	// gate here used to strand results-mode trims instead: top-ranked
+	// cards past DOM_CAP could never be recovered by scrolling back up
+	// (the old "results-mode asymmetry", since closed).
+	//
+	// Liked-mode wrinkle (accepted): restored cards sit at their
+	// detach-time position, which concurrent likes may have made stale
+	// — the same mutable-count caveat loadMore's append-dedupe
+	// documents (like_count is a moving sort key, db.go). The counts
+	// themselves stay correct either way: onImageLiked sweeps the
+	// detached set while the cards wait here.
 	function restore() {
-		if (filterActive || detached.length === 0) return;
+		if (detached.length === 0) return;
 		const doc = document.documentElement;
 		const prevHeight = doc.scrollHeight;
 		const prevTop = window.scrollY;

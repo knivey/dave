@@ -522,17 +522,27 @@ func TestGalleryLoadMoreReArmsSentinel(t *testing.T) {
 		"the successor sentinel must be appended before the old one is removed")
 }
 
-// TestGalleryTrimRestoreOrdering pins the trim()/restore() batch order
-// (source-level; behavioral pin is the browser harness): trim slices
-// each successive batch from the TOP of the remaining grid, so every
-// new batch is strictly OLDER than everything already detached, and
-// `detached` must accumulate NEW BATCHES AT THE TAIL — the array then
-// reads newest-first, which is exactly the order restore() prepends
-// in. The previous `batch.concat(detached)` built it oldest-batch-first
-// and restore() reattached cards as [B2, B1, rest] — scrambling gallery
-// order after any deep scroll + scroll-back (latent only while the
-// sentinel bug kept trim() unreachable; first observed live once paging
-// was repaired).
+// TestGalleryTrimRestoreOrdering pins the trim()/restore() mechanics
+// (source-level; behavioral pin is the browser harness at
+// ~/dev/imgsite-results-restore/verify.ts):
+//
+//   - ORDERING: trim slices each successive batch from the TOP of the
+//     remaining grid, so every new batch is strictly OLDER than
+//     everything already detached, and `detached` must accumulate NEW
+//     BATCHES AT THE TAIL — the array then reads in the exact order
+//     restore() prepends in. The previous `batch.concat(detached)`
+//     built it oldest-batch-first and restore() reattached cards as
+//     [B2, B1, rest] — scrambling gallery order after any deep scroll
+//   - scroll-back (latent only while the sentinel bug kept trim()
+//     unreachable; first observed live once paging was repaired).
+//   - MODE GATING: restore() must be length-gated ONLY. The mode guard
+//     lives in resetPaging at swapGrid's edges (search.js drops the
+//     whole detached set when a query takes over the grid AND when the
+//     gallery is restored), so whatever is still detached was trimmed
+//     from the grid currently attached — results mode and liked sort
+//     included. A filterActive gate strands those modes' top-ranked
+//     cards: past DOM_CAP they detach and could never be recovered by
+//     scrolling back up (the old accepted asymmetry, since closed).
 func TestGalleryTrimRestoreOrdering(t *testing.T) {
 	app := newTestApp(t, testConfig())
 	ts := newTestServer(t, app)
@@ -553,6 +563,19 @@ func TestGalleryTrimRestoreOrdering(t *testing.T) {
 		"trim must append new (older) batches at the tail so restore() prepends newest-first")
 	assert.NotContains(t, handler, "batch.concat(detached)",
 		"prepending oldest-batch-first scrambles the restored grid order")
+
+	// restore(): length-gated only, never filter-gated.
+	rstart := strings.Index(js, "\tfunction restore()")
+	require.NotEqual(t, -1, rstart, "restore not found in served gallery.js")
+	rrest := js[rstart:]
+	rend := strings.Index(rrest[len("\tfunction restore()"):], "\n\t}")
+	require.NotEqual(t, -1, rend, "restore body end not found in served gallery.js")
+	rhandler := rrest[:rend+len("\n\t}")]
+
+	assert.Contains(t, rhandler, "if (detached.length === 0) return;",
+		"restore must stay length-gated (a no-op when nothing is detached)")
+	assert.NotContains(t, rhandler, "filterActive",
+		"restore must not be filter-gated — resetPaging at swapGrid's edges is the mode guard, so detached cards always belong to the grid currently attached (results and liked modes included)")
 }
 
 // TestGalleryMobileCSSPins pins the gallery-layer mobile fixes in the

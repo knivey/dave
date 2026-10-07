@@ -99,17 +99,11 @@ func TestReactionKeyMigration007(t *testing.T) {
 		"default names converted, custom ASCII name dropped, emoji keys untouched")
 }
 
-// reactionTestConfig is testConfig with a small deterministic quick
-// bar (testConfig is a struct literal — normalize never runs, so
-// tests that want reactions must supply the set explicitly).
+// reactionTestConfig is testConfig — reactions are enabled by
+// default (the zero value means "on"), so there is nothing to
+// configure anymore. Kept as a named helper so the intent reads.
 func reactionTestConfig() Config {
-	cfg := testConfig()
-	cfg.Reactions = ReactionConfig{Emojis: []ReactionEmoji{
-		{Glyph: "\U0001F525"},                     // 🔥
-		{Glyph: "\U0001F602", Category: "laughs"}, // 😂
-		{Glyph: "\U0001F62E"},                     // 😮
-	}}
-	return cfg
+	return testConfig()
 }
 
 func TestToggleReactionRoundTrip(t *testing.T) {
@@ -262,93 +256,31 @@ func TestEmojiLess(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestLoadConfigReactions(t *testing.T) {
-	// Absent section → built-in default quick bar (a robust,
-	// categorized 30), enabled.
+	// Absent section → feature on (any-emoji, no curated list).
 	path := writeConfigFile(t, "[auth]\napi_key = \"secret\"\n")
 	cfg, err := loadConfig(path)
 	require.NoError(t, err)
 	assert.True(t, cfg.Reactions.reactionsEnabled(), "absent section defaults to enabled")
-	require.Len(t, cfg.Reactions.Emojis, 30, "default quick bar carries 30 entries")
-	names := map[string]bool{}
-	for _, e := range cfg.Reactions.Emojis {
-		require.True(t, validReactionEmoji(e.Glyph), "default glyphs are valid keys: %q", e.Glyph)
-		names[e.Category] = true
-	}
-	for _, cat := range []string{"hype", "laughs", "feels", "meh", "gross", "spicy"} {
-		assert.True(t, names[cat], "default set covers category %q", cat)
-	}
-
-	// Custom quick bar parses verbatim (order preserved).
-	path = writeConfigFile(t, `[auth]
-api_key = "secret"
-
-[[reactions.emoji]]
-glyph = "✨"
-
-[[reactions.emoji]]
-glyph = "🤡"
-category = "laughs"
-`)
-	cfg, err = loadConfig(path)
-	require.NoError(t, err)
-	require.Len(t, cfg.Reactions.Emojis, 2)
-	assert.Equal(t, "✨", cfg.Reactions.Emojis[0].Glyph)
-	assert.Empty(t, cfg.Reactions.Emojis[0].Category, "category is optional")
-	assert.Equal(t, "laughs", cfg.Reactions.Emojis[1].Category)
 
 	// Explicit disable.
-	path = writeConfigFile(t, `[auth]
-api_key = "secret"
-
-[reactions]
-enabled = false
-`)
+	path = writeConfigFile(t, "[auth]\napi_key = \"secret\"\n\n[reactions]\nenabled = false\n")
 	cfg, err = loadConfig(path)
 	require.NoError(t, err)
 	assert.False(t, cfg.Reactions.reactionsEnabled())
-	assert.Empty(t, cfg.Reactions.Emojis, "disabled feature loads no quick bar")
-}
 
-func TestLoadConfigReactionsInvalid(t *testing.T) {
-	for _, tt := range []struct {
-		name, section string
-	}{
-		{"ascii glyph (not an emoji key)", `[[reactions.emoji]]
-glyph = "fire"
-`},
-		{"empty glyph", `[[reactions.emoji]]
-glyph = ""
-`},
-		{"glyph with ascii space", `[[reactions.emoji]]
-glyph = "🔥 x"
-`},
-		{"duplicated glyph", `[[reactions.emoji]]
-glyph = "🔥"
+	// Stale configs from the quick-bar era still load: the decoder
+	// tolerates unknown keys, so an upgrade never wedges startup (or
+	// a SIGHUP reload) on a leftover [[reactions.emoji]] section.
+	path = writeConfigFile(t, `[auth]
+api_key = "secret"
 
 [[reactions.emoji]]
 glyph = "🔥"
-`},
-		{"category too long", `[[reactions.emoji]]
-glyph = "🔥"
-category = "01234567890123456789012345"
-`},
-		{"too many entries", func() string {
-			var b strings.Builder
-			for i := 0; i < maxReactionEmojis+1; i++ {
-				b.WriteString("[[reactions.emoji]]\nglyph = \"🔥\"\n")
-			}
-			// all duplicates — but the cap check fires before per-entry
-			// validation, so this exercises the cap; uniqueness is
-			// covered by its own case above.
-			return b.String()
-		}()},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			path := writeConfigFile(t, "[auth]\napi_key = \"secret\"\n"+tt.section)
-			_, err := loadConfig(path)
-			require.Error(t, err, "invalid quick bar must fail loadConfig (and thus SIGHUP reload)")
-		})
-	}
+category = "hype"
+`)
+	cfg, err = loadConfig(path)
+	require.NoError(t, err, "stale quick-bar entries must not fail loadConfig")
+	assert.True(t, cfg.Reactions.reactionsEnabled())
 }
 
 func TestValidReactionEmoji(t *testing.T) {
@@ -500,12 +432,9 @@ func TestReactionToggleKeyValidation(t *testing.T) {
 }
 
 func TestReactionToggleDisabledFeature(t *testing.T) {
-	// Struct literal (normalize never ran): an explicit disable with a
-	// leftover list still 404s.
 	cfg := testConfig()
 	f := false
 	cfg.Reactions.Enabled = &f
-	cfg.Reactions.Emojis = []ReactionEmoji{{Glyph: "\U0001F525"}}
 	app := newTestApp(t, cfg)
 	ts := newTestServer(t, app)
 	insertImage(t, app, "rxn1011", "2026-10-06 01:00:00")
@@ -517,28 +446,17 @@ func TestReactionToggleDisabledFeature(t *testing.T) {
 	assert.Empty(t, tally)
 }
 
-// TestReactionDisabledDropsPreset pins normalize's disable semantics:
-// enabled=false discards even an explicitly configured list, so every
-// surface (card badges included, which read the list without their
-// own flag check) agrees. This is the loadConfig path — what a
-// SIGHUP reload actually produces.
-func TestReactionDisabledDropsPreset(t *testing.T) {
-	path := writeConfigFile(t, `[auth]
-api_key = "secret"
-
-[reactions]
-enabled = false
-
-[[reactions.emoji]]
-glyph = "🔥"
-`)
+// TestReactionDisabledGating pins the disable semantics on the
+// loadConfig path (what a SIGHUP reload produces): enabled=false
+// turns reactionsEnabled() off and topCardReactions gates to empty.
+func TestReactionDisabledGating(t *testing.T) {
+	path := writeConfigFile(t, "[auth]\napi_key = \"secret\"\n\n[reactions]\nenabled = false\n")
 	cfg, err := loadConfig(path)
 	require.NoError(t, err)
 	assert.False(t, cfg.Reactions.reactionsEnabled())
-	assert.Empty(t, cfg.Reactions.Emojis, "disabled config drops the quick bar")
 
-	// And no badges render from a disabled config even with tally
-	// rows present (belt-and-braces: topCardReactions also gates).
+	// No badges render from a disabled config even with tally rows
+	// present.
 	badges, more := topCardReactions(cfg, map[string]int{"🔥": 5})
 	assert.Empty(t, badges)
 	assert.False(t, more)
@@ -736,30 +654,20 @@ func TestDetailsPageReactionButtons(t *testing.T) {
 	ts := newTestServer(t, app)
 	insertImage(t, app, "rxn1040", "2026-10-06 01:00:00")
 
-	// Anonymous visit: the ROW renders only existing reactions — with
-	// zero reactions that is NOTHING; the quick-bar picker carries
-	// the FULL configured grid (grouped: 😂 has the category, the
-	// uncategorized fire/wow form the leading header-less group), and
-	// the PicMo "⋯" trigger ships hidden.
+	// Anonymous visit: NO chips (nothing exists yet), but the open
+	// button ALWAYS renders — never hidden behind a JS reveal.
 	status, body := getPage(t, ts.URL, "/rxn1040")
 	require.Equal(t, http.StatusOK, status)
 	assert.Contains(t, body, `<form class="react-form" method="post">`)
-	assert.Contains(t, body, `<details class="react-picker" id="react-picker">`)
-	assert.Contains(t, body, `<summary class="react-picker-btn" title="add a reaction">&#65291;</summary>`)
-	// html/template percent-encodes the emoji in the URL attribute
-	// (lowercase hex).
-	assert.Contains(t, body, `data-emoji="🔥" formaction="/rxn1040/react/%f0%9f%94%a5"`, "uncategorized fire opens the picker grid")
-	assert.Contains(t, body, `<div class="react-cat">laughs</div>`)
-	assert.Contains(t, body, `data-emoji="😂" formaction="/rxn1040/react/%f0%9f%98%82"`)
-	assert.Contains(t, body, `data-emoji="😮" formaction="/rxn1040/react/%f0%9f%98%ae"`)
-	assert.NotContains(t, body, `class="react-chip`, "zero-count emojis render no chip")
-	assert.Contains(t, body, `<button type="button" class="react-more" id="react-more" hidden title="full emoji picker">&#8943;</button>`,
-		"PicMo trigger renders hidden until JS boots")
+	assert.Contains(t, body, `<button type="button" class="react-open" id="react-open" title="add a reaction">&#65291; React</button>`,
+		"the PicMo trigger is always visible, JS or not")
+	assert.NotContains(t, body, `class="react-chip`, "zero reactions render no chip")
+	assert.NotContains(t, body, `react-picker`, "no quick-bar markup exists anymore")
+	assert.NotContains(t, body, `react-open" id="react-open" hidden`, "the open button never ships hidden")
 
-	// tok holds 🔥+😮 (quick bar) and reacted 🐙 (off-bar) from
-	// another token: chips appear for ALL existing reactions in
-	// count-desc order; the quick-bar picker marks only configured
-	// holdings.
+	// tok holds 🔥+😮; another token reacted 🐙: chips appear for ALL
+	// existing reactions in the one true order (count desc, codepoint
+	// ties: 🐙 U+1F419 < 🔥 U+1F525 < 😮 U+1F62E).
 	tok := "0123456789abcdef0123456789abcdef"
 	_, _, _, err := dbToggleReaction(app.db, "rxn1040", tok, "🔥")
 	require.NoError(t, err)
@@ -769,16 +677,12 @@ func TestDetailsPageReactionButtons(t *testing.T) {
 	require.NoError(t, err)
 	status, body = getPageCookie(t, ts.URL, "/rxn1040", likeCookieName+"="+tok)
 	require.Equal(t, http.StatusOK, status)
-	assert.Equal(t, 3, strings.Count(body, `class="react-chip`), "every existing reaction chips (incl. off-bar)")
+	assert.Equal(t, 3, strings.Count(body, `class="react-chip`), "every existing reaction chips")
 	assert.Contains(t, body, `<button type="submit" class="react-chip reacted" data-emoji="🔥" formaction="/rxn1040/react/%f0%9f%94%a5" aria-pressed="true">🔥 <span class="react-count" data-emoji="🔥">1</span></button>`)
 	assert.Less(t, strings.Index(body, `data-emoji="🐙"`), strings.Index(body, `data-emoji="🔥"`),
 		"count ties order by codepoint: 🐙 U+1F419 before 🔥 U+1F525")
-	assert.Contains(t, body, `class="react-chip" data-emoji="🐙"`, "off-bar reaction chips unpressed for this visitor")
+	assert.Contains(t, body, `class="react-chip" data-emoji="🐙"`, "another visitor's reaction chips unpressed here")
 	assert.Equal(t, 2, strings.Count(body, `class="react-chip reacted"`), "exactly the held emojis press")
-	// The picker marks held options and still lists only the bar.
-	assert.Equal(t, 2, strings.Count(body, `class="react-opt mine"`), "only quick-bar holdings mark in the picker")
-	assert.NotContains(t, body, `react-opt" data-emoji="🐙"`, "off-bar emojis are not picker options")
-	assert.NotContains(t, body, `react-opt mine" data-emoji="🐙"`, "off-bar emojis are not picker options (marked)")
 }
 
 // TestDetailsPageChipCap pins the abuse bound: with more distinct
@@ -830,13 +734,6 @@ func TestDetailsPageReactionsDisabled(t *testing.T) {
 
 func TestGalleryCardsShowReactionBadges(t *testing.T) {
 	cfg := testConfig()
-	cfg.Reactions = ReactionConfig{Emojis: []ReactionEmoji{
-		{Glyph: "\U0001F525"}, // 🔥
-		{Glyph: "\U0001F602"}, // 😂
-		{Glyph: "\U0001F62E"}, // 😮
-		{Glyph: "\U0001F480"}, // 💀
-		{Glyph: "\U0001F440"}, // 👀
-	}}
 	app := newTestApp(t, cfg)
 	ts := newTestServer(t, app)
 	insertImage(t, app, "rxn1042", "2026-10-06 01:00:00")

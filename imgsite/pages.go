@@ -213,29 +213,16 @@ table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
 .dislike-btn.disliked { color: #7f96ad; border-color: #3d4a58; }
 .dislike-btn:active { border-color: #5a7290; }
 /* Reactions: the row lists only EXISTING reactions as chips (pressed
-   = warm amber); the "+" summary opens a native <details> picker
-   whose .react-menu overlays as a grouped, scrollable grid of the
-   curated quick bar (.react-cat headers, first-appearance order).
-   The "⋯" button after it opens the vendored full-catalog PicMo
-   picker (hidden until image.js boots). #picmo-pop is the container
-   image.js renders PicMo into — absolutely positioned off the form,
-   above everything except the zoom overlay. */
+   = warm amber); the "＋ React" button ALWAYS renders and opens the
+   vendored full-catalog PicMo picker (image.js). #picmo-pop is the
+   container image.js renders PicMo into — absolutely positioned off
+   the form, above everything except the zoom overlay. */
 .react-form { margin: 0 0 0.5rem; display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; position: relative; }
 .react-chip.reacted { color: #ffd27f; border-color: #7a6a3d; }
-.react-chip:active, .react-opt:active { border-color: #b5994d; }
-.react-picker { position: relative; }
-.react-picker > summary { list-style: none; display: inline-block; background: #2a2a30; color: #ddd; border: 1px solid #3c3c44; border-radius: 6px; padding: 0.25rem 0.7rem; cursor: pointer; user-select: none; font: inherit; line-height: 1.2; }
-.react-picker > summary::-webkit-details-marker { display: none; }
-.react-picker > summary:hover { background: #35353d; }
-.react-picker[open] > summary { background: #35353d; border-color: #4a6fb5; }
-.react-menu { position: absolute; top: calc(100% + 0.45rem); left: 0; z-index: 20; max-width: min(24rem, 92vw); max-height: 17rem; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(2.3rem, 1fr)); gap: 0.25rem; background: #1d1d21; border: 1px solid #3c3c44; border-radius: 8px; padding: 0.5rem; box-shadow: 0 10px 28px rgba(0,0,0,0.55); }
-.react-cat { grid-column: 1 / -1; font-size: 0.75rem; color: #999; text-transform: uppercase; letter-spacing: 0.06em; padding: 0.3rem 0.1rem 0.1rem; }
-.react-cat:first-child { padding-top: 0; }
-.react-opt { font-size: 1.3rem; padding: 0.3rem 0.45rem; line-height: 1.2; }
-.react-opt.mine { color: #ffd27f; border-color: #7a6a3d; }
-.react-more { line-height: 1.2; color: #999; }
-.react-more:hover { color: #ddd; }
+.react-chip:active { border-color: #b5994d; }
 .react-overflow { color: #999; font-size: 0.8125rem; align-self: center; white-space: nowrap; }
+.react-open { color: #999; }
+.react-open:hover { color: #ddd; }
 #picmo-pop { position: absolute; top: calc(100% + 0.45rem); left: 0; z-index: 30; }
 #picmo-pop[hidden] { display: none; }
 </style>
@@ -305,31 +292,23 @@ table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
 </form>
 {{/* Reactions (anonymous, cookie-token identity — see reactions.go).
       ANY emoji is reactable; the row lists only EXISTING reactions
-      (count > 0) as clickable chips, the "+" picker is the curated
-      quick bar (a native <details> popup, grouped by config
-      category), and the "⋯" button after it opens the vendored
-      full-catalog PicMo picker (JS-only: hidden attribute until
-      image.js boots, so no-JS visitors keep the quick bar + plain
-      POSTs and Enter implicit-submits the FIRST chip or nothing
-      while the row is empty — the summaries are not submit
-      buttons). image.js intercepts submits (e.submitter tells it
-      which emoji), rebuilds the row from the response's full tally +
-      mine map, and closes popups on pick; image-reacted SSE keeps
-      the row fresh while pressed states stay local. The reaction key
-      IS the emoji: formaction URLs carry it percent-encoded
-      (html/template attribute escaping handles that). */}}
-{{if .PickerGroups}}
+      (count > 0) as clickable chips, and the "＋ React" button after
+      them ALWAYS renders (owner request, Oct 2026 — no hidden JS-only
+      reveal) and opens the vendored full-catalog PicMo picker. The
+      button is type=button, so it needs JS; no-JS visitors can still
+      toggle via the chips (plain POSTs, 303 back) and Enter
+      implicit-submits the first chip while one exists. image.js
+      intercepts submits (e.submitter tells it which emoji), rebuilds
+      the row from the response's full tally + mine map, and closes
+      the picker on pick; image-reacted SSE keeps the row fresh while
+      pressed states stay local. The reaction key IS the emoji:
+      formaction URLs carry it percent-encoded (html/template
+      attribute escaping handles that). */}}
+{{if .ReactionsEnabled}}
 <form class="react-form" method="post">
-{{range .ReactionButtons}}{{if .Count}}<button type="submit" class="react-chip{{if .Mine}} reacted{{end}}" data-emoji="{{.Emoji}}" formaction="/{{$.ID}}/react/{{.Emoji}}" aria-pressed="{{if .Mine}}true{{else}}false{{end}}">{{.Emoji}} <span class="react-count" data-emoji="{{.Emoji}}">{{.Count}}</span></button>
-{{end}}{{end}}{{if .OverflowChips}}<span class="react-overflow" title="more reactions">+{{.OverflowChips}}</span>
-{{end}}<details class="react-picker" id="react-picker">
-<summary class="react-picker-btn" title="add a reaction">&#65291;</summary>
-<div class="react-menu">
-{{range .PickerGroups}}{{if .Name}}<div class="react-cat">{{.Name}}</div>
-{{end}}{{range .Buttons}}<button type="submit" class="react-opt{{if .Mine}} mine{{end}}" data-emoji="{{.Emoji}}" formaction="/{{$.ID}}/react/{{.Emoji}}" aria-pressed="{{if .Mine}}true{{else}}false{{end}}">{{.Emoji}}</button>
-{{end}}{{end}}</div>
-</details>
-<button type="button" class="react-more" id="react-more" hidden title="full emoji picker">&#8943;</button>
+{{range .ReactionButtons}}<button type="submit" class="react-chip{{if .Mine}} reacted{{end}}" data-emoji="{{.Emoji}}" formaction="/{{$.ID}}/react/{{.Emoji}}" aria-pressed="{{if .Mine}}true{{else}}false{{end}}">{{.Emoji}} <span class="react-count" data-emoji="{{.Emoji}}">{{.Count}}</span></button>
+{{end}}{{if .OverflowChips}}<span class="react-overflow" title="more reactions">+{{.OverflowChips}}</span>
+{{end}}<button type="button" class="react-open" id="react-open" title="add a reaction">&#65291; React</button>
 </form>
 {{end}}
 
@@ -629,14 +608,6 @@ type reactionButton struct {
 	Emoji string
 	Count int
 	Mine  bool
-}
-
-// reactionGroup is one quick-bar picker category: entries in
-// configured order, grouped by the category's first appearance.
-// Name empty = the leading header-less group (uncategorized entries).
-type reactionGroup struct {
-	Name    string
-	Buttons []reactionButton
 }
 
 // galleryPageSize is the number of cards per keyset page; handlers fetch
@@ -1006,23 +977,15 @@ type imageView struct {
 	LikedByYou    bool
 	DislikedByYou bool
 
-	// ReactionButtons is the details-page quick-bar data: one entry
-	// per configured emoji (key = the emoji itself) with its count and
-	// the visitor's pressed state. The template splits it two ways —
-	// the chip row renders only count>0 entries, the picker popup
-	// renders all of them grouped by category (PickerGroups; both set
-	// by handleImagePage from dbGetReactionState; nil when the
-	// feature is disabled renders no form). Reactions OUTSIDE the
-	// quick bar still exist: chips render from the full tally in
-	// handleImagePage (see there), and the full-catalog PicMo picker
-	// (vendored, JS-only) can toggle any emoji.
-	ReactionButtons []reactionButton
-	// OverflowChips is how many existing reactions were elided by
-	// maxDetailChips — rendered as a "+N" note after the chips.
-	OverflowChips int
-	// PickerGroups is ReactionButtons grouped by the category's first
-	// appearance for the quick-bar <details> grid.
-	PickerGroups []reactionGroup
+	// ReactionButtons is the details-page chip data: one entry per
+	// tally key with a non-zero count, in the ONE true chip order
+	// (count desc, emojiLess ties — the image.js rebuild produces the
+	// same order). ReactionsEnabled says the feature is on (the open
+	// button renders even with zero reactions); OverflowChips counts
+	// keys elided by the maxDetailChips abuse bound ("+N" note).
+	ReactionButtons  []reactionButton
+	ReactionsEnabled bool
+	OverflowChips    int
 
 	// LastEvent is the SSE stream position captured at render time —
 	// same replay-cursor contract as galleryView.LastEvent (nil = no
@@ -1314,42 +1277,24 @@ func (a *App) handleImagePage(w http.ResponseWriter, r *http.Request, id string)
 		view.LikeCount, view.DislikeCount = likes, dislikes
 		view.LikedByYou, view.DislikedByYou = myVote == voteLike, myVote == voteDislike
 	}
-	// Reaction state (details page). The quick bar comes from this
-	// request's config snapshot (PickerGroups: configured order,
-	// categories by first appearance — that ordering belongs to the
-	// PICKER alone). The CHIPS render every tally key with count>0 —
-	// quick-bar entries AND any off-bar emoji visitors reacted via
-	// the full-catalog picker — in the same order the JS rebuild
-	// uses (count desc, then emojiLess codepoint ties), so a live
-	// update never reshuffles what the server painted. Disabled
-	// feature renders no form; errors degrade to "no reactions",
-	// same as the vote block.
-	if cfg.Reactions.reactionsEnabled() {
+	// Reaction state (details page). The CHIPS render every tally key
+	// with count>0 in the same order the JS rebuild uses (count desc,
+	// then emojiLess codepoint ties), so a live update never
+	// reshuffles what the server painted. The picker-open button
+	// renders whenever the feature is on (even with zero reactions).
+	// Errors degrade to "no reactions", same as the vote block.
+	view.ReactionsEnabled = cfg.Reactions.reactionsEnabled()
+	if view.ReactionsEnabled {
 		tally, mine, err := dbGetReactionState(a.db, img.ID, token)
 		if err != nil {
 			logger.Error("reaction state lookup failed", "id", id, "error", err)
 		} else {
-			view.ReactionButtons = make([]reactionButton, 0, len(tally)+len(cfg.Reactions.Emojis))
-			for _, e := range cfg.Reactions.Emojis {
-				if tally[e.Glyph] > 0 {
-					view.ReactionButtons = append(view.ReactionButtons,
-						reactionButton{Emoji: e.Glyph, Count: tally[e.Glyph], Mine: mine[e.Glyph]})
-				}
-			}
-			// Off-bar chips: existing reactions the config doesn't list.
-			inBar := make(map[string]bool, len(cfg.Reactions.Emojis))
-			for _, e := range cfg.Reactions.Emojis {
-				inBar[e.Glyph] = true
-			}
-			keys := make([]string, 0, len(tally))
+			view.ReactionButtons = make([]reactionButton, 0, len(tally))
 			for emoji, n := range tally {
-				if n > 0 && !inBar[emoji] {
-					keys = append(keys, emoji)
+				if n > 0 {
+					view.ReactionButtons = append(view.ReactionButtons,
+						reactionButton{Emoji: emoji, Count: n, Mine: mine[emoji]})
 				}
-			}
-			for _, emoji := range keys {
-				view.ReactionButtons = append(view.ReactionButtons,
-					reactionButton{Emoji: emoji, Count: tally[emoji], Mine: mine[emoji]})
 			}
 			// The one true chip order: count desc, codepoint ties —
 			// exactly what image.js's rebuild produces from a tally.
@@ -1366,23 +1311,6 @@ func (a *App) handleImagePage(w http.ResponseWriter, r *http.Request, id string)
 			if len(view.ReactionButtons) > maxDetailChips {
 				view.OverflowChips = len(view.ReactionButtons) - maxDetailChips
 				view.ReactionButtons = view.ReactionButtons[:maxDetailChips]
-			}
-			// Picker groups: configured entries only (configured
-			// order preserved), uncategorized leading (empty header).
-			for _, e := range cfg.Reactions.Emojis {
-				b := reactionButton{Emoji: e.Glyph, Count: tally[e.Glyph], Mine: mine[e.Glyph]}
-				var g *reactionGroup
-				for i := range view.PickerGroups {
-					if view.PickerGroups[i].Name == e.Category {
-						g = &view.PickerGroups[i]
-						break
-					}
-				}
-				if g == nil {
-					view.PickerGroups = append(view.PickerGroups, reactionGroup{Name: e.Category})
-					g = &view.PickerGroups[len(view.PickerGroups)-1]
-				}
-				g.Buttons = append(g.Buttons, b)
 			}
 		}
 	}

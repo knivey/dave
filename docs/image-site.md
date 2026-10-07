@@ -694,7 +694,11 @@ unconvertible custom names), and the toggle URL carries it
 percent-encoded. `validReactionEmoji` is a shape tripwire, not a
 catalog: valid UTF-8, 1–32 runes, ≤128 bytes, and NO ASCII at all —
 words, digits, and path games 404; ZWJ sequences and skin-tone
-variants pass (non-ASCII by construction).
+variants pass (non-ASCII by construction). There is NO curated list
+anywhere — the owner killed the quick-bar config (it duplicated what
+the full picker does worse); the only knob is
+`[reactions] enabled = false` (pointer — absent means true), which
+hides every surface and 404s the endpoints without touching rows.
 
 **Identity & limits.** The same `imgsite_liker` cookie, the same
 per-IP 60/min bucket as the vote endpoints (one identity surface, one
@@ -702,31 +706,19 @@ abuse budget), the same visibility contract (unknown id 404, hidden
 410, safe-host-invisible 404, GET is the catch-all's 404), the same
 cookie-mint-on-first-POST and no-JS 303-back shape.
 
-**The quick bar is config; the catalog is PicMo.** `[[reactions.emoji]]`
-array-of-tables (`glyph` = the emoji key itself, `category` = optional
-≤24-rune grouping), hot-reloadable via SIGHUP / `POST /admin/reload`,
-at most 48 entries, validated by `loadConfig` (unique emojis, key
-shape, category size). The list is the curated FIRST PAGE — the "＋"
-`<details>` popup renders it grouped by first-appearance category —
-NOT a whitelist: off-bar emojis react fine (via the full picker) and
-chip once they exist. Curating never migrates data; emojis removed
-from the bar keep their counts and stay reactable. Section absent =
-built-in default bar (a categorized 30: hype/laughs/feels/meh/gross/
-spicy — 🤢 🤮 🤨 😒 😤 ❌ 😏 🤤 😈 🍑 🍆 💦 🥵 among them);
-`reactions.enabled = false` (a pointer — absent means true) makes
-`normalize` drop the list so every surface hides together, rows
-untouched.
-
-**Full-catalog picker.** The "⋯" trigger (hidden until image.js
-boots) opens the vendored **PicMo** picker (MIT, `web/vendor/` —
-byte-identical upstream files, no bundler, `go build` stays
-self-contained): categories, search, skin tones, recents. It is fed
-via `createPicker`'s `emojiData` + `messages` options from the
-vendored emojibase-data 15.3.2 dataset (the full `data.json` schema
-is exactly what PicMo 5.x ingests) — the options path that bypasses
-its internal CDN fetches, so nothing phones home. The module, CSS,
-and ~700KB dataset load lazily on first open only; no-JS visitors
-keep the quick bar and plain POSTs.
+**The picker is PicMo, always one click away.** The details page
+renders existing-reaction chips plus an ALWAYS-VISIBLE "＋ React"
+button (never hidden behind a JS reveal) that opens the vendored
+**PicMo** picker (MIT, `web/vendor/` — byte-identical upstream files,
+no bundler, `go build` stays self-contained): categories, search,
+skin tones, recents. It is fed via `createPicker`'s `emojiData` +
+`messages` options from the vendored emojibase-data 15.3.2 dataset
+(the full `data.json` schema is exactly what PicMo 5.x ingests) — the
+options path that bypasses its internal CDN fetches, so nothing
+phones home. The module, CSS, and ~700KB dataset load lazily on
+first open only. The button itself is type=button (JS-required), but
+it renders for everyone; no-JS visitors can still toggle via the
+chips (plain POSTs, 303 back).
 
 **Toggle.** The pre-dislikes insert-first pattern, scoped to one
 emoji: `INSERT … ON CONFLICT (image_id, token, emoji) DO NOTHING`;
@@ -738,27 +730,25 @@ states for non-toggled emojis cannot be derived from a delta); the
 no-JS path is a 303 back to the page.
 
 **Surfaces.** Details page: the row lists only EXISTING reactions —
-chips for tally keys with a non-zero count, quick-bar and off-bar
-alike, in count-desc order with codepoint-lexicographic ties
-(`emojiLess`, the ONE true chip order — the JS rebuild produces
-exactly it, so live updates never reshuffle what the server painted)
-— capped at 20 rendered chips with a "+N" note (an abuse bound:
-any-emoji keys have no configured set limiting the row, and elided
-keys stay removable because re-picking the emoji in the full picker
-POSTs a toggle regardless of what the UI showed) — then the "＋"
-quick-bar popup and the "⋯" PicMo trigger. A held
-emoji always has count ≥ 1, so its chip is always present and removal
-is always one click. image.js rebuilds the row from `reactions` +
-`mine` (chips appear/vanish as counts cross the 0 boundary; pressed
-states are a local Set seeded from the render and replaced by
-response `mine`), re-syncs quick-bar marks, and closes popups on
-pick + outside-click. Cards: the top 4 reaction keys by count (no
-whitelist — whatever visitors actually reacted), codepoint ties, as
-compact badges in the meta line's `.counts` wrapper next to the vote
-tallies, with a `…` overflow marker when more non-zero keys did not
-fit; the wrapper lifecycle is coordinated (votes and reactions each
-manage their own spans; wrapper drops only when everything is zero).
-Search cards badge identically; tallies never reorder search results.
+one chip per tally key with a non-zero count, in count-desc order
+with codepoint-lexicographic ties (`emojiLess`, the ONE true chip
+order — the JS rebuild produces exactly it, so live updates never
+reshuffle what the server painted), capped at 20 rendered chips with
+a "+N" note (abuse bound; elided keys stay removable because a
+picker re-pick POSTs a toggle regardless of what the UI showed) —
+then the "＋ React" button. A held emoji always has count ≥ 1, so its
+chip is always present and removal is always one click. image.js
+rebuilds the row from `reactions` + `mine` (chips appear/vanish as
+counts cross the 0 boundary; pressed states are a local Set seeded
+from the render and replaced by response `mine`), and closes the
+picker on pick + outside-click. Cards: the top 4 reaction keys by
+count (no whitelist — whatever visitors actually reacted), codepoint
+ties, as compact badges in the meta line's `.counts` wrapper next to
+the vote tallies, with a `…` overflow marker when more non-zero keys
+did not fit; the wrapper lifecycle is coordinated (votes and
+reactions each manage their own spans; wrapper drops only when
+everything is zero). Search cards badge identically; tallies never
+reorder search results.
 
 **SSE.** Every committed toggle publishes `image-reacted
 {id, reactions}` — the full absolute tally — through the same

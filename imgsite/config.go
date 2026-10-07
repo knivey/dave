@@ -22,13 +22,12 @@ type Config struct {
 	Upload     UploadConfig     `toml:"upload"`
 	Search     SearchConfig     `toml:"search"`
 	Site       SiteConfig       `toml:"site"`
-	// Reactions carries the quick-bar preset. An absent section runs
-	// the built-in default set (normalize fills it); Enabled is a
-	// pointer so "reactions.enabled = false" (explicit disable,
-	// hiding every surface without touching rows) stays
-	// distinguishable from an absent section (default true).
-	// Reactions themselves are NOT limited to this list — any emoji
-	// can be reacted via the full-catalog picker; see reactions.go.
+	// Reactions is the feature toggle for emoji reactions (any
+	// emoji reactable via the full-catalog picker — there is no
+	// curated list anymore). Enabled is a pointer so
+	// "reactions.enabled = false" (explicit disable, hiding every
+	// surface without touching rows) stays distinguishable from an
+	// absent section (default true).
 	Reactions ReactionConfig `toml:"reactions"`
 	// SafeSite is nil unless a [safe_site] section is present; nil is
 	// single-site behavior identical to today. Pointer (not value) so
@@ -101,29 +100,13 @@ type SafeSiteConfig struct {
 	AllowedNetworks []string `toml:"allowed_networks"`
 }
 
-// ReactionConfig is the emoji-reaction preset (reactions.go). Enabled
-// is a POINTER: nil (section absent, or the key unwritten) means true,
-// so the lightest config runs the built-in default set; an explicit
-// `enabled = false` turns the whole feature off (no button row,
-// endpoints 404, no card badges) without touching stored rows.
-// Emojis is ordered — the array-of-tables order is the button-row
-// order and the card-badge tie-break order.
+// ReactionConfig is the emoji-reactions feature toggle (reactions.go).
+// Enabled is a POINTER: nil (section absent, or the key unwritten)
+// means true; an explicit `enabled = false` turns the whole feature
+// off (no chip row or picker button, endpoints 404, no card badges)
+// without touching stored rows.
 type ReactionConfig struct {
-	Enabled *bool           `toml:"enabled"`
-	Emojis  []ReactionEmoji `toml:"emoji"`
-}
-
-// ReactionEmoji is one quick-bar entry: Glyph IS the reaction key —
-// the emoji string stored in the reactions table, embedded
-// percent-encoded in the toggle URL, and rendered as its own glyph
-// (any emoji from the full-catalog picker can also be reacted without
-// appearing here; this list is the curated first page only).
-// Category is optional quick-bar picker grouping: display-only,
-// grouped by first appearance, uncategorized entries render in a
-// leading header-less group.
-type ReactionEmoji struct {
-	Glyph    string `toml:"glyph"`
-	Category string `toml:"category"`
+	Enabled *bool `toml:"enabled"`
 }
 
 const (
@@ -143,10 +126,6 @@ const (
 	defaultPrefixMin      = 2
 	defaultSiteTitle      = "dave's image dump"
 	defaultSiteDesc       = "generations from IRC"
-	// maxReactionEmojis caps the preset so the picker stays a curated
-	// grid (now scrollable and categorized — the cap bounds config
-	// accidents, not ambition; the owner default alone carries 30).
-	maxReactionEmojis = 48
 )
 
 // placeholderAPIKeyPrefix is the prefix of the placeholder secret shipped
@@ -257,14 +236,6 @@ func loadConfig(configFile string) (Config, error) {
 		}
 	}
 
-	// [reactions]: absent section = built-in default set (Enabled
-	// carries over as true); enabled=false disables the feature while
-	// keeping stored rows; a present non-empty list is used verbatim.
-	// This runs before the SafeSite block's return paths can skip it.
-	if err := cfg.Reactions.normalize(); err != nil {
-		return cfg, err
-	}
-
 	return cfg, nil
 }
 
@@ -275,98 +246,10 @@ func defaultString(val, def string) string {
 	return val
 }
 
-// defaultReactionEmojis is the built-in QUICK BAR for an IRC-adjacent
-// AI-art gallery — a robust, categorized 30 (owner request, Oct 2026:
-// the full-catalog PicMo picker exists, the quick bar is the curated
-// first page). Reactions are NOT limited to this set: any emoji from
-// the catalog can be reacted, rows key on the emoji itself. The flat
-// order is the quick-bar chip order; Category groups the quick-bar
-// picker grid (first appearance).
-var defaultReactionEmojis = []ReactionEmoji{
-	// hype
-	{Glyph: "\U0001F525", Category: "hype"}, // 🔥 fire
-	{Glyph: "\U00002728", Category: "hype"}, // ✨ sparkles
-	{Glyph: "\U0001F680", Category: "hype"}, // 🚀 rocket
-	{Glyph: "\U0001F4AF", Category: "hype"}, // 💯 hundred
-	{Glyph: "\U0001F64F", Category: "hype"}, // 🙏 pray
-	{Glyph: "\U0001F3A8", Category: "hype"}, // 🎨 art
-	// laughs
-	{Glyph: "\U0001F602", Category: "laughs"}, // 😂 laugh
-	{Glyph: "\U0001F480", Category: "laughs"}, // 💀 skull
-	{Glyph: "\U0001F921", Category: "laughs"}, // 🤡 clown
-	{Glyph: "\U0001F60F", Category: "laughs"}, // 😏 smirk
-	// feels
-	{Glyph: "\U0001F62E", Category: "feels"}, // 😮 wow
-	{Glyph: "\U0001F914", Category: "feels"}, // 🤔 thinking
-	{Glyph: "\U0001F92F", Category: "feels"}, // 🤯 mindblown
-	{Glyph: "\U0001F97A", Category: "feels"}, // 🥺 pleading
-	{Glyph: "\U0001F62D", Category: "feels"}, // 😭 cry
-	{Glyph: "\U0001F440", Category: "feels"}, // 👀 eyes
-	{Glyph: "\U0001F924", Category: "feels"}, // 🤤 drool
-	// meh
-	{Glyph: "\U0001F4A9", Category: "meh"}, // 💩 poop
-	{Glyph: "\U0001F612", Category: "meh"}, // 😒 unamused
-	{Glyph: "\U0001F928", Category: "meh"}, // 🤨 eyebrow
-	{Glyph: "\U0001F5FF", Category: "meh"}, // 🗿 moai
-	{Glyph: "\U0001F624", Category: "meh"}, // 😤 huff
-	{Glyph: "\U0000274C", Category: "meh"}, // ❌ cross
-	// gross
-	{Glyph: "\U0001F622", Category: "gross"}, // 🤢 sick
-	{Glyph: "\U0001F92E", Category: "gross"}, // 🤮 vomit
-	{Glyph: "\U0001F975", Category: "gross"}, // 🥵 hot
-	// spicy
-	{Glyph: "\U0001F351", Category: "spicy"}, // 🍑 peach
-	{Glyph: "\U0001F346", Category: "spicy"}, // 🍆 eggplant
-	{Glyph: "\U0001F4A6", Category: "spicy"}, // 💦 squirt
-	{Glyph: "\U0001F608", Category: "spicy"}, // 😈 devil
-}
-
 // reactionsEnabled reports whether the reaction feature is on: the
 // absent key (nil pointer) is the default TRUE.
 func (rc ReactionConfig) reactionsEnabled() bool {
 	return rc.Enabled == nil || *rc.Enabled
-}
-
-// normalize validates a loaded quick bar and fills the default set
-// when none was configured. Runs inside loadConfig, so an invalid
-// preset fails startup AND a SIGHUP reload (running config stays
-// live).
-func (rc *ReactionConfig) normalize() error {
-	if !rc.reactionsEnabled() {
-		// Disabled: drop any configured list too, so EVERY surface
-		// (endpoints, details row, card badges) agrees without each
-		// one having to remember the flag. Rows on disk are
-		// untouched.
-		rc.Emojis = nil
-		return nil
-	}
-	if len(rc.Emojis) == 0 {
-		rc.Emojis = append([]ReactionEmoji(nil), defaultReactionEmojis...)
-		return nil
-	}
-	if len(rc.Emojis) > maxReactionEmojis {
-		return fmt.Errorf("reactions.emoji: at most %d entries, got %d", maxReactionEmojis, len(rc.Emojis))
-	}
-	seen := make(map[string]bool, len(rc.Emojis))
-	for _, e := range rc.Emojis {
-		if !validReactionEmoji(e.Glyph) {
-			return fmt.Errorf("reactions.emoji glyph %q: must be 1-32 non-ASCII runes (the reaction key itself)", e.Glyph)
-		}
-		cat := []rune(e.Category)
-		if len(cat) > 24 {
-			return fmt.Errorf("reactions.emoji glyph %q: category must be at most 24 runes", e.Glyph)
-		}
-		for _, r := range cat {
-			if r < 0x20 || r == 0x7f {
-				return fmt.Errorf("reactions.emoji glyph %q: category must not contain control characters", e.Glyph)
-			}
-		}
-		if seen[e.Glyph] {
-			return fmt.Errorf("reactions.emoji glyph %q: duplicated", e.Glyph)
-		}
-		seen[e.Glyph] = true
-	}
-	return nil
 }
 
 // validReactionEmoji pins the reactable-key shape: valid UTF-8, 1-32

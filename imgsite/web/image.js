@@ -526,13 +526,13 @@ export function boot() {
 		if (dc && Number.isFinite(data.dislikes)) dc.textContent = String(data.dislikes);
 	});
 
-	// ---- Reaction row + pickers (details page) ----
+	// ---- Reaction row + full picker (details page) ----
 	// ANY emoji is reactable. The server renders the row as EXISTING
-	// reactions only (count>0 chips) plus the curated quick-bar
-	// <details> picker; the "⋯" button (hidden until JS boots) opens
-	// the vendored full-catalog PicMo picker. A toggle can move ANY
-	// emoji across the 0-boundary, so the JS layer REBUILDS the chip
-	// row from full tallies instead of patching counts.
+	// reactions only (count>0 chips) plus an always-visible "＋ React"
+	// button that opens the vendored full-catalog PicMo picker. A
+	// toggle can move ANY emoji across the 0-boundary, so the JS layer
+	// REBUILDS the chip row from full tallies instead of patching
+	// counts.
 	//
 	// myReactions is the local visitor's holdings — seeded from the
 	// server-rendered pressed chips (a held emoji always has count>=1,
@@ -547,7 +547,6 @@ export function boot() {
 	let myReactions = new Set(
 		Array.from(document.querySelectorAll(".react-chip.reacted")).map((b) => b.dataset.emoji)
 	);
-	const picker = document.getElementById("react-picker");
 
 	// emojiKeyLess: codepoint-lexicographic compare (matching Go's
 	// emojiLess) so rebuild order is identical to the server's chip
@@ -578,9 +577,9 @@ export function boot() {
 			overflow = entries.length - maxDetailChips;
 			entries.length = maxDetailChips;
 		}
-		// Drop the old chips, keep the pickers (re-synced below).
+		// Drop the old chips + overflow note, keep the open button.
 		for (const chip of Array.from(reactForm.querySelectorAll(".react-chip, .react-overflow"))) chip.remove();
-		const anchor = reactForm.querySelector(".react-picker");
+		const anchor = document.getElementById("react-open");
 		for (const [emoji, n] of entries) {
 			const chip = document.createElement("button");
 			chip.type = "submit";
@@ -603,20 +602,13 @@ export function boot() {
 			note.textContent = "+" + overflow;
 			reactForm.insertBefore(note, anchor);
 		}
-		// Quick-bar picker options: every configured emoji, held ones
-		// marked. (Off-bar emojis are chips only — PicMo covers them.)
-		for (const opt of reactForm.querySelectorAll(".react-opt")) {
-			const mine = myReactions.has(opt.dataset.emoji);
-			opt.classList.toggle("mine", mine);
-			opt.setAttribute("aria-pressed", mine ? "true" : "false");
-		}
 	}
 
 	function applyReactionResponse(data) {
 		// {emoji, reacted, reactions, mine}: mine is the authoritative
 		// full holdings map — replace the local set with it (not a
 		// delta), then rebuild the row so 0<->1 boundary moves add/drop
-		// chips. Picks from either popup close both.
+		// chips. A pick closes the picker.
 		if (data.mine) {
 			myReactions = new Set(Object.keys(data.mine).filter((k) => data.mine[k]));
 		} else if (data.emoji) {
@@ -624,7 +616,6 @@ export function boot() {
 			else myReactions.delete(data.emoji);
 		}
 		renderReactionRow(data.reactions);
-		if (picker && picker.open) picker.removeAttribute("open");
 		hidePicmo();
 	}
 
@@ -653,25 +644,23 @@ export function boot() {
 		}
 	}
 
-	// Outside-click closes the quick-bar picker (native <details>
-	// only closes on its own interactions) and PicMo.
-	if (picker || document.getElementById("react-more")) {
-		document.addEventListener("click", (e) => {
-			if (picker && picker.open && !picker.contains(e.target)) picker.removeAttribute("open");
-			if (picmoPop && !picmoPop.hidden && !picmoPop.contains(e.target) && !e.target.closest("#react-more")) hidePicmo();
-		});
-	}
+	// Outside-click closes PicMo (the picker itself only closes via
+	// its own interactions or a pick).
+	document.addEventListener("click", (e) => {
+		if (picmoPop && !picmoPop.hidden && !picmoPop.contains(e.target) && !e.target.closest("#react-open")) hidePicmo();
+	});
 
 	// ---- PicMo: vendored full-catalog picker (web/vendor/) ----
 	// Lazy by construction: the module, its CSS, and the emojibase
-	// dataset only load when the "⋯" button is first clicked, and the
-	// button itself ships hidden (no-JS never sees it). Data is fed
-	// via createPicker's emojiData+messages options — the path that
-	// bypasses PicMo's internal CDN fetches, so nothing phones home.
+	// dataset only load when the "＋ React" button is first clicked
+	// (the button itself always renders — server-side, no JS needed
+	// to see it). Data is fed via createPicker's emojiData+messages
+	// options — the path that bypasses PicMo's internal CDN fetches,
+	// so nothing phones home.
 	let picmoPop = null;
 	let picmoPicker = null;
-	// picmoLoading serializes the first-open dataset load: the "⋯"
-	// button lives inside .react-form, so setTogglesDisabled(false)
+	// picmoLoading serializes the first-open dataset load: the
+	// "＋ React" button lives inside .react-form, so setTogglesDisabled(false)
 	// from any OTHER toggle's finally would re-enable it mid-load,
 	// and a second click racing the ~700KB fetch could create a
 	// duplicate picker div with no close path. The promise — not the
@@ -680,10 +669,9 @@ export function boot() {
 	function hidePicmo() {
 		if (picmoPop) picmoPop.hidden = true;
 	}
-	const moreBtn = document.getElementById("react-more");
-	if (moreBtn && reactForm) {
-		moreBtn.removeAttribute("hidden");
-		moreBtn.addEventListener("click", async () => {
+	const openBtn = document.getElementById("react-open");
+	if (openBtn && reactForm) {
+		openBtn.addEventListener("click", async () => {
 			if (picmoPop && !picmoPop.hidden) {
 				hidePicmo();
 				return;
@@ -695,19 +683,18 @@ export function boot() {
 					await picmoLoading;
 					if (!picmoPop) return; // that load failed
 				} else {
-					moreBtn.disabled = true; // visual busy state only
+					openBtn.disabled = true; // visual busy state only
 					picmoLoading = loadPicmo();
 					try {
 						await picmoLoading;
 					} finally {
 						picmoLoading = null;
-						moreBtn.disabled = false;
+						openBtn.disabled = false;
 					}
-					if (!picmoPop) return; // load failed — quick bar still works
+					if (!picmoPop) return; // load failed — chips still work
 				}
 			}
 			picmoPop.hidden = false;
-			if (picker && picker.open) picker.removeAttribute("open");
 		});
 
 		// loadPicmo imports the vendored picker + dataset exactly once
@@ -741,9 +728,6 @@ export function boot() {
 				console.warn("imgsite: full emoji picker failed to load", err);
 			}
 		}
-				picmoPop.hidden = false;
-			if (picker && picker.open) picker.removeAttribute("open");
-		});
 	}
 	// ---- SSE: ONE stream for the whole page ----
 	// image-liked keeps THIS image's tallies fresh when anyone votes,

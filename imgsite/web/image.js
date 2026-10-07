@@ -526,23 +526,84 @@ export function boot() {
 		if (dc && Number.isFinite(data.dislikes)) dc.textContent = String(data.dislikes);
 	});
 
+	// ---- Reaction row + picker (details page) ----
+	// The server renders the row as EXISTING reactions only (count>0
+	// chips) plus a native <details> picker with the full configured
+	// grid. A toggle can move ANY emoji across the 0-boundary, so the
+	// JS layer REBUILDS the chip row from full tallies instead of
+	// patching counts: chips appear when a count first goes positive
+	// and vanish when it empties.
+	//
+	// myReactions is the local visitor's holdings — seeded from the
+	// server-rendered pressed chips (a held emoji always has count≥1,
+	// so it always HAS a chip), replaced wholesale by the toggle
+	// response's authoritative mine map, and used to keep pressed
+	// states through SSE rebuilds (events never carry identity).
+	let myReactions = new Set(
+		Array.from(document.querySelectorAll(".react-chip.reacted")).map((b) => b.dataset.emoji)
+	);
+	let reactionGlyphs = null;
+	try {
+		reactionGlyphs = JSON.parse(document.body.dataset.reactions || "null");
+	} catch {
+		reactionGlyphs = null; // malformed embed: row never rebuilds client-side
+	}
+	const picker = document.getElementById("react-picker");
+
+	function renderReactionRow(tally) {
+		if (!reactForm || !reactionGlyphs) return;
+		tally = tally || {};
+		// Drop the old chips, keep the picker (it is re-synced below).
+		for (const chip of Array.from(reactForm.querySelectorAll(".react-chip"))) chip.remove();
+		const anchor = reactForm.querySelector(".react-picker");
+		for (const name of Object.keys(reactionGlyphs)) {
+			const n = tally[name];
+			if (!(Number.isFinite(n) && n > 0)) continue;
+			const chip = document.createElement("button");
+			chip.type = "submit";
+			chip.className = "react-chip" + (myReactions.has(name) ? " reacted" : "");
+			chip.dataset.emoji = name;
+			chip.formAction = "/" + currentID + "/react/" + name;
+			chip.setAttribute("aria-pressed", myReactions.has(name) ? "true" : "false");
+			chip.title = name;
+			chip.textContent = reactionGlyphs[name] + " ";
+			const cnt = document.createElement("span");
+			cnt.className = "react-count";
+			cnt.dataset.emoji = name;
+			cnt.textContent = String(n);
+			chip.appendChild(cnt);
+			reactForm.insertBefore(chip, anchor);
+		}
+		// Picker options: every configured emoji, held ones marked.
+		for (const opt of reactForm.querySelectorAll(".react-opt")) {
+			const mine = myReactions.has(opt.dataset.emoji);
+			opt.classList.toggle("mine", mine);
+			opt.setAttribute("aria-pressed", mine ? "true" : "false");
+		}
+	}
+
 	enhanceToggleForm(reactForm, (data) => {
-		// {emoji, reacted, reactions}: the toggled emoji's button flips
-		// its pressed state; every count span re-renders from the full
-		// absolute tally (any toggle can move only one emoji's count,
-		// but re-rendering from the map needs no per-span reasoning).
-		const btn = reactForm && reactForm.querySelector('button[data-emoji="' + (data.emoji || "") + '"]');
-		if (btn) {
-			btn.classList.toggle("reacted", !!data.reacted);
-			btn.setAttribute("aria-pressed", data.reacted ? "true" : "false");
+		// {emoji, reacted, reactions, mine}: mine is the authoritative
+		// full holdings map — replace the local set with it (not a
+		// delta), then rebuild the row so 0↔1 boundary moves add/drop
+		// chips. A pick from the popup closes it.
+		if (data.mine) {
+			myReactions = new Set(Object.keys(data.mine).filter((k) => data.mine[k]));
+		} else if (data.emoji) {
+			if (data.reacted) myReactions.add(data.emoji);
+			else myReactions.delete(data.emoji);
 		}
-		if (data.reactions) {
-			for (const span of document.querySelectorAll(".react-count")) {
-				const n = data.reactions[span.dataset.emoji];
-				if (Number.isFinite(n)) span.textContent = String(n);
-			}
-		}
+		renderReactionRow(data.reactions);
+		if (picker && picker.open) picker.removeAttribute("open");
 	});
+
+	// Outside-click closes the picker (native <details> only closes
+	// on its own summary/option interactions).
+	if (picker) {
+		document.addEventListener("click", (e) => {
+			if (picker.open && !picker.contains(e.target)) picker.removeAttribute("open");
+		});
+	}
 
 	// ---- SSE: ONE stream for the whole page ----
 	// image-liked keeps THIS image's tallies fresh when anyone votes,
@@ -565,14 +626,13 @@ export function boot() {
 				if (dc && Number.isFinite(ev.dislikes)) dc.textContent = String(ev.dislikes);
 			},
 			"image-reacted": (ev) => {
-				// Full absolute tally: refresh every reaction count
-				// span (pressed states are only ever the local
-				// visitor's — never touched here).
+				// Full absolute tally: rebuild the chip row (counts
+				// can cross the 0↔1 boundary for ANY emoji, and the
+				// row only lists existing reactions). Pressed states
+				// come from the local holdings set — never from the
+				// event, which carries no identity.
 				if (!ev || ev.id !== currentID || !ev.reactions) return;
-				for (const span of document.querySelectorAll(".react-count")) {
-					const n = ev.reactions[span.dataset.emoji];
-					if (Number.isFinite(n)) span.textContent = String(n);
-				}
+				renderReactionRow(ev.reactions);
 			},
 			"image-new": () => {
 				if (document.body.dataset.atEnd !== "true") return;

@@ -31,15 +31,18 @@ import (
 )
 
 // cardReactionBadges is how many reaction badges a gallery card shows
-// (top N by count, configured order breaking ties). Owner choice
-// (Oct 2026): cards carry the signal without turning the meta line
-// into a second prompt.
-const cardReactionBadges = 2
+// (top N by count, configured order breaking ties) before the "…"
+// ellipsis that says more exist (owner request, Oct 2026: more than
+// two, with an overflow marker).
+const cardReactionBadges = 4
 
 // dbToggleReaction flips token's reaction of emoji on id and returns
-// whether the caller now holds that reaction plus the image's full
+// whether the caller now holds that reaction, plus the image's full
 // post-toggle reaction tally (emoji name → count; absent = zero —
-// never stored as explicit zeros).
+// never stored as explicit zeros) and the caller's own full holdings
+// map (the details page's JS rebuilds the whole existing-reactions
+// row from the response, and pressed states for emojis OTHER than
+// the toggled one cannot be derived from a delta).
 //
 // The insert-first order makes the toggle idempotent under the DB's
 // single connection: two racing toggles from the same token both fail
@@ -47,58 +50,39 @@ const cardReactionBadges = 2
 // rows — the reported state (un-reacted, tally as-of-then) is
 // coherent either way. Exactly the pre-dislikes dbToggleLike shape,
 // scoped to one emoji.
-func dbToggleReaction(db *sqlx.DB, id, token, emoji string) (reacted bool, tally map[string]int, err error) {
+func dbToggleReaction(db *sqlx.DB, id, token, emoji string) (reacted bool, tally map[string]int, mine map[string]bool, err error) {
 	res, err := db.Exec(
 		`INSERT INTO reactions (image_id, token, emoji, created_at) VALUES (?, ?, ?, ?)
 		 ON CONFLICT (image_id, token, emoji) DO NOTHING`,
 		id, token, emoji, formatDBTimeNow())
 	if err != nil {
-		return false, nil, err
+		return false, nil, nil, err
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return false, nil, err
+		return false, nil, nil, err
 	}
 	reacted = n > 0
 	if !reacted {
 		if _, err := db.Exec(`DELETE FROM reactions WHERE image_id = ? AND token = ? AND emoji = ?`, id, token, emoji); err != nil {
-			return false, nil, err
+			return false, nil, nil, err
 		}
 	}
-	tally, err = dbReactionTally(db, id)
+	tally, mine, err = dbGetReactionState(db, id, token)
 	if err != nil {
-		return false, nil, err
+		return false, nil, nil, err
 	}
-	return reacted, tally, nil
-}
-
-// dbReactionTally returns one image's full reaction tally (emoji →
-// count). Unlike dbVoteCounts there is no FROM images anchor: a
-// GROUP BY over zero rows and over a nonexistent image are
-// indistinguishable, so the anchor would add ceremony without a
-// tripwire — the handler's lookupImage gate is the real boundary.
-func dbReactionTally(db *sqlx.DB, id string) (map[string]int, error) {
-	rows, err := db.Query(
-		`SELECT emoji, COUNT(*) FROM reactions WHERE image_id = ? GROUP BY emoji`, id)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	tally := make(map[string]int)
-	for rows.Next() {
-		var name string
-		var n int
-		if err := rows.Scan(&name, &n); err != nil {
-			return nil, err
-		}
-		tally[name] = n
-	}
-	return tally, rows.Err()
+	return reacted, tally, mine, nil
 }
 
 // dbGetReactionState returns an image's full tally and the subset of
 // emojis token itself holds, in one round trip. Unknown image ids
-// yield empty maps, not errors (see dbReactionTally's anchor note).
+// yield empty maps, not errors — a GROUP BY over zero rows cannot
+// distinguish "no reactions" from "no image", so an anchor would be
+// ceremony without a tripwire (the handler's lookupImage gate is the
+// real boundary; compare dbVoteCounts' deliberate FROM images
+// anchor, which works there because a single-row Get can tell the
+// two apart).
 func dbGetReactionState(db *sqlx.DB, id, token string) (tally map[string]int, mine map[string]bool, err error) {
 	rows, err := db.Query(
 		`SELECT emoji, COUNT(*),
@@ -177,17 +161,19 @@ func hydrateReactionCounts(db *sqlx.DB, imgs []*dbImage) error {
 }
 
 // topCardReactions picks the card-badge slice from a hydrated tally:
-// configured emojis only, top N by count, configured order breaking
-// ties. Dormant rows (names no longer configured) are invisible by
-// construction — the badge can only show a glyph the config supplies.
-// reactionsEnabled is re-checked defensively: normalize already nils
-// the list when disabled, so this only matters for configs that
-// bypassed loadConfig (struct literals in tests, future callers).
-func topCardReactions(cfg Config, tally map[string]int) []reactionBadge {
+// configured emojis only, top N by count (cardReactionBadges),
+// configured order breaking ties, plus whether MORE configured
+// emojis have non-zero counts than fit — the template renders a "…"
+// overflow marker in that case. Dormant rows (names no longer
+// configured) are invisible by construction — the badge can only
+// show a glyph the config supplies. reactionsEnabled is re-checked
+// defensively: normalize already nils the list when disabled, so
+// this only matters for configs that bypassed loadConfig (struct
+// literals in tests, future callers).
+func topCardReactions(cfg Config, tally map[string]int) (badges []reactionBadge, more bool) {
 	if !cfg.Reactions.reactionsEnabled() {
-		return nil
+		return nil, false
 	}
-	var badges []reactionBadge
 	for _, e := range cfg.Reactions.Emojis {
 		if n := tally[e.Name]; n > 0 {
 			badges = append(badges, reactionBadge{Name: e.Name, Glyph: e.Glyph, Count: n})
@@ -196,9 +182,9 @@ func topCardReactions(cfg Config, tally map[string]int) []reactionBadge {
 	// Stable sort by count desc; configured order survives ties.
 	sort.SliceStable(badges, func(i, j int) bool { return badges[i].Count > badges[j].Count })
 	if len(badges) > cardReactionBadges {
-		badges = badges[:cardReactionBadges]
+		badges, more = badges[:cardReactionBadges], true
 	}
-	return badges
+	return badges, more
 }
 
 // publishImageReacted fans out image-reacted for a toggle that just
@@ -220,12 +206,16 @@ func (a *App) publishImageReacted(img *dbImage, tally map[string]int) {
 }
 
 // reactionResponse is the JSON shape the JS enhancement consumes:
-// the toggled emoji, whether the caller now holds it, and the full
-// absolute tally so the client can re-render the whole row.
+// the toggled emoji, whether the caller now holds it, the full
+// absolute tally, and the caller's own full holdings map (mine) —
+// the details page rebuilds its existing-reactions row from the
+// response, and the pressed states of emojis other than the toggled
+// one cannot be derived from a delta.
 type reactionResponse struct {
-	Emoji     string         `json:"emoji"`
-	Reacted   bool           `json:"reacted"`
-	Reactions map[string]int `json:"reactions"`
+	Emoji     string          `json:"emoji"`
+	Reacted   bool            `json:"reacted"`
+	Reactions map[string]int  `json:"reactions"`
+	Mine      map[string]bool `json:"mine"`
 }
 
 // handleReactionToggle implements POST /{id}/react/{emoji} — the
@@ -273,7 +263,7 @@ func (a *App) handleReactionToggle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	token, minted := likeTokenFromRequest(r)
-	reacted, tally, err := dbToggleReaction(a.db, id, token, emoji)
+	reacted, tally, mine, err := dbToggleReaction(a.db, id, token, emoji)
 	if err != nil {
 		logger.Error("reaction toggle failed", "id", id, "emoji", emoji, "error", err)
 		http.Error(w, "storage failure", http.StatusInternalServerError)
@@ -301,7 +291,8 @@ func (a *App) handleReactionToggle(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// A toggle response must never be replayed from any cache.
 		w.Header().Set("Cache-Control", "no-store")
-		if err := json.NewEncoder(w).Encode(reactionResponse{Emoji: emoji, Reacted: reacted, Reactions: tally}); err != nil {
+		resp := reactionResponse{Emoji: emoji, Reacted: reacted, Reactions: tally, Mine: mine}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
 			logger.Error("writing reaction response", "id", id, "emoji", emoji, "error", err)
 		}
 		return

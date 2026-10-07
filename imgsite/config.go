@@ -269,15 +269,24 @@ func defaultString(val, def string) string {
 }
 
 // defaultReactionEmojis is the built-in preset for an IRC-adjacent
-// AI-art gallery: quick visceral verdicts, meme-flavored. Order is
-// the button-row order.
+// AI-art gallery — a robust spread (owner request, Oct 2026: the
+// picker popup handles a large grid, so the default fills the whole
+// cap): quick verdicts (fire/poop), meme flavor (skull/clown/eyes),
+// engagement asks (pleading/pray), and art-appropriate ones
+// (sparkles/art). Order is the picker-grid and tie-break order.
 var defaultReactionEmojis = []ReactionEmoji{
-	{Name: "fire", Glyph: "\U0001F525"},  // 🔥
-	{Name: "laugh", Glyph: "\U0001F602"}, // 😂
-	{Name: "wow", Glyph: "\U0001F62E"},   // 😮
-	{Name: "skull", Glyph: "\U0001F480"}, // 💀
-	{Name: "poop", Glyph: "\U0001F4A9"},  // 💩
-	{Name: "eyes", Glyph: "\U0001F440"},  // 👀
+	{Name: "fire", Glyph: "\U0001F525"},     // 🔥
+	{Name: "laugh", Glyph: "\U0001F602"},    // 😂
+	{Name: "skull", Glyph: "\U0001F480"},    // 💀
+	{Name: "poop", Glyph: "\U0001F4A9"},     // 💩
+	{Name: "eyes", Glyph: "\U0001F440"},     // 👀
+	{Name: "clown", Glyph: "\U0001F921"},    // 🤡
+	{Name: "wow", Glyph: "\U0001F62E"},      // 😮
+	{Name: "thinking", Glyph: "\U0001F914"}, // 🤔
+	{Name: "pleading", Glyph: "\U0001F97A"}, // 🥺
+	{Name: "pray", Glyph: "\U0001F64F"},     // 🙏
+	{Name: "sparkles", Glyph: "\U00002728"}, // ✨
+	{Name: "art", Glyph: "\U0001F3A8"},      // 🎨
 }
 
 // reactionsEnabled reports whether the reaction feature is on: the

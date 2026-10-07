@@ -211,11 +211,23 @@ table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
 .like-btn:active { border-color: #b5566c; }
 .dislike-btn.disliked { color: #7f96ad; border-color: #3d4a58; }
 .dislike-btn:active { border-color: #5a7290; }
-/* Reaction row: wraps when the preset is wide; the pressed state is
-   a warm amber so it reads apart from both vote buttons. */
-.react-form { margin: 0 0 0.5rem; display: flex; flex-wrap: wrap; gap: 0.4rem; }
-.react-btn.reacted { color: #ffd27f; border-color: #7a6a3d; }
-.react-btn:active { border-color: #b5994d; }
+/* Reactions: the row lists only EXISTING reactions as chips (pressed
+   = warm amber); the "+" summary opens a native <details> picker
+   whose .react-menu overlays as a grid popup. The menu's containing
+   block is the .react-picker (its own position: relative), so it
+   drops right below the "+" — the form's position: relative merely
+   anchors any future absolutely-positioned row pieces. */
+.react-form { margin: 0 0 0.5rem; display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; position: relative; }
+.react-chip.reacted { color: #ffd27f; border-color: #7a6a3d; }
+.react-chip:active, .react-opt:active { border-color: #b5994d; }
+.react-picker { position: relative; }
+.react-picker > summary { list-style: none; display: inline-block; background: #2a2a30; color: #ddd; border: 1px solid #3c3c44; border-radius: 6px; padding: 0.25rem 0.7rem; cursor: pointer; user-select: none; font: inherit; line-height: 1.2; }
+.react-picker > summary::-webkit-details-marker { display: none; }
+.react-picker > summary:hover { background: #35353d; }
+.react-picker[open] > summary { background: #35353d; border-color: #4a6fb5; }
+.react-menu { position: absolute; top: calc(100% + 0.45rem); left: 0; z-index: 20; display: grid; grid-template-columns: repeat(6, auto); gap: 0.25rem; background: #1d1d21; border: 1px solid #3c3c44; border-radius: 8px; padding: 0.5rem; box-shadow: 0 10px 28px rgba(0,0,0,0.55); }
+.react-opt { font-size: 1.3rem; padding: 0.3rem 0.45rem; line-height: 1.2; }
+.react-opt.mine { color: #ffd27f; border-color: #7a6a3d; }
 </style>
 </head>
 <body data-page="image" data-image-id="{{.ID}}"{{if .AtEnd}} data-at-end="true"{{end}}{{if .LastEvent}} data-last-event="{{.LastEvent}}"{{end}}{{if .ReactionsJSON}} data-reactions="{{.ReactionsJSON}}"{{end}}>
@@ -281,18 +293,27 @@ table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
 <button type="submit" class="like-btn{{if .LikedByYou}} liked{{end}}" id="like-btn" formaction="/{{.ID}}/like" aria-pressed="{{if .LikedByYou}}true{{else}}false{{end}}" title="{{if .LikedByYou}}unlike{{else}}like{{end}}">&#9829; <span id="like-count">{{.LikeCount}}</span></button>
 <button type="submit" class="dislike-btn{{if .DislikedByYou}} disliked{{end}}" id="dislike-btn" formaction="/{{.ID}}/dislike" aria-pressed="{{if .DislikedByYou}}true{{else}}false{{end}}" title="{{if .DislikedByYou}}remove dislike{{else}}dislike{{end}}">&#128148; <span id="dislike-count">{{.DislikeCount}}</span></button>
 </form>
-{{/* Reaction row (anonymous, cookie-token identity — see
-      reactions.go). One button per configured emoji, each carrying
-      its own formaction (/{{.ID}}/react/<name>); Enter inside this
-      form implicit-submits the FIRST emoji. Unlike the vote tallies,
-      counts render at zero too — the buttons ARE the affordance.
-      image.js intercepts the submit (e.submitter tells it which
-      emoji) and image-reacted SSE keeps every button's count fresh;
-      pressed states are only ever the local visitor's. */}}
+{{/* Reactions (anonymous, cookie-token identity — see reactions.go).
+      The ROW lists only EXISTING reactions (count > 0), each chip
+      clickable to add/remove your own; the "+" picker after them is
+      a native <details> popup with the FULL configured grid — no-JS
+      visitors get an expanding picker and plain POSTs back here
+      (Enter inside the form implicit-submits the FIRST chip, or does
+      nothing when the row is empty because summary is not a submit
+      button). image.js intercepts submits (e.submitter tells it
+      which emoji), rebuilds the row from the response's full tally +
+      mine map, and closes the picker on pick; image-reacted SSE
+      keeps counts fresh while pressed states stay local. */}}
 {{if .ReactionButtons}}
 <form class="react-form" method="post">
-{{range .ReactionButtons}}<button type="submit" class="react-btn{{if .Mine}} reacted{{end}}" data-emoji="{{.Name}}" formaction="/{{$.ID}}/react/{{.Name}}" aria-pressed="{{if .Mine}}true{{else}}false{{end}}" title="{{.Name}}">{{.Glyph}} <span class="react-count" data-emoji="{{.Name}}">{{.Count}}</span></button>
-{{end}}</form>
+{{range .ReactionButtons}}{{if .Count}}<button type="submit" class="react-chip{{if .Mine}} reacted{{end}}" data-emoji="{{.Name}}" formaction="/{{$.ID}}/react/{{.Name}}" aria-pressed="{{if .Mine}}true{{else}}false{{end}}" title="{{.Name}}">{{.Glyph}} <span class="react-count" data-emoji="{{.Name}}">{{.Count}}</span></button>
+{{end}}{{end}}<details class="react-picker" id="react-picker">
+<summary class="react-picker-btn" title="add a reaction">&#65291;</summary>
+<div class="react-menu">
+{{range .ReactionButtons}}<button type="submit" class="react-opt{{if .Mine}} mine{{end}}" data-emoji="{{.Name}}" formaction="/{{$.ID}}/react/{{.Name}}" aria-pressed="{{if .Mine}}true{{else}}false{{end}}" title="{{.Name}}">{{.Glyph}}</button>
+{{end}}</div>
+</details>
+</form>
 {{end}}
 
 <h2>Original prompt</h2>
@@ -409,10 +430,11 @@ const cardsPartialSrc = `{{define "cards"}}{{range .Cards}}<article class="card"
      vote span renders ONLY for its non-zero count — zero spans on
      every card are noise; the SSE image-liked handler manages the
      spans (and the wrapper) client-side when a count moves 0→1. The
-     reaction badges are the top 2 configured emojis by count
+     reaction badges are the top 4 configured emojis by count, with a
+     "…" marker when more non-zero emojis did not fit
      (topCardReactions); the SSE image-reacted handler rebuilds
      them. */}}
-<div class="meta"><time datetime="{{.CreatedRFC3339}}" data-ts="{{.CreatedRFC3339}}">{{.Timestamp}}</time>{{if or .LikeCount .DislikeCount .TopReactions}}<span class="counts">{{if .LikeCount}}<span class="likes" data-count="{{.LikeCount}}">&#9829; {{.LikeCount}}</span>{{end}}{{if .DislikeCount}}<span class="dislikes" data-count="{{.DislikeCount}}">&#128148; {{.DislikeCount}}</span>{{end}}{{if .TopReactions}}<span class="reacts">{{range .TopReactions}}<span class="react" data-emoji="{{.Name}}">{{.Glyph}} {{.Count}}</span>{{end}}</span>{{end}}</span>{{end}}</div>
+<div class="meta"><time datetime="{{.CreatedRFC3339}}" data-ts="{{.CreatedRFC3339}}">{{.Timestamp}}</time>{{if or .LikeCount .DislikeCount .TopReactions}}<span class="counts">{{if .LikeCount}}<span class="likes" data-count="{{.LikeCount}}">&#9829; {{.LikeCount}}</span>{{end}}{{if .DislikeCount}}<span class="dislikes" data-count="{{.DislikeCount}}">&#128148; {{.DislikeCount}}</span>{{end}}{{if .TopReactions}}<span class="reacts">{{range .TopReactions}}<span class="react" data-emoji="{{.Name}}">{{.Glyph}} {{.Count}}</span>{{end}}{{if .MoreReactions}}<span class="react more" title="more reactions">&#8230;</span>{{end}}</span>{{end}}</span>{{end}}</div>
 </article>
 {{end}}{{if .NoResults}}<p class="no-results">no results for {{.Query}}</p>{{end}}{{if .NothingSearched}}<p class="no-results">nothing searched yet — type a query</p>{{end}}{{if .EmptyGallery}}<p class="no-results">nothing here yet — images appear here as they are generated</p>{{end}}{{if .HasMore}}<div class="sentinel" data-next-cursor="{{.NextCursor}}"></div>{{end}}{{end}}`
 
@@ -524,8 +546,11 @@ type galleryCard struct {
 	DislikeCount int
 	// TopReactions is the card's badge slice: configured emojis with
 	// non-zero counts, top N by count, configured order breaking ties
-	// (topCardReactions). Nil renders nothing.
-	TopReactions []reactionBadge
+	// (topCardReactions). MoreReactions says additional configured
+	// emojis have non-zero counts that did not fit — the template
+	// renders a "…" overflow marker. Nil renders nothing.
+	TopReactions  []reactionBadge
+	MoreReactions bool
 	// SnippetParts, when non-nil, replaces the plain prompt preview
 	// with a highlighted match snippet (search results only).
 	SnippetParts []snippetPart
@@ -739,7 +764,7 @@ func galleryCardFromImage(cfg Config, img *dbImage) galleryCard {
 	if t, ok := parseDBTime(created); ok {
 		rfc3339 = t.UTC().Format(time.RFC3339)
 	}
-	return galleryCard{
+	card := galleryCard{
 		ID:             img.ID,
 		ThumbURL:       "/" + img.ID + "/t/small",
 		OrigURL:        "/" + img.ID + "/orig/" + url.PathEscape(img.Filename),
@@ -750,8 +775,9 @@ func galleryCardFromImage(cfg Config, img *dbImage) galleryCard {
 		ThumbFailed:    img.ThumbStatus == thumbStatusFailed,
 		LikeCount:      img.LikeCount,
 		DislikeCount:   img.DislikeCount,
-		TopReactions:   topCardReactions(cfg, img.Reactions),
 	}
+	card.TopReactions, card.MoreReactions = topCardReactions(cfg, img.Reactions)
+	return card
 }
 
 // reactionsGlyphJSON marshals the configured preset as the JSON the
@@ -992,11 +1018,13 @@ type imageView struct {
 	LikedByYou    bool
 	DislikedByYou bool
 
-	// ReactionButtons is the details-page reaction row: one entry per
-	// configured emoji with its count and the visitor's pressed state
-	// (set by handleImagePage from dbGetReactionState; nil when the
-	// feature is disabled renders no form). ReactionsJSON is the
-	// preset glyph map for the page's body[data-reactions].
+	// ReactionButtons is the details-page reaction data: one entry per
+	// configured emoji with its count and the visitor's pressed state.
+	// The template splits it two ways — the chip row renders only
+	// count>0 entries, the picker popup renders all of them (set by
+	// handleImagePage from dbGetReactionState; nil when the feature is
+	// disabled renders no form). ReactionsJSON is the preset glyph map
+	// for the page's body[data-reactions].
 	ReactionButtons []reactionButton
 	ReactionsJSON   string
 

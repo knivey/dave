@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jmoiron/sqlx"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -74,32 +75,38 @@ func TestToggleReactionRoundTrip(t *testing.T) {
 	require.NoError(t, dbInsertImage(db, in))
 
 	// React, un-react, re-react with one emoji; a second token stacks.
-	reacted, tally, err := dbToggleReaction(db, "rxn0001", "tok1", "fire")
+	// mine (the caller's full holdings map) rides every return — the
+	// details-page JS rebuilds its whole chip row from it.
+	reacted, tally, mine, err := dbToggleReaction(db, "rxn0001", "tok1", "fire")
 	require.NoError(t, err)
 	assert.True(t, reacted, "first toggle reacts")
 	assert.Equal(t, map[string]int{"fire": 1}, tally)
+	assert.Equal(t, map[string]bool{"fire": true}, mine)
 
-	reacted, tally, err = dbToggleReaction(db, "rxn0001", "tok1", "fire")
+	reacted, tally, mine, err = dbToggleReaction(db, "rxn0001", "tok1", "fire")
 	require.NoError(t, err)
 	assert.False(t, reacted, "second toggle removes the reaction")
 	assert.Empty(t, tally)
+	assert.Empty(t, mine, "un-reacting empties the holdings map")
 
-	reacted, tally, err = dbToggleReaction(db, "rxn0001", "tok1", "fire")
+	reacted, tally, mine, err = dbToggleReaction(db, "rxn0001", "tok1", "fire")
 	require.NoError(t, err)
 	assert.True(t, reacted, "third toggle re-reacts")
 
-	reacted, tally, err = dbToggleReaction(db, "rxn0001", "tok2", "fire")
+	reacted, tally, mine, err = dbToggleReaction(db, "rxn0001", "tok2", "fire")
 	require.NoError(t, err)
 	assert.True(t, reacted)
 	assert.Equal(t, map[string]int{"fire": 2}, tally, "independent tokens count independently")
+	assert.Equal(t, map[string]bool{"fire": true}, mine, "mine describes ONLY the calling token")
 
 	// MULTI-emoji cardinality: the same token adds different emojis
 	// without releasing the ones it holds.
-	reacted, tally, err = dbToggleReaction(db, "rxn0001", "tok2", "wow")
+	reacted, tally, mine, err = dbToggleReaction(db, "rxn0001", "tok2", "wow")
 	require.NoError(t, err)
 	assert.True(t, reacted, "second emoji from the same token lands")
 	assert.Equal(t, map[string]int{"fire": 2, "wow": 1}, tally)
-	reacted, tally, err = dbToggleReaction(db, "rxn0001", "tok2", "laugh")
+	assert.Equal(t, map[string]bool{"fire": true, "wow": true}, mine)
+	reacted, tally, mine, err = dbToggleReaction(db, "rxn0001", "tok2", "laugh")
 	require.NoError(t, err)
 	assert.True(t, reacted)
 	assert.Equal(t, map[string]int{"fire": 2, "laugh": 1, "wow": 1}, tally)
@@ -107,9 +114,10 @@ func TestToggleReactionRoundTrip(t *testing.T) {
 	// Removing one emoji leaves the token's others (and other
 	// tokens' reactions) untouched: tok1's fire survives, tok2's
 	// does not.
-	_, tally, err = dbToggleReaction(db, "rxn0001", "tok2", "fire")
+	_, tally, mine, err = dbToggleReaction(db, "rxn0001", "tok2", "fire")
 	require.NoError(t, err)
 	assert.Equal(t, map[string]int{"fire": 1, "laugh": 1, "wow": 1}, tally, "removing tok2's fire releases only tok2's fire")
+	assert.Equal(t, map[string]bool{"laugh": true, "wow": true}, mine, "tok2 keeps its other emojis")
 }
 
 func TestDbGetReactionState(t *testing.T) {
@@ -118,10 +126,10 @@ func TestDbGetReactionState(t *testing.T) {
 		SizeBytes: 1, CreatedAt: "2026-10-06 01:00:00", ThumbStatus: thumbStatusPending}
 	require.NoError(t, dbInsertImage(db, in))
 	for _, e := range []string{"fire", "wow"} {
-		_, _, err := dbToggleReaction(db, "rxn0002", "tok1", e)
+		_, _, _, err := dbToggleReaction(db, "rxn0002", "tok1", e)
 		require.NoError(t, err)
 	}
-	_, _, err := dbToggleReaction(db, "rxn0002", "tok2", "fire")
+	_, _, _, err := dbToggleReaction(db, "rxn0002", "tok2", "fire")
 	require.NoError(t, err)
 
 	tally, mine, err := dbGetReactionState(db, "rxn0002", "tok1")
@@ -151,12 +159,12 @@ func TestHydrateReactionCounts(t *testing.T) {
 	}
 	// rhy0001: fire x2 + wow x1; rhy0002: none; rhy0003: laugh x1.
 	for _, tok := range []string{"a", "b"} {
-		_, _, err := dbToggleReaction(db, "rhy0001", tok, "fire")
+		_, _, _, err := dbToggleReaction(db, "rhy0001", tok, "fire")
 		require.NoError(t, err)
 	}
-	_, _, err := dbToggleReaction(db, "rhy0001", "c", "wow")
+	_, _, _, err := dbToggleReaction(db, "rhy0001", "c", "wow")
 	require.NoError(t, err)
-	_, _, err = dbToggleReaction(db, "rhy0003", "d", "laugh")
+	_, _, _, err = dbToggleReaction(db, "rhy0003", "d", "laugh")
 	require.NoError(t, err)
 
 	rows := []dbImage{{ID: "rhy0001"}, {ID: "rhy0002"}, {ID: "rhy0003"}}
@@ -168,29 +176,53 @@ func TestHydrateReactionCounts(t *testing.T) {
 }
 
 func TestTopCardReactions(t *testing.T) {
-	cfg := reactionTestConfig()
-	// fire=1 laugh=2 wow=2 → top 2 by count are laugh and wow
-	// (configured order breaks the tie in their favor over fire, and
-	// orders laugh before wow despite equal counts).
-	badges := topCardReactions(cfg, map[string]int{"fire": 1, "laugh": 2, "wow": 2})
-	require.Len(t, badges, 2)
+	cfg := reactionTestConfig() // fire, laugh, wow (cap is 4)
+	// fire=1 laugh=2 wow=2 → count desc is laugh, wow (configured
+	// order breaks their tie), then fire — all three fit the cap.
+	badges, more := topCardReactions(cfg, map[string]int{"fire": 1, "laugh": 2, "wow": 2})
+	require.Len(t, badges, 3)
+	assert.False(t, more)
 	assert.Equal(t, "laugh", badges[0].Name)
 	assert.Equal(t, "wow", badges[1].Name)
+	assert.Equal(t, "fire", badges[2].Name)
 	assert.Equal(t, "\U0001F602", badges[0].Glyph, "glyph comes from the config")
 
 	// Dormant names (not configured) never badge.
-	badges = topCardReactions(cfg, map[string]int{"sparkles": 9})
+	badges, more = topCardReactions(cfg, map[string]int{"sparkles": 9})
 	assert.Empty(t, badges)
+	assert.False(t, more)
 
 	// Zero counts never badge; empty tally is fine.
-	assert.Empty(t, topCardReactions(cfg, map[string]int{"fire": 0}))
-	assert.Empty(t, topCardReactions(cfg, nil))
+	badges, _ = topCardReactions(cfg, map[string]int{"fire": 0})
+	assert.Empty(t, badges)
+	badges, _ = topCardReactions(cfg, nil)
+	assert.Empty(t, badges)
 
-	// Exactly at the cap: 3 configured, cap 2.
-	badges = topCardReactions(cfg, map[string]int{"fire": 3, "laugh": 2, "wow": 1})
-	require.Len(t, badges, 2)
+	// Exactly at the cap (4 with a 3-entry preset is unreachable via
+	// the preset, so exercise the boundary with counts on all three:
+	// 3 badges, no overflow).
+	badges, more = topCardReactions(cfg, map[string]int{"fire": 3, "laugh": 2, "wow": 1})
+	require.Len(t, badges, 3)
+	assert.False(t, more)
 	assert.Equal(t, "fire", badges[0].Name)
 	assert.Equal(t, "laugh", badges[1].Name)
+
+	// Overflow with a 6-entry preset: 5 non-zero → 4 badges + more.
+	wide := testConfig()
+	wide.Reactions = ReactionConfig{Emojis: []ReactionEmoji{
+		{Name: "a", Glyph: "🇦"}, {Name: "b", Glyph: "🇧"}, {Name: "c", Glyph: "🇨"},
+		{Name: "d", Glyph: "🇩"}, {Name: "e", Glyph: "🇪"}, {Name: "f", Glyph: "🇫"},
+	}}
+	badges, more = topCardReactions(wide, map[string]int{"a": 1, "b": 2, "c": 3, "d": 4, "e": 5})
+	require.Len(t, badges, cardReactionBadges)
+	assert.True(t, more, "a 5th non-zero configured emoji sets the overflow flag")
+	assert.Equal(t, "e", badges[0].Name, "count desc")
+	assert.Equal(t, "d", badges[1].Name)
+
+	// Dormant names never contribute to the overflow flag either.
+	badges, more = topCardReactions(cfg, map[string]int{"fire": 1, "sparkles": 9})
+	require.Len(t, badges, 1)
+	assert.False(t, more)
 }
 
 func TestReactionsGlyphJSON(t *testing.T) {
@@ -211,12 +243,13 @@ func TestReactionsGlyphJSON(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestLoadConfigReactions(t *testing.T) {
-	// Absent section → built-in default set, enabled.
+	// Absent section → built-in default set (a robust 12 — the picker
+	// grid handles a large set), enabled.
 	path := writeConfigFile(t, "[auth]\napi_key = \"secret\"\n")
 	cfg, err := loadConfig(path)
 	require.NoError(t, err)
 	assert.True(t, cfg.Reactions.reactionsEnabled(), "absent section defaults to enabled")
-	require.NotEmpty(t, cfg.Reactions.Emojis, "absent section fills the default preset")
+	require.Len(t, cfg.Reactions.Emojis, 12, "default preset fills the cap")
 	names := []string{}
 	for _, e := range cfg.Reactions.Emojis {
 		require.True(t, validReactionName(e.Name), "default names are valid")
@@ -310,6 +343,28 @@ glyph = "🔥"
 // POST /{id}/react/{emoji} — toggle handler
 // ---------------------------------------------------------------------------
 
+// dbReactionTally returns one image's full reaction tally (emoji →
+// count). Production reads go through dbGetReactionState (tally +
+// mine in one pass); this plain-tally probe lives for tests.
+func dbReactionTally(db *sqlx.DB, id string) (map[string]int, error) {
+	rows, err := db.Query(
+		`SELECT emoji, COUNT(*) FROM reactions WHERE image_id = ? GROUP BY emoji`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	tally := make(map[string]int)
+	for rows.Next() {
+		var name string
+		var n int
+		if err := rows.Scan(&name, &n); err != nil {
+			return nil, err
+		}
+		tally[name] = n
+	}
+	return tally, rows.Err()
+}
+
 // postReact posts to the reaction toggle endpoint and returns the
 // response (body NOT closed — tests either read it or pass through).
 func postReact(t *testing.T, ts *httptest.Server, id, emoji, cookie, accept string) *http.Response {
@@ -357,7 +412,7 @@ func TestReactionToggleJSONRoundTrip(t *testing.T) {
 	assert.Empty(t, rr.Reactions)
 
 	// Multi-emoji from one token stacks (unlike votes): the same
-	// cookie reacts fire, then wow, holding both.
+	// cookie reacts fire, then wow, holding both — mine reports both.
 	resp = postReact(t, ts, "rxn1000", "fire", cookie, "application/json")
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	resp = postReact(t, ts, "rxn1000", "wow", cookie, "application/json")
@@ -365,6 +420,13 @@ func TestReactionToggleJSONRoundTrip(t *testing.T) {
 	rr = decodeReactionResponse(t, resp)
 	assert.Equal(t, "wow", rr.Emoji)
 	assert.Equal(t, map[string]int{"fire": 1, "wow": 1}, rr.Reactions, "the same token holds both")
+	assert.Equal(t, map[string]bool{"fire": true, "wow": true}, rr.Mine, "mine carries the caller's full holdings")
+
+	// Un-reacting one leaves the other in mine.
+	resp = postReact(t, ts, "rxn1000", "fire", cookie, "application/json")
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	rr = decodeReactionResponse(t, resp)
+	assert.Equal(t, map[string]bool{"wow": true}, rr.Mine, "mine drops only the released emoji")
 
 	// And the vote identity is SHARED: the token that reacted can
 	// also like — one cookie, both features.
@@ -430,7 +492,9 @@ glyph = "🔥"
 
 	// And no badges render from a disabled config even with tally
 	// rows present (belt-and-braces: topCardReactions also gates).
-	assert.Empty(t, topCardReactions(cfg, map[string]int{"fire": 5}))
+	badges, more := topCardReactions(cfg, map[string]int{"fire": 5})
+	assert.Empty(t, badges)
+	assert.False(t, more)
 }
 
 func TestReactionToggleFormRedirectsBack(t *testing.T) {
@@ -625,32 +689,44 @@ func TestDetailsPageReactionButtons(t *testing.T) {
 	ts := newTestServer(t, app)
 	insertImage(t, app, "rxn1040", "2026-10-06 01:00:00")
 
-	// Anonymous visit: full button row, zero counts shown (the
-	// buttons are the affordance), no pressed states.
+	// Anonymous visit: the ROW renders only existing reactions — with
+	// zero reactions that is NOTHING (no zero-count chips; the picker
+	// alone remains), and the picker carries the FULL configured grid.
 	status, body := getPage(t, ts.URL, "/rxn1040")
 	require.Equal(t, http.StatusOK, status)
 	assert.Contains(t, body, `<form class="react-form" method="post">`)
-	assert.Contains(t, body, `data-emoji="fire" formaction="/rxn1040/react/fire"`)
-	assert.Contains(t, body, `data-emoji="laugh" formaction="/rxn1040/react/laugh"`)
-	assert.Contains(t, body, `data-emoji="wow" formaction="/rxn1040/react/wow"`)
-	assert.Contains(t, body, `<span class="react-count" data-emoji="fire">0</span>`)
-	assert.NotContains(t, body, `class="react-btn reacted"`)
+	assert.Contains(t, body, `<details class="react-picker" id="react-picker">`)
+	assert.Contains(t, body, `<summary class="react-picker-btn" title="add a reaction">&#65291;</summary>`)
+	assert.Contains(t, body, `class="react-opt" data-emoji="fire" formaction="/rxn1040/react/fire"`)
+	assert.Contains(t, body, `class="react-opt" data-emoji="laugh" formaction="/rxn1040/react/laugh"`)
+	assert.Contains(t, body, `class="react-opt" data-emoji="wow" formaction="/rxn1040/react/wow"`)
+	assert.NotContains(t, body, `class="react-chip`, "zero-count emojis render no chip")
+	assert.NotContains(t, body, `class="react-count"`, "no counts render anywhere until one exists")
 
 	// data-reactions embed (attribute-escaped JSON on the wire).
 	assert.Contains(t, body, `data-reactions="`)
 	assert.Contains(t, html.UnescapeString(body), `{"fire":"🔥","laugh":"😂","wow":"😮"}`)
 
-	// A visitor holding fire + wow sees those pressed, their counts.
+	// After reactions exist: chips appear (count>0 only), the
+	// visitor's held ones pressed. tok holds fire+wow.
 	tok := "0123456789abcdef0123456789abcdef"
-	_, _, err := dbToggleReaction(app.db, "rxn1040", tok, "fire")
+	_, _, _, err := dbToggleReaction(app.db, "rxn1040", tok, "fire")
 	require.NoError(t, err)
-	_, _, err = dbToggleReaction(app.db, "rxn1040", tok, "wow")
+	_, _, _, err = dbToggleReaction(app.db, "rxn1040", tok, "wow")
+	require.NoError(t, err)
+	_, _, _, err = dbToggleReaction(app.db, "rxn1040", "other", "laugh")
 	require.NoError(t, err)
 	status, body = getPageCookie(t, ts.URL, "/rxn1040", likeCookieName+"="+tok)
 	require.Equal(t, http.StatusOK, status)
-	assert.Equal(t, 2, strings.Count(body, `class="react-btn reacted"`), "exactly the held emojis press")
-	assert.Contains(t, body, `<span class="react-count" data-emoji="fire">1</span>`)
-	assert.NotContains(t, body, `data-emoji="laugh" formaction="/rxn1040/react/laugh" aria-pressed="true"`)
+	assert.Equal(t, 3, strings.Count(body, `class="react-chip`), "every existing reaction chips")
+	assert.Contains(t, body, `<button type="submit" class="react-chip reacted" data-emoji="fire" formaction="/rxn1040/react/fire" aria-pressed="true" title="fire">🔥 <span class="react-count" data-emoji="fire">1</span></button>`)
+	assert.Contains(t, body, `<button type="submit" class="react-chip reacted" data-emoji="wow" formaction="/rxn1040/react/wow" aria-pressed="true" title="wow">😮 <span class="react-count" data-emoji="wow">1</span></button>`)
+	assert.Contains(t, body, `class="react-chip" data-emoji="laugh"`, "laugh (held by another token) chips unpressed")
+	assert.Equal(t, 2, strings.Count(body, `class="react-chip reacted"`), "exactly the held emojis press")
+	// The picker marks held options and still lists the full set.
+	assert.Contains(t, body, `class="react-opt mine" data-emoji="fire"`)
+	assert.Contains(t, body, `class="react-opt mine" data-emoji="wow"`)
+	assert.Contains(t, body, `class="react-opt" data-emoji="laugh"`)
 }
 
 func TestDetailsPageReactionsDisabled(t *testing.T) {
@@ -670,41 +746,69 @@ func TestDetailsPageReactionsDisabled(t *testing.T) {
 }
 
 func TestGalleryCardsShowReactionBadges(t *testing.T) {
-	app := newTestApp(t, reactionTestConfig())
+	cfg := testConfig()
+	cfg.Reactions = ReactionConfig{Emojis: []ReactionEmoji{
+		{Name: "fire", Glyph: "\U0001F525"},
+		{Name: "laugh", Glyph: "\U0001F602"},
+		{Name: "wow", Glyph: "\U0001F62E"},
+		{Name: "skull", Glyph: "\U0001F480"},
+		{Name: "eyes", Glyph: "\U0001F440"},
+	}}
+	app := newTestApp(t, cfg)
 	ts := newTestServer(t, app)
 	insertImage(t, app, "rxn1042", "2026-10-06 01:00:00")
 	insertImage(t, app, "rxn1043", "2026-10-06 02:00:00")
 	insertImage(t, app, "rxn1044", "2026-10-06 03:00:00")
-	// rxn1043: fire x2, laugh x1, wow x1 → badges fire + laugh
-	// (count desc, configured order ties). Plus votes so the wrapper
-	// carries all three groups.
+	insertImage(t, app, "rxn1046", "2026-10-06 04:00:00")
+
+	// rxn1043: fire x2, laugh x1, wow x1 → 3 badges, no overflow.
+	// Plus votes so the wrapper carries all three groups.
 	_, _, _, err := dbToggleVote(app.db, "rxn1043", "v1", voteLike)
 	require.NoError(t, err)
 	for _, tok := range []string{"a", "b"} {
-		_, _, err := dbToggleReaction(app.db, "rxn1043", tok, "fire")
+		_, _, _, err := dbToggleReaction(app.db, "rxn1043", tok, "fire")
 		require.NoError(t, err)
 	}
-	_, _, err = dbToggleReaction(app.db, "rxn1043", "c", "laugh")
+	_, _, _, err = dbToggleReaction(app.db, "rxn1043", "c", "laugh")
 	require.NoError(t, err)
-	_, _, err = dbToggleReaction(app.db, "rxn1043", "d", "wow")
+	_, _, _, err = dbToggleReaction(app.db, "rxn1043", "d", "wow")
 	require.NoError(t, err)
-	// rxn1044: reactions only (wrapper without vote spans).
-	_, _, err = dbToggleReaction(app.db, "rxn1044", "e", "fire")
+
+	// rxn1044: FIVE non-zero emojis → 4 badges (count desc: fire 3,
+	// skull 2, laugh 1, wow 1 — configured order ties) + the "…"
+	// overflow marker for eyes. Reactions only (wrapper without vote
+	// spans).
+	_, _, _, err = dbToggleReaction(app.db, "rxn1044", "e1", "fire")
+	require.NoError(t, err)
+	_, _, _, err = dbToggleReaction(app.db, "rxn1044", "e2", "fire")
+	require.NoError(t, err)
+	_, _, _, err = dbToggleReaction(app.db, "rxn1044", "e3", "fire")
+	require.NoError(t, err)
+	for _, tok := range []string{"e4", "e5"} {
+		_, _, _, err := dbToggleReaction(app.db, "rxn1044", tok, "skull")
+		require.NoError(t, err)
+	}
+	_, _, _, err = dbToggleReaction(app.db, "rxn1044", "e6", "laugh")
+	require.NoError(t, err)
+	_, _, _, err = dbToggleReaction(app.db, "rxn1044", "e7", "wow")
+	require.NoError(t, err)
+	_, _, _, err = dbToggleReaction(app.db, "rxn1044", "e8", "eyes")
 	require.NoError(t, err)
 
 	status, body := getPage(t, ts.URL, "/")
 	require.Equal(t, http.StatusOK, status)
 
-	// Votes + top-2 badges share the wrapper; wow (count 1, behind
-	// laugh on the tie) is NOT badged.
+	// Votes + badges share the wrapper; the 5th non-zero emoji is
+	// elided with the overflow marker.
 	assert.Contains(t, body,
-		`<span class="counts"><span class="likes" data-count="1">&#9829; 1</span><span class="reacts"><span class="react" data-emoji="fire">🔥 2</span><span class="react" data-emoji="laugh">😂 1</span></span></span>`,
-		"wrapper carries votes then the top-2 badges in count order")
-	// Reactions-only card renders the wrapper without vote spans.
+		`<span class="counts"><span class="likes" data-count="1">&#9829; 1</span><span class="reacts"><span class="react" data-emoji="fire">🔥 2</span><span class="react" data-emoji="laugh">😂 1</span><span class="react" data-emoji="wow">😮 1</span></span></span>`,
+		"wrapper carries votes then the badges in count order")
 	assert.Contains(t, body,
-		`<span class="counts"><span class="reacts"><span class="react" data-emoji="fire">🔥 1</span></span></span>`)
-	// The un-reacted card renders neither wrapper nor badges.
+		`<span class="counts"><span class="reacts"><span class="react" data-emoji="fire">🔥 3</span><span class="react" data-emoji="skull">💀 2</span><span class="react" data-emoji="laugh">😂 1</span><span class="react" data-emoji="wow">😮 1</span><span class="react more" title="more reactions">&#8230;</span></span></span>`,
+		"overflow card shows 4 badges plus the ellipsis marker")
+	// The un-reacted cards render neither wrapper nor badges.
 	assert.Equal(t, 2, strings.Count(body, `class="reacts"`), "only the two reacted cards badge")
+	assert.Equal(t, 1, strings.Count(body, `class="react more"`), "exactly one overflow marker")
 
 	// The gallery page embeds the glyph map for the SSE path.
 	assert.Contains(t, body, `data-reactions="`)
@@ -716,7 +820,7 @@ func TestSearchCardsShowReactionBadges(t *testing.T) {
 	insertImage(t, app, "rxn1045", "2026-10-06 01:00:00", func(img *dbImage) {
 		img.OriginalPrompt = "shrew parade five"
 	})
-	_, _, err := dbToggleReaction(app.db, "rxn1045", "t9", "wow")
+	_, _, _, err := dbToggleReaction(app.db, "rxn1045", "t9", "wow")
 	require.NoError(t, err)
 
 	status, body := getPage(t, ts.URL, "/search?q=shrew")
@@ -734,7 +838,7 @@ func TestDbGetGalleryPageHydratesReactions(t *testing.T) {
 	app := newTestApp(t, reactionTestConfig())
 	insertImage(t, app, "rxn1050", "2026-10-06 01:00:00")
 	insertImage(t, app, "rxn1051", "2026-10-06 02:00:00")
-	_, _, err := dbToggleReaction(app.db, "rxn1051", "a", "fire")
+	_, _, _, err := dbToggleReaction(app.db, "rxn1051", "a", "fire")
 	require.NoError(t, err)
 
 	rows, err := dbGetGalleryPage(app.db, "", "", 10, siteCtx{})

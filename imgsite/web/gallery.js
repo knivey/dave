@@ -727,37 +727,39 @@ function setTallySpan(wrap, className, glyph, count) {
 
 // topBadges picks the card's reaction badge list from a tally map:
 // configured emojis only (glyphs come from reactionGlyphs — dormant
-// names can't render), top 2 by count, configured order breaking ties
-// (Object key order is the configured order and Array#sort is
-// stable). Mirrors topCardReactions server-side.
+// names can't render), top 4 by count (cardReactionBadges), configured
+// order breaking ties (Object key order is the configured order and
+// Array#sort is stable), plus whether more non-zero configured emojis
+// did not fit — the caller renders a "…" overflow marker. Mirrors
+// topCardReactions server-side.
 function topBadges(tally) {
-	if (!reactionGlyphs || !tally) return [];
-	const out = [];
+	if (!reactionGlyphs || !tally) return { list: [], more: false };
+	const all = [];
 	for (const name of Object.keys(reactionGlyphs)) {
 		const n = tally[name];
 		if (Number.isFinite(n) && n > 0) {
-			out.push({ name, glyph: reactionGlyphs[name], count: n });
+			all.push({ name, glyph: reactionGlyphs[name], count: n });
 		}
 	}
-	out.sort((a, b) => b.count - a.count);
-	return out.slice(0, cardReactionBadges);
+	all.sort((a, b) => b.count - a.count);
+	return { list: all.slice(0, cardReactionBadges), more: all.length > cardReactionBadges };
 }
 
 // cardReactionBadges mirrors the server's constant (reactions.go):
-// how many reaction badges a card shows.
-const cardReactionBadges = 2;
+// how many reaction badges a card shows before the "…" marker.
+const cardReactionBadges = 4;
 
 // setCardReactions rebuilds one card's .reacts strip (inside the
 // .counts wrapper, after the vote spans) from a tally map. Rebuild-
-// not-diff: the top-2 membership can change on any toggle, so
-// replacing the strip's children is the simple correct move. The
-// strip drops when no configured emoji has a count; the wrapper
-// drops with it only when the vote spans are gone too (shared
-// lifecycle with setCardCounts — see its comment).
+// not-diff: the top-4 membership and the overflow marker can change
+// on any toggle, so replacing the strip's children is the simple
+// correct move. The strip drops when no configured emoji has a
+// count; the wrapper drops with it only when the vote spans are gone
+// too (shared lifecycle with setCardCounts — see its comment).
 function setCardReactions(card, tally) {
 	let wrap = card.querySelector(".counts");
-	const badges = topBadges(tally);
-	if (badges.length === 0) {
+	const { list: badges, more } = topBadges(tally);
+	if (badges.length === 0 && !more) {
 		if (wrap) {
 			const strip = wrap.querySelector(".reacts");
 			if (strip) strip.remove();
@@ -784,6 +786,16 @@ function setCardReactions(card, tally) {
 		s.className = "react";
 		s.dataset.emoji = b.name;
 		s.textContent = b.glyph + " " + b.count;
+		parts.push(s);
+	}
+	if (more) {
+		// Overflow marker: more non-zero configured emojis than the
+		// badge cap — same contract as the server template's
+		// {{if .MoreReactions}} span.
+		const s = document.createElement("span");
+		s.className = "react more";
+		s.title = "more reactions";
+		s.textContent = "…";
 		parts.push(s);
 	}
 	strip.replaceChildren(...parts);

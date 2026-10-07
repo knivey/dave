@@ -14,13 +14,12 @@ package main
 //     1 row affected means the toggle REACTED; zero rows means this
 //     token already had that reaction, so the toggle REMOVES it via
 //     DELETE.
-//   - The config list ([[reactions.emoji]]) is a CURATED QUICK
-//     BAR, not a whitelist: ANY emoji can be reacted (the
-//     full-catalog PicMo picker covers the rest), the row key IS the
-//     emoji string itself, and off-bar emojis chip once they exist —
-//     so curation never migrates data. `reactions.enabled = false`
-//     hides every surface and 404s the endpoints without touching
-//     stored rows.
+//   - ANY emoji can be reacted (there is no curated list — the
+//     owner dropped the quick-bar concept): the row key IS the emoji
+//     string itself, and the vendored full-catalog PicMo picker
+//     covers the whole catalog. `[reactions] enabled = false` hides
+//     every surface and 404s the endpoints without touching stored
+//     rows.
 
 import (
 	"encoding/json"

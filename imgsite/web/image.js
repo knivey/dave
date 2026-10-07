@@ -720,9 +720,14 @@ export function boot() {
 					theme: darkTheme,
 					messages,
 					emojiData,
-					onEmojiSelect: (selection) => {
-						if (selection && selection.emoji) toggleReactionEmoji(selection.emoji);
-					},
+				});
+				// PicMo 5 delivers picks as EVENTS, not a createPicker
+				// option — onEmojiSelect does not exist in this
+				// version (it is silently ignored), which is exactly
+				// how "clicking any emoji does nothing" shipped. The
+				// native renderer's payload is {emoji, hexcode, label}.
+				picmoPicker.addEventListener("emoji:select", (selection) => {
+					if (selection && selection.emoji) toggleReactionEmoji(selection.emoji);
 				});
 			} catch (err) {
 				console.warn("imgsite: full emoji picker failed to load", err);

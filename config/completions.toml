@@ -7,8 +7,8 @@
 #   aliases               (string array, default: [])    Additional trigger names for this command
 #   description          (string)                        Short description for help listings
 #   mcps                 (string array)                  Opt-in MCP server names for tool access
-#   maxtokens            (int, cascades from service)    Max tokens per response
-#   maxcompletiontokens  (int, cascades from service)    Max completion tokens per response
+#   maxtokens            (int, cascades from service)    Max tokens per response (legacy knob)
+#   maxcompletiontokens  (int, cascades from service)    Max completion tokens per response — takes precedence over maxtokens for completions
 #   temperature          (float, cascades from service)  Sampling temperature
 #   topp                 (float, omitted when unset, API default typically 1.0)  Nucleus sampling (0-1)
 #   stop                 (string array)                  Stop sequences
@@ -18,6 +18,10 @@
 #   streamtimeout        (duration, default: timeout)    Max idle time between stream chunks. Cascade: command > service > timeout
 #   toolverbose          (bool, default: true)           Show 🔧 tool call notifications (cascades from service)
 #   paralleltoolcalls    (bool, default: true)           Enable parallel MCP tool calls (cascades from service)
+#
+# Token cap precedence: maxcompletiontokens > maxtokens > hardcoded default (500).
+# A bounded cap is ALWAYS sent — llama.cpp treats an absent max_tokens as
+# "generate until EOS or the full context", which outlives proxy timeouts.
 #
 # Duration values: TOML strings like "30s", "2m", "1m30s".
 #

@@ -20,6 +20,34 @@ import (
 
 var responseChainMu sync.Map
 
+// defaultCompletionMaxTokens bounds a legacy completion when no config value
+// resolves. llama.cpp treats an absent (or effectively unset) max_tokens as
+// "generate until EOS or the full context window" — a base model asked to
+// continue prose may ramble for many minutes, long past any proxy read
+// timeout (observed in production: the llama-server multi-model router runs
+// with timeout=10 and returns 500 "proxy error: Failed to read connection"
+// for every generation that outlives 10 seconds).
+const defaultCompletionMaxTokens = 500
+
+// completionMaxTokens resolves the token cap for the legacy completions API.
+//
+// Precedence: the command's maxcompletiontokens beats the service's maxtokens
+// (services.toml documents maxtokens as the legacy knob, "prefer
+// maxcompletiontokens") — the cascade in ApplyDefaults only fills zeros, so
+// without this a command declaring maxcompletiontokens=200 against a service
+// default of maxtokens=500 would silently generate 500. A config where both
+// resolve to zero still gets the bounded default above so the request is
+// never unbounded.
+func completionMaxTokens(cfg AIConfig) int64 {
+	if cfg.MaxCompletionTokens > 0 {
+		return int64(cfg.MaxCompletionTokens)
+	}
+	if cfg.MaxTokens > 0 {
+		return int64(cfg.MaxTokens)
+	}
+	return defaultCompletionMaxTokens
+}
+
 func completion(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx context.Context, output chan<- string, args ...string) {
 	var svcKey, svcBaseURL string
 	readConfig(func() {
@@ -34,20 +62,18 @@ func completion(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx
 
 	logger := newLogger(network.Name + ".completion." + cfg.Name)
 
-	apiCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	// cfg.Timeout cascades command > service > 60s in ApplyDefaults, so it is
+	// always non-zero here; honoring it (instead of a hardcoded 60s) lets a
+	// slow local endpoint be given a longer budget per-command.
+	apiCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel()
-
-	maxTokens := cfg.MaxTokens
-	if maxTokens == 0 {
-		maxTokens = cfg.MaxCompletionTokens
-	}
 
 	resp, err := aiClient.Completions.New(apiCtx, openai.CompletionNewParams{
 		Model: openai.CompletionNewParamsModel(cfg.Model),
 		Prompt: openai.CompletionNewParamsPromptUnion{
 			OfString: openai.String(args[0]),
 		},
-		MaxTokens:   openai.Int(int64(maxTokens)),
+		MaxTokens:   openai.Int(completionMaxTokens(cfg)),
 		Temperature: openai.Float(float64(cfg.Temperature)),
 	})
 	if err != nil {

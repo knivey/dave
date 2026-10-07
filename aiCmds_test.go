@@ -1069,3 +1069,46 @@ func TestCheckEmptyRetry(t *testing.T) {
 		})
 	}
 }
+
+func TestCompletionMaxTokens(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  AIConfig
+		want int64
+	}{
+		{
+			name: "command maxcompletiontokens beats service maxtokens",
+			// the cascade in ApplyDefaults fills MaxTokens from the service,
+			// so this is the post-cascade shape of a command declaring
+			// maxcompletiontokens=200 against a service default of 500
+			cfg:  AIConfig{MaxTokens: 500, MaxCompletionTokens: 200},
+			want: 200,
+		},
+		{
+			name: "service maxtokens when command sets nothing",
+			cfg:  AIConfig{MaxTokens: 500},
+			want: 500,
+		},
+		{
+			name: "command maxtokens alone",
+			cfg:  AIConfig{MaxTokens: 300},
+			want: 300,
+		},
+		{
+			name: "fully unset gets bounded default, never unbounded",
+			cfg:  AIConfig{},
+			want: defaultCompletionMaxTokens,
+		},
+		{
+			name: "negative values fall through to the default",
+			cfg:  AIConfig{MaxTokens: -1, MaxCompletionTokens: -5},
+			want: defaultCompletionMaxTokens,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, completionMaxTokens(tt.cfg))
+		})
+	}
+}

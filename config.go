@@ -294,6 +294,7 @@ type AIConfig struct {
 	NeedsUserSuffix      bool               `toml:"needsusersuffix"`
 	APIUser              string             `toml:"api_user"`
 	RetryOnEmpty         *int               `toml:"retry_on_empty"`
+	LoadNotice           *bool              `toml:"load_notice"`
 	DisabledBuiltinTools []string           `toml:"disabled_builtin_tools"`
 	HiddenMCPTools       []string           `toml:"hidden_mcp_tools"`
 	HiddenMCPToolSets    []string           `toml:"hidden_mcp_tool_sets"`
@@ -317,6 +318,7 @@ type Service struct {
 	ParallelToolCalls    *bool         `toml:"paralleltoolcalls"`
 	Parallel             int           `toml:"parallel"`
 	APIUser              string        `toml:"api_user"`
+	LoadNotice           *bool         `toml:"load_notice"`
 	DisabledBuiltinTools []string      `toml:"disabled_builtin_tools"`
 	HiddenMCPTools       []string      `toml:"hidden_mcp_tools"`
 	HiddenMCPToolSets    []string      `toml:"hidden_mcp_tool_sets"`
@@ -418,6 +420,17 @@ func (cfg *AIConfig) ApplyDefaults(service Service) {
 	if cfg.RetryOnEmpty == nil {
 		defaultRetry := 1
 		cfg.RetryOnEmpty = &defaultRetry
+	}
+	// load_notice cascade: command > service > (type == "llama"). llama-type
+	// services (llama-server built-in router, llama-swap) get the pre-turn
+	// model-load probe by default; load_notice = false opts out, and
+	// load_notice = true opts IN for any other service type.
+	if cfg.LoadNotice == nil {
+		cfg.LoadNotice = service.LoadNotice
+	}
+	if cfg.LoadNotice == nil {
+		v := service.Type == "llama"
+		cfg.LoadNotice = &v
 	}
 	if cfg.DisabledBuiltinTools == nil {
 		cfg.DisabledBuiltinTools = service.DisabledBuiltinTools

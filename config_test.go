@@ -287,6 +287,81 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 				return cfg
 			},
 		},
+		{
+			name: "load_notice defaults on for llama services",
+			cfg:  AIConfig{},
+			svc:  Service{Type: "llama"},
+			expect: func(cfg AIConfig) AIConfig {
+				cfg.LoadNotice = boolPtr(true)
+				cfg.MaxImages = 5
+				cfg.MaxContextImages = 5
+				cfg.ImageFormat = "jpg"
+				cfg.ImageQuality = 75
+				cfg.MaxImageSize = "1024x1024"
+				cfg.RetryOnEmpty = intPtr(1)
+				return cfg
+			},
+		},
+		{
+			name: "load_notice service false overrides llama type default",
+			cfg:  AIConfig{},
+			svc:  Service{Type: "llama", LoadNotice: boolPtr(false)},
+			expect: func(cfg AIConfig) AIConfig {
+				cfg.LoadNotice = boolPtr(false)
+				cfg.MaxImages = 5
+				cfg.MaxContextImages = 5
+				cfg.ImageFormat = "jpg"
+				cfg.ImageQuality = 75
+				cfg.MaxImageSize = "1024x1024"
+				cfg.RetryOnEmpty = intPtr(1)
+				return cfg
+			},
+		},
+		{
+			name: "load_notice defaults off for non-llama services",
+			cfg:  AIConfig{},
+			svc:  Service{Type: "openai"},
+			expect: func(cfg AIConfig) AIConfig {
+				cfg.LoadNotice = boolPtr(false)
+				cfg.MaxImages = 5
+				cfg.MaxContextImages = 5
+				cfg.ImageFormat = "jpg"
+				cfg.ImageQuality = 75
+				cfg.MaxImageSize = "1024x1024"
+				cfg.RetryOnEmpty = intPtr(1)
+				return cfg
+			},
+		},
+		{
+			name: "load_notice service true opts in for non-llama services",
+			cfg:  AIConfig{},
+			svc:  Service{LoadNotice: boolPtr(true)},
+			expect: func(cfg AIConfig) AIConfig {
+				cfg.LoadNotice = boolPtr(true)
+				cfg.MaxImages = 5
+				cfg.MaxContextImages = 5
+				cfg.ImageFormat = "jpg"
+				cfg.ImageQuality = 75
+				cfg.MaxImageSize = "1024x1024"
+				cfg.RetryOnEmpty = intPtr(1)
+				return cfg
+			},
+		},
+		{
+			name: "load_notice command value beats service",
+			cfg:  AIConfig{LoadNotice: boolPtr(false)},
+			svc:  Service{Type: "llama", LoadNotice: boolPtr(true)},
+			expect: func(cfg AIConfig) AIConfig {
+				cfg.LoadNotice = boolPtr(false)
+				cfg.MaxImages = 5
+				cfg.MaxContextImages = 5
+				cfg.ImageFormat = "jpg"
+				cfg.ImageQuality = 75
+				cfg.MaxImageSize = "1024x1024"
+				cfg.RetryOnEmpty = intPtr(1)
+				return cfg
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -306,6 +381,12 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 			assert.Equal(t, want.APIUser, cfg.APIUser, "APIUser")
 			assert.Equal(t, want.RetryOnEmpty, cfg.RetryOnEmpty, "RetryOnEmpty")
 			assert.Equal(t, want.DisabledBuiltinTools, cfg.DisabledBuiltinTools, "DisabledBuiltinTools")
+			// ApplyDefaults always resolves LoadNotice to non-nil (nil ->
+			// type default); compare as booleans so cases written before the
+			// field (expecting nil) stay valid as "false".
+			wantLoadNotice := want.LoadNotice != nil && *want.LoadNotice
+			gotLoadNotice := cfg.LoadNotice != nil && *cfg.LoadNotice
+			assert.Equal(t, wantLoadNotice, gotLoadNotice, "LoadNotice")
 		})
 	}
 }
@@ -1507,6 +1588,83 @@ baseurl = "http://localhost:8000/v1"
 	assert.Equal(t, []string{"ban_user"}, svc.DisabledBuiltinTools, "service should inherit root disabled_builtin_tools")
 	assert.Equal(t, []string{"wait_for_job"}, svc.HiddenMCPTools, "service should inherit root hidden_mcp_tools")
 	assert.Equal(t, []string{"img-async-management"}, svc.HiddenMCPToolSets, "service should inherit root hidden_mcp_tool_sets")
+}
+
+func TestLoadConfigDirLoadNotice(t *testing.T) {
+	mainTOML := `
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+	servicesTOML := `
+[router]
+type = "llama"
+baseurl = "http://localhost:8000/v1"
+
+[router-off]
+type = "llama"
+baseurl = "http://localhost:8001/v1"
+load_notice = false
+
+[cloud]
+baseurl = "https://api.example.com/v1/"
+`
+	chatsTOML := `
+[inherit]
+service = "router"
+model = "m1"
+
+[optout]
+service = "router"
+model = "m2"
+load_notice = false
+
+[optin]
+service = "cloud"
+model = "m3"
+load_notice = true
+
+[clouddefault]
+service = "cloud"
+model = "m4"
+
+[disabled-service]
+service = "router-off"
+model = "m5"
+
+[re-enable]
+service = "router-off"
+model = "m6"
+load_notice = true
+`
+	completionsTOML := `
+[comp]
+service = "router"
+model = "m7"
+`
+	dir := createTestConfigDir(t, mainTOML, map[string]string{
+		"services.toml":    servicesTOML,
+		"chats.toml":       chatsTOML,
+		"completions.toml": completionsTOML,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg := loadConfigDirOrDie(dir)
+	assert.Equal(t, boolPtr(true), cfg.Commands.Chats["inherit"].LoadNotice,
+		"type = llama service enables the model-load notice by default")
+	assert.Equal(t, boolPtr(false), cfg.Commands.Chats["optout"].LoadNotice,
+		"chat-level load_notice = false opts out of the llama default")
+	assert.Equal(t, boolPtr(true), cfg.Commands.Chats["optin"].LoadNotice,
+		"chat-level load_notice = true opts in on a non-llama service")
+	assert.Equal(t, boolPtr(false), cfg.Commands.Chats["clouddefault"].LoadNotice,
+		"non-llama service without load_notice stays off")
+	assert.Equal(t, boolPtr(false), cfg.Commands.Chats["disabled-service"].LoadNotice,
+		"service-level load_notice = false overrides the llama type default")
+	assert.Equal(t, boolPtr(true), cfg.Commands.Chats["re-enable"].LoadNotice,
+		"chat-level load_notice = true beats a service-level false")
+	assert.Equal(t, boolPtr(true), cfg.Commands.Completions["comp"].LoadNotice,
+		"completions get the same cascade")
 }
 
 func TestRootToServiceCascadeServiceOverrides(t *testing.T) {

@@ -26,6 +26,7 @@ type NoticesConfig struct {
 	Compaction CompactionNotices `toml:"compaction"`
 	Clone      CloneNotices      `toml:"clone"`
 	Users      UsersNotices      `toml:"users"`
+	LLM        LLMNotices        `toml:"llm"`
 	Support    string            `toml:"support"`
 }
 
@@ -161,6 +162,15 @@ type CloneNotices struct {
 type UsersNotices struct {
 	ResolveTransient  string `toml:"resolve_transient"`
 	ResolvePersistent string `toml:"resolve_persistent"`
+}
+
+// LLMNotices governs user-facing messages emitted around LLM requests.
+// ModelLoad is sent before a request when the service's model list reports
+// the requested model is not loaded yet (llama-server router status, or
+// absence from a status-less list such as llama-swap's) — the request will
+// block while the server loads it.
+type LLMNotices struct {
+	ModelLoad string `toml:"model_load"`
 }
 
 var (
@@ -422,6 +432,9 @@ func setNoticesDefaults(n *NoticesConfig) {
 	}
 	if n.Users.ResolvePersistent == "" {
 		n.Users.ResolvePersistent = "internal data conflict for {nick} — using temporary tracking, admin should investigate"
+	}
+	if n.LLM.ModelLoad == "" {
+		n.LLM.ModelLoad = "\x0306⏳ {nick}: loading model {model} on the server, this may take a while...\x0f"
 	}
 	if n.Support == "" {
 		n.Support = "If you enjoy using dave, consider supporting development at https://patreon.com/shrew269 ❤️"

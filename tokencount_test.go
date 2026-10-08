@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"testing"
 	"time"
@@ -172,6 +173,15 @@ func TestCountMessageTokens(t *testing.T) {
 		assert.False(t, tc.Exact)
 	})
 
+	t.Run("message-only count leaves tool fields zero", func(t *testing.T) {
+		// countMessageTokens is the messages-only core: the tool fields
+		// belong to countRequestTokens and must stay zero here so the
+		// two counters can never be confused for each other.
+		tc := countMessageTokens("gpt-4o", []ChatMessage{{Role: RoleUser, Content: "hello"}})
+		assert.Equal(t, 0, tc.ToolTokens)
+		assert.Equal(t, 0, tc.Tools)
+	})
+
 	t.Run("special-token-looking text never panics", func(t *testing.T) {
 		// EncodeOrdinary must be used everywhere: tiktoken.Encode PANICS
 		// on disallowed special tokens, and user content can contain
@@ -206,6 +216,152 @@ func TestCountMessageTokens(t *testing.T) {
 		for i := range results {
 			assert.Equal(t, want, results[i])
 		}
+	})
+}
+
+// TestCountToolTokens covers the tool-definition counter: empty input,
+// nil-Function skipping, the exact per-component formula, and the
+// marshal-failure degrade (schema counts as 0, never fails).
+func TestCountToolTokens(t *testing.T) {
+	enc, err := getEncoder("o200k_base")
+	require.NoError(t, err)
+
+	t.Run("empty tool list is zero", func(t *testing.T) {
+		assert.Equal(t, 0, countToolTokens(enc, nil))
+		assert.Equal(t, 0, countToolTokens(enc, []Tool{}))
+	})
+
+	t.Run("nil Function tools are skipped entirely", func(t *testing.T) {
+		withNil := []Tool{
+			{Type: "function", Function: nil},
+			{Type: "function"},
+		}
+		assert.Equal(t, 0, countToolTokens(enc, withNil))
+		// A nil-Function entry between real ones contributes nothing.
+		mixed := []Tool{
+			{Type: "function", Function: &FunctionDefinition{Name: "aaa", Description: "bbb"}},
+			{Type: "function", Function: nil},
+		}
+		onlyReal := []Tool{
+			{Type: "function", Function: &FunctionDefinition{Name: "aaa", Description: "bbb"}},
+		}
+		assert.Equal(t, countToolTokens(enc, onlyReal), countToolTokens(enc, mixed))
+	})
+
+	t.Run("each component counted — name, description, schema, overhead", func(t *testing.T) {
+		schema := map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"prompt": map[string]any{"type": "string", "description": "the prompt"},
+			},
+			"required": []string{"prompt"},
+		}
+		tool := Tool{Type: "function", Function: &FunctionDefinition{
+			Name:        "generate_image",
+			Description: "Generate an image from a prompt",
+			Parameters:  schema,
+		}}
+		raw, err := json.Marshal(schema)
+		require.NoError(t, err)
+
+		nameT := len(enc.EncodeOrdinary("generate_image"))
+		descT := len(enc.EncodeOrdinary("Generate an image from a prompt"))
+		schemaT := len(enc.EncodeOrdinary(string(raw)))
+
+		got := countToolTokens(enc, []Tool{tool})
+		assert.Equal(t, nameT+descT+schemaT+toolDefOverheadTokens, got,
+			"formula must be name + description + marshalled schema + overhead")
+		// And strictly more than the name-only count, so each component
+		// is demonstrably present rather than an equality accident.
+		assert.Greater(t, got, nameT+toolDefOverheadTokens)
+	})
+
+	t.Run("nil Parameters contribute no schema tokens", func(t *testing.T) {
+		withSchema := Tool{Type: "function", Function: &FunctionDefinition{
+			Name:        "t",
+			Description: "d",
+			Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
+		}}
+		without := Tool{Type: "function", Function: &FunctionDefinition{
+			Name:        "t",
+			Description: "d",
+		}}
+		assert.Greater(t, countToolTokens(enc, []Tool{withSchema}), countToolTokens(enc, []Tool{without}))
+	})
+
+	t.Run("unmarshalable schema counts as zero, never fails", func(t *testing.T) {
+		// json.Marshal rejects channels; the counter must degrade to
+		// "schema contributes 0" instead of erroring or panicking.
+		bad := Tool{Type: "function", Function: &FunctionDefinition{
+			Name:        "bad",
+			Description: "d",
+			Parameters:  make(chan int),
+		}}
+		equivalentNilParams := Tool{Type: "function", Function: &FunctionDefinition{
+			Name:        "bad",
+			Description: "d",
+		}}
+		assert.Equal(t,
+			countToolTokens(enc, []Tool{equivalentNilParams}),
+			countToolTokens(enc, []Tool{bad}))
+	})
+
+	t.Run("nil encoder degrades to estimateTokens", func(t *testing.T) {
+		// Single-char strings make the two bases clearly diverge:
+		// BPE counts 1 token per char, chars/4 floors each to 0.
+		tool := Tool{Type: "function", Function: &FunctionDefinition{Name: "a", Description: "b"}}
+		want := toolDefOverheadTokens + estimateTokens("a") + estimateTokens("b")
+		assert.Equal(t, want, countToolTokens(nil, []Tool{tool}))
+		assert.NotEqual(t, countToolTokens(enc, []Tool{tool}), want,
+			"sanity: the encoder count must differ from the chars/4 fallback")
+	})
+}
+
+// TestCountRequestTokens pins the composition contract: the request
+// count is exactly the message count plus the tool count, with the tool
+// fields filled in and the message-side fields (ImageParts, Encoding,
+// Exact) preserved verbatim.
+func TestCountRequestTokens(t *testing.T) {
+	enc, err := getEncoder("o200k_base")
+	require.NoError(t, err)
+
+	msgs := []ChatMessage{
+		{Role: RoleSystem, Content: "you are a bot"},
+		{Role: RoleUser, Content: "hello world", MultiContent: []MessagePart{
+			{Type: PartTypeImageURL, ImageURL: &ImageURL{URL: "data:image/png;base64,AAAA"}},
+		}},
+		{Role: RoleAssistant, Content: "hi", ReasoningContent: "thinking"},
+	}
+	tools := []Tool{
+		{Type: "function", Function: &FunctionDefinition{
+			Name:        "generate_image",
+			Description: "Generate an image",
+			Parameters:  map[string]any{"type": "object", "properties": map[string]any{}},
+		}},
+		{Type: "function", Function: nil}, // skipped: not counted in Tools
+		{Type: "function", Function: &FunctionDefinition{
+			Name:        "get_transcript",
+			Description: "Fetch a transcript",
+		}},
+	}
+
+	base := countMessageTokens("gpt-4o", msgs)
+	toolSum := countToolTokens(enc, tools)
+	req := countRequestTokens("gpt-4o", msgs, tools)
+
+	assert.Equal(t, base.Tokens+toolSum, req.Tokens, "request total = messages + tools")
+	assert.Equal(t, toolSum, req.ToolTokens)
+	assert.Equal(t, 2, req.Tools, "only tools with non-nil Function count")
+	assert.Equal(t, base.ImageParts, req.ImageParts, "message-side fields preserved")
+	assert.Equal(t, base.Encoding, req.Encoding)
+	assert.Equal(t, base.Exact, req.Exact)
+
+	t.Run("no tools degenerates to the message count", func(t *testing.T) {
+		req := countRequestTokens("gpt-4o", msgs, nil)
+		base := countMessageTokens("gpt-4o", msgs)
+		assert.Equal(t, base.Tokens, req.Tokens)
+		assert.Equal(t, 0, req.ToolTokens)
+		assert.Equal(t, 0, req.Tools)
 	})
 }
 

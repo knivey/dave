@@ -784,16 +784,35 @@ func tuiCmdCompact(parts []string, _ string) {
 // tuiCmdTokenCount is the owner's on-demand provider-accounting
 // investigation tool (/tokencount <session-id>): it computes dave's OWN
 // neutral token count of exactly the payload the next turn would send
-// (real tokenizer via tokencount.go, same MaxHistory truncation
-// GetMessages applies) and lays it next to what the provider last
-// REPORTED for that session's most recent API call (prompt/completion/
-// cached from turn_usage). A provider whose cache-adjusted prompt
-// persistently exceeds our count is accounting differently (the xAI/Grok
-// ~2x prompt_tokens observation), not sending a bigger payload — this
-// command is how that gets diagnosed per-session without touching IRC.
+// — MESSAGES PLUS TOOL DEFINITIONS, both of which the request
+// serializes and OpenAI-style providers fold into prompt_tokens — using
+// the real tokenizer via tokencount.go and the same MaxHistory
+// truncation GetMessages applies, then lays it next to what the
+// provider last REPORTED for that session's most recent API call
+// (prompt/completion/cached from turn_usage).
 //
-// Purely local: DB reads + tokenizer, no API call, no bot connection
-// needed, so unlike /compact it runs synchronously.
+// COMPARAND LOGIC: the primary ratio is the RAW provider prompt over
+// our messages+tools total — the raw prompt is the full wire payload
+// and therefore the counting comparand. When caching is active the
+// adjusted figure (prompt minus cached) is also printed, labeled the
+// billing view: it strips the cached prefix, which contains the tool
+// definitions and shared history, so it is NOT comparable against our
+// full request count. The one known legitimate residual is REASONING
+// REPLAY on Responses API chains (session.ResponseID set): prior
+// turns' reasoning items are re-sent as input and billed in
+// prompt_tokens. That is real input the model consumes — it is NOT
+// subtracted from the provider side; instead it is surfaced as a
+// separate labeled estimate (prior turns' reasoning from turn_usage)
+// alongside a second raw-prompt ratio, and flagged as an UPPER BOUND
+// because the server may evict replayed reasoning. A provider whose
+// raw prompt still exceeds our count plus that bound is accounting
+// differently (the xAI/Grok ~2x prompt_tokens observation), not
+// sending a bigger payload — this command is how that gets diagnosed
+// per-session without touching IRC.
+//
+// Purely local: DB reads + tokenizer + in-memory MCP tool map, no API
+// call, no bot connection needed, so unlike /compact it runs
+// synchronously.
 func tuiCmdTokenCount(parts []string, _ string) {
 	if len(parts) < 2 {
 		fmt.Fprintf(logView, "[yellow]Usage: /tokencount <session-id>[white]\n")
@@ -826,7 +845,11 @@ func tuiCmdTokenCount(parts []string, _ string) {
 		return
 	}
 
-	ours := countMessageTokens(cfg.Model, msgs)
+	// The same tool definitions a real turn would serialize (live MCP
+	// tool map via toolDefsForConfig — getTools' exact assembly, so the
+	// count can never drift from the sent set).
+	tools := toolDefsForConfig(cfg)
+	ours := countRequestTokens(cfg.Model, msgs, tools)
 
 	fmt.Fprintf(logView, "[white]Session #%d %s/%s model:%s service:%s[white]\n",
 		session.ID, tview.Escape(session.Network), tview.Escape(session.Channel),
@@ -835,24 +858,61 @@ func tuiCmdTokenCount(parts []string, _ string) {
 	if ours.Exact {
 		exactNote = "exact"
 	}
+	msgTokens := ours.Tokens - ours.ToolTokens
 	fmt.Fprintf(logView, "[white]Our count: %d tokens across %d messages (encoding %s, %s; %d image part(s))[white]\n",
-		ours.Tokens, len(msgs), ours.Encoding, exactNote, ours.ImageParts)
+		msgTokens, len(msgs), ours.Encoding, exactNote, ours.ImageParts)
 	if ours.ImageParts > 0 {
 		fmt.Fprintf(logView, "[white]  images counted at a flat ~%d tokens each (low-detail lower bound — real cost scales with resolution)[white]\n",
 			imageTokenEstimate)
 	}
+	fmt.Fprintf(logView, "[white]  tools: %d definitions, ~%d tokens[white]\n", ours.Tools, ours.ToolTokens)
+	fmt.Fprintf(logView, "[white]  our request total (messages+tools): %d[white]\n", ours.Tokens)
 
 	lastUsage, err := getLastTurnUsageForSession(session.ID)
 	if err != nil || lastUsage == nil {
 		fmt.Fprintf(logView, "[yellow]No provider usage recorded for this session yet.[white]\n")
 		return
 	}
+	// Reasoning replay surface: only PREVIOUS turns' reasoning can be
+	// replayed into the next request's prompt, hence the prior-turns
+	// split from sumSessionReasoningTokens. Omitted cleanly when there
+	// are no usage rows with reasoning (nothing to surface). The error
+	// is deliberately swallowed: the same table was just read via
+	// getLastTurnUsageForSession, so a failure here is a transient we
+	// degrade on (section omitted) rather than abort the command for.
+	reasoningAll, reasoningPrior, _ := sumSessionReasoningTokens(session.ID)
+	if reasoningAll > 0 {
+		fmt.Fprintf(logView, "[white]Reasoning tokens (turn_usage): all turns %d, prior turns %d (replay-eligible upper bound)[white]\n",
+			reasoningAll, reasoningPrior)
+		if session.ResponseID != nil {
+			fmt.Fprintf(logView, "[white]  Responses chain active — provider prompt legitimately includes replayed prior reasoning (~%d tok upper bound; server may evict)[white]\n",
+				reasoningPrior)
+		} else {
+			fmt.Fprint(logView, "[white]  (no Responses chain — reasoning is not replayed; prior reasoning should NOT appear in prompt_tokens)[white]\n")
+		}
+	}
 	adjusted := lastUsage.PromptTokens - lastUsage.CachedTokens
 	fmt.Fprintf(logView, "[white]Provider last turn: prompt %d (cached %d, adjusted %d), completion %d[white]\n",
 		lastUsage.PromptTokens, lastUsage.CachedTokens, adjusted, lastUsage.CompletionTokens)
 	if ours.Tokens > 0 {
-		fmt.Fprintf(logView, "[white]Ratio provider_adjusted/our = %.2f[white]\n",
-			float64(adjusted)/float64(ours.Tokens))
+		// When cache is active the adjusted figure strips the cached
+		// prefix — which contains the tool definitions and shared
+		// history — so it is NOT comparable against our full request
+		// count. The raw-prompt ratio is the counting-comparand; the
+		// adjusted ratio is the billing story. Identical when cached
+		// is zero, so we only print both when they differ.
+		fmt.Fprintf(logView, "[white]Ratio provider_prompt/our_total = %.2f[white]\n",
+			float64(lastUsage.PromptTokens)/float64(ours.Tokens))
+		if lastUsage.CachedTokens > 0 {
+			fmt.Fprintf(logView, "[white]  Ratio provider_adjusted/our_total = %.2f (billing view — cached prefix stripped)[white]\n",
+				float64(adjusted)/float64(ours.Tokens))
+		}
+		if session.ResponseID != nil && reasoningAll > 0 {
+			// Second ratio accounting for replay-eligible reasoning —
+			// the comparable figure while a Responses chain is active.
+			fmt.Fprintf(logView, "[white]  Ratio provider_prompt/(our_total+prior_reasoning) = %.2f[white]\n",
+				float64(lastUsage.PromptTokens)/float64(ours.Tokens+int(reasoningPrior)))
+		}
 	}
 }
 

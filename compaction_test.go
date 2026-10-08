@@ -545,6 +545,61 @@ func TestShouldAutoCompactServiceWindowCascade(t *testing.T) {
 	}
 }
 
+// TestSumSessionReasoningTokens pins the replay-eligibility split: `all`
+// sums every turn_usage reasoning row, `prior` excludes the LATEST
+// row's contribution (the latest row's reasoning belongs to its own
+// completion; only previous turns' reasoning can be replayed into the
+// next request's prompt). No rows → 0,0 without error.
+func TestSumSessionReasoningTokens(t *testing.T) {
+	setupTestDB(t)
+
+	sid := createTestSession(t, "net", "#c", "u1", "cmd", "svc", "model")
+
+	t.Run("no rows yields zeros", func(t *testing.T) {
+		all, prior, err := sumSessionReasoningTokens(sid)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), all)
+		assert.Equal(t, int64(0), prior)
+	})
+
+	t.Run("single row: prior is zero", func(t *testing.T) {
+		single := createTestSession(t, "net", "#c", "u2", "cmd", "svc", "model")
+		require.NoError(t, theDB.Create(&TurnUsage{SessionID: single, ReasoningTokens: 250}).Error)
+		all, prior, err := sumSessionReasoningTokens(single)
+		require.NoError(t, err)
+		assert.Equal(t, int64(250), all, "all includes the only row")
+		assert.Equal(t, int64(0), prior, "the latest row's reasoning is its own completion, not replayable")
+	})
+
+	t.Run("multiple rows: prior excludes the latest row", func(t *testing.T) {
+		multi := createTestSession(t, "net", "#c", "u3", "cmd", "svc", "model")
+		// Insert order determines id order, hence which row is latest.
+		require.NoError(t, theDB.Create(&TurnUsage{SessionID: multi, ReasoningTokens: 100}).Error)
+		require.NoError(t, theDB.Create(&TurnUsage{SessionID: multi, ReasoningTokens: 200}).Error)
+		require.NoError(t, theDB.Create(&TurnUsage{SessionID: multi, ReasoningTokens: 40}).Error)
+		all, prior, err := sumSessionReasoningTokens(multi)
+		require.NoError(t, err)
+		assert.Equal(t, int64(340), all)
+		assert.Equal(t, int64(300), prior, "prior = all minus the latest (40)")
+	})
+
+	t.Run("zero-reasoning rows sum to zero", func(t *testing.T) {
+		zero := createTestSession(t, "net", "#c", "u4", "cmd", "svc", "model")
+		require.NoError(t, theDB.Create(&TurnUsage{SessionID: zero, ReasoningTokens: 0, PromptTokens: 100}).Error)
+		require.NoError(t, theDB.Create(&TurnUsage{SessionID: zero, ReasoningTokens: 0, PromptTokens: 200}).Error)
+		all, prior, err := sumSessionReasoningTokens(zero)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), all)
+		assert.Equal(t, int64(0), prior)
+	})
+
+	// The first session must be unaffected by the rows created for the
+	// other subtests (session_id scoping).
+	all, _, err := sumSessionReasoningTokens(sid)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), all)
+}
+
 // TestCallSummarizerMissingServiceErrorsEarly pins the explicit
 // missing-service error: when cfg.Service is absent from config.Services
 // the call must fail BEFORE constructing the SDK client — no network

@@ -6,6 +6,7 @@ import (
 	"text/template"
 
 	"github.com/lrstanley/girc"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/rivo/tview"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -358,8 +359,11 @@ func TestTuiCmdTokenCount(t *testing.T) {
 		assert.Contains(t, out, "encoding o200k_base, exact")
 		assert.Contains(t, out, "across 3 messages")
 		assert.Contains(t, out, "0 image part(s)")
+		assert.Contains(t, out, "tools: 0 definitions, ~0 tokens", "cfg has no MCPs — no tools serialized")
+		assert.Contains(t, out, "our request total (messages+tools): ")
 		assert.Contains(t, out, "No provider usage recorded")
 		assert.NotContains(t, out, "Ratio")
+		assert.NotContains(t, out, "Reasoning tokens", "no usage rows → no reasoning section")
 	})
 
 	t.Run("count with provider usage and ratio", func(t *testing.T) {
@@ -376,8 +380,85 @@ func TestTuiCmdTokenCount(t *testing.T) {
 		out := getLogViewText()
 		assert.Contains(t, out, "encoding o200k_base, approximate")
 		assert.Contains(t, out, "Provider last turn: prompt 2000 (cached 800, adjusted 1200), completion 300")
-		assert.Contains(t, out, "Ratio provider_adjusted/our = ")
-		// The ratio line must be a plausible 2-decimal number.
-		assert.Regexp(t, `Ratio provider_adjusted/our = \d+\.\d\d`, out)
+		// Primary ratio is over the messages+tools total against the RAW
+		// prompt (the counting comparand); cached>0 additionally prints
+		// the billing-view adjusted ratio. No Responses chain and no
+		// reasoning rows → neither the reasoning section nor the second
+		// ratio appears.
+		assert.Regexp(t, `Ratio provider_prompt/our_total = \d+\.\d\d`, out)
+		assert.Regexp(t, `Ratio provider_adjusted/our_total = \d+\.\d\d \(billing view`, out)
+		assert.NotContains(t, out, "Reasoning tokens", "usage row carries no reasoning")
+		assert.NotContains(t, out, "prior_reasoning")
+	})
+
+	t.Run("reasoning with responses chain surfaces replay bound and second ratio", func(t *testing.T) {
+		setupTUITest(t)
+		sid := newSession(t, "grok-4")
+		setChats(t, AIConfig{Name: "chat", Service: "svc", Model: "grok-4", MaxHistory: 100})
+		// Two reasoning turns: all=140, prior=100 (the latest row's 40
+		// belongs to its own completion and is not replay-eligible).
+		require.NoError(t, theDB.Create(&TurnUsage{
+			SessionID: sid, Model: "grok-4", Service: "svc",
+			PromptTokens: 1500, CachedTokens: 0, ReasoningTokens: 100,
+		}).Error)
+		require.NoError(t, theDB.Create(&TurnUsage{
+			SessionID: sid, Model: "grok-4", Service: "svc",
+			PromptTokens: 2000, CompletionTokens: 300, CachedTokens: 800, ReasoningTokens: 40,
+		}).Error)
+		rid := "resp_123"
+		require.NoError(t, sessionMgr.UpdateResponseID(sid, &rid, "grok-4"))
+
+		tuiCmdTokenCount([]string{"/tokencount", fmt.Sprintf("%d", sid)}, "/tokencount "+fmt.Sprint(sid))
+		out := getLogViewText()
+		assert.Contains(t, out, "Reasoning tokens (turn_usage): all turns 140, prior turns 100 (replay-eligible upper bound)")
+		assert.Contains(t, out, "Responses chain active — provider prompt legitimately includes replayed prior reasoning (~100 tok upper bound; server may evict)")
+		assert.Contains(t, out, "Provider last turn: prompt 2000 (cached 800, adjusted 1200), completion 300")
+		assert.Regexp(t, `Ratio provider_prompt/our_total = \d+\.\d\d`, out)
+		assert.Regexp(t, `Ratio provider_prompt/\(our_total\+prior_reasoning\) = \d+\.\d\d`, out)
+	})
+
+	t.Run("reasoning without responses chain notes reasoning is not replayed", func(t *testing.T) {
+		setupTUITest(t)
+		sid := newSession(t, "grok-4")
+		setChats(t, AIConfig{Name: "chat", Service: "svc", Model: "grok-4", MaxHistory: 100})
+		require.NoError(t, theDB.Create(&TurnUsage{
+			SessionID: sid, Model: "grok-4", Service: "svc",
+			PromptTokens: 1500, CachedTokens: 0, ReasoningTokens: 100,
+		}).Error)
+		require.NoError(t, theDB.Create(&TurnUsage{
+			SessionID: sid, Model: "grok-4", Service: "svc",
+			PromptTokens: 2000, CompletionTokens: 300, CachedTokens: 800, ReasoningTokens: 40,
+		}).Error)
+
+		tuiCmdTokenCount([]string{"/tokencount", fmt.Sprintf("%d", sid)}, "/tokencount "+fmt.Sprint(sid))
+		out := getLogViewText()
+		assert.Contains(t, out, "Reasoning tokens (turn_usage): all turns 140, prior turns 100 (replay-eligible upper bound)")
+		assert.Contains(t, out, "(no Responses chain — reasoning is not replayed; prior reasoning should NOT appear in prompt_tokens)")
+		assert.NotContains(t, out, "Responses chain active")
+		assert.NotContains(t, out, "prior_reasoning", "no chain → no second ratio line")
+		assert.Regexp(t, `Ratio provider_prompt/our_total = \d+\.\d\d`, out)
+	})
+
+	t.Run("tools from the live MCP map are counted", func(t *testing.T) {
+		setupTUITest(t)
+		sid := newSession(t, "grok-4")
+		setChats(t, AIConfig{Name: "chat", Service: "svc", Model: "grok-4", MaxHistory: 100, MCPs: []string{"img-mcp"}})
+		origServers := mcpServers
+		mcpServers = map[string]*MCPServer{"img-mcp": {
+			Tools: []*mcp.Tool{{Name: "generate_image", Description: "Generate an image from a text prompt"}},
+		}}
+		t.Cleanup(func() { mcpServers = origServers })
+		require.NoError(t, theDB.Create(&TurnUsage{
+			SessionID: sid, Model: "grok-4", Service: "svc",
+			PromptTokens: 2000, CompletionTokens: 300, CachedTokens: 800,
+		}).Error)
+
+		tuiCmdTokenCount([]string{"/tokencount", fmt.Sprintf("%d", sid)}, "/tokencount "+fmt.Sprint(sid))
+		out := getLogViewText()
+		// 1 MCP tool + 3 builtins (builtins ride along whenever MCP
+		// tools exist — getTools' exact assembly via toolDefsForConfig).
+		assert.Contains(t, out, "tools: 4 definitions")
+		assert.Regexp(t, `tools: 4 definitions, ~\d+ tokens`, out)
+		assert.NotContains(t, out, "~0 tokens", "tool definitions must actually be counted")
 	})
 }

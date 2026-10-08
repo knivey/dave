@@ -1590,6 +1590,36 @@ baseurl = "http://localhost:8000/v1"
 	assert.Equal(t, []string{"img-async-management"}, svc.HiddenMCPToolSets, "service should inherit root hidden_mcp_tool_sets")
 }
 
+// TestLoadConfigDirServiceContextWindow covers the per-service context
+// window consumed by ShouldAutoCompact's service-first cascade: it must
+// load from services.toml and default to 0 (fallback semantics) when unset.
+func TestLoadConfigDirServiceContextWindow(t *testing.T) {
+	mainTOML := `
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+	servicesTOML := `
+[bigctx]
+baseurl = "http://localhost:8000/v1"
+context_window = 200000
+
+[nodefault]
+baseurl = "http://localhost:8001/v1"
+`
+	dir := createTestConfigDir(t, mainTOML, map[string]string{
+		"services.toml": servicesTOML,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg := loadConfigDirOrDie(dir)
+	assert.Equal(t, 200000, cfg.Services["bigctx"].ContextWindow,
+		"service context_window must load from services.toml")
+	assert.Equal(t, 0, cfg.Services["nodefault"].ContextWindow,
+		"unset service context_window must default to 0 (fall back to [compaction])")
+}
+
 func TestLoadConfigDirLoadNotice(t *testing.T) {
 	mainTOML := `
 [networks.testnet]

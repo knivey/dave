@@ -434,15 +434,6 @@ func loadDBSessionMessagesIncludingSuperseded(sessionID int64) ([]Message, error
 	return messages, err
 }
 
-// archiveMessagesRange marks every message in the (inclusive) id range as
-// archived and links it to the given compaction. Operates on the supplied
-// transaction so the caller can run it inside an outer atomic block.
-func archiveMessagesRange(tx *gorm.DB, sessionID, compactionID, firstID, lastID int64) error {
-	return tx.Model(&Message{}).
-		Where("session_id = ? AND id >= ? AND id <= ?", sessionID, firstID, lastID).
-		Updates(map[string]interface{}{"archived": true, "compaction_id": compactionID}).Error
-}
-
 // archiveMessageByID archives a single message (used for the original system
 // prompt row, which lives outside the contiguous compacted range).
 func archiveMessageByID(tx *gorm.DB, messageID, compactionID int64) error {

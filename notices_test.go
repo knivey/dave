@@ -159,6 +159,57 @@ func TestSetNoticesDefaultsPreservesSetValues(t *testing.T) {
 	assert.NotEmpty(t, n.Sessions.NotOwned)
 }
 
+// TestCompactionChangedNoticeDefault covers the notice sent when the
+// compaction transaction's optimistic guard aborts because new messages
+// arrived mid-flight (ErrCompactionSessionChanged → n.Compaction.Changed).
+func TestCompactionChangedNoticeDefault(t *testing.T) {
+	n := NoticesConfig{}
+	setNoticesDefaults(&n)
+	assert.NotEmpty(t, n.Compaction.Changed, "changed notice must have a default")
+
+	n2 := NoticesConfig{Compaction: CompactionNotices{Changed: "custom changed notice"}}
+	setNoticesDefaults(&n2)
+	assert.Equal(t, "custom changed notice", n2.Compaction.Changed)
+}
+
+// TestCompactionNoticeDefaultsUseOwnNumbers pins the Phase B default
+// templates: completed/auto_notice must render the compaction's OWN
+// summarizer-call numbers (summary size + post-compaction live history),
+// not the last chat turn's usage. The last-turn placeholders remain
+// available to custom templates (see TestCompactionNoticeVars) but the
+// defaults no longer show them. Phase D tightened the wording further:
+// both defaults now show the before/after context sizes
+// ({context_before} → {context_after}) with every number labeled in
+// plain words.
+func TestCompactionNoticeDefaultsUseOwnNumbers(t *testing.T) {
+	n := NoticesConfig{}
+	setNoticesDefaults(&n)
+
+	assert.Equal(t,
+		"\x0303✓ Compacted: summarized {count} messages into a {summary_tokens}-token summary. Context now ~{context_after} tokens across {live_messages} messages (was ~{context_before}).\x0F",
+		n.Compaction.Completed)
+	assert.Equal(t,
+		"\x0314🗜 Compaction: {count} messages summarized ({summary_tokens} tokens). Context: ~{context_before} → ~{context_after} tokens ({live_messages} messages).\x0F",
+		n.Compaction.AutoNotice)
+
+	// The defaults must not present the last chat turn's numbers as
+	// compaction numbers.
+	for _, tmpl := range []string{n.Compaction.Completed, n.Compaction.AutoNotice} {
+		assert.NotContains(t, tmpl, "{total}")
+		assert.NotContains(t, tmpl, "{cached}")
+		assert.NotContains(t, tmpl, "{prompt}")
+		assert.NotContains(t, tmpl, "{completion}")
+	}
+
+	// Degenerate-refusal notice default.
+	assert.Equal(t, "No new messages to compact since the last compaction.", n.Compaction.NothingNew)
+
+	// Custom values survive the defaults pass.
+	n2 := NoticesConfig{Compaction: CompactionNotices{NothingNew: "custom nothing new"}}
+	setNoticesDefaults(&n2)
+	assert.Equal(t, "custom nothing new", n2.Compaction.NothingNew)
+}
+
 func TestRatemsg(t *testing.T) {
 	n := NoticesConfig{}
 	setNoticesDefaults(&n)

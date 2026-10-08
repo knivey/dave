@@ -314,7 +314,7 @@ func TestRunTurnModelLoadNotice(t *testing.T) {
 		t.Helper()
 		sid := createTestSession(t, "testnet", "#101", "shrew", "testcmd", "svc", "m")
 		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "hi"}))
-		messages, err := sessionMgr.GetMessages(sid, 10)
+		messages, err := sessionMgr.GetMessages(sid)
 		require.NoError(t, err)
 		return sid, messages
 	}
@@ -383,12 +383,12 @@ func newModelLoadTurnRunner(t *testing.T, modelsBody string, outputCh chan strin
 	logger := logxi.New("test")
 	logger.SetLevel(logxi.LevelAll)
 	return &chatRunner{
+		cfg:          AIConfig{Model: "m", LoadNotice: boolPtr(true), Timeout: 10 * time.Second},
 		openaiClient: &client,
 		transport:    transport,
 		httpClient:   &http.Client{Transport: transport},
 		baseURL:      server.URL + "/v1",
 		apiKey:       "test-key",
-		cfg:          AIConfig{Model: "m", LoadNotice: boolPtr(true), MaxHistory: 10, Timeout: 10 * time.Second},
 		network:      Network{Name: "testnet"},
 		channel:      "#101",
 		nick:         "shrew",

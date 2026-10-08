@@ -9,6 +9,7 @@ import (
 
 const (
 	RoleSystem    = "system"
+	RoleDeveloper = "developer"
 	RoleUser      = "user"
 	RoleAssistant = "assistant"
 	RoleTool      = "tool"

@@ -9,8 +9,7 @@
 #   maxtokens            (int)             Max tokens per response (legacy, prefer maxcompletiontokens)
 #   maxcompletiontokens  (int)             Max completion tokens per response
 #   temperature          (float)           Sampling temperature (0=deterministic, default: 0)
-#   maxhistory           (int, default: 100) Max conversation turns sent as context
-#   context_window       (int, default: 0) Model context window in tokens, used by auto-compaction thresholding ([compaction] auto_enabled). 0 = fall back to [compaction] context_window
+#   context_window       (int, default: 0) Model context window in tokens, used by auto-compaction thresholding ([compaction] auto_enabled). A per-command context_window overrides this; when unset here, [compaction] context_window is the final fallback
 #   imageformat          (string, default: "jpg")  Image format: "jpg", "jpeg", or "webp"
 #   imagequality         (int 1-100, default: 75)   Image quality percentage
 #   maximagesize         (string, default: "1024x1024") Max image dimensions "WxH"
@@ -18,9 +17,12 @@
 #   streamtimeout        (duration, default: timeout) Max idle time between stream chunks
 #   load_notice          (bool, default: true when type = "llama", else false) Before each turn, GET /v1/models and send an IRC notice when the requested model is not loaded yet (llama-server router status: unloaded/loading/sleeping; llama-swap status-less list: model absent). Fails open — no notice when the endpoint errors. Set false to disable for llama services, true to enable for others. Cascades to commands.
 #   toolverbose          (bool, default: true)       Show 🔧 tool call notifications in IRC
+#   needsusersuffix      (*bool, default: auto)      Guidance Knob 2 (cascades to commands): append a short user message after injected guidance when it would be the last message of the request. Auto (unset) appends it for anthropic/ models; true forces it, false suppresses it.
+#   injection_role       (string, default: "system") Guidance Knob 1 (cascades to commands): wire role for injected guidance payload rows ("system" | "developer" | "user"). "developer" maps to system server-side on llama.cpp; "user" is for models whose templates cannot render mid-chain system at all.
+#   async_result_delivery (string, default: "message") (cascades to commands) How completed background jobs are delivered: "message" = guidance row per the knobs above; "tool" = synthetic assistant tool-call + tool-result round-trip, for smaller models that handle mid-chain guidance poorly.
 #   paralleltoolcalls    (bool, default: true)       Enable parallel MCP tool calls
 #   parallel             (int, default: 1)           Max concurrent requests per command
-#   api_user             (string)                    Go template for the end-user identifier field (cascades to commands). Sent as safety_identifier + prompt_cache_key on OpenAI/xAI (prompt_cache_key on xAI chat completions rides the x-grok-conv-id header), user on OpenRouter chat completions and unknown providers. Variables: {{.Nick}}, {{.BotNick}}, {{.Channel}}, {{.Network}}, {{.Date}}, {{.SessionID}}, {{.Vars.*}}. Empty = not sent.
+#   api_user             (string)                    Go template for the end-user identifier field (cascades to commands). Sent as safety_identifier + prompt_cache_key on OpenAI/xAI (prompt_cache_key on xAI chat completions rides the x-grok-conv-id header), user on OpenRouter chat completions and unknown providers. Variables: {{.Nick}}, {{.BotNick}}, {{.Channel}}, {{.Network}}, {{.Date}}, {{.SessionID}}, {{.AsyncResultRole}}, {{.Vars.*}}. Empty = not sent.
 #   disabled_builtin_tools (string array)            Builtin LLM tools to disable for commands using this service. Cascade: command > service > root default ([]). Nil = inherit.
 #   hidden_mcp_tools     (string array)              MCP tool names to hide from the LLM. Bare names ("tool") or server-prefixed ("server.tool"). Cascade: command > service > root.
 #   hidden_mcp_tool_sets (string array)              Named tool sets from mcps.toml [hidden_mcp_tool_sets.*]. Merged with hidden_mcp_tools. Cascade: command > service > root.
@@ -35,7 +37,6 @@
 # maxtokens = 500
 # maxcompletiontokens = 600
 # temperature = 0.7
-# maxhistory = 100
 # context_window = 200000
 # imageformat = "jpg"
 # imagequality = 75
@@ -43,6 +44,9 @@
 # timeout = "90s"
 # streamtimeout = "45s"
 # load_notice = true
+# needsusersuffix = true
+# injection_role = "system"
+# async_result_delivery = "message"
 # toolverbose = true
 # paralleltoolcalls = true
 # parallel = 1

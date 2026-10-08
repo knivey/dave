@@ -786,10 +786,10 @@ func tuiCmdCompact(parts []string, _ string) {
 // neutral token count of exactly the payload the next turn would send
 // — MESSAGES PLUS TOOL DEFINITIONS, both of which the request
 // serializes and OpenAI-style providers fold into prompt_tokens — using
-// the real tokenizer via tokencount.go and the same MaxHistory
-// truncation GetMessages applies, then lays it next to what the
-// provider last REPORTED for that session's most recent API call
-// (prompt/completion/cached from turn_usage).
+// the real tokenizer via tokencount.go and the full live history
+// GetMessages returns (truncation-free since Oct 2026), then lays it
+// next to what the provider last REPORTED for that session's most
+// recent API call (prompt/completion/cached from turn_usage).
 //
 // COMPARAND LOGIC: the primary ratio is the RAW provider prompt over
 // our messages+tools total — the raw prompt is the full wire payload
@@ -837,9 +837,9 @@ func tuiCmdTokenCount(parts []string, _ string) {
 		fmt.Fprintf(logView, "[red]Chat command %q for session %d no longer exists[white]\n", session.ChatCommand, sessionID)
 		return
 	}
-	// The same truncation a real turn would send (GetMessages applies
-	// TruncateHistory with the live config's MaxHistory).
-	msgs, err := sessionMgr.GetMessages(session.ID, cfg.MaxHistory)
+	// The same history a real turn would send (GetMessages returns the
+	// full live history — no truncation since Oct 2026).
+	msgs, err := sessionMgr.GetMessages(session.ID)
 	if err != nil {
 		fmt.Fprintf(logView, "[red]Failed to load messages for session %d: %s[white]\n", sessionID, err)
 		return
@@ -1029,6 +1029,10 @@ func tuiCmdSystemMsg(parts []string, text string) {
 	}
 	userNick := displayNick(u)
 
+	// The session's command config decides the delivery-role template
+	// variable; a gone command falls back to the default role ("system").
+	cfg, _ := getSessionConfig(session)
+
 	tmpl, err := template.New("systemmsg").Parse(tmplText)
 	if err != nil {
 		fmt.Fprintf(logView, "[red]Template parse error: %s[white]\n", err)
@@ -1036,6 +1040,7 @@ func tuiCmdSystemMsg(parts []string, text string) {
 	}
 
 	data := buildSystemPromptData(bot.Network, bot.Client, session.Channel, userNick)
+	data.AsyncResultRole = asyncResultRole(cfg)
 	var buf strings.Builder
 	if err := tmpl.Execute(&buf, data); err != nil {
 		fmt.Fprintf(logView, "[red]Template execute error: %s[white]\n", err)

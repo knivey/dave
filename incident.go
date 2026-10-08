@@ -82,7 +82,6 @@ type sanitizedAIConfig struct {
 	MaxTokens           int            `json:"maxtokens,omitempty"`
 	MaxCompletionTokens int            `json:"maxcompletiontokens,omitempty"`
 	Temperature         float32        `json:"temperature,omitempty"`
-	MaxHistory          int            `json:"maxhistory,omitempty"`
 	RenderMarkdown      bool           `json:"rendermarkdown"`
 	MCPs                []string       `json:"mcps,omitempty"`
 	TopP                float32        `json:"topp,omitempty"`
@@ -92,7 +91,9 @@ type sanitizedAIConfig struct {
 	ReasoningSummary    string         `json:"reasoningsummary,omitempty"`
 	ResponsesAPI        bool           `json:"responses_api"`
 	PreviousResponseID  bool           `json:"previous_response_id"`
-	NeedsUserSuffix     bool           `json:"needsusersuffix"`
+	NeedsUserSuffix     bool           `json:"needsusersuffix,omitempty"`
+	InjectionRole       string         `json:"injection_role,omitempty"`
+	AsyncResultDelivery string         `json:"async_result_delivery,omitempty"`
 	Timeout             string         `json:"timeout,omitempty"`
 	StreamTimeout       string         `json:"streamtimeout,omitempty"`
 	ExtraBody           map[string]any `json:"extra_body,omitempty"`
@@ -108,7 +109,6 @@ func sanitizeAIConfig(cfg AIConfig) sanitizedAIConfig {
 		MaxTokens:           cfg.MaxTokens,
 		MaxCompletionTokens: cfg.MaxCompletionTokens,
 		Temperature:         cfg.Temperature,
-		MaxHistory:          cfg.MaxHistory,
 		RenderMarkdown:      cfg.RenderMarkdown,
 		MCPs:                cfg.MCPs,
 		TopP:                cfg.TopP,
@@ -118,7 +118,9 @@ func sanitizeAIConfig(cfg AIConfig) sanitizedAIConfig {
 		ReasoningSummary:    cfg.ReasoningSummary,
 		ResponsesAPI:        cfg.ResponsesAPI,
 		PreviousResponseID:  cfg.PreviousResponseID,
-		NeedsUserSuffix:     cfg.NeedsUserSuffix,
+		NeedsUserSuffix:     needsUserSuffix(cfg),
+		InjectionRole:       guidanceRole(cfg),
+		AsyncResultDelivery: asyncResultDelivery(cfg),
 		ExtraBody:           cfg.ExtraBody,
 		System:              cfg.System,
 	}

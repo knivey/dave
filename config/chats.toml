@@ -2,10 +2,12 @@
 # Available variables: {{.Nick}} (caller's nickname), {{.BotNick}} (bot's nickname), {{.Channel}} (channel name),
 #   {{.Network}} (network name - exactly as defined in config.toml under [networks.*]),
 #   {{.ChanNicks}} (JSON array of ALL nicknames in {{.Channel}}), {{.Date}} (current date, YYYY-MM-DD),
+#   {{.AsyncResultRole}} (wire role background-job results arrive under: injection_role of this command — "system" default, "developer", "user"; or "tool" when async_result_delivery = "tool"),
 #   {{.Vars.*}} (custom variables from templatevars.toml)
 # Templates are processed when starting a new chat context. Invalid templates will cause the bot to fail at startup.
 # Template logic supported: conditionals ({{if}} {{else}}), comparisons (eq, ne, lt, gt), logical operators (and, or, not)
 # Example: system = "You are {{.BotNick}} chatting with {{.Nick}} in {{.Channel}} on {{.Network}}."
+# Async results example: system = "Background job results arrive in {{if eq .AsyncResultRole \"user\"}}a user message{{else}}a system message{{end}} — respond when they do."
 #
 # Available options (per [section]):
 #   service              (string, required)         Service name from services.toml
@@ -42,9 +44,11 @@
 #   extra_body           (map)                       Provider-specific parameters (top-level in request body)
 #   responses_api        (bool, default: false)      Use POST /v1/responses instead of Chat Completions
 #   previous_response_id (bool, default: false)      Chain responses via server-side context (requires responses_api)
-#   needsusersuffix      (bool, default: false)      Append user message after system messages (auto-detected for anthropic/ models)
-#                                                Fix for: "This model does not support assistant message prefill. The conversation must end with a user message."
-#   api_user             (string, cascades from service)  Go template for the end-user identifier field. Sent as safety_identifier + prompt_cache_key on OpenAI/xAI (prompt_cache_key on xAI chat completions rides the x-grok-conv-id header), user on OpenRouter chat completions and unknown providers. Variables: {{.Nick}}, {{.BotNick}}, {{.Channel}}, {{.Network}}, {{.Date}}, {{.SessionID}} (DB session id; 0 in system templates — those render before the session exists), {{.Vars.*}}. Empty = not sent.
+#   needsusersuffix      (*bool, default: auto)         Guidance Knob 2: append a short user message after injected guidance when it would be the last message of the request (async background results, empty-response corrections). Auto (unset) appends it for anthropic/ models; true forces it, false suppresses it. Cascade: command > service > auto. Fix for: "This model does not support assistant message prefill. The conversation must end with a user message."
+#   injection_role       (string, default: "system")   Guidance Knob 1: wire role for injected guidance payload rows ("system" | "developer" | "user"). "developer" maps to system server-side on llama.cpp; "user" is for models whose templates cannot render mid-chain system at all. Cascade: command > service > "system".
+#   async_result_delivery (string, default: "message") How completed background jobs are delivered: "message" = guidance row per injection_role/needsusersuffix (default); "tool" = synthetic assistant tool-call + tool-result round-trip (job_status) — the native tool-cycle shape every provider handles, for smaller models that handle mid-chain guidance poorly. Clears previous_response_id per notification. Cascade: command > service > "message".
+#   context_window       (int, default: 0)              This command's model context window in tokens, for auto-compaction thresholding — the window varies per MODEL more than per service. 0 = fall back to the service's context_window, then [compaction] context_window.
+#   api_user             (string, cascades from service)  Go template for the end-user identifier field. Sent as safety_identifier + prompt_cache_key on OpenAI/xAI (prompt_cache_key on xAI chat completions rides the x-grok-conv-id header), user on OpenRouter chat completions and unknown providers. Variables: {{.Nick}}, {{.BotNick}}, {{.Channel}}, {{.Network}}, {{.Date}}, {{.SessionID}} (DB session id; 0 in system templates — those render before the session exists), {{.AsyncResultRole}}, {{.Vars.*}}. Empty = not sent.
 #   retry_on_empty       (int, default: 1)           Number of retries when API returns empty response (0 = disabled)
 #   disabled_builtin_tools (string array)            Builtin LLM tools to disable (e.g. ["ban_user", "check_ban_history"]). Cascade: command > service > root default ([]).
 #   hidden_mcp_tools     (string array)              MCP tool names to hide from the LLM. Bare names ("tool") or server-prefixed ("server.tool"). Cascade: command > service > root default ([]).
@@ -91,7 +95,10 @@
 # extra_body = {reasoning = {effort = "high"}}
 # responses_api = false
 # previous_response_id = false
-# needsusersuffix = false
+# needsusersuffix = true
+# injection_role = "system"
+# async_result_delivery = "message"
+# context_window = 200000
 # api_user = "irc:{{.Network}}:{{.Channel}}:{{.Nick}}:s{{.SessionID}}"
 # retry_on_empty = 1
 # disabled_builtin_tools = ["ban_user", "check_ban_history"]

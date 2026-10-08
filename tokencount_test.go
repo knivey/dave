@@ -438,7 +438,7 @@ func TestCompactSessionLiveTokensEstTokenizerDerived(t *testing.T) {
 	defer stub.Close()
 	prevServices := config.Services
 	config.Services = map[string]Service{
-		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second, MaxHistory: 100},
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second},
 	}
 	defer func() { config.Services = prevServices }()
 
@@ -482,7 +482,7 @@ func TestCompactSessionLiveTokensEstNoModelFallback(t *testing.T) {
 	defer stub.Close()
 	prevServices := config.Services
 	config.Services = map[string]Service{
-		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second, MaxHistory: 100},
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second},
 	}
 	defer func() { config.Services = prevServices }()
 

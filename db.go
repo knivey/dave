@@ -353,6 +353,26 @@ func insertDBMessage(sessionID int64, role, content string, toolCallsJSON *strin
 		Update("last_active", time.Now()).Error
 }
 
+// insertDBMessageRows persists prebuilt Message rows in ONE transaction.
+// Required for multi-row injections like the synthetic tool round-trip,
+// where a partial write would leave an incomplete tool call and make the
+// session un-clonable.
+func insertDBMessageRows(sessionID int64, rows []Message) error {
+	err := theDB.Transaction(func(tx *gorm.DB) error {
+		for i := range rows {
+			if err := tx.Create(&rows[i]).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return theDB.Model(&Session{}).Where("id = ?", sessionID).
+		Update("last_active", time.Now()).Error
+}
+
 func insertDBTurnUsage(sessionID int64, cfg AIConfig, usage *Usage, finishReason, apiPath string, durationMs int) error {
 	if usage == nil || sessionID == 0 {
 		return nil

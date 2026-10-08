@@ -14,10 +14,12 @@ func messagesToResponseInputItems(messages []ChatMessage) []responses.ResponseIn
 	input := make([]responses.ResponseInputItemUnionParam, 0, len(messages)*2)
 	for _, msg := range messages {
 		switch msg.Role {
-		case RoleSystem:
+		case RoleSystem, RoleDeveloper:
+			// Developer is guidance Knob 1's payload role; llama.cpp maps
+			// it to system server-side (see guidance.go).
 			input = append(input, responses.ResponseInputItemUnionParam{
 				OfMessage: &responses.EasyInputMessageParam{
-					Role: responses.EasyInputMessageRoleSystem,
+					Role: responses.EasyInputMessageRole(msg.Role),
 					Content: responses.EasyInputMessageContentUnionParam{
 						OfString: openai.String(msg.Content),
 					},

@@ -178,8 +178,18 @@ type UsersNotices struct {
 // the requested model is not loaded yet (llama-server router status, or
 // absence from a status-less list such as llama-swap's) — the request will
 // block while the server loads it.
+// EmptyResponse is sent when a turn ends with no response text after
+// retry_on_empty retries are exhausted — the "..." sentinel stored on the
+// session is never sent to IRC (see sendFinalText), so without this notice
+// the user would be left waiting for a reply that already failed.
+// ReasoningOnly is sent instead of EmptyResponse when the model produced
+// reasoning but no response text (it put its answer in the reasoning
+// channel); the reasoning content itself is then delivered as a normal
+// rendered message so the user still sees what the model said.
 type LLMNotices struct {
-	ModelLoad string `toml:"model_load"`
+	ModelLoad     string `toml:"model_load"`
+	EmptyResponse string `toml:"empty_response"`
+	ReasoningOnly string `toml:"reasoning_only"`
 }
 
 var (
@@ -462,6 +472,12 @@ func setNoticesDefaults(n *NoticesConfig) {
 	}
 	if n.LLM.ModelLoad == "" {
 		n.LLM.ModelLoad = "\x0306⏳ {nick}: loading model {model} on the server, this may take a while...\x0f"
+	}
+	if n.LLM.EmptyResponse == "" {
+		n.LLM.EmptyResponse = "\x0307⚠️ empty response from model after {attempts} attempt(s) — retries exhausted, giving up\x0F"
+	}
+	if n.LLM.ReasoningOnly == "" {
+		n.LLM.ReasoningOnly = "\x0307⚠️ empty response from model after {attempts} attempt(s) — retries exhausted; the model put its reply in the reasoning channel instead, showing that below:\x0F"
 	}
 	if n.Support == "" {
 		n.Support = "If you enjoy using dave, consider supporting development at https://patreon.com/shrew269 ❤️"

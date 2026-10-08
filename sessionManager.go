@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"time"
 
 	"gorm.io/gorm"
 )
@@ -85,6 +86,27 @@ func (sm *SessionManager) CreateSession(network, channel string, userID int64, c
 }
 
 func (sm *SessionManager) AddMessage(sessionID int64, msg ChatMessage) error {
+	row := buildDBMessage(sessionID, msg)
+	if err := theDB.Create(&row).Error; err != nil {
+		return err
+	}
+	if err := theDB.Model(&Session{}).Where("id = ?", sessionID).
+		Update("last_active", time.Now()).Error; err != nil {
+		return err
+	}
+
+	if msg.Role == "user" {
+		if err := updateDBSessionFirstMessage(sessionID, textContentFromMessage(msg)); err != nil {
+			loggerSM.Error("Failed to update first message", "session", sessionID, "error", err)
+		}
+	}
+
+	return nil
+}
+
+// buildDBMessage marshals a ChatMessage's pointer-typed columns into a
+// persistence-ready Message row.
+func buildDBMessage(sessionID int64, msg ChatMessage) Message {
 	var toolCallsJSON *string
 	if len(msg.ToolCalls) > 0 {
 		if tcData, err := json.Marshal(msg.ToolCalls); err == nil {
@@ -107,32 +129,65 @@ func (sm *SessionManager) AddMessage(sessionID int64, msg ChatMessage) error {
 			multiContentJSON = &s
 		}
 	}
+	return Message{
+		SessionID:        sessionID,
+		Role:             msg.Role,
+		Content:          msg.Content,
+		ToolCalls:        toolCallsJSON,
+		ToolCallID:       toolCallID,
+		ReasoningContent: reasoningContent,
+		MultiContent:     multiContentJSON,
+	}
+}
 
-	if err := insertDBMessage(sessionID, msg.Role, msg.Content, toolCallsJSON, toolCallID, reasoningContent, multiContentJSON); err != nil {
+// AddMessages persists multiple messages ATOMICALLY (one transaction —
+// see insertDBMessageRows). Use for multi-row injections whose partial
+// write would corrupt the session shape, e.g. the synthetic tool
+// round-trip's assistant-tool-call + tool-result pair.
+func (sm *SessionManager) AddMessages(sessionID int64, msgs []ChatMessage) error {
+	if len(msgs) == 0 {
+		return nil
+	}
+	rows := make([]Message, len(msgs))
+	for i, m := range msgs {
+		rows[i] = buildDBMessage(sessionID, m)
+	}
+	if err := insertDBMessageRows(sessionID, rows); err != nil {
 		return err
 	}
-
-	if msg.Role == "user" {
-		if err := updateDBSessionFirstMessage(sessionID, textContentFromMessage(msg)); err != nil {
-			loggerSM.Error("Failed to update first message", "session", sessionID, "error", err)
+	for _, m := range msgs {
+		if m.Role == "user" {
+			if err := updateDBSessionFirstMessage(sessionID, textContentFromMessage(m)); err != nil {
+				loggerSM.Error("Failed to update first message", "session", sessionID, "error", err)
+			}
 		}
 	}
-
 	return nil
 }
 
-func (sm *SessionManager) GetMessages(sessionID int64, maxHistory int) ([]ChatMessage, error) {
+// GetMessages returns the session's FULL live (non-archived) history.
+// DESIGN NOTE (Oct 2026): no truncation here — message-count windowing on
+// the live request path was removed (docs/superpowers/plans/
+// 2026-10-08-remove-live-truncation.md): it predated compaction, could
+// split tool call/result pairs at the window edge (orphan tool outputs),
+// and starved auto-compaction (the trigger reads the sent prompt's
+// tokens, so a small window kept prompts under the threshold forever).
+// Context sizing is compaction's job (token-aware, cascade command >
+// service > [compaction] context_window). The maxhistory knob was
+// removed entirely — old configs carrying it load fine (unknown TOML
+// keys are ignored).
+func (sm *SessionManager) GetMessages(sessionID int64) ([]ChatMessage, error) {
 	dbMsgs, err := loadDBSessionMessages(sessionID)
 	if err != nil {
 		return nil, err
 	}
 
-	var messages []ChatMessage
+	messages := make([]ChatMessage, 0, len(dbMsgs))
 	for _, dm := range dbMsgs {
 		messages = append(messages, messageFromDB(dm))
 	}
 
-	return TruncateHistory(messages, maxHistory), nil
+	return messages, nil
 }
 
 func (sm *SessionManager) CompleteSession(sessionID int64) error {

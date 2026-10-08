@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -158,7 +159,7 @@ func TestCompactSession_LiveHistoryStartsWithUserAfterSystem(t *testing.T) {
 	defer stub.Close()
 	prevServices := config.Services
 	config.Services = map[string]Service{
-		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second, MaxHistory: 100},
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second},
 	}
 	defer func() { config.Services = prevServices }()
 
@@ -276,7 +277,7 @@ func TestCompactSession_EnforcesMinTurns(t *testing.T) {
 	defer stub.Close()
 	prevServices := config.Services
 	config.Services = map[string]Service{
-		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second, MaxHistory: 100},
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second},
 	}
 	defer func() { config.Services = prevServices }()
 
@@ -339,7 +340,7 @@ func TestCompactSession_EndToEnd(t *testing.T) {
 
 	prevServices := config.Services
 	config.Services = map[string]Service{
-		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second, MaxHistory: 100},
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second},
 	}
 	defer func() { config.Services = prevServices }()
 
@@ -416,7 +417,7 @@ func TestCompactSession_Concurrency(t *testing.T) {
 	defer stub.Close()
 	prevServices := config.Services
 	config.Services = map[string]Service{
-		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second, MaxHistory: 100},
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second},
 	}
 	defer func() { config.Services = prevServices }()
 
@@ -638,7 +639,7 @@ func TestCompactSession_TagsTailCopiesWithSourceCompactionID(t *testing.T) {
 	defer stub.Close()
 	prevServices := config.Services
 	config.Services = map[string]Service{
-		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second, MaxHistory: 100},
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second},
 	}
 	defer func() { config.Services = prevServices }()
 
@@ -695,7 +696,7 @@ func TestRepeatCompaction_DoesNotInflateArchivedCount(t *testing.T) {
 	defer stub.Close()
 	prevServices := config.Services
 	config.Services = map[string]Service{
-		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second, MaxHistory: 100},
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second},
 	}
 	defer func() { config.Services = prevServices }()
 
@@ -792,7 +793,7 @@ func TestCompactSession_FoldsPriorSummaryIntoNextSummarization(t *testing.T) {
 	defer stub.Close()
 	prevServices := config.Services
 	config.Services = map[string]Service{
-		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second, MaxHistory: 100},
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second},
 	}
 	defer func() { config.Services = prevServices }()
 
@@ -921,7 +922,7 @@ func TestCompactSession_FirstCompactionUnchanged(t *testing.T) {
 	defer stub.Close()
 	prevServices := config.Services
 	config.Services = map[string]Service{
-		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second, MaxHistory: 100},
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second},
 	}
 	defer func() { config.Services = prevServices }()
 
@@ -986,7 +987,7 @@ func TestCompactSession_AbortsWhenSessionGainsMessagesMidFlight(t *testing.T) {
 	defer releaseNow()
 	prevServices := config.Services
 	config.Services = map[string]Service{
-		"stubsvc": {BaseURL: stub.URL, Timeout: 30 * time.Second, MaxHistory: 100},
+		"stubsvc": {BaseURL: stub.URL, Timeout: 30 * time.Second},
 	}
 	defer func() { config.Services = prevServices }()
 
@@ -1214,7 +1215,7 @@ func TestCompactSession_RefusesWhenNothingNew(t *testing.T) {
 	defer stub.Close()
 	prevServices := config.Services
 	config.Services = map[string]Service{
-		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second, MaxHistory: 100},
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second},
 	}
 	defer func() { config.Services = prevServices }()
 
@@ -1264,17 +1265,18 @@ func TestCompactSession_RefusesWhenNothingNew(t *testing.T) {
 	assert.Contains(t, live[1].Content, "SUMMARY_ONE_CONTENT")
 }
 
-// TestTokensPerMessage covers every estimate path, the MaxHistory
-// truncation cap, the 1.0 floor, the empty-input guard, and the
-// tool-definition de-bias of the usage path. The usage path divides the
-// API's own prompt_tokens (minus dave's tool-token estimate when one
-// exists) by the number of rows that prompt actually contained (never
-// more than maxHistory+1) — real provider numbers stay PRIMARY over any
-// tokenizer estimate. Without usage rows the fallback basis is the real
-// tokenizer when a model is configured (basis "tokenizer:<enc>[,approx]")
-// and chars/4 when not — both must remain reachable (the second is the
-// never-fail floor). toolTokens only ever touches the usage path: the
-// fallback paths never counted the tool prefix in the first place.
+// TestTokensPerMessage covers every estimate path, the 1.0 floor, the
+// empty-input guard, and the tool-definition de-bias of the usage path.
+// The usage path divides the API's own prompt_tokens (minus dave's
+// tool-token estimate when one exists) by the number of live rows — real
+// provider numbers stay PRIMARY over any tokenizer estimate. Without
+// usage rows the fallback basis is the real tokenizer when a model is
+// configured (basis "tokenizer:<enc>[,approx]") and chars/4 when not —
+// both must remain reachable (the second is the never-fail floor).
+// toolTokens only ever touches the usage path: the fallback paths never
+// counted the tool prefix in the first place. (The maxHistory divisor
+// cap died with live-path truncation, Oct 2026 — the divisor is now
+// always the full live row count, matching what the next request sends.)
 func TestTokensPerMessage(t *testing.T) {
 	msgs := make([]Message, 10)
 	for i := range msgs {
@@ -1282,7 +1284,7 @@ func TestTokensPerMessage(t *testing.T) {
 	}
 
 	t.Run("usage path", func(t *testing.T) {
-		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, 0, "", 0)
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, "", 0)
 		assert.Equal(t, 100.0, perMsg)
 		assert.Equal(t, "usage", basis)
 	})
@@ -1290,23 +1292,9 @@ func TestTokensPerMessage(t *testing.T) {
 	t.Run("usage path wins over tokenizer", func(t *testing.T) {
 		// Real API numbers for the provider beat any tokenizer estimate
 		// — a configured model must not steal the basis from usage.
-		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, 0, "gpt-4o", 0)
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, "gpt-4o", 0)
 		assert.Equal(t, 100.0, perMsg)
 		assert.Equal(t, "usage", basis)
-	})
-
-	t.Run("usage path capped by maxhistory", func(t *testing.T) {
-		// TruncateHistory sends min(live, maxHistory+1) rows, so a
-		// prompt built from 10 live rows under maxhistory=4 contained
-		// only 5 rows — dividing by 10 would understate the cost.
-		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, 4, "", 0)
-		assert.Equal(t, 200.0, perMsg)
-		assert.Equal(t, "usage", basis)
-	})
-
-	t.Run("usage path ignores non-positive maxhistory", func(t *testing.T) {
-		perMsg, _ := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, -3, "", 0)
-		assert.Equal(t, 100.0, perMsg)
 	})
 
 	t.Run("usage path subtracts tool tokens", func(t *testing.T) {
@@ -1314,17 +1302,8 @@ func TestTokensPerMessage(t *testing.T) {
 		// the messages themselves cost (1000-600)/10 = 40/msg — NOT the
 		// amortized 100/msg that divides the constant tool prefix into
 		// every message.
-		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, 0, "", 600)
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, "", 600)
 		assert.Equal(t, 40.0, perMsg)
-		assert.Equal(t, "usage-net-tools", basis)
-	})
-
-	t.Run("de-bias respects the maxhistory divisor cap", func(t *testing.T) {
-		// Same cap as the legacy path: only 5 of the 10 rows were in
-		// the prompt, so the de-biased dividend divides by 5:
-		// (1000-600)/5 = 80.
-		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, 4, "", 600)
-		assert.Equal(t, 80.0, perMsg)
 		assert.Equal(t, "usage-net-tools", basis)
 	})
 
@@ -1332,7 +1311,7 @@ func TestTokensPerMessage(t *testing.T) {
 		// net = 1000-990 = 10 = effective: the floor admits the
 		// de-biased dividend exactly at the boundary → perMsg 1.0 via
 		// the DE-BIASED path (legacy would report 100).
-		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, 0, "", 990)
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, "", 990)
 		assert.Equal(t, 1.0, perMsg)
 		assert.Equal(t, "usage-net-tools", basis)
 	})
@@ -1341,7 +1320,7 @@ func TestTokensPerMessage(t *testing.T) {
 		// net = 1000-995 = 5 < effective 10: the subtraction cannot
 		// yield a meaningful per-message average, so the legacy
 		// prompt/effective division stands (perMsg 100, not 0.5).
-		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, 0, "", 995)
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, "", 995)
 		assert.Equal(t, 100.0, perMsg)
 		assert.Equal(t, "usage-net-tools", basis,
 			"basis stays self-describing: the log carries tool_tokens alongside for the reconstruction")
@@ -1351,26 +1330,26 @@ func TestTokensPerMessage(t *testing.T) {
 		// net = -200: the tool estimate ate the whole prompt outright
 		// (provider under-counts tools or the estimate drifted) — fall
 		// back to prompt/effective; never a nonsense sub-1.0 perMsg.
-		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, 0, "", 1200)
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, "", 1200)
 		assert.Equal(t, 100.0, perMsg)
 		assert.Equal(t, "usage-net-tools", basis)
 	})
 
 	t.Run("zero prompt tokens falls back", func(t *testing.T) {
-		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 0}, msgs, 0, "", 0)
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 0}, msgs, "", 0)
 		// 10 rows of "filler" (7 runes → estimateTokens = 1 each).
 		assert.Equal(t, 1.0, perMsg)
 		assert.Equal(t, "chars/4", basis)
 	})
 
 	t.Run("tokenizer fallback basis exact", func(t *testing.T) {
-		perMsg, basis := tokensPerMessage(nil, msgs, 0, "gpt-4o", 0)
+		perMsg, basis := tokensPerMessage(nil, msgs, "gpt-4o", 0)
 		assert.Greater(t, perMsg, 0.0)
 		assert.Equal(t, "tokenizer:o200k_base", basis)
 	})
 
 	t.Run("tokenizer fallback basis approx for unknown model", func(t *testing.T) {
-		perMsg, basis := tokensPerMessage(nil, msgs, 0, "grok-4", 0)
+		perMsg, basis := tokensPerMessage(nil, msgs, "grok-4", 0)
 		assert.Greater(t, perMsg, 0.0)
 		assert.Equal(t, "tokenizer:o200k_base,approx", basis)
 	})
@@ -1379,24 +1358,23 @@ func TestTokensPerMessage(t *testing.T) {
 		// No usage rows → the tokenizer path never counted the tool
 		// prefix; a non-zero toolTokens must not perturb it (there is
 		// no tool-inflated dividend to de-bias).
-		perMsg, basis := tokensPerMessage(nil, msgs, 0, "gpt-4o", 5000)
+		perMsg, basis := tokensPerMessage(nil, msgs, "gpt-4o", 5000)
 		assert.Equal(t, "tokenizer:o200k_base", basis)
 		want := float64(countMessageTokens("gpt-4o", messagesToChat(msgs)).Tokens) / float64(len(msgs))
 		assert.InDelta(t, want, perMsg, 0.0001)
 
-		perMsg, basis = tokensPerMessage(nil, msgs, 0, "", 5000)
+		perMsg, basis = tokensPerMessage(nil, msgs, "", 5000)
 		assert.Equal(t, 1.0, perMsg)
 		assert.Equal(t, "chars/4", basis)
 	})
 
-	t.Run("tokenizer fallback respects maxhistory cap", func(t *testing.T) {
-		// 10 rows under maxhistory=4 → count only the 5 rows a real
-		// request would send (msgs[0] + last 4), divide by 5.
-		perMsg, basis := tokensPerMessage(nil, msgs, 4, "gpt-4o", 0)
+	t.Run("tokenizer fallback averages the full live history", func(t *testing.T) {
+		// Live-path truncation is gone (Oct 2026): the next request sends
+		// all 10 rows, so the estimate averages over all of them.
+		perMsg, basis := tokensPerMessage(nil, msgs, "gpt-4o", 0)
 		assert.Greater(t, perMsg, 0.0)
 		assert.Equal(t, "tokenizer:o200k_base", basis)
-		projected := append([]Message{msgs[0]}, msgs[6:]...)
-		want := float64(countMessageTokens("gpt-4o", messagesToChat(projected)).Tokens) / float64(len(projected))
+		want := float64(countMessageTokens("gpt-4o", messagesToChat(msgs)).Tokens) / float64(len(msgs))
 		assert.InDelta(t, want, perMsg, 0.0001)
 	})
 
@@ -1405,25 +1383,26 @@ func TestTokensPerMessage(t *testing.T) {
 			{Content: strings.Repeat("x", 400)}, // 100 est
 			{Content: strings.Repeat("y", 400)}, // 100 est
 		}
-		perMsg, basis := tokensPerMessage(nil, fallbackMsgs, 0, "", 0)
+		perMsg, basis := tokensPerMessage(nil, fallbackMsgs, "", 0)
 		assert.Equal(t, 100.0, perMsg)
 		assert.Equal(t, "chars/4", basis)
 	})
 
 	t.Run("floor at one token per message", func(t *testing.T) {
-		perMsg, _ := tokensPerMessage(&TurnUsage{PromptTokens: 1}, msgs, 0, "", 0)
+		perMsg, _ := tokensPerMessage(&TurnUsage{PromptTokens: 1}, msgs, "", 0)
 		assert.Equal(t, 1.0, perMsg, "budget math must never see a sub-1.0 per-message cost")
 	})
 
 	t.Run("empty live history guards division", func(t *testing.T) {
-		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 500}, nil, 0, "gpt-4o", 0)
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 500}, nil, "gpt-4o", 0)
 		assert.Equal(t, 1.0, perMsg)
 		assert.Equal(t, "chars/4", basis)
 	})
 }
 
-// TestEffectiveContextWindow covers the service-first window cascade
-// shared by ShouldAutoCompact and CompactSession's token-aware sizing.
+// TestEffectiveContextWindow covers the command-first window cascade
+// shared by ShouldAutoCompact and CompactSession's token-aware sizing:
+// command context_window > service > [compaction] global > none.
 func TestEffectiveContextWindow(t *testing.T) {
 	prevCompaction := config.Compaction
 	defer func() { config.Compaction = prevCompaction }()
@@ -1437,6 +1416,14 @@ func TestEffectiveContextWindow(t *testing.T) {
 	w, src := effectiveContextWindow(cfg)
 	assert.Equal(t, 128000, w)
 	assert.Equal(t, "service", src)
+
+	// The command's own window wins over the service's — the window
+	// varies per model more than per service.
+	cmdCfg := cfg
+	cmdCfg.ContextWindow = 32000
+	w, src = effectiveContextWindow(cmdCfg)
+	assert.Equal(t, 32000, w)
+	assert.Equal(t, "command", src)
 
 	config.Services = map[string]Service{"svc": {}}
 	w, src = effectiveContextWindow(cfg)
@@ -1452,6 +1439,42 @@ func TestEffectiveContextWindow(t *testing.T) {
 	w, src = effectiveContextWindow(AIConfig{Service: "missing"})
 	assert.Equal(t, 0, w)
 	assert.Equal(t, "none", src)
+}
+
+// TestGetMessagesReturnsFullHistory pins the post-truncation-removal
+// contract (Oct 2026): the request path carries the FULL live history —
+// the maxhistory knob was deleted outright (display limits are
+// sessions_display_limit's job, not a message-count request cap).
+// Tool call/result pairs ride intact regardless of window position.
+func TestGetMessagesReturnsFullHistory(t *testing.T) {
+	setupTestDB(t)
+	sid := createTestSession(t, "testnet", "#test", "shrew", "testchat", "svc", "m")
+
+	insertTestMessage(t, sid, "system", "sys")
+	for i := 0; i < 30; i++ {
+		insertTestMessage(t, sid, "user", fmt.Sprintf("msg %d", i))
+	}
+	// A tool pair at the "old window edge" — must never be split.
+	callJSON := `[{"id":"tc-edge","type":"function","function":{"name":"job_status","arguments":"{}"}}]`
+	require.NoError(t, theDB.Exec(`INSERT INTO messages (session_id, role, content, tool_calls, created_at)
+		VALUES (?, 'assistant', '', ?, datetime('now'))`, sid, callJSON).Error)
+	require.NoError(t, theDB.Exec(`INSERT INTO messages (session_id, role, content, tool_call_id, created_at)
+		VALUES (?, 'tool', 'result', 'tc-edge', datetime('now'))`, sid).Error)
+
+	msgs, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	require.Len(t, msgs, 33, "full live history expected — no message-count clipping")
+
+	// The pair is adjacent and paired.
+	pairIdx := -1
+	for i, m := range msgs {
+		if m.ToolCallID == "tc-edge" {
+			pairIdx = i
+		}
+	}
+	require.GreaterOrEqual(t, pairIdx, 1)
+	assert.Len(t, msgs[pairIdx-1].ToolCalls, 1)
+	assert.Equal(t, "tc-edge", msgs[pairIdx-1].ToolCalls[0].ID)
 }
 
 // TestCompactionConfigApplyDefaultsTargetFraction pins the defaulting of
@@ -1584,7 +1607,7 @@ func TestCompactSession_TokenAwareTailShrinks(t *testing.T) {
 	defer stub.Close()
 	prevServices := config.Services
 	config.Services = map[string]Service{
-		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second, MaxHistory: 100},
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second},
 	}
 	defer func() { config.Services = prevServices }()
 
@@ -1665,8 +1688,9 @@ func TestCompactSession_TokenAwareTailShrinks(t *testing.T) {
 // (never hardcoded), so the seed tracks any drift in builtin tool
 // descriptions.
 //
-// Seed: system + 12 turns = 25 rows, cfg.MaxHistory unset (0 = no cap →
-// effective = 25). TurnUsage PromptTokens P = 2500:
+// Seed: system + 12 turns = 25 rows (the divisor is the full live row
+// count since live-path truncation was removed, Oct 2026). TurnUsage
+// PromptTokens P = 2500:
 //
 //	AMORTIZED perMsg = P/25     = 100/msg     (pre-Phase-G behavior)
 //	DE-BIASED perMsg = (P-T)/25 = 100-T/25    (Phase G, basis
@@ -1712,7 +1736,7 @@ func TestCompactSession_ToolTokensDeBiasTailSizing(t *testing.T) {
 	defer stub.Close()
 	prevServices := config.Services
 	config.Services = map[string]Service{
-		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second, MaxHistory: 100},
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second},
 	}
 	defer func() { config.Services = prevServices }()
 
@@ -1826,7 +1850,7 @@ func TestCompactSession_NoWindowKeepsTwoThirdsCut(t *testing.T) {
 	defer stub.Close()
 	prevServices := config.Services
 	config.Services = map[string]Service{
-		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second, MaxHistory: 100},
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second},
 	}
 	defer func() { config.Services = prevServices }()
 
@@ -1895,7 +1919,7 @@ func TestCompactSession_MaxSummaryTokensCapsRequest(t *testing.T) {
 		defer stub.Close()
 		prevServices := config.Services
 		config.Services = map[string]Service{
-			"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second, MaxHistory: 100},
+			"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second},
 		}
 		defer func() { config.Services = prevServices }()
 

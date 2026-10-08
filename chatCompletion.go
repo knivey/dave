@@ -14,6 +14,11 @@ func messagesToChatCompletionParams(messages []ChatMessage) []openai.ChatComplet
 		case RoleSystem:
 			params = append(params, openai.SystemMessage(msg.Content))
 
+		case RoleDeveloper:
+			// Guidance Knob 1 payload role; OpenAI-native, mapped to
+			// system server-side by llama.cpp (see guidance.go).
+			params = append(params, openai.DeveloperMessage(msg.Content))
+
 		case RoleUser:
 			if len(msg.MultiContent) > 0 {
 				parts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(msg.MultiContent))
@@ -171,8 +176,16 @@ func parseChatCompletionResponse(resp openai.ChatCompletion) (string, string, []
 	}
 
 	reasoning := ""
-	if raw, ok := msg.JSON.ExtraFields["reasoning_content"]; ok && raw.Valid() {
-		json.Unmarshal([]byte(raw.Raw()), &reasoning)
+	// DESIGN NOTE: deliberately NOT gating on raw.Valid() — the openai-go
+	// SDK marks fields it has no typed destination for (everything lands
+	// in ExtraFields) with status=invalid, so Valid() is always false for
+	// reasoning_content even though Raw() carries the value. Map presence
+	// + a successful string unmarshal is the correct test (null/omitted
+	// shapes leave reasoning empty).
+	if raw, ok := msg.JSON.ExtraFields["reasoning_content"]; ok {
+		if err := json.Unmarshal([]byte(raw.Raw()), &reasoning); err != nil {
+			reasoning = ""
+		}
 	}
 
 	return msg.Content, reasoning, toolCalls, usage

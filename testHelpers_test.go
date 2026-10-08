@@ -104,11 +104,10 @@ func insertTestMessage(t *testing.T, sessionID int64, role, content string) {
 
 func makeTestAIConfig() AIConfig {
 	return AIConfig{
-		Name:       "testchat",
-		Service:    "testsvc",
-		Model:      "test-model",
-		MaxHistory: 20,
-		Timeout:    30 * time.Second,
+		Name:    "testchat",
+		Service: "testsvc",
+		Model:   "test-model",
+		Timeout: 30 * time.Second,
 	}
 }
 

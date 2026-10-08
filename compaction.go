@@ -213,9 +213,10 @@ func summarySizeRatio(promptTokens, completionTokens int) float64 {
 // tokensPerMessage estimates the model's token cost of one live-history
 // message, derived from the API's OWN usage accounting: the last recorded
 // turn's prompt_tokens (de-biased, see below) divided by the number of
-// live messages that prompt contained (capped by MaxHistory truncation —
-// GetMessages sends min(live, maxHistory+1) rows). This captures chat
-// framing, tool-call JSON, and image tokens for the actual model.
+// live messages (the FULL live set — GetMessages is truncation-free since
+// Oct 2026, so the divisor is exactly what the next request sends). This
+// captures chat framing, tool-call JSON, and image tokens for the actual
+// model.
 //
 // TOOL-DEFINITION DE-BIAS: the provider's prompt_tokens also contains
 // the serialized tool DEFINITIONS — a near-constant prefix (name +
@@ -268,11 +269,10 @@ func summarySizeRatio(promptTokens, completionTokens int) float64 {
 //
 //   - "tokenizer:<enc>" / "tokenizer:<enc>,approx": no usage rows yet
 //     (fresh sessions, manual compact before any turn) and a model is
-//     configured — countMessageTokens over the payload projection the
-//     next request would send (the live rows truncated by the same
-//     min(live, maxHistory+1) TruncateHistory rule the usage path
-//     mirrors), averaged over the rows it contains. "approx" marks
-//     models whose real tokenizer is unknown (o200k_base stand-in).
+//     configured — countMessageTokens over ALL live rows (the next
+//     request sends the full live history since live-path truncation was
+//     removed, Oct 2026), averaged over the rows it contains. "approx"
+//     marks models whose real tokenizer is unknown (o200k_base stand-in).
 //     toolTokens does not apply here: with no usage row there is no
 //     tool-inflated dividend to de-bias — this path never counted the
 //     tool prefix in the first place.
@@ -283,31 +283,18 @@ func summarySizeRatio(promptTokens, completionTokens int) float64 {
 //
 // The DECISION math (budget projection) is unchanged by which basis
 // wins: every path yields perMsg with the same 1.0 floor semantics.
-func tokensPerMessage(lastUsage *TurnUsage, liveMsgs []Message, maxHistory int, model string, toolTokens int) (perMsg float64, basis string) {
+func tokensPerMessage(lastUsage *TurnUsage, liveMsgs []Message, model string, toolTokens int) (perMsg float64, basis string) {
 	if len(liveMsgs) == 0 {
 		// Nothing to average over; the floor below is the only sane
 		// answer so budget math can't divide to infinity.
 		return 1.0, "chars/4"
 	}
-	// effective/rowsForProjection mirror TruncateHistory: the next
-	// request (and the one that produced lastUsage) carried at most
-	// maxHistory+1 rows — msgs[0] plus the newest maxHistory. maxHistory
-	// == 0 is treated as "no cap" here: production configs always have a
-	// positive MaxHistory (AIConfig.ApplyDefaults backfills the service
-	// default), and a literal 0 would mean TruncateHistory sends a
-	// single message — an estimate-quality corner we deliberately don't
-	// model.
-	rowsForProjection := liveMsgs
+	// The next request (and the one that produced lastUsage) carried the
+	// full live history — the message-count windowing this used to mirror
+	// (TruncateHistory) was removed along with the maxhistory knob itself.
 	effective := len(liveMsgs)
-	if maxHistory > 0 && effective > maxHistory+1 {
-		effective = maxHistory + 1
-		rowsForProjection = append([]Message{liveMsgs[0]}, liveMsgs[len(liveMsgs)-maxHistory:]...)
-	}
+	rowsForProjection := liveMsgs
 	if lastUsage != nil && lastUsage.PromptTokens > 0 {
-		// The last turn's prompt contained at most maxHistory+1 rows
-		// (TruncateHistory), so dividing by more rows than that would
-		// understate the per-message cost.
-		//
 		// Dividend de-bias (see the TOOL-DEFINITION DE-BIAS note in the
 		// function comment): strip our estimate of the constant tool
 		// prefix before averaging. The de-biased value is only taken
@@ -355,16 +342,20 @@ func tokensPerMessage(lastUsage *TurnUsage, liveMsgs []Message, maxHistory int, 
 // effectiveContextWindow resolves the token window to budget against, in
 // ONE readConfig snapshot (a concurrent /reload can never splice a service
 // window from one config generation onto a compaction fallback from
-// another): the session's service context_window ("service") wins when
-// set > 0, else the global [compaction] context_window fallback
-// ("compaction"), else 0 ("none").
+// another): the command's own context_window ("command" — budgeting
+// varies per model more than per service) wins when set > 0, else the
+// service context_window ("service"), else the global [compaction]
+// context_window fallback ("compaction"), else 0 ("none").
 func effectiveContextWindow(cfg AIConfig) (window int, source string) {
 	readConfig(func() {
-		if w := config.Services[cfg.Service].ContextWindow; w > 0 {
-			window, source = w, "service"
-		} else if w := config.Compaction.ContextWindow; w > 0 {
-			window, source = w, "compaction"
-		} else {
+		switch {
+		case cfg.ContextWindow > 0:
+			window, source = cfg.ContextWindow, "command"
+		case config.Services[cfg.Service].ContextWindow > 0:
+			window, source = config.Services[cfg.Service].ContextWindow, "service"
+		case config.Compaction.ContextWindow > 0:
+			window, source = config.Compaction.ContextWindow, "compaction"
+		default:
 			source = "none"
 		}
 	})
@@ -544,6 +535,7 @@ func renderFreshSystemPrompt(cfg AIConfig, network Network, client *girc.Client,
 		return fallback
 	}
 	data := buildSystemPromptData(network, client, channel, userNick)
+	data.AsyncResultRole = asyncResultRole(cfg)
 	var buf strings.Builder
 	if err := cfg.SystemTmpl.Execute(&buf, data); err != nil {
 		return fallback
@@ -596,6 +588,8 @@ func callSummarizer(ctx context.Context, cfg AIConfig, summarizerSys string, arc
 		switch m.Role {
 		case RoleSystem:
 			b.WriteString("[system] ")
+		case RoleDeveloper:
+			b.WriteString("[developer] ")
 		case RoleUser:
 			b.WriteString("[user] ")
 		case RoleAssistant:
@@ -792,16 +786,16 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 	toolEnc, _ := getEncoder(toolEncName) // nil on init failure → estimateTokens, same degradation as the message side
 	toolTokens := countToolTokens(toolEnc, toolDefs)
 
-	perMsg, estBasis := tokensPerMessage(lastUsage, dbMsgs, cfg.MaxHistory, cfg.Model, toolTokens)
+	perMsg, estBasis := tokensPerMessage(lastUsage, dbMsgs, cfg.Model, toolTokens)
 	// Dave's own neutral token count of the payload the NEXT request
-	// would send: the live rows truncated by the same min(live,
-	// maxHistory+1) TruncateHistory rule a real turn applies (GetMessages),
-	// converted to ChatMessages. This is the number to diff against the
+	// would send: the FULL live history (live-path truncation was removed
+	// Oct 2026 — GetMessages returns everything), converted to
+	// ChatMessages. This is the number to diff against the
 	// provider-reported last_prompt_tokens below — a persistent gap means
 	// the provider's accounting (or template) differs from the payload,
 	// not that the payload grew. Unconditional on model: an empty/unknown
 	// model still counts via the o200k_base approximation (Exact=false).
-	ourCount := countMessageTokens(cfg.Model, TruncateHistory(chatMsgs, cfg.MaxHistory))
+	ourCount := countMessageTokens(cfg.Model, chatMsgs)
 
 	// PROJECTION RECONCILIATION (supersedes the old "informational only"
 	// note that used to sit where the tool tokens are now counted): the
@@ -1125,9 +1119,12 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 		// gets an autoincrement id above the snapshot's max but BELOW the
 		// fresh system/summary/tail-copy rows this transaction is about to
 		// insert — scrambling the live ORDER BY id ASC stream into
-		// [user, assistant, system, summary, tail...]. From there,
-		// TruncateHistory silently drops the system prompt and the next
-		// compaction's dbMsgs[0]-is-system assumption breaks. Compaction-
+		// [user, assistant, system, summary, tail...]. From there the
+		// next compaction's dbMsgs[0]-is-system assumption breaks, and
+		// (post live-truncation removal, Oct 2026) the system row rides
+		// mid-list to providers that hoist/merge system rows — the old
+		// "TruncateHistory silently drops it" harm is gone, the ordering
+		// harm remains. Compaction-
 		// vs-compaction is already excluded by the TryLock, so only
 		// concurrent AddMessage traffic can trip this guard — and once new
 		// messages exist the summarizer result is stale anyway. Aborting
@@ -1344,9 +1341,11 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 // after the most recent turn. Returns false when the feature is disabled,
 // the most recent usage is unknown, or no context-window value is available.
 //
-// Context-window cascade (service-first): effectiveContextWindow resolves
-// the session's service ([services.<name>] context_window) first, then the
-// global [compaction] context_window fallback. When neither is set,
+// Context-window cascade (command-first): effectiveContextWindow resolves
+// the command's own context_window (chats.toml — the window varies per
+// model more than per service) first, then the session's service
+// ([services.<name>] context_window), then the global [compaction]
+// context_window fallback. When none is set,
 // auto-compaction stays off — one global number is wrong for every model
 // but one when services mix context sizes (e.g. 8k local next to 200k
 // cloud). The flags snapshot and the window snapshot are separate

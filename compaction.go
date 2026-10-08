@@ -728,6 +728,21 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 	// model still counts via the o200k_base approximation (Exact=false).
 	ourCount := countMessageTokens(cfg.Model, TruncateHistory(chatMsgs, cfg.MaxHistory))
 
+	// Tool definitions the next request would serialize alongside those
+	// messages — INFORMATIONAL ONLY. The budget/projection decisions
+	// above and below still use the usage-derived perMsg exclusively:
+	// prompt_tokens already amortizes tool-definition overhead into
+	// prompt_tokens÷messages, so folding tool tokens into the projection
+	// would double-count them (and err in the conservative direction).
+	// tool_tokens exists for display and for diffing against the
+	// provider's last_prompt_tokens. toolDefsForConfig reads only the
+	// live in-memory MCP tool map (getMCPTools does no MCP I/O), so this
+	// can never block the compaction path.
+	toolDefs := toolDefsForConfig(cfg)
+	toolEncName, _ := resolveEncodingForModel(cfg.Model)
+	toolEnc, _ := getEncoder(toolEncName) // nil on init failure → estimateTokens, same degradation as the message side
+	toolTokens := countToolTokens(toolEnc, toolDefs)
+
 	// The window snapshot is taken by effectiveContextWindow's own
 	// readConfig (shared with ShouldAutoCompact); a /reload racing this
 	// point could pair a new window with the event's earlier ccfg
@@ -877,7 +892,9 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 	// (window source, per-message estimate basis, assumed summary size),
 	// dave's own neutral token count of the next-request payload
 	// (our_token_count/our_encoding/our_exact/image_parts — diff against
-	// last_prompt_tokens to attribute provider accounting divergence),
+	// last_prompt_tokens to attribute provider accounting divergence)
+	// plus the tool definitions riding on the same request
+	// (tools/tool_tokens — informational only, never in the projection),
 	// and the post-compaction projection evaluated at the FINAL cut (the
 	// value the advancement loop optimized against; compare it with
 	// budget_tokens for the achieved margin, and with the completion
@@ -908,6 +925,8 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 		"our_encoding", ourCount.Encoding,
 		"our_exact", ourCount.Exact,
 		"image_parts", ourCount.ImageParts,
+		"tools", len(toolDefs),
+		"tool_tokens", toolTokens,
 		"summary_tokens_assumed", summaryTokensAssumed,
 		"projection_tokens", projectionTokens,
 		"max_summary_tokens", ccfg.MaxSummaryTokens,

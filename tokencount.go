@@ -24,6 +24,7 @@ package main
 import (
 	_ "embed" // go:embed directives below (blank import required even for []byte targets)
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"path"
 	"strconv"
@@ -62,6 +63,15 @@ type TokenCount struct {
 	// documented lower-bound, and any provider reporting materially more
 	// is charging the real resolution-scaled vision cost.
 	ImageParts int
+	// ToolTokens is the estimated token cost of the tool DEFINITIONS
+	// serialized into the request (name + description + parameter
+	// schema per tool, plus structural framing). Filled by
+	// countRequestTokens; countMessageTokens always leaves it zero.
+	ToolTokens int
+	// Tools is the number of tool definitions included in ToolTokens
+	// (tools with a nil Function are skipped and not counted). Filled by
+	// countRequestTokens; countMessageTokens always leaves it zero.
+	Tools int
 }
 
 // imageTokenEstimate is the flat per-image cost added for image_url
@@ -86,6 +96,13 @@ const (
 	toolCallOverheadPerCall        = 3
 	replyPrimingTokens             = 3
 )
+
+// toolDefOverheadTokens approximates the JSON structural overhead per
+// serialized tool definition — braces, quotes, commas, the "type":
+// "function" wrapper — an approximation in the same spirit as the
+// per-message chat-template overhead: constant per tool, negligible
+// next to name+description+schema size.
+const toolDefOverheadTokens = 7
 
 // embeddedBpeLoader serves tiktoken-go's rank lookups from the
 // go:embed'd files in tokendata/. The library passes the full blob URL
@@ -311,6 +328,75 @@ func countMessageTokens(model string, msgs []ChatMessage) TokenCount {
 		}
 	}
 	return TokenCount{Tokens: total, Encoding: encName, Exact: exact, ImageParts: imageParts}
+}
+
+// countToolTokens counts what a request's `tools` array contributes to
+// the prompt: per tool, tokens(name) + tokens(description) +
+// tokens(JSON-marshal of the parameter schema when non-nil) +
+// toolDefOverheadTokens of structural framing. OpenAI-style providers
+// fold tool definitions into prompt_tokens, so a neutral count meant to
+// be compared against provider numbers must include them (this is the
+// bulk of the /tokencount gap where provider prompt far exceeded the
+// messages-only count).
+//
+// Tools with a nil Function are skipped entirely — they are not
+// serializable function definitions. A schema that fails to marshal
+// counts as 0: a counting helper must never fail, and the real request
+// path (jsonschema validation at MCP registration) rejects such tools
+// long before here. EncodeOrdinary only, per the rule in
+// countMessageTokens. A nil enc degrades to estimateTokens, mirroring
+// the message side's encoder-init failure path.
+func countToolTokens(enc *tiktoken.Tiktoken, tools []Tool) int {
+	count := estimateTokens
+	if enc != nil {
+		count = func(s string) int { return len(enc.EncodeOrdinary(s)) }
+	}
+	total := 0
+	for _, t := range tools {
+		if t.Function == nil {
+			continue
+		}
+		total += toolDefOverheadTokens
+		total += count(t.Function.Name)
+		total += count(t.Function.Description)
+		if t.Function.Parameters != nil {
+			if raw, err := json.Marshal(t.Function.Parameters); err == nil {
+				total += count(string(raw))
+			}
+		}
+	}
+	return total
+}
+
+// countRequestTokens is the request-level counterpart of
+// countMessageTokens: messages PLUS the tool definitions serialized
+// into the same request (Tokens = message tokens + tool tokens, with
+// ToolTokens/Tools filled in). This is what a chat request actually
+// puts on the wire, and therefore the right comparand for a provider's
+// reported prompt_tokens — EXCEPT reasoning replay on Responses API
+// chains (session.ResponseID set), where prior turns' reasoning items
+// are legitimately re-sent as input and counted by the provider.
+// Reasoning replay is real input the model consumes, so it is NOT
+// subtracted from the provider side; /tokencount surfaces it separately
+// as a labeled upper-bound estimate (sumSessionReasoningTokens) because
+// server-side context eviction means the provider may replay less than
+// the full prior total.
+func countRequestTokens(model string, msgs []ChatMessage, tools []Tool) TokenCount {
+	tc := countMessageTokens(model, msgs)
+	// Second resolution for the tool schemas: getEncoder is a cached
+	// lookup (the message pass above already parsed the rank table), and
+	// a nil encoder degrades BOTH sides to estimateTokens consistently,
+	// so Encoding/Exact keep describing the whole request.
+	encName, _ := resolveEncodingForModel(model)
+	enc, _ := getEncoder(encName)
+	tc.ToolTokens = countToolTokens(enc, tools)
+	for i := range tools {
+		if tools[i].Function != nil {
+			tc.Tools++
+		}
+	}
+	tc.Tokens += tc.ToolTokens
+	return tc
 }
 
 // messagesToChat converts DB message rows to their ChatMessage shape

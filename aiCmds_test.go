@@ -13,6 +13,7 @@ import (
 	"time"
 
 	logxi "github.com/mgutz/logxi/v1"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	openai "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
 	"github.com/stretchr/testify/assert"
@@ -867,6 +868,62 @@ func TestGetBuiltinToolDefsFiltering(t *testing.T) {
 
 	filteredAll := getBuiltinToolDefs([]string{"register_background_job", "ban_user", "check_ban_history"})
 	assert.Len(t, filteredAll, 0, "disabling all tools should return empty")
+}
+
+// TestToolDefsForConfig pins the cfg-level tool-assembly contract that
+// /tokencount and the compaction trigger log reuse: a config with no
+// MCP servers yields NO tools (builtins are appended only when MCP
+// tools exist — a tool-less config has nothing to call), and a config
+// pointing at a registered server yields that server's live tools plus
+// the builtins. The fixture seeds the mcpServers map directly: getMCPTools
+// reads only that in-memory map (no MCP I/O — the same guarantee that
+// makes toolDefsForConfig safe to call from accounting paths), so no
+// live server or transport is needed to exercise the real assembly
+// logic. This mirrors the fixture pattern of TestGetMCPToolsHidden.
+func TestToolDefsForConfig(t *testing.T) {
+	fixtureServer := &MCPServer{
+		Tools: []*mcp.Tool{
+			{Name: "generate_image", Description: "Generate an image"},
+			{Name: "get_transcript", Description: "Fetch a transcript"},
+		},
+	}
+	origServers := mcpServers
+	mcpServers = map[string]*MCPServer{"img-mcp": fixtureServer}
+	t.Cleanup(func() { mcpServers = origServers })
+
+	toolNames := func(tools []Tool) map[string]bool {
+		names := make(map[string]bool, len(tools))
+		for _, tool := range tools {
+			require.NotNil(t, tool.Function, "every assembled tool must be a serializable function definition")
+			names[tool.Function.Name] = true
+		}
+		return names
+	}
+
+	t.Run("no MCPs configured yields no tools, builtins withheld", func(t *testing.T) {
+		assert.Empty(t, toolDefsForConfig(AIConfig{Name: "chat"}))
+	})
+
+	t.Run("unknown server name contributes nothing", func(t *testing.T) {
+		assert.Empty(t, toolDefsForConfig(AIConfig{Name: "chat", MCPs: []string{"nonexistent"}}))
+	})
+
+	t.Run("MCP tools present pulls in the builtins", func(t *testing.T) {
+		tools := toolDefsForConfig(AIConfig{Name: "chat", MCPs: []string{"img-mcp"}})
+		names := toolNames(tools)
+		assert.True(t, names["generate_image"], "live MCP tool included")
+		assert.True(t, names["get_transcript"], "live MCP tool included")
+		assert.True(t, names["register_background_job"], "builtins appended when MCP tools exist")
+		assert.True(t, names["ban_user"], "builtins appended when MCP tools exist")
+		assert.True(t, names["check_ban_history"], "builtins appended when MCP tools exist")
+	})
+
+	t.Run("hidden MCP tools are excluded", func(t *testing.T) {
+		tools := toolDefsForConfig(AIConfig{Name: "chat", MCPs: []string{"img-mcp"}, HiddenMCPTools: []string{"get_transcript"}})
+		names := toolNames(tools)
+		assert.True(t, names["generate_image"])
+		assert.False(t, names["get_transcript"], "hidden tool must not be offered (or counted)")
+	})
 }
 
 func TestRegisterBackgroundJob_ServerNameAutoDetection(t *testing.T) {

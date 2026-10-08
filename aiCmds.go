@@ -430,13 +430,31 @@ func (cr *chatRunner) sendWarning(msg string) {
 }
 
 func (cr *chatRunner) getTools() []Tool {
+	return toolDefsForConfig(cr.cfg)
+}
+
+// toolDefsForConfig assembles the full tool-definition list a turn run
+// under cfg puts on the wire: the config's live MCP tools (minus its
+// hidden set) plus the builtin LLM tools, appended only when MCP tools
+// exist (the builtins exist to serve tool-calling turns; a tool-less
+// config has nothing to call). Extracted verbatim from
+// chatRunner.getTools so /tokencount and the compaction trigger log
+// count EXACTLY the tool set a real request serializes — the counted
+// set can never drift from the sent set.
+//
+// getMCPTools reflects the LIVE MCP tool map: a disconnected (or still
+// connecting) server contributes nothing here, exactly as it would
+// contribute nothing to a real request — the count describes the next
+// request as it would actually go out. No MCP I/O happens (in-memory
+// map reads only), so this is safe to call from any accounting path.
+func toolDefsForConfig(cfg AIConfig) []Tool {
 	var hiddenMCPTools []string
 	readConfig(func() {
-		hiddenMCPTools = cr.cfg.resolveHiddenMCPTools(config.MCPToolSets)
+		hiddenMCPTools = cfg.resolveHiddenMCPTools(config.MCPToolSets)
 	})
-	mcpTools := getMCPTools(cr.cfg.MCPs, hiddenMCPTools)
+	mcpTools := getMCPTools(cfg.MCPs, hiddenMCPTools)
 	if len(mcpTools) > 0 {
-		mcpTools = append(mcpTools, getBuiltinToolDefs(cr.cfg.DisabledBuiltinTools)...)
+		mcpTools = append(mcpTools, getBuiltinToolDefs(cfg.DisabledBuiltinTools)...)
 	}
 	return mcpTools
 }

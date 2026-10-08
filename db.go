@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -480,6 +481,36 @@ func getLastTurnUsageForSession(sessionID int64) (*TurnUsage, error) {
 		return nil, err
 	}
 	return &u, nil
+}
+
+// sumSessionReasoningTokens totals reasoning_tokens across a session's
+// turn_usage rows. `all` sums every row; `prior` subtracts the LATEST
+// row's contribution — the latest row's reasoning belongs to its own
+// completion, and only PREVIOUS turns' reasoning can be replayed into
+// the next request's prompt (Responses API previous_response_id chains
+// re-send prior reasoning items as input, and providers count them in
+// prompt_tokens). Server-side context eviction means the replayed
+// amount can only shrink from `prior`: it is an upper bound, never a
+// floor. Used by /tokencount to label the residual gap between provider
+// prompt_tokens and our messages+tools count.
+func sumSessionReasoningTokens(sessionID int64) (all, prior int64, err error) {
+	var sum int64
+	if err := theDB.Model(&TurnUsage{}).
+		Where("session_id = ?", sessionID).
+		Select("COALESCE(SUM(reasoning_tokens), 0)").
+		Scan(&sum).Error; err != nil {
+		return 0, 0, err
+	}
+	last, err := getLastTurnUsageForSession(sessionID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			// No usage rows at all: the SUM above scanned 0, so both
+			// totals are 0 — nothing errored.
+			return sum, sum, nil
+		}
+		return 0, 0, err
+	}
+	return sum, sum - int64(last.ReasoningTokens), nil
 }
 
 func cleanupDBSessions(maxAgeDays int) (int64, error) {

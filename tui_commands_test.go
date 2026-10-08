@@ -341,7 +341,7 @@ func TestTuiCmdTokenCount(t *testing.T) {
 	t.Run("chat command no longer exists", func(t *testing.T) {
 		setupTUITest(t)
 		sid := newSession(t, "gpt-4o")
-		setChats(t, AIConfig{Name: "chat", Service: "svc", Model: "gpt-4o", MaxHistory: 100})
+		setChats(t, AIConfig{Name: "chat", Service: "svc", Model: "gpt-4o"})
 		// Point the session at a command name that is not configured.
 		require.NoError(t, theDB.Model(&Session{}).Where("id = ?", sid).Update("chat_command", "gone").Error)
 		tuiCmdTokenCount([]string{"/tokencount", fmt.Sprintf("%d", sid)}, "/tokencount "+fmt.Sprint(sid))
@@ -351,7 +351,7 @@ func TestTuiCmdTokenCount(t *testing.T) {
 	t.Run("count without provider usage", func(t *testing.T) {
 		setupTUITest(t)
 		sid := newSession(t, "gpt-4o")
-		setChats(t, AIConfig{Name: "chat", Service: "svc", Model: "gpt-4o", MaxHistory: 100})
+		setChats(t, AIConfig{Name: "chat", Service: "svc", Model: "gpt-4o"})
 
 		tuiCmdTokenCount([]string{"/tokencount", fmt.Sprintf("%d", sid)}, "/tokencount "+fmt.Sprint(sid))
 		out := getLogViewText()
@@ -369,7 +369,7 @@ func TestTuiCmdTokenCount(t *testing.T) {
 	t.Run("count with provider usage and ratio", func(t *testing.T) {
 		setupTUITest(t)
 		sid := newSession(t, "grok-4")
-		setChats(t, AIConfig{Name: "chat", Service: "svc", Model: "grok-4", MaxHistory: 100})
+		setChats(t, AIConfig{Name: "chat", Service: "svc", Model: "grok-4"})
 		// Provider reported 2x-ish prompt tokens with partial cache.
 		require.NoError(t, theDB.Create(&TurnUsage{
 			SessionID: sid, Model: "grok-4", Service: "svc",
@@ -394,7 +394,7 @@ func TestTuiCmdTokenCount(t *testing.T) {
 	t.Run("reasoning with responses chain surfaces replay bound and second ratio", func(t *testing.T) {
 		setupTUITest(t)
 		sid := newSession(t, "grok-4")
-		setChats(t, AIConfig{Name: "chat", Service: "svc", Model: "grok-4", MaxHistory: 100})
+		setChats(t, AIConfig{Name: "chat", Service: "svc", Model: "grok-4"})
 		// Two reasoning turns: all=140, prior=100 (the latest row's 40
 		// belongs to its own completion and is not replay-eligible).
 		require.NoError(t, theDB.Create(&TurnUsage{
@@ -420,7 +420,7 @@ func TestTuiCmdTokenCount(t *testing.T) {
 	t.Run("reasoning without responses chain notes reasoning is not replayed", func(t *testing.T) {
 		setupTUITest(t)
 		sid := newSession(t, "grok-4")
-		setChats(t, AIConfig{Name: "chat", Service: "svc", Model: "grok-4", MaxHistory: 100})
+		setChats(t, AIConfig{Name: "chat", Service: "svc", Model: "grok-4"})
 		require.NoError(t, theDB.Create(&TurnUsage{
 			SessionID: sid, Model: "grok-4", Service: "svc",
 			PromptTokens: 1500, CachedTokens: 0, ReasoningTokens: 100,
@@ -442,7 +442,7 @@ func TestTuiCmdTokenCount(t *testing.T) {
 	t.Run("tools from the live MCP map are counted", func(t *testing.T) {
 		setupTUITest(t)
 		sid := newSession(t, "grok-4")
-		setChats(t, AIConfig{Name: "chat", Service: "svc", Model: "grok-4", MaxHistory: 100, MCPs: []string{"img-mcp"}})
+		setChats(t, AIConfig{Name: "chat", Service: "svc", Model: "grok-4", MCPs: []string{"img-mcp"}})
 		origServers := mcpServers
 		mcpServers = map[string]*MCPServer{"img-mcp": {
 			Tools: []*mcp.Tool{{Name: "generate_image", Description: "Generate an image from a text prompt"}},

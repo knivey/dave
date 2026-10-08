@@ -362,6 +362,7 @@ func (cr *chatRunner) renderAPIUser() string {
 	// The identifier renders per-request, when the session exists (unlike the
 	// system prompt, which renders before session creation).
 	data.SessionID = cr.sessionID
+	data.AsyncResultRole = asyncResultRole(cr.cfg)
 
 	var buf strings.Builder
 	if err := cr.cfg.apiUserTmpl.Execute(&buf, data); err != nil {
@@ -454,7 +455,7 @@ func toolDefsForConfig(cfg AIConfig) []Tool {
 	})
 	mcpTools := getMCPTools(cfg.MCPs, hiddenMCPTools)
 	if len(mcpTools) > 0 {
-		mcpTools = append(mcpTools, getBuiltinToolDefs(cfg.DisabledBuiltinTools)...)
+		mcpTools = append(mcpTools, getBuiltinToolDefs(cfg, cfg.DisabledBuiltinTools)...)
 	}
 	return mcpTools
 }
@@ -473,6 +474,63 @@ func (cr *chatRunner) checkIterationLimit(iteration int) bool {
 	return false
 }
 
+// emptyResponseCorrection returns the self-correction instruction injected
+// into the turn when a response comes back empty and a retry is scheduled,
+// so the model is TOLD what went wrong and can fix it instead of repeating
+// the same empty output. Reasoning-only failures get an explicit "the
+// reasoning channel is not the response" instruction — the observed
+// failure mode is the model writing its whole answer into reasoning and
+// leaving the response content empty. The "[automated notice, not from
+// the user]" marker keeps the row honest in API logs and the history
+// viewer regardless of its wire role.
+func emptyResponseCorrection(hadReasoning bool) string {
+	if hadReasoning {
+		return "[automated notice, not from the user] Your previous response was rejected: it produced reasoning but an EMPTY response content, so your answer never reached the user. Respond again now, placing your complete answer in the response content. The reasoning channel is for private working only — the user sees exclusively the response content."
+	}
+	return "[automated notice, not from the user] Your previous response was rejected: the response content came back completely empty, so the user received nothing. Respond again now, placing your complete answer in the response content."
+}
+
+// correctionUserSuffix is the guidance Knob 2 suffix text for empty-
+// response corrections (guidance.go).
+const correctionUserSuffix = "Respond now with your complete answer in the response content."
+
+// addEmptyResponseCorrection appends the empty-response correction to the
+// turn via the shared guidance mechanism (guidance.go): the payload row
+// under Knob 1's role (default system) plus, when the provider needs an
+// answerable trailing turn (Knob 2), the short user suffix after it. The
+// correction is by construction the LAST message of the retry request —
+// the trailing-position hazards and the two-knob design are documented in
+// docs/superpowers/specs/2026-10-08-guidance-injection-role-design.md.
+//
+// PERSISTED deliberately (design D7): the stored session stays exactly
+// what the model was told (no DB/API drift), and the nudge keeps steering
+// later turns for models that chronically strand answers in reasoning.
+// Back-to-back identical injections (payload+suffix tail) collapse — one
+// nudge per failure shape per turn.
+func (cr *chatRunner) addEmptyResponseCorrection(turn *turnContext, reasoning string) {
+	seq := guidanceMessages(cr.cfg, emptyResponseCorrection(reasoning != ""), correctionUserSuffix, true)
+	if messagesEndWith(turn.Messages(), seq) {
+		return
+	}
+	for _, msg := range seq {
+		turn.Add(msg)
+	}
+}
+
+// checkEmptyRetry gates the retry-on-empty-response behavior shared by all
+// four turn paths (chat completions + responses API, streaming and not).
+//
+// When the response text is empty and retries remain, it schedules a retry
+// (callers inject the self-correction via addEmptyResponseCorrection).
+//
+// When retries are exhausted it makes sure the user is TOLD: the "..."
+// sentinel returned here is stored on the session but never sent to IRC
+// (sendFinalText skips it), so without an explicit notice the user would be
+// left waiting for a reply that already failed. When the model produced
+// reasoning but no text, the notice explains what happened and the
+// reasoning content itself is delivered as a normal rendered message —
+// shown to the user as a fallback, but deliberately NOT accepted as the
+// reply (the stored assistant content stays the "..." sentinel).
 func (cr *chatRunner) checkEmptyRetry(content, reasoning string, emptyRetries, maxEmptyRetries int) (bool, string) {
 	if content != "" {
 		return false, content
@@ -481,8 +539,16 @@ func (cr *chatRunner) checkEmptyRetry(content, reasoning string, emptyRetries, m
 		cr.logger.Warn("empty response from API, retrying", "attempt", emptyRetries+1, "max", maxEmptyRetries)
 		return true, ""
 	}
+	// emptyRetries == maxEmptyRetries here, so the turn made
+	// maxEmptyRetries+1 API attempts in total.
+	vars := map[string]string{"attempts": fmt.Sprintf("%d", maxEmptyRetries+1)}
 	if reasoning != "" {
 		cr.logger.Warn("empty response from API, max retries reached, reasoning was present but no text output")
+		cr.sendIRC(expandNotice(getNotices().LLM.ReasoningOnly, vars))
+		cr.sendRendered(reasoning)
+	} else {
+		cr.logger.Warn("empty response from API, max retries reached")
+		cr.sendIRC(expandNotice(getNotices().LLM.EmptyResponse, vars))
 	}
 	return false, "..."
 }
@@ -518,14 +584,22 @@ func (so *streamOutput) Flush(send func(string)) {
 	}
 }
 
+// sendRendered renders rawText for IRC (markdown when enabled) and sends
+// it through the pastebin-wrapping path — the send shape shared by final
+// replies and the empty-response reasoning fallback, extracted so the two
+// cannot drift.
+func (cr *chatRunner) sendRendered(rawText string) {
+	text := rawText
+	if cr.cfg.RenderMarkdown {
+		text = markdowntoirc.MarkdownToIRC(text)
+	}
+	cr.sendWithPastebin(text, rawText)
+}
+
 func (cr *chatRunner) sendFinalText(content string) {
 	text := ExtractFinalText(content)
 	if text != "" && text != "..." {
-		rawText := text
-		if cr.cfg.RenderMarkdown {
-			text = markdowntoirc.MarkdownToIRC(text)
-		}
-		cr.sendWithPastebin(text, rawText)
+		cr.sendRendered(text)
 	}
 }
 
@@ -631,10 +705,17 @@ func (cr *chatRunner) runTurnResponsesStream(
 
 	if len(toolCalls) == 0 {
 		if retry, newText := cr.checkEmptyRetry(text, reasoning, emptyRetries, maxEmptyRetries); retry {
+			cr.addEmptyResponseCorrection(turn, reasoning)
+			// Full-history retry (correction included) with the chain
+			// dropped: handleResponseIDSave already cleared the stored
+			// response_id after the empty output, and keeping the old
+			// chain head alongside a full-history resend would
+			// duplicate context server-side. A successful retry
+			// starts a fresh chain.
 			return responsesStreamResult{
 				emptyRetries:      emptyRetries + 1,
-				currentResponseID: currentResponseID,
-				usePrevID:         usePrevID,
+				currentResponseID: "",
+				usePrevID:         false,
 				input:             messagesToResponseInputItems(turn.Messages()),
 			}
 		} else if newText != text {
@@ -748,10 +829,20 @@ StreamLoop:
 
 			chunkReasoning := ""
 			if len(chunk.Choices) > 0 {
-				if f, ok := chunk.Choices[0].Delta.JSON.ExtraFields["reasoning_content"]; ok && f.Valid() {
+				// DESIGN NOTE: deliberately NOT gating on f.Valid() —
+				// the openai-go SDK marks fields it has no typed
+				// destination for (everything lands in ExtraFields)
+				// with status=invalid, so Valid() is always false for
+				// reasoning_content even though Raw() carries the
+				// value. Map presence + a successful non-empty string
+				// unmarshal is the correct test (unmarshal of a null
+				// raw succeeds but leaves rc empty, which the
+				// rc != "" check rejects).
+				if f, ok := chunk.Choices[0].Delta.JSON.ExtraFields["reasoning_content"]; ok {
 					var rc string
-					json.Unmarshal([]byte(f.Raw()), &rc)
-					chunkReasoning = rc
+					if err := json.Unmarshal([]byte(f.Raw()), &rc); err == nil && rc != "" {
+						chunkReasoning = rc
+					}
 				}
 			}
 			if chunkReasoning == "" {
@@ -849,6 +940,9 @@ StreamLoop:
 	if streamDone || len(accumulatedToolCalls) == 0 {
 		if len(accumulatedToolCalls) == 0 {
 			if retry, newContent := cr.checkEmptyRetry(fullContent, reasoningBuffer, emptyRetries, maxEmptyRetries); retry {
+				// The outer loop rebuilds params from turn.Messages(),
+				// so the persisted correction rides along.
+				cr.addEmptyResponseCorrection(turn, reasoningBuffer)
 				emptyRetries++
 				return false, emptyRetries
 			} else if newContent != fullContent {
@@ -953,6 +1047,10 @@ func (cr *chatRunner) runTurn(turn *turnContext) bool {
 
 		if len(toolCalls) == 0 {
 			if retry, newContent := cr.checkEmptyRetry(content, reasoning, emptyRetries, maxEmptyRetries); retry {
+				// Tell the model what went wrong so the retry can
+				// correct itself; params are rebuilt from
+				// turn.Messages() at the top of the loop.
+				cr.addEmptyResponseCorrection(turn, reasoning)
 				emptyRetries++
 				continue
 			} else {
@@ -1360,7 +1458,18 @@ func (cr *chatRunner) runTurnResponses(turn *turnContext) bool {
 		if len(toolCalls) == 0 {
 			content := text
 			if retry, newContent := cr.checkEmptyRetry(content, reasoning, emptyRetries, maxEmptyRetries); retry {
+				cr.addEmptyResponseCorrection(turn, reasoning)
 				emptyRetries++
+				// Rebuild the input from the turn so the correction
+				// rides along, and drop the response chain for the
+				// retry: handleResponseIDSave already cleared the
+				// stored response_id (empty output), and keeping the
+				// old chain head alongside a full-history resend
+				// would duplicate context server-side. A successful
+				// retry starts a fresh chain.
+				input = messagesToResponseInputItems(turn.Messages())
+				currentResponseID = ""
+				usePrevID = false
 				continue
 			} else {
 				content = newContent
@@ -1541,6 +1650,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 		var systemContent string
 		if cfg.SystemTmpl != nil {
 			data := buildSystemPromptData(network, c, channel, nick)
+			data.AsyncResultRole = asyncResultRole(cfg)
 
 			var buf strings.Builder
 			err := cfg.SystemTmpl.Execute(&buf, data)
@@ -1580,7 +1690,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 
 	var userMsg ChatMessage
 	if cfg.DetectImages {
-		messages, err := sessionMgr.GetMessages(session.ID, cfg.MaxHistory)
+		messages, err := sessionMgr.GetMessages(session.ID)
 		if err != nil {
 			runner.logger.Error("failed to load messages for image detection", "error", err)
 			messages = nil
@@ -1635,7 +1745,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 	runner.syncAPISessionID()
 	runner.syncConvID()
 
-	messages, err := sessionMgr.GetMessages(runner.sessionID, cfg.MaxHistory)
+	messages, err := sessionMgr.GetMessages(runner.sessionID)
 	if err != nil {
 		runner.logger.Error("failed to load messages", "error", err)
 		runner.sendError("failed to load conversation history")
@@ -1662,7 +1772,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 				injectAsyncResultFromDB(runner.sessionID, cfg, cj, network.Name, channel, e.Source.Name)
 				markPendingJobDelivered(cj.JobID)
 			}
-			messages, err = sessionMgr.GetMessages(runner.sessionID, cfg.MaxHistory)
+			messages, err = sessionMgr.GetMessages(runner.sessionID)
 			if err != nil {
 				runner.logger.Error("failed to reload messages after job delivery", "error", err)
 				break
@@ -1806,7 +1916,13 @@ func getToolServerName(toolName string) string {
 	return getMCPServerForTool(toolName)
 }
 
-func getBuiltinToolDefs(disabled []string) []Tool {
+// getBuiltinToolDefs assembles the builtin tool definitions for a turn run
+// under cfg. Like ban_user's duration description (live config values), the
+// register_background_job description is rewritten per-config: it tells the
+// model the wire role its background results will arrive under (guidance
+// Knob 1), so a command configured with injection_role = "user" promises a
+// user message instead of the default system message.
+func getBuiltinToolDefs(cfg AIConfig, disabled []string) []Tool {
 	tools := make([]Tool, 0, len(builtinTools))
 
 	var banMaxDur, banDefaultDur string
@@ -1822,6 +1938,20 @@ disabledLoop:
 			if t.Function.Name == d {
 				continue disabledLoop
 			}
+		}
+		if t.Function.Name == backgroundJobToolName {
+			jobDef := *t.Function
+			if asyncResultDelivery(cfg) == asyncDeliveryTool {
+				// Tool-delivery mode (spec addendum): state the delivery
+				// fact passively — meta-instructions ("respond to it as
+				// you would any tool result") invite tool-call reasoning.
+				jobDef.Description = "Register a background job for monitoring. When an async tool (e.g. generate_image_async) returns a job_id, call this to have the system monitor the job. The result will be delivered as a tool response when it completes. Do not poll or wait for results. Continue the conversation normally."
+			} else {
+				jobDef.Description = fmt.Sprintf(
+					"Register a background job for monitoring. When an async tool (e.g. generate_image_async) returns a job_id, call this to have the system monitor the job. You will be notified with the result in a %s message when it completes. Do not poll or wait for results. Continue the conversation normally.",
+					guidanceRole(cfg))
+			}
+			t.Function = &jobDef
 		}
 		if t.Function.Name == "ban_user" {
 			banDef := *t.Function

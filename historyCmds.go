@@ -504,10 +504,9 @@ func historyResume(network Network, c *girc.Client, e girc.Event, args ...string
 		return
 	}
 
-	var currentCfg AIConfig
-	var cfgOk bool
-	currentCfg, cfgOk = getSessionConfig(session)
-	if !cfgOk {
+	// The command must still exist for the session to be usable after
+	// resume (its config drives every subsequent turn).
+	if _, cfgOk := getSessionConfig(session); !cfgOk {
 		c.Cmd.Reply(e, errorNotice(n.Sessions.CommandGone, map[string]string{"command": session.ChatCommand}))
 		return
 	}
@@ -527,8 +526,6 @@ func historyResume(network Network, c *girc.Client, e girc.Event, args ...string
 		c.Cmd.Reply(e, errorMsg(n.Sessions.NoMessages))
 		return
 	}
-
-	messages = TruncateHistory(messages, currentCfg.MaxHistory)
 
 	var resumeUserID int64
 	if session.UserID != nil {

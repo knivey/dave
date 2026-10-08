@@ -128,6 +128,8 @@
 #
 # [llm] options:
 #   model_load         (string)  Sent before a request when the service's /v1/models reports the requested model is not loaded yet (llama-server router status, or absent from a status-less list like llama-swap's). Enabled per service/command via load_notice (default: on for type = "llama"). Placeholders: {nick}, {model}
+#   empty_response     (string)  Sent when the model returns no response text and retry_on_empty retries are exhausted (previously the user got no feedback at all). Placeholders: {attempts}
+#   reasoning_only     (string)  Sent instead of empty_response when the model produced reasoning but no response text (it put its answer in the reasoning channel); the reasoning content itself is delivered as a normal rendered message right after this notice. Placeholders: {attempts}
 #
 # support           (string)     Support message
 #
@@ -247,6 +249,8 @@
 #
 # [llm]
 # model_load = "\x0306⏳ {nick}: loading model {model} on the server, this may take a while...\x0f"
+# empty_response = "\x0307⚠️ empty response from model after {attempts} attempt(s) — retries exhausted, giving up\x0F"
+# reasoning_only = "\x0307⚠️ empty response from model after {attempts} attempt(s) — retries exhausted; the model put its reply in the reasoning channel instead, showing that below:\x0F"
 #
 # support = "If you enjoy using dave, consider supporting development at https://patreon.com/shrew269 ❤️"
 

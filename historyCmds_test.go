@@ -189,7 +189,7 @@ func TestHistorySessions_StarterPreservedAfterCompaction(t *testing.T) {
 	prevServices := config.Services
 	prevSessionsDisplayLimit := config.SessionsDisplayLimit
 	config.Services = map[string]Service{
-		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second, MaxHistory: 100},
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second},
 	}
 	config.SessionsDisplayLimit = 10
 	defer func() {
@@ -244,7 +244,7 @@ func TestHistoryShow_StarterInHeadAfterCompaction(t *testing.T) {
 	defer stub.Close()
 	prevServices := config.Services
 	config.Services = map[string]Service{
-		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second, MaxHistory: 100},
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second},
 	}
 	defer func() { config.Services = prevServices }()
 
@@ -297,7 +297,7 @@ func TestRepeatAutoCompaction(t *testing.T) {
 	defer stub.Close()
 	prevServices := config.Services
 	config.Services = map[string]Service{
-		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second, MaxHistory: 100},
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second},
 	}
 	defer func() { config.Services = prevServices }()
 
@@ -362,7 +362,7 @@ func TestHistorySessions_ArchivedCountExcludesSupersededRows(t *testing.T) {
 	prevServices := config.Services
 	prevSessionsDisplayLimit := config.SessionsDisplayLimit
 	config.Services = map[string]Service{
-		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second, MaxHistory: 100},
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second},
 	}
 	config.SessionsDisplayLimit = 10
 	defer func() {
@@ -443,7 +443,7 @@ func TestHistoryShow_DoesNotShowSupersededRows(t *testing.T) {
 	defer stub.Close()
 	prevServices := config.Services
 	config.Services = map[string]Service{
-		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second, MaxHistory: 100},
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second},
 	}
 	defer func() { config.Services = prevServices }()
 

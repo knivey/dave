@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -450,8 +452,8 @@ func TestRunTurnResponses_ConcurrentSerialization(t *testing.T) {
 		Model:              "test-model",
 		ResponsesAPI:       true,
 		PreviousResponseID: true,
-		MaxHistory:         20,
-		Timeout:            10 * time.Second,
+
+		Timeout: 10 * time.Second,
 	}
 
 	session, _ := sessionMgr.GetActiveSession("testnet", "#101", ensureTestUser(t, "testnet", "shrew"))
@@ -486,7 +488,7 @@ func TestRunTurnResponses_ConcurrentSerialization(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		sessionMgr.AddMessage(session.ID, ChatMessage{Role: RoleUser, Content: "msg 1"})
-		messages, _ := sessionMgr.GetMessages(session.ID, cfg.MaxHistory)
+		messages, _ := sessionMgr.GetMessages(session.ID)
 		runner := makeRunner()
 		runner.runTurn(newTurnContext(runner.sessionID, messages))
 	}()
@@ -495,7 +497,7 @@ func TestRunTurnResponses_ConcurrentSerialization(t *testing.T) {
 		defer wg.Done()
 		time.Sleep(50 * time.Millisecond)
 		sessionMgr.AddMessage(session.ID, ChatMessage{Role: RoleSystem, Content: "bg job result"})
-		messages, _ := sessionMgr.GetMessages(session.ID, cfg.MaxHistory)
+		messages, _ := sessionMgr.GetMessages(session.ID)
 		runner := makeRunner()
 		runner.runTurn(newTurnContext(runner.sessionID, messages))
 	}()
@@ -523,8 +525,8 @@ func TestRunTurnResponses_DifferentCtxKeysParallel(t *testing.T) {
 		Model:              "test-model",
 		ResponsesAPI:       true,
 		PreviousResponseID: true,
-		MaxHistory:         20,
-		Timeout:            10 * time.Second,
+
+		Timeout: 10 * time.Second,
 	}
 
 	var (
@@ -590,7 +592,7 @@ func TestRunTurnResponses_DifferentCtxKeysParallel(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		sessionMgr.AddMessage(sid1, ChatMessage{Role: RoleUser, Content: "msg"})
-		messages, _ := sessionMgr.GetMessages(sid1, cfg.MaxHistory)
+		messages, _ := sessionMgr.GetMessages(sid1)
 		runner := makeRunner(sid1, "alice", ensureTestUser(t, "testnet", "alice"))
 		runner.runTurn(newTurnContext(sid1, messages))
 	}()
@@ -598,7 +600,7 @@ func TestRunTurnResponses_DifferentCtxKeysParallel(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		sessionMgr.AddMessage(sid2, ChatMessage{Role: RoleUser, Content: "msg"})
-		messages, _ := sessionMgr.GetMessages(sid2, cfg.MaxHistory)
+		messages, _ := sessionMgr.GetMessages(sid2)
 		runner := makeRunner(sid2, "bob", ensureTestUser(t, "testnet", "bob"))
 		runner.runTurn(newTurnContext(sid2, messages))
 	}()
@@ -676,8 +678,8 @@ func TestRunTurnResponsesSkipsChainOnModelChange(t *testing.T) {
 			Model:              model,
 			ResponsesAPI:       true,
 			PreviousResponseID: true,
-			MaxHistory:         20,
-			Timeout:            10 * time.Second,
+
+			Timeout: 10 * time.Second,
 		}
 		client := openai.NewClient(
 			option.WithAPIKey("test-key"),
@@ -698,7 +700,7 @@ func TestRunTurnResponsesSkipsChainOnModelChange(t *testing.T) {
 			ctx:          context.Background(),
 			outputCh:     make(chan string, 100),
 		}
-		messages, err := sessionMgr.GetMessages(session.ID, cfg.MaxHistory)
+		messages, err := sessionMgr.GetMessages(session.ID)
 		require.NoError(t, err)
 		runner.runTurn(newTurnContext(runner.sessionID, messages))
 
@@ -727,6 +729,126 @@ func TestRunTurnResponsesSkipsChainOnModelChange(t *testing.T) {
 		prevID, _ := runTurn(t, s, "any-model")
 		assert.Equal(t, "resp-old", prevID, "NULL response_model (legacy) must still chain")
 	})
+}
+
+// TestRunTurnResponsesEmptyRetryDropsChainAndCorrects pins the Responses API
+// empty-retry behavior: the first (chained) attempt returns a reasoning-only
+// response; the retry must drop previous_response_id (handleResponseIDSave
+// already cleared the stored id — chaining the old head on top of a
+// full-history resend would duplicate context), send the full history plus
+// the persisted correction (design D7), and a successful retry
+// re-establishes the chain.
+func TestRunTurnResponsesEmptyRetryDropsChainAndCorrects(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	userID := ensureTestUser(t, "testnet", "shrew")
+	sid, err := sessionMgr.CreateSession("testnet", "#101", userID, "testcmd", "svc", "m")
+	require.NoError(t, err)
+	require.NoError(t, theDB.Model(&Session{}).Where("id = ?", sid).
+		Updates(map[string]interface{}{"response_id": "resp-old", "response_model": "m"}).Error)
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "one"}))
+
+	emptyReasoningOnly := func(id string) map[string]any {
+		return map[string]any{
+			"id": id, "object": "response", "model": "m",
+			"output": []any{map[string]any{
+				"type": "reasoning", "id": "rs_" + id,
+				"summary": []any{map[string]any{"type": "summary_text", "text": "answer stranded in reasoning"}},
+			}},
+		}
+	}
+
+	var (
+		mu       sync.Mutex
+		prevIDs  []string
+		inputs   []string
+		requests []string
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var body map[string]json.RawMessage
+		// No require/assert here: testify FailNow must not run off the
+		// handler goroutine; a malformed body simply yields empty fields.
+		_ = json.Unmarshal(raw, &body)
+
+		var prevID string
+		if raw, ok := body["previous_response_id"]; ok {
+			json.Unmarshal(raw, &prevID)
+		}
+		inputJSON, _ := json.Marshal(body["input"])
+
+		mu.Lock()
+		n := len(prevIDs)
+		prevIDs = append(prevIDs, prevID)
+		inputs = append(inputs, string(inputJSON))
+		requests = append(requests, string(raw))
+		mu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		if n == 0 {
+			json.NewEncoder(w).Encode(emptyReasoningOnly("resp-empty"))
+			return
+		}
+		json.NewEncoder(w).Encode(makeResponsesAPIResponse("resp-good", "recovered answer"))
+	}))
+	defer server.Close()
+
+	cfg := AIConfig{
+		Model:              "m",
+		ResponsesAPI:       true,
+		PreviousResponseID: true,
+		RetryOnEmpty:       intPtr(1),
+
+		Timeout: 10 * time.Second,
+	}
+	client := openai.NewClient(
+		option.WithAPIKey("test-key"),
+		option.WithBaseURL(server.URL+"/v1"),
+	)
+	transport := newDaveTransport(nil, nil)
+	outputCh := make(chan string, 100)
+	logger := logxi.New("test")
+	logger.SetLevel(logxi.LevelAll)
+	runner := &chatRunner{
+		openaiClient: &client,
+		transport:    transport,
+		httpClient:   &http.Client{Transport: transport},
+		cfg:          cfg,
+		network:      Network{Name: "testnet"},
+		channel:      "#101",
+		nick:         "shrew",
+		userID:       userID,
+		sessionID:    sid,
+		logger:       logger,
+		ctx:          context.Background(),
+		outputCh:     outputCh,
+	}
+	messages, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+
+	runner.runTurn(newTurnContext(sid, messages))
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, prevIDs, 2, "expected initial attempt + 1 retry, got %d", len(prevIDs))
+	assert.Equal(t, "resp-old", prevIDs[0], "initial attempt chains the stored response")
+	assert.Empty(t, prevIDs[1], "retry must drop previous_response_id (full-history resend would duplicate context)")
+	assert.NotContains(t, inputs[1], "resp-old")
+	assert.Contains(t, requests[1], "EMPTY response", "retry must carry the correction")
+	assert.Contains(t, inputs[1], `"role":"system"`, "retry input must include the correction payload under the default Knob 1 role")
+	assert.Contains(t, inputs[1], "automated notice", "correction must be marked as not-from-the-user")
+	assert.Contains(t, inputs[1], "one", "retry must resend the full history")
+
+	lines := drainOutput(t, outputCh, 4, time.Second)
+	assert.Contains(t, strings.Join(lines, "\n"), "recovered answer")
+
+	// The successful retry re-establishes the chain in the DB.
+	s, err := sessionMgr.GetSession(sid)
+	require.NoError(t, err)
+	require.NotNil(t, s.ResponseID)
+	assert.Equal(t, "resp-good", *s.ResponseID)
 }
 
 func TestHandleResponseIDSave_SavesToRunnerSessionNotActive(t *testing.T) {
@@ -850,13 +972,13 @@ func TestGetBuiltinToolDefsFiltering(t *testing.T) {
 	config.Bans.DefaultDuration = "5m"
 	configMu.Unlock()
 
-	allTools := getBuiltinToolDefs(nil)
+	allTools := getBuiltinToolDefs(AIConfig{}, nil)
 	assert.Len(t, allTools, 3, "all builtin tools should be returned with nil disabled")
 
-	allToolsEmpty := getBuiltinToolDefs([]string{})
+	allToolsEmpty := getBuiltinToolDefs(AIConfig{}, []string{})
 	assert.Len(t, allToolsEmpty, 3, "empty disabled list should return all tools")
 
-	filteredBan := getBuiltinToolDefs([]string{"ban_user"})
+	filteredBan := getBuiltinToolDefs(AIConfig{}, []string{"ban_user"})
 	assert.Len(t, filteredBan, 2, "disabling ban_user should leave 2 tools")
 	names := make(map[string]bool, len(filteredBan))
 	for _, tool := range filteredBan {
@@ -866,8 +988,44 @@ func TestGetBuiltinToolDefsFiltering(t *testing.T) {
 	assert.True(t, names["check_ban_history"], "check_ban_history should remain")
 	assert.False(t, names["ban_user"], "ban_user should be filtered out")
 
-	filteredAll := getBuiltinToolDefs([]string{"register_background_job", "ban_user", "check_ban_history"})
+	filteredAll := getBuiltinToolDefs(AIConfig{}, []string{"register_background_job", "ban_user", "check_ban_history"})
 	assert.Len(t, filteredAll, 0, "disabling all tools should return empty")
+}
+
+// TestGetBuiltinToolDefsBackgroundJobRoleDescription pins the per-config
+// register_background_job description: the model is told the wire role its
+// background results will arrive under (guidance Knob 1), so a
+// user-role config never promises a system message.
+func TestGetBuiltinToolDefsBackgroundJobRoleDescription(t *testing.T) {
+	find := func(tools []Tool) *FunctionDefinition {
+		for i := range tools {
+			if tools[i].Function.Name == backgroundJobToolName {
+				return tools[i].Function
+			}
+		}
+		return nil
+	}
+
+	def := find(getBuiltinToolDefs(AIConfig{}, nil))
+	require.NotNil(t, def)
+	assert.Contains(t, def.Description, "in a system message", "default Knob 1 role wording")
+
+	def = find(getBuiltinToolDefs(AIConfig{InjectionRole: RoleUser}, nil))
+	require.NotNil(t, def)
+	assert.Contains(t, def.Description, "in a user message")
+	assert.NotContains(t, def.Description, "in a system message")
+
+	def = find(getBuiltinToolDefs(AIConfig{InjectionRole: RoleDeveloper}, nil))
+	require.NotNil(t, def)
+	assert.Contains(t, def.Description, "in a developer message")
+
+	// Tool-delivery mode: passive delivery fact, no role wording and no
+	// meta-instruction inviting tool-call reasoning.
+	def = find(getBuiltinToolDefs(AIConfig{AsyncResultDelivery: asyncDeliveryTool}, nil))
+	require.NotNil(t, def)
+	assert.Contains(t, def.Description, "delivered as a tool response")
+	assert.NotContains(t, def.Description, "in a system message")
+	assert.NotContains(t, def.Description, "as you would any tool result")
 }
 
 // TestToolDefsForConfig pins the cfg-level tool-assembly contract that
@@ -1041,10 +1199,7 @@ func TestRegisterBackgroundJob_ServerNameAutoDetection(t *testing.T) {
 }
 
 func TestCheckEmptyRetry(t *testing.T) {
-	cr := &chatRunner{
-		logger: logxi.New("test"),
-	}
-	cr.logger.SetLevel(logxi.LevelAll)
+	setupNoticesDefaults(t)
 
 	tests := []struct {
 		name            string
@@ -1054,6 +1209,7 @@ func TestCheckEmptyRetry(t *testing.T) {
 		maxEmptyRetries int
 		wantRetry       bool
 		wantContent     string
+		wantOutput      []string
 	}{
 		{
 			name:            "content present, no retry",
@@ -1080,6 +1236,9 @@ func TestCheckEmptyRetry(t *testing.T) {
 			maxEmptyRetries: 3,
 			wantRetry:       false,
 			wantContent:     "...",
+			// the user must be told the turn failed instead of
+			// silently waiting for a reply that already died
+			wantOutput: []string{"empty response from model after 4 attempt(s)"},
 		},
 		{
 			name:            "reasoning only, retries remaining",
@@ -1098,6 +1257,8 @@ func TestCheckEmptyRetry(t *testing.T) {
 			maxEmptyRetries: 3,
 			wantRetry:       false,
 			wantContent:     "...",
+			// explanation notice + the reasoning content itself
+			wantOutput: []string{"reasoning channel", "let me think about this"},
 		},
 		{
 			name:            "reasoning only, zero max retries",
@@ -1107,6 +1268,17 @@ func TestCheckEmptyRetry(t *testing.T) {
 			maxEmptyRetries: 0,
 			wantRetry:       false,
 			wantContent:     "...",
+			wantOutput:      []string{"reasoning channel", "thinking..."},
+		},
+		{
+			name:            "both empty, zero max retries",
+			content:         "",
+			reasoning:       "",
+			emptyRetries:    0,
+			maxEmptyRetries: 0,
+			wantRetry:       false,
+			wantContent:     "...",
+			wantOutput:      []string{"empty response from model after 1 attempt(s)"},
 		},
 		{
 			name:            "content present with reasoning, no retry",
@@ -1120,11 +1292,450 @@ func TestCheckEmptyRetry(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			outputCh := make(chan string, 8)
+			cr := &chatRunner{
+				logger:   logxi.New("test"),
+				ctx:      context.Background(),
+				outputCh: outputCh,
+				network:  Network{Name: "testnet"},
+				channel:  "#test",
+			}
+			cr.logger.SetLevel(logxi.LevelAll)
+
 			retry, content := cr.checkEmptyRetry(tt.content, tt.reasoning, tt.emptyRetries, tt.maxEmptyRetries)
 			assert.Equal(t, tt.wantRetry, retry)
 			assert.Equal(t, tt.wantContent, content)
+
+			if len(tt.wantOutput) == 0 {
+				// Negative cases: a spurious notice on a healthy or
+				// still-retrying response would be a regression.
+				assert.Empty(t, drainOutput(t, outputCh, 1, 50*time.Millisecond),
+					"no IRC output expected for this case")
+				return
+			}
+			lines := drainOutput(t, outputCh, len(tt.wantOutput), 100*time.Millisecond)
+			require.Len(t, lines, len(tt.wantOutput), "unexpected IRC output: %q", lines)
+			for i, want := range tt.wantOutput {
+				assert.Contains(t, lines[i], want)
+			}
 		})
 	}
+}
+
+// newEmptyRetryTurnRunner builds a chatRunner against a stub chat-completions
+// server that replies with the given bodies in order (repeating the last one
+// when exhausted), recording every request body it received.
+func newEmptyRetryTurnRunner(t *testing.T, bodies []string, requests *[]string, outputCh chan string) *chatRunner {
+	t.Helper()
+	var mu sync.Mutex
+	seq := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		idx := seq
+		if idx >= len(bodies) {
+			idx = len(bodies) - 1
+		}
+		seq++
+		*requests = append(*requests, string(body))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, bodies[idx])
+	}))
+	t.Cleanup(server.Close)
+
+	transport := newDaveTransport(nil, nil)
+	client := openai.NewClient(
+		option.WithAPIKey("test-key"),
+		option.WithBaseURL(server.URL+"/v1"),
+		option.WithHTTPClient(&http.Client{Transport: transport}),
+	)
+	logger := logxi.New("test")
+	logger.SetLevel(logxi.LevelAll)
+	return &chatRunner{
+		openaiClient: &client,
+		transport:    transport,
+		httpClient:   &http.Client{Transport: transport},
+		baseURL:      server.URL + "/v1",
+		apiKey:       "test-key",
+		cfg:          AIConfig{Model: "m", Timeout: 10 * time.Second, RetryOnEmpty: intPtr(1)},
+		network:      Network{Name: "testnet"},
+		channel:      "#101",
+		nick:         "shrew",
+		logger:       logger,
+		ctx:          context.Background(),
+		outputCh:     outputCh,
+	}
+}
+
+// TestRunTurnEmptyResponseRetryInjectsCorrection verifies the retry carries a
+// self-correction instruction the model can act on: the first response is
+// reasoning-only (the production failure mode), and the retry must both tell
+// the model what went wrong and succeed normally — with the correction
+// persisted to the session exactly once (design D7: DB parity with what the
+// API saw + standing guidance for later turns).
+func TestRunTurnEmptyResponseRetryInjectsCorrection(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	sid := createTestSession(t, "testnet", "#101", "shrew", "testcmd", "svc", "m")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "hi"}))
+	messages, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+
+	var requests []string
+	outputCh := make(chan string, 8)
+	cr := newEmptyRetryTurnRunner(t, []string{
+		// attempt 1: empty content, answer stranded in the reasoning field
+		`{"id":"cmpl-1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning":"call poison control"},"finish_reason":"stop"}]}`,
+		// attempt 2: proper answer
+		`{"id":"cmpl-2","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"here is the real answer"},"finish_reason":"stop"}]}`,
+	}, &requests, outputCh)
+	cr.sessionID = sid
+
+	cr.runTurn(newTurnContext(sid, messages))
+
+	require.Len(t, requests, 2, "expected one retry, got %d requests", len(requests))
+	assert.Contains(t, requests[1], "EMPTY response", "retry request must carry the correction, got: %s", requests[1])
+	assert.Contains(t, requests[1], "reasoning channel", "correction must name the reasoning-channel failure mode")
+	assert.NotContains(t, requests[0], "EMPTY response", "first request must not carry a correction")
+
+	lines := drainOutput(t, outputCh, 4, time.Second)
+	require.NotEmpty(t, lines, "user must see the successful answer")
+	assert.Contains(t, strings.Join(lines, "\n"), "here is the real answer")
+	assert.NotContains(t, strings.Join(lines, "\n"), "reasoning channel", "no failure notice expected on a successful retry")
+
+	// D7: the correction persists — the stored session is exactly what
+	// the API saw, and the standing nudge keeps steering later turns.
+	final, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	corrections := 0
+	for _, msg := range final {
+		if strings.Contains(msg.Content, "Your previous response was rejected") {
+			corrections++
+			assert.Equal(t, RoleSystem, msg.Role, "default Knob 1 payload role")
+		}
+	}
+	assert.Equal(t, 1, corrections, "exactly one correction row may persist, got %d: %+v", corrections, final)
+	assert.Equal(t, "here is the real answer", final[len(final)-1].Content)
+}
+
+// TestRunTurnEmptyResponseExhaustedShowsReasoningToUser verifies the
+// user-facing failure path: when every attempt strands the answer in the
+// reasoning channel, the user gets an explanatory notice plus the reasoning
+// content itself, and the reasoning is NOT accepted as the assistant reply.
+func TestRunTurnEmptyResponseExhaustedShowsReasoningToUser(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	sid := createTestSession(t, "testnet", "#101", "shrew", "testcmd", "svc", "m")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "hi"}))
+	messages, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+
+	var requests []string
+	outputCh := make(chan string, 8)
+	cr := newEmptyRetryTurnRunner(t, []string{
+		`{"id":"cmpl-1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning":"first attempt reasoning"},"finish_reason":"stop"}]}`,
+		`{"id":"cmpl-2","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning":"the answer is forty-two"},"finish_reason":"stop"}]}`,
+	}, &requests, outputCh)
+	cr.sessionID = sid
+
+	cr.runTurn(newTurnContext(sid, messages))
+
+	require.Len(t, requests, 2, "expected initial attempt + 1 retry, got %d", len(requests))
+	assert.Contains(t, requests[1], "EMPTY response", "retry must carry the correction")
+
+	lines := drainOutput(t, outputCh, 6, time.Second)
+	joined := strings.Join(lines, "\n")
+	assert.Contains(t, joined, "reasoning channel", "explanation notice expected, got %q", lines)
+	// The LAST attempt's reasoning is shown — that is the model's most
+	// recent word, exactly like the pre-existing reasoning log line.
+	assert.Contains(t, joined, "the answer is forty-two")
+	assert.NotContains(t, joined, "first attempt reasoning")
+
+	// The stored reply stays the "..." sentinel — reasoning is not a reply.
+	final, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	last := final[len(final)-1]
+	assert.Equal(t, RoleAssistant, last.Role)
+	assert.Equal(t, "...", last.Content)
+}
+
+// TestRunTurnEmptyResponseExhaustedNoReasoning verifies the plain-empty
+// exhaustion path tells the user the turn failed (previously the user was
+// left waiting with no feedback at all).
+func TestRunTurnEmptyResponseExhaustedNoReasoning(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	sid := createTestSession(t, "testnet", "#101", "shrew", "testcmd", "svc", "m")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "hi"}))
+	messages, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+
+	var requests []string
+	outputCh := make(chan string, 8)
+	cr := newEmptyRetryTurnRunner(t, []string{
+		`{"id":"cmpl-1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"stop"}]}`,
+	}, &requests, outputCh)
+	cr.sessionID = sid
+
+	cr.runTurn(newTurnContext(sid, messages))
+
+	lines := drainOutput(t, outputCh, 4, time.Second)
+	assert.Contains(t, strings.Join(lines, "\n"), "empty response from model after", "failure notice expected, got %q", lines)
+	assert.Contains(t, strings.Join(lines, "\n"), "retries exhausted", "notice must state retries were exhausted")
+}
+
+// TestAddEmptyResponseCorrection pins the correction shape (guidance
+// Knob 1 payload role — system by default, user/developer when configured;
+// Knob 2 suffix appended for anthropic-class models), persistence (D7 —
+// rows go through turn.Add and reach the session store), and the
+// back-to-back dedupe: one nudge per failure shape per turn.
+func TestAddEmptyResponseCorrection(t *testing.T) {
+	setupTestDB(t)
+	sid := createTestSession(t, "testnet", "#101", "shrew", "testcmd", "svc", "m")
+	turn := newTurnContext(sid, nil)
+	turn.Add(ChatMessage{Role: RoleUser, Content: "real"})
+
+	newRunner := func(cfg AIConfig) *chatRunner {
+		logger := logxi.New("test")
+		logger.SetLevel(logxi.LevelAll)
+		return &chatRunner{cfg: cfg, logger: logger}
+	}
+
+	t.Run("default role system, no suffix for plain models", func(t *testing.T) {
+		cr := newRunner(AIConfig{Model: "qwen3"})
+		cr.addEmptyResponseCorrection(turn, "some reasoning")
+		require.Len(t, turn.Messages(), 2) // real + correction
+		c := turn.Messages()[1]
+		assert.Equal(t, RoleSystem, c.Role)
+		assert.Contains(t, c.Content, "reasoning")
+		assert.Contains(t, c.Content, "automated notice", "correction must be marked as not-from-the-user")
+
+		// identical repeat collapses (in-turn dedupe)
+		cr.addEmptyResponseCorrection(turn, "more reasoning")
+		require.Len(t, turn.Messages(), 2)
+
+		// different failure shape earns its own nudge, and its repeat collapses
+		cr.addEmptyResponseCorrection(turn, "")
+		require.Len(t, turn.Messages(), 3)
+		assert.Contains(t, turn.Messages()[2].Content, "completely empty")
+		cr.addEmptyResponseCorrection(turn, "")
+		require.Len(t, turn.Messages(), 3)
+
+		// D7: correction rows persist to the session store
+		stored, err := sessionMgr.GetMessages(sid)
+		require.NoError(t, err)
+		require.Len(t, stored, 3, "correction rows must persist (design D7)")
+		assert.Equal(t, RoleSystem, stored[1].Role)
+		assert.Contains(t, stored[1].Content, "Your previous response was rejected")
+		assert.Equal(t, RoleSystem, stored[2].Role)
+	})
+
+	t.Run("anthropic model gets the knob 2 user suffix", func(t *testing.T) {
+		sid2 := createTestSession(t, "testnet", "#101", "shrew", "testcmd", "svc", "anthropic/claude-4")
+		turn2 := newTurnContext(sid2, nil)
+		turn2.Add(ChatMessage{Role: RoleUser, Content: "q"})
+		cr := newRunner(AIConfig{Model: "anthropic/claude-4"})
+
+		cr.addEmptyResponseCorrection(turn2, "")
+		require.Len(t, turn2.Messages(), 3) // user + system payload + user suffix
+		assert.Equal(t, RoleSystem, turn2.Messages()[1].Role)
+		assert.Equal(t, RoleUser, turn2.Messages()[2].Role)
+		assert.Equal(t, correctionUserSuffix, turn2.Messages()[2].Content)
+
+		// dedupe covers payload+suffix tail
+		cr.addEmptyResponseCorrection(turn2, "")
+		require.Len(t, turn2.Messages(), 3)
+	})
+
+	t.Run("explicit false suppresses even anthropic suffix", func(t *testing.T) {
+		turn3 := newTurnContext(0, nil)
+		cr := newRunner(AIConfig{Model: "anthropic/claude-4", NeedsUserSuffix: boolPtr(false)})
+		cr.addEmptyResponseCorrection(turn3, "")
+		require.Len(t, turn3.Messages(), 1)
+		assert.Equal(t, RoleSystem, turn3.Messages()[0].Role)
+	})
+
+	t.Run("user payload role gets no suffix", func(t *testing.T) {
+		turn4 := newTurnContext(0, nil)
+		cr := newRunner(AIConfig{Model: "anthropic/claude-4", InjectionRole: RoleUser})
+		cr.addEmptyResponseCorrection(turn4, "")
+		require.Len(t, turn4.Messages(), 1)
+		assert.Equal(t, RoleUser, turn4.Messages()[0].Role)
+	})
+}
+
+// TestRunTurnStreamEmptyResponseRetry verifies the streaming chat
+// completions retry path: a reasoning-only stream (deltas carry
+// reasoning_content but never content) triggers a retry whose request
+// carries the self-correction, and a good second stream reaches the user.
+func TestRunTurnStreamEmptyResponseRetry(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	sid := createTestSession(t, "testnet", "#101", "shrew", "testcmd", "svc", "m")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "hi"}))
+	messages, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+
+	chunk := func(delta string, finish any) string {
+		return fmt.Sprintf(`data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":%s,"finish_reason":%s}]}`+"\n\n", delta, finish)
+	}
+	reasoningOnlyStream := chunk(`{"role":"assistant","reasoning_content":"answer stranded in reasoning"}`, `null`) +
+		chunk(`{}`, `"stop"`) + "data: [DONE]\n\n"
+	goodStream := chunk(`{"role":"assistant","content":"streamed answer"}`, `null`) +
+		chunk(`{}`, `"stop"`) + "data: [DONE]\n\n"
+
+	var requests []string
+	var mu sync.Mutex
+	seq := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		idx := seq
+		if idx > 1 {
+			idx = 1
+		}
+		seq++
+		requests = append(requests, string(body))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		if idx == 0 {
+			fmt.Fprint(w, reasoningOnlyStream)
+			return
+		}
+		fmt.Fprint(w, goodStream)
+	}))
+	defer server.Close()
+
+	transport := newDaveTransport(nil, nil)
+	client := openai.NewClient(
+		option.WithAPIKey("test-key"),
+		option.WithBaseURL(server.URL+"/v1"),
+		option.WithHTTPClient(&http.Client{Transport: transport}),
+	)
+	outputCh := make(chan string, 8)
+	logger := logxi.New("test")
+	logger.SetLevel(logxi.LevelAll)
+	cr := &chatRunner{
+		openaiClient: &client,
+		transport:    transport,
+		httpClient:   &http.Client{Transport: transport},
+		baseURL:      server.URL + "/v1",
+		apiKey:       "test-key",
+		cfg:          AIConfig{Model: "m", Timeout: 10 * time.Second, RetryOnEmpty: intPtr(1), Streaming: true, StreamTimeout: 5 * time.Second},
+		network:      Network{Name: "testnet"},
+		channel:      "#101",
+		nick:         "shrew",
+		logger:       logger,
+		ctx:          context.Background(),
+		outputCh:     outputCh,
+	}
+	cr.sessionID = sid
+
+	cr.runTurn(newTurnContext(sid, messages))
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, requests, 2, "expected one retry, got %d requests", len(requests))
+	assert.NotContains(t, requests[0], "EMPTY response")
+	assert.Contains(t, requests[1], "EMPTY response", "streaming retry must carry the correction")
+	assert.Contains(t, requests[1], "reasoning channel")
+
+	lines := drainOutput(t, outputCh, 4, time.Second)
+	assert.Contains(t, strings.Join(lines, "\n"), "streamed answer")
+}
+
+// TestParseChatCompletionResponseReasoningContent pins the ExtraFields
+// extraction for reasoning_content: the openai-go SDK has no typed field for
+// it, so it lands in ExtraFields with status=invalid — Valid() is false but
+// Raw() carries the value. Producers that strand their whole answer in
+// reasoning_content (DeepSeek-style, llama-server reasoning models) must be
+// detected so the reasoning-only failure path can show the user what happened.
+func TestParseChatCompletionResponseReasoningContent(t *testing.T) {
+	body := `{"id":"cmpl-1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning_content":"the answer is in the reasoning"},"finish_reason":"stop"}]}`
+	var resp openai.ChatCompletion
+	require.NoError(t, json.Unmarshal([]byte(body), &resp))
+
+	content, reasoning, toolCalls, usage := parseChatCompletionResponse(resp)
+	assert.Empty(t, content)
+	assert.Equal(t, "the answer is in the reasoning", reasoning)
+	assert.Nil(t, toolCalls)
+	require.NotNil(t, usage)
+	assert.Equal(t, "stop", usage.FinishReason)
+}
+
+// TestRunTurnStreamEmptyResponseExhausted verifies the streaming exhaustion
+// path end to end: every attempt strands the answer in reasoning_content, so
+// the user gets the explanation notice plus the reasoning itself — and only
+// that (the "..." stored on the session is never sent, and the post-retry
+// stream flush must not double-send anything).
+func TestRunTurnStreamEmptyResponseExhausted(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	sid := createTestSession(t, "testnet", "#101", "shrew", "testcmd", "svc", "m")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "hi"}))
+	messages, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+
+	chunk := func(delta string, finish any) string {
+		return fmt.Sprintf(`data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":%s,"finish_reason":%s}]}`+"\n\n", delta, finish)
+	}
+	reasoningOnlyStream := chunk(`{"role":"assistant","reasoning_content":"streamed reasoning answer"}`, `null`) +
+		chunk(`{}`, `"stop"`) + "data: [DONE]\n\n"
+
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, reasoningOnlyStream)
+	}))
+	defer server.Close()
+
+	transport := newDaveTransport(nil, nil)
+	client := openai.NewClient(
+		option.WithAPIKey("test-key"),
+		option.WithBaseURL(server.URL+"/v1"),
+		option.WithHTTPClient(&http.Client{Transport: transport}),
+	)
+	outputCh := make(chan string, 8)
+	logger := logxi.New("test")
+	logger.SetLevel(logxi.LevelAll)
+	cr := &chatRunner{
+		openaiClient: &client,
+		transport:    transport,
+		httpClient:   &http.Client{Transport: transport},
+		baseURL:      server.URL + "/v1",
+		apiKey:       "test-key",
+		cfg:          AIConfig{Model: "m", Timeout: 10 * time.Second, RetryOnEmpty: intPtr(1), Streaming: true, StreamTimeout: 5 * time.Second},
+		network:      Network{Name: "testnet"},
+		channel:      "#101",
+		nick:         "shrew",
+		logger:       logger,
+		ctx:          context.Background(),
+		outputCh:     outputCh,
+	}
+	cr.sessionID = sid
+
+	cr.runTurn(newTurnContext(sid, messages))
+
+	assert.Equal(t, int32(2), atomic.LoadInt32(&hits), "initial attempt + 1 retry expected")
+
+	lines := drainOutput(t, outputCh, 6, time.Second)
+	joined := strings.Join(lines, "\n")
+	assert.Contains(t, joined, "reasoning channel", "explanation notice expected, got %q", lines)
+	assert.Contains(t, joined, "streamed reasoning answer", "reasoning must be shown to the user")
+	assert.Equal(t, 1, strings.Count(joined, "streamed reasoning answer"), "reasoning must be sent exactly once (no double-send from the stream flush)")
+
+	final, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	last := final[len(final)-1]
+	assert.Equal(t, RoleAssistant, last.Role)
+	assert.Equal(t, "...", last.Content, "reasoning is not accepted as the reply; the sentinel stays")
 }
 
 func TestCompletionMaxTokens(t *testing.T) {

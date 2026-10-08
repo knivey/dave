@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -140,7 +141,7 @@ func TestDeliverAsyncResult_SameSession(t *testing.T) {
 	output := make(chan string, 100)
 	deliverAsyncResult(entry, context.Background(), output)
 
-	msgs, err := sessionMgr.GetMessages(sid, 20)
+	msgs, err := sessionMgr.GetMessages(sid)
 	require.NoError(t, err)
 
 	hasAsyncMsg := false
@@ -196,7 +197,7 @@ func TestDeliverAsyncResult_DifferentSession(t *testing.T) {
 	require.NoError(t, err, "getDBSessionByID")
 	assert.Equal(t, "active", sessA.Status, "session A status")
 
-	msgs, err := sessionMgr.GetMessages(sessionA, 20)
+	msgs, err := sessionMgr.GetMessages(sessionA)
 	require.NoError(t, err)
 	hasAsyncMsg := false
 	for _, m := range msgs {
@@ -300,7 +301,7 @@ func TestOnAsyncJobCompleted_MultipleJobsWhileBusy(t *testing.T) {
 
 	waitForActiveSession(t, "testnet", "#test", ensureTestUser(t, "testnet", "testuser"), sessionA, 5*time.Second)
 
-	msgs, err := sessionMgr.GetMessages(sessionA, 20)
+	msgs, err := sessionMgr.GetMessages(sessionA)
 	require.NoError(t, err)
 
 	asyncCount := 0
@@ -343,7 +344,7 @@ func TestSwitchToSession_CompletesOldSession(t *testing.T) {
 	sessA, _ := getDBSessionByID(sessionA)
 	assert.Equal(t, "active", sessA.Status, "session A status")
 
-	msgs, err := sessionMgr.GetMessages(sessionA, 20)
+	msgs, err := sessionMgr.GetMessages(sessionA)
 	require.NoError(t, err)
 	foundUserMsg := false
 	for _, m := range msgs {
@@ -443,7 +444,7 @@ func TestDeliverAsyncResult_NoContext(t *testing.T) {
 	require.NotNil(t, activeSession)
 	assert.Equal(t, sessionA, activeSession.ID, "should have loaded from DB")
 
-	msgs, err := sessionMgr.GetMessages(sessionA, 20)
+	msgs, err := sessionMgr.GetMessages(sessionA)
 	require.NoError(t, err)
 	hasAsyncMsg := false
 	for _, m := range msgs {
@@ -597,7 +598,7 @@ func TestInjectAsyncResultFromDB(t *testing.T) {
 
 	injectAsyncResultFromDB(sid, cfg, pj, "testnet", "#test", "testuser")
 
-	msgs, err := sessionMgr.GetMessages(sid, 20)
+	msgs, err := sessionMgr.GetMessages(sid)
 	require.NoError(t, err)
 	require.Len(t, msgs, 2, "expected 2 messages")
 	lastMsg := msgs[len(msgs)-1]
@@ -628,7 +629,7 @@ func TestInjectAsyncResultFromDB_AnthropicUserSuffix(t *testing.T) {
 
 	injectAsyncResultFromDB(sid, cfg, pj, "testnet", "#test", "testuser")
 
-	msgs, err := sessionMgr.GetMessages(sid, 20)
+	msgs, err := sessionMgr.GetMessages(sid)
 	require.NoError(t, err)
 	require.Len(t, msgs, 3, "expected 3 messages (sys + system result + user suffix)")
 	assert.Equal(t, "system", msgs[1].Role)
@@ -641,7 +642,7 @@ func TestInjectAsyncResultFromDB_NeedsUserSuffixConfig(t *testing.T) {
 	setupTestDB(t)
 
 	cfg := makeTestAIConfig()
-	cfg.NeedsUserSuffix = true
+	cfg.NeedsUserSuffix = boolPtr(true)
 
 	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	sessionMgr.AddMessage(sid, ChatMessage{Role: "system", Content: "sys"})
@@ -658,10 +659,73 @@ func TestInjectAsyncResultFromDB_NeedsUserSuffixConfig(t *testing.T) {
 
 	injectAsyncResultFromDB(sid, cfg, pj, "testnet", "#test", "testuser")
 
-	msgs, err := sessionMgr.GetMessages(sid, 20)
+	msgs, err := sessionMgr.GetMessages(sid)
 	require.NoError(t, err)
 	require.Len(t, msgs, 3, "expected 3 messages (sys + system result + user suffix)")
 	assert.Equal(t, "user", msgs[2].Role, "last message should be user suffix")
+}
+
+// TestInjectAsyncResultFromDB_GuidanceKnobs pins the shared guidance
+// mechanism on the async site: Knob 1 selects the payload role, Knob 2 the
+// trailing user turn (auto for anthropic/, explicit false suppresses it,
+// user payloads never need a suffix).
+func TestInjectAsyncResultFromDB_GuidanceKnobs(t *testing.T) {
+	tests := []struct {
+		name      string
+		cfg       AIConfig
+		wantRoles []string
+	}{
+		{
+			name:      "default: system payload, no suffix",
+			cfg:       AIConfig{Model: "qwen3"},
+			wantRoles: []string{"system"},
+		},
+		{
+			name:      "anthropic auto: system payload + user suffix",
+			cfg:       AIConfig{Model: "anthropic/claude-sonnet-4.6"},
+			wantRoles: []string{"system", "user"},
+		},
+		{
+			name:      "explicit false suppresses anthropic auto suffix",
+			cfg:       AIConfig{Model: "anthropic/claude-sonnet-4.6", NeedsUserSuffix: boolPtr(false)},
+			wantRoles: []string{"system"},
+		},
+		{
+			name:      "developer payload role",
+			cfg:       AIConfig{Model: "qwen3", InjectionRole: RoleDeveloper},
+			wantRoles: []string{"developer"},
+		},
+		{
+			name:      "user payload role never gets a suffix",
+			cfg:       AIConfig{Model: "anthropic/claude-sonnet-4.6", InjectionRole: RoleUser},
+			wantRoles: []string{"user"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setupTestDB(t)
+			sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
+			result := "done"
+			pj := PendingJob{
+				SessionID: &sid,
+				JobID:     "job-1",
+				ToolName:  "generate_image_async",
+				Status:    "completed",
+				Result:    &result,
+			}
+
+			injectAsyncResultFromDB(sid, tt.cfg, pj, "testnet", "#test", "testuser")
+
+			msgs, err := sessionMgr.GetMessages(sid)
+			require.NoError(t, err)
+			require.Len(t, msgs, len(tt.wantRoles), "unexpected injected rows: %+v", msgs)
+			for i, want := range tt.wantRoles {
+				assert.Equal(t, want, msgs[i].Role)
+			}
+			assert.Contains(t, msgs[0].Content, "Background task completed")
+		})
+	}
 }
 
 func TestInjectAsyncResultFromDB_NilResult(t *testing.T) {
@@ -682,12 +746,119 @@ func TestInjectAsyncResultFromDB_NilResult(t *testing.T) {
 
 	injectAsyncResultFromDB(sid, cfg, pj, "testnet", "#test", "testuser")
 
-	msgs, err := sessionMgr.GetMessages(sid, 20)
+	msgs, err := sessionMgr.GetMessages(sid)
 	require.NoError(t, err)
 	lastMsg := msgs[len(msgs)-1]
 	assert.Contains(t, lastMsg.Content, "Background task completed", "injected message missing expected text even with nil result")
 }
 
+// TestInjectAsyncResultFromDB_ToolDelivery pins the tool-delivery mode:
+// the notification is a synthetic assistant tool-call + tool-result pair
+// (atomically persisted, ids paired, audit marker kept) and the session's
+// response chain is cleared — a chained turn would otherwise send an
+// orphan tool output.
+func TestInjectAsyncResultFromDB_ToolDelivery(t *testing.T) {
+	setupTestDB(t)
+
+	cfg := makeTestAIConfig()
+	cfg.AsyncResultDelivery = asyncDeliveryTool
+
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
+	sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "make me a picture"})
+	require.NoError(t, sessionMgr.UpdateResponseID(sid, strPtrOrNil("resp-old"), "test-model"))
+
+	result := "image url: http://example.com/test.png"
+	pj := PendingJob{
+		SessionID: &sid,
+		JobID:     "job-tool-1",
+		ToolName:  "generate_image_async",
+		Status:    "completed",
+		Result:    &result,
+	}
+
+	injectAsyncResultFromDB(sid, cfg, pj, "testnet", "#test", "testuser")
+
+	msgs, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	require.Len(t, msgs, 3, "user + synthetic pair, got %+v", msgs)
+
+	call := msgs[1]
+	assert.Equal(t, RoleAssistant, call.Role)
+	require.Len(t, call.ToolCalls, 1)
+	assert.Equal(t, asyncJobStatusTool, call.ToolCalls[0].Function.Name)
+	assert.JSONEq(t, `{"job_id":"job-tool-1"}`, call.ToolCalls[0].Function.Arguments)
+
+	res := msgs[2]
+	assert.Equal(t, RoleTool, res.Role)
+	assert.Equal(t, call.ToolCalls[0].ID, res.ToolCallID)
+	assert.Contains(t, res.Content, "Background task completed")
+	assert.Contains(t, res.Content, result)
+
+	// chain cleared for the next full-history turn
+	s, err := sessionMgr.GetSession(sid)
+	require.NoError(t, err)
+	assert.Nil(t, s.ResponseID, "response_id must be cleared in tool-delivery mode")
+}
+
+// TestInjectAsyncResultFromDB_ToolDeliveryBuildFailureFallsBack pins the
+// fallback: when the round-trip cannot be built (id mint failure), the
+// notification still lands via message delivery — never silently lost.
+func TestInjectAsyncResultFromDB_ToolDeliveryBuildFailureFallsBack(t *testing.T) {
+	setupTestDB(t)
+
+	orig := newToolCallIDFn
+	newToolCallIDFn = func() (string, error) { return "", errors.New("entropy exhausted") }
+	t.Cleanup(func() { newToolCallIDFn = orig })
+
+	cfg := makeTestAIConfig()
+	cfg.AsyncResultDelivery = asyncDeliveryTool
+
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
+	sessionMgr.AddMessage(sid, ChatMessage{Role: "user", Content: "go"})
+
+	result := "done"
+	pj := PendingJob{
+		SessionID: &sid,
+		JobID:     "job-fb-2",
+		ToolName:  "generate_image_async",
+		Status:    "completed",
+		Result:    &result,
+	}
+
+	injectAsyncResultFromDB(sid, cfg, pj, "testnet", "#test", "testuser")
+
+	msgs, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	require.Len(t, msgs, 2, "user + message-mode payload, got %+v", msgs)
+	assert.Equal(t, RoleSystem, msgs[1].Role, "fallback uses the guidance message path")
+	assert.Contains(t, msgs[1].Content, "Background task completed")
+}
+
+// TestInjectAsyncResultFromDB_ToolDeliveryMissingSession pins the
+// defensive shape against a nonexistent session: no panic (the session id
+// has no FK constraint, so rows for a missing session are simply orphans
+// in the temp DB — the assertion is robustness, not row counts).
+func TestInjectAsyncResultFromDB_ToolDeliveryMissingSession(t *testing.T) {
+	setupTestDB(t)
+
+	cfg := makeTestAIConfig()
+	cfg.AsyncResultDelivery = asyncDeliveryTool
+
+	result := "done"
+	pj := PendingJob{
+		SessionID: nil,
+		JobID:     "job-fb-1",
+		ToolName:  "generate_image_async",
+		Status:    "completed",
+		Result:    &result,
+	}
+
+	assert.NotPanics(t, func() {
+		injectAsyncResultFromDB(999999, cfg, pj, "testnet", "#test", "testuser")
+	})
+}
+
+// TestModelNeedsUserSuffix tests the anthropic/ auto-detection regex.
 func TestModelNeedsUserSuffix(t *testing.T) {
 	tests := []struct {
 		model    string
@@ -837,7 +1008,7 @@ func TestDeliverAsyncResult_NoContextLoaded_LoadsFromDB(t *testing.T) {
 	require.NotNil(t, activeSession)
 	assert.Equal(t, sid, activeSession.ID, "should have loaded from DB")
 
-	msgs, err := sessionMgr.GetMessages(sid, 20)
+	msgs, err := sessionMgr.GetMessages(sid)
 	require.NoError(t, err)
 	assert.NotEmpty(t, msgs, "expected messages to be loaded from DB")
 
@@ -1001,7 +1172,7 @@ func TestSwitchToSession_DBMessagesWithToolCalls(t *testing.T) {
 	}
 	switchToSession(entry)
 
-	msgs, err := sessionMgr.GetMessages(sessionA, 20)
+	msgs, err := sessionMgr.GetMessages(sessionA)
 	require.NoError(t, err)
 
 	foundToolCall := false
@@ -1018,13 +1189,10 @@ func TestSwitchToSession_DBMessagesWithToolCalls(t *testing.T) {
 	assert.True(t, foundToolCallID, "tool_call_id not restored from DB")
 }
 
-func TestSwitchToSession_TruncatesHistory(t *testing.T) {
+func TestSwitchToSession_FullHistory(t *testing.T) {
 	setupTestDB(t)
 	setupTestJobManager(t)
 	_ = setupMockDeps(t)
-
-	cfg := makeTestAIConfig()
-	cfg.MaxHistory = 3
 
 	sessionA := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 	insertTestMessage(t, sessionA, "system", "sys")
@@ -1034,7 +1202,7 @@ func TestSwitchToSession_TruncatesHistory(t *testing.T) {
 
 	_ = createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
 
-	config.Commands.Chats["testchat"] = cfg
+	config.Commands.Chats["testchat"] = makeTestAIConfig()
 
 	entry := &jobEntry[asyncJobPayload]{
 		jobID: "job-1", payload: asyncJobPayload{sessionID: sessionA},
@@ -1042,10 +1210,13 @@ func TestSwitchToSession_TruncatesHistory(t *testing.T) {
 	}
 	switchToSession(entry)
 
-	msgs, err := sessionMgr.GetMessages(sessionA, cfg.MaxHistory)
+	// Live-path truncation was removed (Oct 2026): the request history is
+	// the FULL live set — context sizing is compaction's job.
+	msgs, err := sessionMgr.GetMessages(sessionA)
 	require.NoError(t, err)
-	assert.LessOrEqual(t, len(msgs), cfg.MaxHistory+1, "messages not truncated")
-	assert.Equal(t, "system", msgs[0].Role, "first message should be system prompt after truncation")
+	require.Len(t, msgs, 11, "full live history expected, no message-count clipping")
+	assert.Equal(t, "system", msgs[0].Role)
+	assert.Equal(t, "msg 9", msgs[len(msgs)-1].Content)
 }
 
 func TestDeliverAsyncResult_RunningDuringTurn(t *testing.T) {

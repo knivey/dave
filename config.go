@@ -253,45 +253,53 @@ func (c MCPCommandConfig) GetAsyncTool() string {
 }
 
 type AIConfig struct {
-	Name                 string //gets set to key name
-	Service              string
-	Model                string
-	Aliases              []string `toml:"aliases"`
-	System               string
-	SystemTmpl           *template.Template `json:"-"`
-	Streaming            bool
-	MaxTokens            int `toml:"maxtokens"`
-	MaxCompletionTokens  int `toml:"maxcompletiontokens"`
-	Temperature          float32
-	MaxHistory           int    `toml:"maxhistory"`
-	RenderMarkdown       bool   `toml:"rendermarkdown"`
-	DetectImages         bool   `toml:"detectimages"`
-	MaxImages            int    `toml:"maximages"`
-	MaxContextImages     int    `toml:"maxcontextimages"`
-	ImageFormat          string `toml:"imageformat"`
-	ImageQuality         int    `toml:"imagequality"`
-	MaxImageSize         string `toml:"maximagesize"`
-	MaxImageWidth        int    `toml:"-"`
-	MaxImageHeight       int    `toml:"-"`
-	Description          string
-	MCPs                 []string           `toml:"mcps"`
-	TopP                 float32            `toml:"topp"`
-	Stop                 []string           `toml:"stop"`
-	PresencePenalty      float32            `toml:"presencepenalty"`
-	FrequencyPenalty     float32            `toml:"frequencypenalty"`
-	ParallelToolCalls    *bool              `toml:"paralleltoolcalls"`
-	ReasoningEffort      string             `toml:"reasoningeffort"`
-	ReasoningSummary     string             `toml:"reasoningsummary"`
-	ServiceTier          string             `toml:"servicetier"`
-	Verbosity            string             `toml:"verbosity"`
-	ChatTemplateKwargs   map[string]any     `toml:"chat_template_kwargs"`
-	ExtraBody            map[string]any     `toml:"extra_body"`
-	Timeout              time.Duration      `toml:"timeout"`
-	StreamTimeout        time.Duration      `toml:"streamtimeout"`
-	ToolVerbose          *bool              `toml:"toolverbose"`
-	ResponsesAPI         bool               `toml:"responses_api"`
-	PreviousResponseID   bool               `toml:"previous_response_id"`
-	NeedsUserSuffix      bool               `toml:"needsusersuffix"`
+	Name                string //gets set to key name
+	Service             string
+	Model               string
+	Aliases             []string `toml:"aliases"`
+	System              string
+	SystemTmpl          *template.Template `json:"-"`
+	Streaming           bool
+	MaxTokens           int `toml:"maxtokens"`
+	MaxCompletionTokens int `toml:"maxcompletiontokens"`
+	Temperature         float32
+	RenderMarkdown      bool   `toml:"rendermarkdown"`
+	DetectImages        bool   `toml:"detectimages"`
+	MaxImages           int    `toml:"maximages"`
+	MaxContextImages    int    `toml:"maxcontextimages"`
+	ImageFormat         string `toml:"imageformat"`
+	ImageQuality        int    `toml:"imagequality"`
+	MaxImageSize        string `toml:"maximagesize"`
+	MaxImageWidth       int    `toml:"-"`
+	MaxImageHeight      int    `toml:"-"`
+	Description         string
+	MCPs                []string       `toml:"mcps"`
+	TopP                float32        `toml:"topp"`
+	Stop                []string       `toml:"stop"`
+	PresencePenalty     float32        `toml:"presencepenalty"`
+	FrequencyPenalty    float32        `toml:"frequencypenalty"`
+	ParallelToolCalls   *bool          `toml:"paralleltoolcalls"`
+	ReasoningEffort     string         `toml:"reasoningeffort"`
+	ReasoningSummary    string         `toml:"reasoningsummary"`
+	ServiceTier         string         `toml:"servicetier"`
+	Verbosity           string         `toml:"verbosity"`
+	ChatTemplateKwargs  map[string]any `toml:"chat_template_kwargs"`
+	ExtraBody           map[string]any `toml:"extra_body"`
+	Timeout             time.Duration  `toml:"timeout"`
+	StreamTimeout       time.Duration  `toml:"streamtimeout"`
+	ToolVerbose         *bool          `toml:"toolverbose"`
+	ResponsesAPI        bool           `toml:"responses_api"`
+	PreviousResponseID  bool           `toml:"previous_response_id"`
+	NeedsUserSuffix     *bool          `toml:"needsusersuffix"`       // guidance Knob 2: tri-state, nil = auto (anthropic/)
+	InjectionRole       string         `toml:"injection_role"`        // guidance Knob 1: system (default) | developer | user
+	AsyncResultDelivery string         `toml:"async_result_delivery"` // async results: "message" (default) | "tool" round-trip
+	// ContextWindow is the model's context-window size in tokens for
+	// THIS command's model — compaction budgeting varies per model more
+	// than per service, so the command can override the service value.
+	// 0 = unset; resolved command > service > [compaction] context_window
+	// by effectiveContextWindow (no ApplyDefaults cascade, so the source
+	// stays attributable in logs).
+	ContextWindow        int                `toml:"context_window"`
 	APIUser              string             `toml:"api_user"`
 	RetryOnEmpty         *int               `toml:"retry_on_empty"`
 	LoadNotice           *bool              `toml:"load_notice"`
@@ -308,7 +316,6 @@ type Service struct {
 	MaxCompletionTokens  int    `toml:"maxcompletiontokens"`
 	BaseURL              string
 	Temperature          float32
-	MaxHistory           int           `toml:"maxhistory"`
 	ImageFormat          string        `toml:"imageformat"`
 	ImageQuality         int           `toml:"imagequality"`
 	MaxImageSize         string        `toml:"maximagesize"`
@@ -319,6 +326,9 @@ type Service struct {
 	Parallel             int           `toml:"parallel"`
 	APIUser              string        `toml:"api_user"`
 	LoadNotice           *bool         `toml:"load_notice"`
+	NeedsUserSuffix      *bool         `toml:"needsusersuffix"`       // guidance Knob 2: tri-state, nil = auto (anthropic/)
+	InjectionRole        string        `toml:"injection_role"`        // guidance Knob 1: system (default) | developer | user
+	AsyncResultDelivery  string        `toml:"async_result_delivery"` // async results: "message" (default) | "tool" round-trip
 	DisabledBuiltinTools []string      `toml:"disabled_builtin_tools"`
 	HiddenMCPTools       []string      `toml:"hidden_mcp_tools"`
 	HiddenMCPToolSets    []string      `toml:"hidden_mcp_tool_sets"`
@@ -346,6 +356,12 @@ type SystemPromptData struct {
 	Network   string
 	ChanNicks string
 	Date      string
+	// AsyncResultRole is the wire role background-job results will be
+	// delivered under (guidance Knob 1: "system" default, "developer",
+	// "user") — lets system templates tell the model the truth about
+	// what to expect: {{if eq .AsyncResultRole "user"}}a user
+	// message{{else}}a system message{{end}}.
+	AsyncResultRole string
 	// SessionID is the DB session id. Only meaningful in api_user templates,
 	// which render per-request once the session exists; system-prompt
 	// templates render before session creation and always see 0.
@@ -354,7 +370,7 @@ type SystemPromptData struct {
 }
 
 func validateTemplate(tmpl *template.Template) error {
-	dummy := SystemPromptData{Nick: "dummy", BotNick: "dummy", Channel: "dummy", Network: "dummy", ChanNicks: `["dummy1","dummy2"]`, Date: "2025-01-01", SessionID: 42, Vars: map[string]string{"example": "test"}}
+	dummy := SystemPromptData{Nick: "dummy", BotNick: "dummy", Channel: "dummy", Network: "dummy", ChanNicks: `["dummy1","dummy2"]`, Date: "2025-01-01", AsyncResultRole: RoleSystem, SessionID: 42, Vars: map[string]string{"example": "test"}}
 	var buf strings.Builder
 	return tmpl.Execute(&buf, dummy)
 }
@@ -368,9 +384,6 @@ func (cfg *AIConfig) ApplyDefaults(service Service) {
 	}
 	if cfg.Temperature == 0 {
 		cfg.Temperature = service.Temperature
-	}
-	if cfg.MaxHistory == 0 {
-		cfg.MaxHistory = service.MaxHistory
 	}
 	if cfg.MaxImages == 0 {
 		cfg.MaxImages = 5
@@ -435,6 +448,29 @@ func (cfg *AIConfig) ApplyDefaults(service Service) {
 	if cfg.LoadNotice == nil {
 		v := service.Type == "llama"
 		cfg.LoadNotice = &v
+	}
+	// Guidance knobs (see docs/superpowers/specs/
+	// 2026-10-08-guidance-injection-role-design.md). Knob 1 materializes
+	// its default here like load_notice; Knob 2 deliberately stays nil
+	// when unset because its default depends on the model (anthropic/
+	// auto-detection) and is resolved at call time by needsUserSuffix.
+	if cfg.InjectionRole == "" {
+		cfg.InjectionRole = service.InjectionRole
+	}
+	if cfg.InjectionRole == "" {
+		cfg.InjectionRole = RoleSystem
+	}
+	if cfg.NeedsUserSuffix == nil {
+		cfg.NeedsUserSuffix = service.NeedsUserSuffix
+	}
+	// Async result delivery mode (spec addendum): command > service >
+	// "message". Invalid values are rejected at load; the empty-string
+	// fallback here only fills the default.
+	if cfg.AsyncResultDelivery == "" {
+		cfg.AsyncResultDelivery = service.AsyncResultDelivery
+	}
+	if cfg.AsyncResultDelivery == "" {
+		cfg.AsyncResultDelivery = asyncDeliveryMessage
 	}
 	if cfg.DisabledBuiltinTools == nil {
 		cfg.DisabledBuiltinTools = service.DisabledBuiltinTools
@@ -678,8 +714,11 @@ func loadServicesFile(dir string, config *Config) error {
 		config.Services = make(map[string]Service)
 	}
 	for name, service := range config.Services {
-		if service.MaxHistory == 0 {
-			service.MaxHistory = 100
+		if err := validateInjectionRole(service.InjectionRole, fmt.Sprintf("services.%s", name)); err != nil {
+			return err
+		}
+		if err := validateAsyncResultDelivery(service.AsyncResultDelivery, fmt.Sprintf("services.%s", name)); err != nil {
+			return err
 		}
 		if service.Parallel <= 0 {
 			service.Parallel = 1
@@ -962,6 +1001,27 @@ func validateCommands(commands *Commands, config *Config) error {
 	return nil
 }
 
+// validateInjectionRole rejects unknown guidance Knob 1 values at load
+// time so a typo cannot silently fall back to "system" (guidanceRole's
+// fallback exists only for hand-built configs that skip validation).
+func validateInjectionRole(role, where string) error {
+	switch role {
+	case "", RoleSystem, RoleDeveloper, RoleUser:
+		return nil
+	}
+	return fmt.Errorf("%s injection_role must be one of \"system\", \"developer\", \"user\" (got %q)", where, role)
+}
+
+// validateAsyncResultDelivery rejects unknown async delivery modes at load
+// time (asyncResultDelivery's fallback exists only for hand-built configs).
+func validateAsyncResultDelivery(mode, where string) error {
+	switch mode {
+	case "", asyncDeliveryMessage, asyncDeliveryTool:
+		return nil
+	}
+	return fmt.Errorf("%s async_result_delivery must be one of \"message\", \"tool\" (got %q)", where, mode)
+}
+
 func validateAndSetAPIUserTemplate(cfg *AIConfig, name, section string) error {
 	if cfg.APIUser == "" {
 		return nil
@@ -993,6 +1053,12 @@ func validateAIConfig(cfg AIConfig, name, section string, config *Config) (AICon
 		}
 	}
 	if service, ok := config.Services[cfg.Service]; ok {
+		if err := validateInjectionRole(cfg.InjectionRole, fmt.Sprintf("commands.%s.%s", section, name)); err != nil {
+			return cfg, err
+		}
+		if err := validateAsyncResultDelivery(cfg.AsyncResultDelivery, fmt.Sprintf("commands.%s.%s", section, name)); err != nil {
+			return cfg, err
+		}
 		cfg.ApplyDefaults(service)
 	} else {
 		return cfg, fmt.Errorf("commands.%s.%s service %s is undefined", section, name, cfg.Service)

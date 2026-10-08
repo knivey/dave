@@ -356,7 +356,7 @@ func deliverAsyncResult(entry *jobEntry[asyncJobPayload], ctx context.Context, o
 			injectAsyncResultFromDB(entry.payload.sessionID, currentCfg, cj, entry.network, entry.channel, entry.nick)
 			markPendingJobDelivered(cj.JobID)
 		}
-		messages, _ := sessionMgr.GetMessages(entry.payload.sessionID, currentCfg.MaxHistory)
+		messages, _ := sessionMgr.GetMessages(entry.payload.sessionID)
 		turn := newTurnContext(entry.payload.sessionID, messages)
 		done := runner.runTurn(turn)
 		if done {
@@ -405,23 +405,58 @@ func switchToSession(entry *jobEntry[asyncJobPayload]) string {
 	return switchMsg
 }
 
+// asyncUserSuffix is the guidance Knob 2 suffix text for async background
+// results — wording kept exactly as the pre-guidance-refactor mechanism so
+// model-visible behavior is unchanged.
+const asyncUserSuffix = "Respond to the user based on the above background task result."
+
+// injectAsyncResultFromDB persists a completed background job's result.
+// Delivery mode (async_result_delivery, spec addendum): "message" (default)
+// routes through the shared guidance mechanism — payload row under Knob 1's
+// role plus the Knob 2 user suffix when the provider needs an answerable
+// trailing turn. "tool" delivers a SYNTHETIC TOOL ROUND-TRIP instead: an
+// assistant row carrying a job_status call plus the matching tool result —
+// the one conversation shape every OpenAI-compat provider handles natively,
+// targeted at smaller models that handle mid-chain guidance poorly. The
+// pending-jobs loop fires a turn immediately after this, so either shape is
+// trailing.
 func injectAsyncResultFromDB(sessionID int64, cfg AIConfig, job PendingJob, network, channel, nick string) {
 	resultText := ""
 	if job.Result != nil {
 		resultText = *job.Result
 	}
 	content := fmt.Sprintf("[System: Background task completed — tool: %s, job: %s. Result:\n%s]", job.ToolName, job.JobID, resultText)
-	msg := ChatMessage{
-		Role:    RoleSystem,
-		Content: content,
-	}
-	sessionMgr.AddMessage(sessionID, msg)
-	if cfg.NeedsUserSuffix || modelNeedsUserSuffix(cfg.Model) {
-		userMsg := ChatMessage{
-			Role:    RoleUser,
-			Content: "Respond to the user based on the above background task result.",
+
+	if asyncResultDelivery(cfg) == asyncDeliveryTool {
+		msgs, err := asyncToolRoundTrip(job, content)
+		switch {
+		case err != nil:
+			loggerJM.Error("failed to build tool round-trip, falling back to message delivery", "session", sessionID, "job", job.JobID, "error", err)
+		default:
+			// The synthetic call predates any Responses chain head: a
+			// chained turn sends only LastN(1), which would emit an
+			// orphan tool output. Clear the chain so the next turn
+			// resends full history (accepted cost — the models this
+			// mode targets do not use previous_response_id). If the
+			// clear FAILS, do NOT proceed with the pair: an active
+			// chain + injected pair means an orphan function_call_output
+			// (a 400 wording isResponseIDError does not catch, so the
+			// chain would never self-heal) — fall back to message
+			// delivery instead.
+			if clearErr := sessionMgr.UpdateResponseID(sessionID, nil, ""); clearErr != nil {
+				loggerJM.Error("failed to clear response_id for tool-delivery injection, falling back to message delivery", "session", sessionID, "job", job.JobID, "error", clearErr)
+				break
+			}
+			if addErr := sessionMgr.AddMessages(sessionID, msgs); addErr != nil {
+				loggerJM.Error("failed to inject tool round-trip, falling back to message delivery", "session", sessionID, "job", job.JobID, "error", addErr)
+				break
+			}
+			return
 		}
-		sessionMgr.AddMessage(sessionID, userMsg)
+	}
+
+	for _, msg := range guidanceMessages(cfg, content, asyncUserSuffix, true) {
+		sessionMgr.AddMessage(sessionID, msg)
 	}
 }
 

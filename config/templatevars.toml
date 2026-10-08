@@ -2,6 +2,11 @@
 # Use these to inject reusable text blocks, notes, or configuration into your prompts.
 # Missing file = empty map (not fatal).
 # Variables are hot-reloadable — edit this file and run `/reload` in the TUI to update without restart.
+#
+# NOTE: vars are static strings — they cannot branch on config. For role-aware
+# wording (e.g. async results arriving as a user vs system message), use the
+# {{.AsyncResultRole}} template variable in the system prompt itself:
+#   {{if eq .AsyncResultRole "user"}}a user message{{else}}a system message{{end}}
 
 AsyncToolsNote = "You have access to both synchronous and asynchronous tools. Async tools return a job_id immediately. After calling an async tool, use register_background_job to monitor it — you will receive the result automatically when it completes. Do not poll or wait for results."
 

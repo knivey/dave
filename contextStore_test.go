@@ -34,7 +34,7 @@ func TestDBSessionRoundtrip(t *testing.T) {
 	require.NoError(t, err, "failed to get session")
 	assert.Equal(t, "active", session.Status)
 
-	loaded, err := sessionMgr.GetMessages(sid, 20)
+	loaded, err := sessionMgr.GetMessages(sid)
 	require.NoError(t, err, "failed to load messages")
 	assert.Len(t, loaded, 3, "messages count")
 	assert.Equal(t, "system", loaded[0].Role, "first message role")
@@ -119,7 +119,7 @@ func TestDBSessionCreateAndMessage(t *testing.T) {
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: "system", Content: "You are helpful"}))
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: "user", Content: "Hello!"}))
 
-	msgs, err := sessionMgr.GetMessages(sid, 20)
+	msgs, err := sessionMgr.GetMessages(sid)
 	require.NoError(t, err, "GetMessages failed")
 	assert.Len(t, msgs, 2, "messages count")
 	assert.Equal(t, "system", msgs[0].Role, "first message role")
@@ -327,7 +327,7 @@ func TestDBMultiContent(t *testing.T) {
 	err := sessionMgr.AddMessage(sid, msg)
 	require.NoError(t, err, "AddMessage with MultiContent failed")
 
-	msgs, err := sessionMgr.GetMessages(sid, 10)
+	msgs, err := sessionMgr.GetMessages(sid)
 	require.NoError(t, err, "GetMessages failed")
 	require.Len(t, msgs, 1, "messages count")
 
@@ -365,7 +365,7 @@ func TestDBMultiContentWithToolCalls(t *testing.T) {
 	err := sessionMgr.AddMessage(sid, msg)
 	require.NoError(t, err)
 
-	msgs, err := sessionMgr.GetMessages(sid, 10)
+	msgs, err := sessionMgr.GetMessages(sid)
 	require.NoError(t, err)
 	require.Len(t, msgs, 1)
 
@@ -640,7 +640,7 @@ func TestConcurrentCreateSessionIsolation(t *testing.T) {
 	assert.Len(t, uniqueIDs, numGoroutines, "each goroutine should get a unique session ID")
 
 	for _, id := range sessionIDs {
-		msgs, err := sessionMgr.GetMessages(id, 10)
+		msgs, err := sessionMgr.GetMessages(id)
 		require.NoError(t, err)
 		assert.Len(t, msgs, 2, "each session should have exactly its own system + user message")
 	}
@@ -693,7 +693,7 @@ func TestConcurrentCreateSessionWithoutLockRaces(t *testing.T) {
 		if id == 0 {
 			continue
 		}
-		msgs, err := sessionMgr.GetMessages(id, 10)
+		msgs, err := sessionMgr.GetMessages(id)
 		require.NoError(t, err)
 		systemCount := 0
 		for _, m := range msgs {

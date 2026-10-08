@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -41,13 +42,11 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 				MaxTokens:           100,
 				MaxCompletionTokens: 200,
 				Temperature:         0.7,
-				MaxHistory:          10,
 			},
 			expect: func(cfg AIConfig) AIConfig {
 				cfg.MaxTokens = 100
 				cfg.MaxCompletionTokens = 200
 				cfg.Temperature = 0.7
-				cfg.MaxHistory = 10
 				cfg.MaxImages = 5
 				cfg.MaxContextImages = 5
 				cfg.ImageFormat = "jpg"
@@ -67,12 +66,10 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 			svc: Service{
 				MaxTokens:   100,
 				Temperature: 0.7,
-				MaxHistory:  10,
 			},
 			expect: func(cfg AIConfig) AIConfig {
 				cfg.MaxTokens = 500
 				cfg.Temperature = 1.5
-				cfg.MaxHistory = 10
 				cfg.MaxImages = 3
 				cfg.MaxContextImages = 5
 				cfg.ImageFormat = "jpg"
@@ -372,7 +369,6 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 			assert.Equal(t, want.MaxTokens, cfg.MaxTokens, "MaxTokens")
 			assert.Equal(t, want.MaxCompletionTokens, cfg.MaxCompletionTokens, "MaxCompletionTokens")
 			assert.Equal(t, want.Temperature, cfg.Temperature, "Temperature")
-			assert.Equal(t, want.MaxHistory, cfg.MaxHistory, "MaxHistory")
 			assert.Equal(t, want.MaxImages, cfg.MaxImages, "MaxImages")
 			assert.Equal(t, want.MaxContextImages, cfg.MaxContextImages, "MaxContextImages")
 			assert.Equal(t, want.ImageFormat, cfg.ImageFormat, "ImageFormat")
@@ -389,6 +385,227 @@ func TestAIConfigApplyDefaults(t *testing.T) {
 			assert.Equal(t, wantLoadNotice, gotLoadNotice, "LoadNotice")
 		})
 	}
+}
+
+// TestAIConfigApplyDefaults_GuidanceKnobs pins the guidance knob cascades
+// (see docs/superpowers/specs/2026-10-08-guidance-injection-role-design.md):
+// Knob 1 (injection_role) materializes command > service > "system";
+// Knob 2 (needsusersuffix) cascades command > service but deliberately
+// stays nil when unset — its default is model-dependent (anthropic/
+// auto-detection) and resolved at call time by needsUserSuffix.
+func TestAIConfigApplyDefaults_GuidanceKnobs(t *testing.T) {
+	tests := []struct {
+		name           string
+		cfg            AIConfig
+		svc            Service
+		wantRole       string
+		wantNeedsUsers *bool
+	}{
+		{
+			name:           "unset everywhere defaults to system, nil suffix",
+			cfg:            AIConfig{},
+			svc:            Service{},
+			wantRole:       RoleSystem,
+			wantNeedsUsers: nil,
+		},
+		{
+			name:           "service values inherited",
+			cfg:            AIConfig{},
+			svc:            Service{InjectionRole: RoleDeveloper, NeedsUserSuffix: boolPtr(true)},
+			wantRole:       RoleDeveloper,
+			wantNeedsUsers: boolPtr(true),
+		},
+		{
+			name:           "command beats service",
+			cfg:            AIConfig{InjectionRole: RoleUser, NeedsUserSuffix: boolPtr(false)},
+			svc:            Service{InjectionRole: RoleDeveloper, NeedsUserSuffix: boolPtr(true)},
+			wantRole:       RoleUser,
+			wantNeedsUsers: boolPtr(false),
+		},
+		{
+			name:           "command role set, suffix inherits service",
+			cfg:            AIConfig{InjectionRole: RoleDeveloper},
+			svc:            Service{NeedsUserSuffix: boolPtr(true)},
+			wantRole:       RoleDeveloper,
+			wantNeedsUsers: boolPtr(true),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := tt.cfg
+			cfg.ApplyDefaults(tt.svc)
+			assert.Equal(t, tt.wantRole, cfg.InjectionRole, "InjectionRole")
+			assert.Equal(t, tt.wantNeedsUsers, cfg.NeedsUserSuffix, "NeedsUserSuffix")
+			assert.Equal(t, tt.wantRole, guidanceRole(cfg), "guidanceRole resolves the materialized value")
+		})
+	}
+}
+
+// TestLoadConfigDirRejectsInvalidInjectionRole pins load-time validation:
+// an unknown Knob 1 value fails the chats load instead of silently
+// falling back to system.
+func TestLoadConfigDirRejectsInvalidInjectionRole(t *testing.T) {
+	dir := createTestConfigDir(t, `
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`, map[string]string{
+		"services.toml": `
+[localsvc]
+type = "llama"
+`,
+		"chats.toml": `
+[badrole]
+service = "localsvc"
+model = "m"
+injection_role = "root"
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	_, err := loadConfigDir(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "injection_role")
+	assert.Contains(t, err.Error(), "root")
+}
+
+// TestLoadConfigDirRejectsInvalidInjectionRoleService pins the service-level
+// validation branch: a bad Knob 1 value in services.toml fails load even
+// when every command is unset.
+func TestLoadConfigDirRejectsInvalidInjectionRoleService(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": `
+[localsvc]
+type = "llama"
+injection_role = "assistant"
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	_, err := loadConfigDir(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "injection_role")
+	assert.Contains(t, err.Error(), "localsvc")
+}
+
+// TestLoadConfigDirNeedsUserSuffixExplicitFalse pins the Knob 2 tri-state
+// through TOML: an explicit false decodes to a non-nil *bool (suppressing
+// even anthropic auto-detect) and stays distinguishable from unset.
+func TestLoadConfigDirNeedsUserSuffixExplicitFalse(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": `
+[svc]
+baseurl = "http://localhost"
+`,
+		"chats.toml": `
+[off]
+service = "svc"
+model = "anthropic/claude-sonnet-4.6"
+needsusersuffix = false
+
+[on]
+service = "svc"
+model = "anthropic/claude-sonnet-4.6"
+needsusersuffix = true
+
+[auto]
+service = "svc"
+model = "anthropic/claude-sonnet-4.6"
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg, err := loadConfigDir(dir)
+	require.NoError(t, err)
+
+	off := cfg.Commands.Chats["off"]
+	require.NotNil(t, off.NeedsUserSuffix, "explicit false must decode non-nil")
+	assert.False(t, *off.NeedsUserSuffix)
+	assert.False(t, needsUserSuffix(off), "explicit false suppresses anthropic auto-detect")
+
+	on := cfg.Commands.Chats["on"]
+	require.NotNil(t, on.NeedsUserSuffix)
+	assert.True(t, *on.NeedsUserSuffix)
+
+	auto := cfg.Commands.Chats["auto"]
+	assert.Nil(t, auto.NeedsUserSuffix, "unset must stay nil (auto)")
+	assert.True(t, needsUserSuffix(auto), "auto resolves anthropic")
+}
+
+// TestAIConfigApplyDefaults_AsyncResultDelivery pins the delivery-mode
+// cascade: command > service > "message".
+func TestAIConfigApplyDefaults_AsyncResultDelivery(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  AIConfig
+		svc  Service
+		want string
+	}{
+		{"unset everywhere defaults to message", AIConfig{}, Service{}, asyncDeliveryMessage},
+		{"service value inherited", AIConfig{}, Service{AsyncResultDelivery: asyncDeliveryTool}, asyncDeliveryTool},
+		{"command beats service", AIConfig{AsyncResultDelivery: asyncDeliveryMessage}, Service{AsyncResultDelivery: asyncDeliveryTool}, asyncDeliveryMessage},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := tt.cfg
+			cfg.ApplyDefaults(tt.svc)
+			assert.Equal(t, tt.want, cfg.AsyncResultDelivery, "AsyncResultDelivery")
+		})
+	}
+}
+
+// TestLoadConfigDirRejectsInvalidAsyncResultDelivery pins load-time
+// validation of the delivery mode.
+func TestLoadConfigDirRejectsInvalidAsyncResultDelivery(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": `
+[svc]
+baseurl = "http://localhost"
+`,
+		"chats.toml": `
+[badmode]
+service = "svc"
+model = "m"
+async_result_delivery = "owl"
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	_, err := loadConfigDir(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "async_result_delivery")
+	assert.Contains(t, err.Error(), "owl")
+}
+
+// TestLoadConfigDirAsyncResultRoleTemplate pins the load path for
+// role-aware system templates: a chats.toml system prompt branching on
+// {{.AsyncResultRole}} parses and validates (the dummy render in
+// validateTemplate must provide the field).
+func TestLoadConfigDirAsyncResultRoleTemplate(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": `
+[svc]
+baseurl = "http://localhost"
+`,
+		"chats.toml": `
+[rolechat]
+service = "svc"
+model = "m"
+system = 'Background results arrive in {{if eq .AsyncResultRole "user"}}a user message{{else}}a system message{{end}}.'
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg, err := loadConfigDir(dir)
+	require.NoError(t, err)
+	chat := cfg.Commands.Chats["rolechat"]
+	require.NotNil(t, chat.SystemTmpl)
+
+	var buf bytes.Buffer
+	require.NoError(t, chat.SystemTmpl.Execute(&buf, SystemPromptData{AsyncResultRole: RoleUser}))
+	assert.Equal(t, "Background results arrive in a user message.", buf.String())
 }
 
 func TestServerGetPort(t *testing.T) {

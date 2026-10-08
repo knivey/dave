@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -252,33 +255,6 @@ func TestLoadDBSessionMessages_FiltersArchived(t *testing.T) {
 	assert.Len(t, allAgain, 4, "all-loader should still see archived row")
 }
 
-func TestArchiveMessagesRange(t *testing.T) {
-	db := setupTestDB(t)
-
-	sid := createTestSession(t, "net", "#c", "u1", "cmd", "svc", "model")
-	for i := 0; i < 5; i++ {
-		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "m"}))
-	}
-	all, _ := loadDBSessionMessagesAll(sid)
-	require.Len(t, all, 5)
-
-	// Archive ids[1..3] inclusive.
-	first := all[1].ID
-	last := all[3].ID
-	require.NoError(t, archiveMessagesRange(db, sid, 42, first, last))
-
-	live, _ := loadDBSessionMessages(sid)
-	assert.Len(t, live, 2, "two non-archived rows expected")
-
-	for _, m := range all[1:4] {
-		var fresh Message
-		require.NoError(t, db.Where("id = ?", m.ID).First(&fresh).Error)
-		assert.True(t, fresh.Archived)
-		require.NotNil(t, fresh.CompactionID)
-		assert.Equal(t, int64(42), *fresh.CompactionID)
-	}
-}
-
 func TestCompactSession_RefusesShort(t *testing.T) {
 	setupTestDB(t)
 
@@ -470,14 +446,17 @@ func TestCompactSession_Concurrency(t *testing.T) {
 	for _, err := range results {
 		if err == nil {
 			successes++
-		} else if errors.Is(err, ErrCompactionInProgress) || errors.Is(err, ErrCompactionTooShort) {
+		} else if errors.Is(err, ErrCompactionInProgress) || errors.Is(err, ErrCompactionTooShort) || errors.Is(err, ErrCompactionNothingNew) {
 			inProgress++
 		}
 	}
 	assert.GreaterOrEqual(t, successes, 1, "at least one compaction should succeed")
-	// The other may either be rejected by the lock OR succeed if it raced
-	// after the first commit, in which case the second sees too few
-	// unarchived turns and fails with ErrCompactionTooShort.
+	// The other is rejected by the lock, or — if it slips past and starts
+	// after the first commit — sees only the first compaction's tail-copies
+	// as archivable material. With this seed (zero-value MinTurns and 3
+	// live turns) the slip-through deterministically refuses with
+	// ErrCompactionNothingNew; ErrCompactionTooShort stays in the accepted
+	// set to keep the test robust against seed/MinTurns drift.
 	assert.Equal(t, 2, successes+inProgress)
 }
 
@@ -510,6 +489,86 @@ func TestShouldAutoCompact(t *testing.T) {
 			assert.Equal(t, tc.expected, got)
 		})
 	}
+}
+
+// TestShouldAutoCompactServiceWindowCascade covers the service-first
+// context-window cascade: the session's service context_window overrides
+// the [compaction] fallback in BOTH directions (each direction alone would
+// also pass if the fallback were still the only value consulted, so the
+// pair is what proves the service value is actually used), the fallback
+// still applies when the service sets nothing, both-unset keeps auto off,
+// and the enabled flags trump every window value.
+func TestShouldAutoCompactServiceWindowCascade(t *testing.T) {
+	setupTestDB(t)
+
+	sid := createTestSession(t, "net", "#c", "u1", "cmd", "bigsvc", "model")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "u"}))
+	// 90000 prompt tokens sits above 0.7*100000 and below 0.7*200000, so
+	// which window wins fully determines the verdict.
+	require.NoError(t, theDB.Create(&TurnUsage{SessionID: sid, PromptTokens: 90000, APIPath: "x"}).Error)
+
+	cases := []struct {
+		name        string
+		svcWindow   int
+		compWindow  int
+		enabled     bool
+		autoEnabled bool
+		expected    bool
+	}{
+		{"service window overrides larger fallback", 100000, 200000, true, true, true},
+		{"service window overrides smaller fallback", 200000, 100000, true, true, false},
+		{"service unset falls back to compaction window", 0, 100000, true, true, true},
+		{"both unset disables auto", 0, 0, true, true, false},
+		{"enabled false trumps service window", 100000, 0, false, true, false},
+		{"auto_enabled false trumps service window", 100000, 0, true, false, false},
+	}
+
+	prevCompaction := config.Compaction
+	defer func() { config.Compaction = prevCompaction }()
+	prevServices := config.Services
+	defer func() { config.Services = prevServices }()
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			config.Compaction = CompactionConfig{
+				Enabled:       tc.enabled,
+				AutoEnabled:   tc.autoEnabled,
+				ContextWindow: tc.compWindow,
+				AutoThreshold: 0.7,
+			}
+			config.Services = map[string]Service{
+				"bigsvc": {ContextWindow: tc.svcWindow},
+			}
+			got := sessionMgr.ShouldAutoCompact(sid, AIConfig{Service: "bigsvc"})
+			assert.Equal(t, tc.expected, got)
+		})
+	}
+}
+
+// TestCallSummarizerMissingServiceErrorsEarly pins the explicit
+// missing-service error: when cfg.Service is absent from config.Services
+// the call must fail BEFORE constructing the SDK client — no network
+// attempt, no opaque upstream 401 from an empty BaseURL — and the message
+// must name the missing service. The "other" service points at a
+// fail-if-hit stub server: the early return must fire BEFORE any HTTP
+// attempt, so a request reaching ANY server is itself a failure. The
+// message assertion additionally pins which error path was taken.
+func TestCallSummarizerMissingServiceErrorsEarly(t *testing.T) {
+	hitStub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("callSummarizer must not make an HTTP request when the service is missing from config")
+	}))
+	defer hitStub.Close()
+	prevServices := config.Services
+	config.Services = map[string]Service{
+		"other": {BaseURL: hitStub.URL},
+	}
+	defer func() { config.Services = prevServices }()
+
+	_, _, _, err := callSummarizer(context.Background(),
+		AIConfig{Service: "nosuchsvc", Model: "m", Timeout: time.Second},
+		"sys", nil, 1, 0)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, `summarizer service "nosuchsvc" not found in config`)
 }
 
 // TestCompactSession_TagsTailCopiesWithSourceCompactionID verifies the basic
@@ -659,4 +718,938 @@ func TestRepeatCompaction_DoesNotInflateArchivedCount(t *testing.T) {
 	require.NoError(t, err)
 	assert.Greater(t, len(allRows), len(all),
 		"raw loader should still see superseded rows on disk")
+}
+
+// TestCompactSession_FoldsPriorSummaryIntoNextSummarization is the core
+// regression for the dropped-prior-summary bug: on a repeat compaction the
+// previous compaction's summary row sits BEFORE firstIdx, and the old
+// partition loop dumped it into tailRegularIDs — archiving it without ever
+// feeding it to the summarizer, silently destroying the accumulated rolling
+// summary. The fix routes it through priorSummaryIDs: its content must
+// appear in the second summarizer request, and the row itself must archive
+// (visible, superseded=false) while the live history carries exactly ONE
+// summary row — the fresh one.
+func TestCompactSession_FoldsPriorSummaryIntoNextSummarization(t *testing.T) {
+	setupTestDB(t)
+
+	stub, getBodies := newRecordingSummarizerStubServer(t, "SUMMARY_ONE_CONTENT", "SUMMARY_TWO_CONTENT")
+	defer stub.Close()
+	prevServices := config.Services
+	config.Services = map[string]Service{
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second, MaxHistory: 100},
+	}
+	defer func() { config.Services = prevServices }()
+
+	sid := createTestSession(t, "net", "#c", "u1", "cmd", "stubsvc", "stubmodel")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+	for i := 0; i < 12; i++ {
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "u"}))
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleAssistant, Content: "a"}))
+	}
+
+	cfg := AIConfig{Service: "stubsvc", Model: "m", Timeout: 5 * time.Second, MaxTokens: 256}
+
+	// Compaction #1.
+	_, err := sessionMgr.CompactSession(context.Background(), CompactSessionInputs{
+		SessionID: sid, Network: Network{Name: "net"}, Channel: "#c", UserNick: "u1", Trigger: "manual",
+	}, cfg)
+	require.NoError(t, err)
+
+	// Add fresh turns so compaction #2 has genuine new material.
+	for i := 0; i < 3; i++ {
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "later"}))
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleAssistant, Content: "later-a"}))
+	}
+
+	// Count the live tail-copies from compaction #1 — these are the rows
+	// compaction #2 must supersede (they cover 4 preserved turns = 8 rows:
+	// the 2/3 rule on 12 turns archives 8 turns and keeps 4).
+	var taggedLiveBefore2 int64
+	require.NoError(t, theDB.Model(&Message{}).
+		Where("session_id = ? AND source_compaction_id IS NOT NULL AND archived = ?", sid, false).
+		Count(&taggedLiveBefore2).Error)
+	require.Equal(t, int64(8), taggedLiveBefore2,
+		"seed sanity: compaction #1 must leave exactly 8 tagged tail-copies live")
+
+	// Compaction #2.
+	res2, err := sessionMgr.CompactSession(context.Background(), CompactSessionInputs{
+		SessionID: sid, Network: Network{Name: "net"}, Channel: "#c", UserNick: "u1", Trigger: "manual",
+	}, cfg)
+	require.NoError(t, err)
+
+	bodies := getBodies()
+	require.Len(t, bodies, 2, "expected exactly one summarizer call per compaction")
+
+	// (i) The second summarizer request must carry the prior summary's
+	// content — the rolling-summary chain accumulates instead of resetting.
+	assert.Contains(t, bodies[1], "SUMMARY_ONE_CONTENT",
+		"compaction #2 must feed summary #1 to the summarizer")
+
+	// (ii) Live history contains exactly ONE summary row: the new one —
+	// and no stray copy of the old summary's text anywhere in live.
+	live, err := loadDBSessionMessages(sid)
+	require.NoError(t, err)
+	summaryRows := 0
+	for _, m := range live {
+		if strings.Contains(m.Content, "SUMMARY_ONE_CONTENT") {
+			t.Fatalf("old summary content must not remain live in any row (id=%d role=%s)",
+				m.ID, m.Role)
+		}
+		if strings.Contains(m.Content, "[CONVERSATION SUMMARY") {
+			summaryRows++
+			assert.Contains(t, m.Content, "SUMMARY_TWO_CONTENT",
+				"the surviving summary must be the new one")
+			assert.NotContains(t, m.Content, "SUMMARY_ONE_CONTENT",
+				"the old summary must not remain live")
+		}
+	}
+	assert.Equal(t, 1, summaryRows,
+		"live history must contain exactly one summary row")
+
+	// (iii) The prior summary row archived as REAL material: visible in
+	// the all-loader, archived, NOT superseded.
+	all, err := loadDBSessionMessagesAll(sid)
+	require.NoError(t, err)
+	priorFound := false
+	for _, m := range all {
+		if strings.Contains(m.Content, "SUMMARY_ONE_CONTENT") {
+			priorFound = true
+			assert.True(t, m.Archived,
+				"prior summary row must be archived")
+			assert.False(t, m.Superseded,
+				"prior summary row is real archived material, not a tail-copy ghost")
+		}
+	}
+	assert.True(t, priorFound,
+		"prior summary row must still exist for the history viewer")
+
+	// (iv) Existing invariant: live history starts with system rows, then
+	// the first non-system message is RoleUser.
+	idx := 0
+	for idx < len(live) && live[idx].Role == RoleSystem {
+		idx++
+	}
+	require.Less(t, idx, len(live), "live history must contain non-system messages after compaction")
+	assert.Equal(t, RoleUser, live[idx].Role,
+		"first non-system message after compaction must be RoleUser")
+
+	// (v) Observability fields on the result: SupersededCount equals the
+	// tagged rows re-archived, PriorSummaryCount is the one folded summary
+	// row, and LiveMessages/LiveTokensEst mirror exactly what the
+	// transaction made live (fresh system + summary + preserved tail).
+	assert.Equal(t, int(taggedLiveBefore2), res2.SupersededCount,
+		"SupersededCount must equal the tagged tail-copies superseded")
+	assert.Equal(t, 1, res2.PriorSummaryCount,
+		"exactly the prior compaction's summary row is prior-summary material")
+	assert.Equal(t, len(live), res2.LiveMessages,
+		"LiveMessages must equal the actual live row count from loadDBSessionMessages")
+	// Phase E: LiveTokensEst is tokenizer-derived when a model is
+	// configured (cfg.Model = "m" → o200k_base approximation), counted
+	// over exactly the rows the transaction made live — the chars/4 sum
+	// over Content is only the no-model fallback now.
+	wantEst := countMessageTokens("m", messagesToChat(live)).Tokens
+	assert.Greater(t, res2.LiveTokensEst, 0)
+	assert.Equal(t, wantEst, res2.LiveTokensEst,
+		"LiveTokensEst must equal countMessageTokens over the actual live rows (model configured)")
+}
+
+// TestCompactSession_FirstCompactionUnchanged pins the never-compacted
+// path: with no prior summary row in the session, the summarizer request
+// must contain no summary text and the resulting live history keeps the
+// [freshSys, summary, tagged tail-copies] shape. (TestCompactSession_
+// EndToEnd additionally proves the general first-compaction behavior.)
+func TestCompactSession_FirstCompactionUnchanged(t *testing.T) {
+	setupTestDB(t)
+
+	stub, getBodies := newRecordingSummarizerStubServer(t, "FIRST_SUMMARY_TEXT")
+	defer stub.Close()
+	prevServices := config.Services
+	config.Services = map[string]Service{
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second, MaxHistory: 100},
+	}
+	defer func() { config.Services = prevServices }()
+
+	sid := createTestSession(t, "net", "#c", "u1", "cmd", "stubsvc", "stubmodel")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+	for i := 0; i < 6; i++ {
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "u"}))
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleAssistant, Content: "a"}))
+	}
+
+	cfg := AIConfig{Service: "stubsvc", Model: "m", Timeout: 5 * time.Second, MaxTokens: 256}
+	res, err := sessionMgr.CompactSession(context.Background(), CompactSessionInputs{
+		SessionID: sid, Network: Network{Name: "net"}, Channel: "#c", UserNick: "u1", Trigger: "manual",
+	}, cfg)
+	require.NoError(t, err)
+
+	bodies := getBodies()
+	require.Len(t, bodies, 1)
+	assert.NotContains(t, bodies[0], "[CONVERSATION SUMMARY",
+		"a never-compacted session must not feed summary text to the summarizer")
+
+	live, err := loadDBSessionMessages(sid)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(live), 3,
+		"live history should contain fresh-system, summary, and tail rows")
+	assert.Equal(t, RoleSystem, live[0].Role, "first live row should be the fresh system row")
+	assert.Equal(t, RoleSystem, live[1].Role, "second live row should be the summary system row")
+	assert.Contains(t, live[1].Content, "FIRST_SUMMARY_TEXT")
+	for _, m := range live[2:] {
+		require.NotNil(t, m.SourceCompactionID,
+			"every preserved-tail row must be tagged with SourceCompactionID")
+		assert.Equal(t, res.CompactionID, *m.SourceCompactionID)
+	}
+	idx := 0
+	for idx < len(live) && live[idx].Role == RoleSystem {
+		idx++
+	}
+	require.Less(t, idx, len(live))
+	assert.Equal(t, RoleUser, live[idx].Role)
+}
+
+// TestCompactSession_AbortsWhenSessionGainsMessagesMidFlight is the core
+// regression for the live-ordering scramble: a message inserted by
+// AddMessage while the summarizer call is in flight used to land between
+// the snapshot rows and the transaction's inserted system/summary/tail
+// rows, corrupting the live ORDER BY id ASC stream. The optimistic guard
+// inside the transaction must abort with ErrCompactionSessionChanged and
+// leave the session completely untouched.
+func TestCompactSession_AbortsWhenSessionGainsMessagesMidFlight(t *testing.T) {
+	setupTestDB(t)
+
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseNow := func() { releaseOnce.Do(func() { close(release) }) }
+
+	stub, arrived := newBlockingSummarizerStubServer(t, release)
+	defer stub.Close()
+	// LIFO defer ordering: registered AFTER stub.Close() so it runs BEFORE
+	// it on failure paths — stub.Close() blocks indefinitely while the
+	// handler is still parked on the release channel, so releasing first
+	// is what lets a failed require unwind cleanly instead of hanging.
+	defer releaseNow()
+	prevServices := config.Services
+	config.Services = map[string]Service{
+		"stubsvc": {BaseURL: stub.URL, Timeout: 30 * time.Second, MaxHistory: 100},
+	}
+	defer func() { config.Services = prevServices }()
+
+	sid := createTestSession(t, "net", "#c", "u1", "cmd", "stubsvc", "stubmodel")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+	for i := 0; i < 6; i++ {
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "u"}))
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleAssistant, Content: "a"}))
+	}
+
+	cfg := AIConfig{Service: "stubsvc", Model: "m", Timeout: 30 * time.Second, MaxTokens: 256}
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := sessionMgr.CompactSession(context.Background(), CompactSessionInputs{
+			SessionID: sid, Network: Network{Name: "net"}, Channel: "#c", UserNick: "u1", Trigger: "manual",
+		}, cfg)
+		errCh <- err
+	}()
+
+	// Wait until the snapshot is taken and the summarizer request is
+	// blocked server-side, then inject traffic exactly like a chatty user.
+	// Bounded: if CompactSession ever fails before issuing the HTTP
+	// request, this receive must not park forever (no handler exists yet,
+	// so the deferred stub.Close() below would not block anyway).
+	select {
+	case <-arrived:
+	case <-time.After(30 * time.Second):
+		t.Fatal("summarizer request never arrived")
+	}
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "mid-flight user"}))
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleAssistant, Content: "mid-flight assistant"}))
+	releaseNow()
+
+	select {
+	case err := <-errCh:
+		require.ErrorIs(t, err, ErrCompactionSessionChanged,
+			"compaction must abort when messages arrive mid-flight")
+	case <-time.After(30 * time.Second):
+		t.Fatal("CompactSession did not return after release")
+	}
+
+	// No compaction row was committed.
+	comps, err := getCompactionsForSession(sid)
+	require.NoError(t, err)
+	assert.Empty(t, comps, "no compaction row should exist after the abort")
+
+	// All rows remain live and in the original shape: nothing archived, no
+	// tail-copy tags, no summary/fresh-system rows inserted, system row
+	// still first, the two mid-flight rows last.
+	live, err := loadDBSessionMessages(sid)
+	require.NoError(t, err)
+	require.Len(t, live, 15, "13 original + 2 mid-flight rows, all live")
+	assert.Equal(t, RoleSystem, live[0].Role, "original system row must still lead the live history")
+	for _, m := range live {
+		assert.False(t, m.Archived, "no row should be archived after the abort")
+		assert.Nil(t, m.SourceCompactionID, "no tail-copy rows should exist after the abort")
+		assert.NotContains(t, m.Content, "[CONVERSATION SUMMARY",
+			"no summary row should have been inserted")
+	}
+	assert.Equal(t, "mid-flight user", live[len(live)-2].Content)
+	assert.Equal(t, "mid-flight assistant", live[len(live)-1].Content)
+}
+
+// TestCompactSession_NoLeadingSystemRowRefuses covers the defensive state
+// check: a session whose live history does not start with a system row
+// (e.g. a legacy session already scrambled before the session-changed
+// guard existed) must be refused with ErrCompactionNoSystemRow before
+// anything is archived or summarized.
+func TestCompactSession_NoLeadingSystemRowRefuses(t *testing.T) {
+	setupTestDB(t)
+
+	sid := createTestSession(t, "net", "#c", "u1", "cmd", "svc", "model")
+	for i := 0; i < 6; i++ {
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "u"}))
+	}
+
+	_, err := sessionMgr.CompactSession(context.Background(), CompactSessionInputs{
+		SessionID: sid, Network: Network{Name: "net"}, Channel: "#c", UserNick: "u1", Trigger: "manual",
+	}, AIConfig{Service: "svc", Model: "model", Timeout: time.Second})
+	assert.ErrorIs(t, err, ErrCompactionNoSystemRow)
+
+	// Nothing was archived or inserted.
+	comps, compErr := getCompactionsForSession(sid)
+	require.NoError(t, compErr)
+	assert.Empty(t, comps)
+
+	all, err := loadDBSessionMessagesAll(sid)
+	require.NoError(t, err)
+	require.Len(t, all, 6)
+	for _, m := range all {
+		assert.False(t, m.Archived, "no row should be archived after the refusal")
+		assert.False(t, m.Superseded)
+	}
+}
+
+func TestEstimateTokens(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want int
+	}{
+		{"empty", "", 0},
+		{"under one token drops remainder", "abc", 0},
+		{"exactly one token", "abcd", 1},
+		{"longer text", strings.Repeat("x", 400), 100},
+		{"counts runes not bytes", strings.Repeat("é", 8), 2}, // 8 runes = 16 bytes
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, estimateTokens(tc.in))
+		})
+	}
+}
+
+// TestSummarySizeRatio covers the ratio helper AND the WARN tripwire
+// decision boundary (ratio >= summarySizeWarnRatio) — asserting the
+// decision function, not log output.
+func TestSummarySizeRatio(t *testing.T) {
+	cases := []struct {
+		name                 string
+		prompt, completion   int
+		want                 float64
+		wantWarnTripsTrigger bool
+	}{
+		{"zero prompt guard", 0, 100, 0, false},
+		{"negative prompt guard", -5, 100, 0, false},
+		{"zero completion", 100, 0, 0, false},
+		{"well under threshold", 1000, 100, 0.1, false},
+		{"just under threshold", 100, 49, 0.49, false},
+		{"at threshold trips", 100, 50, 0.5, true},
+		{"over threshold trips", 100, 80, 0.8, true},
+		{"echo-sized trips", 100, 100, 1.0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := summarySizeRatio(tc.prompt, tc.completion)
+			assert.Equal(t, tc.want, got)
+			assert.Equal(t, tc.wantWarnTripsTrigger, got >= summarySizeWarnRatio,
+				"warn tripwire decision must match ratio >= summarySizeWarnRatio")
+		})
+	}
+}
+
+// TestCompactionNoticeVars pins every placeholder compactionNoticeVars
+// fills, including the new aliases: the compaction's own numbers AND the
+// last-turn TurnUsage numbers (kept for custom-template compatibility).
+func TestCompactionNoticeVars(t *testing.T) {
+	setupTestDB(t)
+
+	res := &CompactionResult{
+		ArchivedCount:     9,
+		PromptTokens:      500,
+		CompletionTokens:  60,
+		DurationMs:        1234,
+		SupersededCount:   7,
+		PriorSummaryCount: 1,
+		LiveMessages:      6,
+		LiveTokensEst:     42,
+		ContextBefore:     5000,
+	}
+
+	t.Run("with last turn usage", func(t *testing.T) {
+		sid := createTestSession(t, "net", "#c", "u1", "cmd", "svc", "model")
+		require.NoError(t, theDB.Create(&TurnUsage{
+			SessionID:        sid,
+			PromptTokens:     111,
+			CompletionTokens: 22,
+			CachedTokens:     33,
+			ReasoningTokens:  44,
+			APIPath:          "chat",
+		}).Error)
+
+		vars := compactionNoticeVars(res, sid)
+		// Compaction's own summarizer-call numbers + result mirrors.
+		assert.Equal(t, "9", vars["count"])
+		assert.Equal(t, "500", vars["tokens_in"])
+		assert.Equal(t, "60", vars["tokens_out"])
+		assert.Equal(t, "60", vars["summary_tokens"], "summary_tokens aliases tokens_out")
+		assert.Equal(t, "7", vars["superseded"])
+		assert.Equal(t, "1", vars["prior_summaries"])
+		assert.Equal(t, "6", vars["live_messages"])
+		assert.Equal(t, "42", vars["live_tokens_est"])
+		assert.Equal(t, "5000", vars["context_before"])
+		assert.Equal(t, "42", vars["context_after"], "context_after aliases live_tokens_est")
+		assert.Equal(t, "1234", vars["duration"])
+		// Last chat turn's TurnUsage numbers stay filled (template compat).
+		assert.Equal(t, "111", vars["prompt"])
+		assert.Equal(t, "22", vars["completion"])
+		assert.Equal(t, "133", vars["total"])
+		assert.Equal(t, "33", vars["cached"])
+		assert.Equal(t, "44", vars["reasoning"])
+	})
+
+	t.Run("without turn usage falls back to zero", func(t *testing.T) {
+		sid := createTestSession(t, "net", "#c", "u2", "cmd", "svc", "model")
+		vars := compactionNoticeVars(res, sid)
+		assert.Equal(t, "0", vars["prompt"])
+		assert.Equal(t, "0", vars["completion"])
+		assert.Equal(t, "0", vars["total"])
+		assert.Equal(t, "0", vars["cached"])
+		assert.Equal(t, "0", vars["reasoning"])
+		// Compaction's own numbers are unaffected.
+		assert.Equal(t, "9", vars["count"])
+		assert.Equal(t, "60", vars["summary_tokens"])
+		assert.Equal(t, "42", vars["live_tokens_est"])
+		assert.Equal(t, "5000", vars["context_before"])
+		assert.Equal(t, "42", vars["context_after"])
+	})
+}
+
+// TestCompactSession_RefusesWhenNothingNew covers the degenerate repeat
+// compaction: when the 2/3 cut lands entirely on tail-copies from the
+// prior compaction, there is no genuinely-new material and the event must
+// be refused BEFORE any summarizer call is spent.
+//
+// Cut math for this seed: 12 turns → compaction #1 archives turns 1–8
+// (16 msgs ≥ target 16) and preserves 4 turns = 8 tagged rows. Adding 2
+// more turns gives live = [freshSys, summary, 8 tagged, u,a,u,a] = 12
+// non-system rows; target = (12*2)/3 = 8 → the cut after the 4 tagged
+// turns reaches exactly 8 → archived range is 100% tagged rows → count 0.
+func TestCompactSession_RefusesWhenNothingNew(t *testing.T) {
+	setupTestDB(t)
+
+	stub, getBodies := newRecordingSummarizerStubServer(t, "SUMMARY_ONE_CONTENT")
+	defer stub.Close()
+	prevServices := config.Services
+	config.Services = map[string]Service{
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second, MaxHistory: 100},
+	}
+	defer func() { config.Services = prevServices }()
+
+	sid := createTestSession(t, "net", "#c", "u1", "cmd", "stubsvc", "stubmodel")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+	for i := 0; i < 12; i++ {
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "u"}))
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleAssistant, Content: "a"}))
+	}
+
+	cfg := AIConfig{Service: "stubsvc", Model: "m", Timeout: 5 * time.Second, MaxTokens: 256}
+
+	// Compaction #1: succeeds, spends exactly one summarizer call.
+	_, err := sessionMgr.CompactSession(context.Background(), CompactSessionInputs{
+		SessionID: sid, Network: Network{Name: "net"}, Channel: "#c", UserNick: "u1", Trigger: "manual",
+	}, cfg)
+	require.NoError(t, err)
+	require.Len(t, getBodies(), 1)
+
+	// Add exactly 2 more turns (4 fresh messages).
+	for i := 0; i < 2; i++ {
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "later"}))
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleAssistant, Content: "later-a"}))
+	}
+
+	// Compaction #2 must refuse without calling the summarizer.
+	_, err = sessionMgr.CompactSession(context.Background(), CompactSessionInputs{
+		SessionID: sid, Network: Network{Name: "net"}, Channel: "#c", UserNick: "u1", Trigger: "manual",
+	}, cfg)
+	assert.ErrorIs(t, err, ErrCompactionNothingNew)
+	assert.Len(t, getBodies(), 1,
+		"no second summarizer call may happen when there is nothing new to compact")
+
+	// No second compaction event was recorded.
+	comps, err := getCompactionsForSession(sid)
+	require.NoError(t, err)
+	assert.Len(t, comps, 1, "compactions table must still hold exactly the first event")
+
+	// The refusal mutated nothing: live history is still freshSys +
+	// summary + 8 tail-copies + the 4 fresh rows = 14 rows, all in the
+	// same order compaction #1 left them in.
+	live, err := loadDBSessionMessages(sid)
+	require.NoError(t, err)
+	require.Len(t, live, 14)
+	assert.Equal(t, RoleSystem, live[0].Role)
+	assert.Equal(t, RoleSystem, live[1].Role)
+	assert.Contains(t, live[1].Content, "SUMMARY_ONE_CONTENT")
+}
+
+// TestTokensPerMessage covers every estimate path, the MaxHistory
+// truncation cap, the 1.0 floor, and the empty-input guard. The usage
+// path divides the API's own prompt_tokens by the number of rows that
+// prompt actually contained (never more than maxHistory+1) — real
+// provider numbers stay PRIMARY over any tokenizer estimate. Without
+// usage rows the fallback basis is the real tokenizer when a model is
+// configured (basis "tokenizer:<enc>[,approx]") and chars/4 when not —
+// both must remain reachable (the second is the never-fail floor).
+func TestTokensPerMessage(t *testing.T) {
+	msgs := make([]Message, 10)
+	for i := range msgs {
+		msgs[i] = Message{Content: "filler"}
+	}
+
+	t.Run("usage path", func(t *testing.T) {
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, 0, "")
+		assert.Equal(t, 100.0, perMsg)
+		assert.Equal(t, "usage", basis)
+	})
+
+	t.Run("usage path wins over tokenizer", func(t *testing.T) {
+		// Real API numbers for the provider beat any tokenizer estimate
+		// — a configured model must not steal the basis from usage.
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, 0, "gpt-4o")
+		assert.Equal(t, 100.0, perMsg)
+		assert.Equal(t, "usage", basis)
+	})
+
+	t.Run("usage path capped by maxhistory", func(t *testing.T) {
+		// TruncateHistory sends min(live, maxHistory+1) rows, so a
+		// prompt built from 10 live rows under maxhistory=4 contained
+		// only 5 rows — dividing by 10 would understate the cost.
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, 4, "")
+		assert.Equal(t, 200.0, perMsg)
+		assert.Equal(t, "usage", basis)
+	})
+
+	t.Run("usage path ignores non-positive maxhistory", func(t *testing.T) {
+		perMsg, _ := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, -3, "")
+		assert.Equal(t, 100.0, perMsg)
+	})
+
+	t.Run("zero prompt tokens falls back", func(t *testing.T) {
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 0}, msgs, 0, "")
+		// 10 rows of "filler" (7 runes → estimateTokens = 1 each).
+		assert.Equal(t, 1.0, perMsg)
+		assert.Equal(t, "chars/4", basis)
+	})
+
+	t.Run("tokenizer fallback basis exact", func(t *testing.T) {
+		perMsg, basis := tokensPerMessage(nil, msgs, 0, "gpt-4o")
+		assert.Greater(t, perMsg, 0.0)
+		assert.Equal(t, "tokenizer:o200k_base", basis)
+	})
+
+	t.Run("tokenizer fallback basis approx for unknown model", func(t *testing.T) {
+		perMsg, basis := tokensPerMessage(nil, msgs, 0, "grok-4")
+		assert.Greater(t, perMsg, 0.0)
+		assert.Equal(t, "tokenizer:o200k_base,approx", basis)
+	})
+
+	t.Run("tokenizer fallback respects maxhistory cap", func(t *testing.T) {
+		// 10 rows under maxhistory=4 → count only the 5 rows a real
+		// request would send (msgs[0] + last 4), divide by 5.
+		perMsg, basis := tokensPerMessage(nil, msgs, 4, "gpt-4o")
+		assert.Greater(t, perMsg, 0.0)
+		assert.Equal(t, "tokenizer:o200k_base", basis)
+		projected := append([]Message{msgs[0]}, msgs[6:]...)
+		want := float64(countMessageTokens("gpt-4o", messagesToChat(projected)).Tokens) / float64(len(projected))
+		assert.InDelta(t, want, perMsg, 0.0001)
+	})
+
+	t.Run("chars fallback averages estimateTokens", func(t *testing.T) {
+		fallbackMsgs := []Message{
+			{Content: strings.Repeat("x", 400)}, // 100 est
+			{Content: strings.Repeat("y", 400)}, // 100 est
+		}
+		perMsg, basis := tokensPerMessage(nil, fallbackMsgs, 0, "")
+		assert.Equal(t, 100.0, perMsg)
+		assert.Equal(t, "chars/4", basis)
+	})
+
+	t.Run("floor at one token per message", func(t *testing.T) {
+		perMsg, _ := tokensPerMessage(&TurnUsage{PromptTokens: 1}, msgs, 0, "")
+		assert.Equal(t, 1.0, perMsg, "budget math must never see a sub-1.0 per-message cost")
+	})
+
+	t.Run("empty live history guards division", func(t *testing.T) {
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 500}, nil, 0, "gpt-4o")
+		assert.Equal(t, 1.0, perMsg)
+		assert.Equal(t, "chars/4", basis)
+	})
+}
+
+// TestEffectiveContextWindow covers the service-first window cascade
+// shared by ShouldAutoCompact and CompactSession's token-aware sizing.
+func TestEffectiveContextWindow(t *testing.T) {
+	prevCompaction := config.Compaction
+	defer func() { config.Compaction = prevCompaction }()
+	prevServices := config.Services
+	defer func() { config.Services = prevServices }()
+
+	cfg := AIConfig{Service: "svc"}
+
+	config.Services = map[string]Service{"svc": {ContextWindow: 128000}}
+	config.Compaction = CompactionConfig{ContextWindow: 64000}
+	w, src := effectiveContextWindow(cfg)
+	assert.Equal(t, 128000, w)
+	assert.Equal(t, "service", src)
+
+	config.Services = map[string]Service{"svc": {}}
+	w, src = effectiveContextWindow(cfg)
+	assert.Equal(t, 64000, w)
+	assert.Equal(t, "compaction", src)
+
+	config.Compaction = CompactionConfig{}
+	w, src = effectiveContextWindow(cfg)
+	assert.Equal(t, 0, w)
+	assert.Equal(t, "none", src)
+
+	// Unknown service behaves like an unset one.
+	w, src = effectiveContextWindow(AIConfig{Service: "missing"})
+	assert.Equal(t, 0, w)
+	assert.Equal(t, "none", src)
+}
+
+// TestCompactionConfigApplyDefaultsTargetFraction pins the defaulting of
+// the token-aware sizing fraction: 0 (TOML unset) and negatives map to
+// 0.4, legitimate fractions pass through, and the >= 1.0 disable
+// sentinel passes through UNTOUCHED (defaulting it would make the
+// feature impossible to turn off).
+func TestCompactionConfigApplyDefaultsTargetFraction(t *testing.T) {
+	cases := []struct {
+		name string
+		in   float64
+		want float64
+	}{
+		{"unset defaults to 0.4", 0, 0.4},
+		{"negative defaults to 0.4", -0.5, 0.4},
+		{"default value passes through", 0.4, 0.4},
+		{"custom fraction passes through", 0.75, 0.75},
+		{"disable sentinel 1.0 passes through", 1.0, 1.0},
+		{"disable sentinel >1.0 passes through", 2.5, 2.5},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := CompactionConfig{TargetFraction: tc.in}
+			c.ApplyDefaults()
+			assert.Equal(t, tc.want, c.TargetFraction)
+		})
+	}
+}
+
+// TestAdvanceCutForTokenBudget exercises the cut-advancement loop in
+// isolation: budgets force advancing, advancement stops as soon as the
+// projection fits, unreachable budgets still leave one tail turn,
+// non-User boundaries are skipped, and disabled budgets are no-ops.
+func TestAdvanceCutForTokenBudget(t *testing.T) {
+	// system + 6 user/assistant turns = 13 messages, 7 turns.
+	msgs := makeChatMessages(13)
+	turns := buildTurns(msgs)
+	// turns: t0=[0,1) t1=[1,3) t2=[3,5) t3=[5,7) t4=[7,9) t5=[9,11) t6=[11,13)
+	// Projection at cut c (perMsg=10, summary=100):
+	//   100 + 10*(1 + (13 - turns[c].end))
+	//   cut3 → 100+10*7=170, cut4 → 100+10*5=150, cut5 → 100+10*3=130.
+
+	t.Run("disabled budget returns cut unchanged", func(t *testing.T) {
+		assert.Equal(t, 3, advanceCutForTokenBudget(msgs, turns, 3, 0, 10, 100))
+		assert.Equal(t, 3, advanceCutForTokenBudget(msgs, turns, 3, -5, 10, 100))
+	})
+
+	t.Run("projection already fits returns cut unchanged", func(t *testing.T) {
+		assert.Equal(t, 3, advanceCutForTokenBudget(msgs, turns, 3, 170, 10, 100))
+	})
+
+	t.Run("budget forces advancing and stops as soon as it fits", func(t *testing.T) {
+		// cut3 projects 170 > 150 → advance; cut4 projects 150 <= 150 → stop.
+		assert.Equal(t, 4, advanceCutForTokenBudget(msgs, turns, 3, 150, 10, 100))
+	})
+
+	t.Run("unreachable budget keeps one tail turn", func(t *testing.T) {
+		// Even the smallest legal tail (turn 6 alone) projects 130, but
+		// cut may never reach len(turns)-1 = 6.
+		final := advanceCutForTokenBudget(msgs, turns, 3, 50, 10, 100)
+		assert.Equal(t, 5, final)
+		assert.Equal(t, 1, len(turns)-1-final, "at least one tail turn must survive")
+	})
+
+	t.Run("non-user boundaries are skipped", func(t *testing.T) {
+		// Hand-built turns with async-injected RoleSystem rows at two
+		// consecutive turn heads: advancing from cut 1 must skip the
+		// boundaries at idx 5 and idx 7 (tails would start with
+		// RoleSystem) and land on cut 4 (tail starts at idx 9 = u3).
+		skipMsgs := []ChatMessage{
+			{Role: RoleSystem, Content: "sys"},       // 0
+			{Role: RoleUser, Content: "u1"},          // 1
+			{Role: RoleAssistant, Content: "a1"},     // 2
+			{Role: RoleUser, Content: "u2"},          // 3
+			{Role: RoleAssistant, Content: "a2"},     // 4
+			{Role: RoleSystem, Content: "injected"},  // 5  ← boundary role: system
+			{Role: RoleAssistant, Content: "a3"},     // 6
+			{Role: RoleSystem, Content: "injected2"}, // 7  ← boundary role: system
+			{Role: RoleAssistant, Content: "a4"},     // 8
+			{Role: RoleUser, Content: "u3"},          // 9
+			{Role: RoleAssistant, Content: "a5"},     // 10
+		}
+		skipTurns := []messageTurn{
+			{start: 0, end: 1},
+			{start: 1, end: 3}, // end→3 user ✓
+			{start: 3, end: 5}, // end→5 system ✗
+			{start: 5, end: 7}, // end→7 system ✗
+			{start: 7, end: 9}, // end→9 user ✓
+			{start: 9, end: 11},
+		}
+		// Projection at cut1 (perMsg=100, summary=0): 100*(1+8)=900 > 500.
+		// cut4 projects 100*(1+2)=300 <= 500 → stop.
+		final := advanceCutForTokenBudget(skipMsgs, skipTurns, 1, 500, 100, 0)
+		assert.Equal(t, 4, final,
+			"must skip the two non-user boundaries and land on the first valid one")
+		boundary := skipTurns[final].end
+		require.Less(t, boundary, len(skipMsgs))
+		assert.Equal(t, RoleUser, skipMsgs[boundary].Role,
+			"advanced cut's tail must still begin with RoleUser")
+	})
+
+	t.Run("never retreats below the given cut", func(t *testing.T) {
+		// A generous budget with a cut already past the 2/3 point must
+		// not move the cut backward.
+		assert.Equal(t, 4, advanceCutForTokenBudget(msgs, turns, 4, 100000, 10, 100))
+	})
+}
+
+// TestCompactSession_TokenAwareTailShrinks is the end-to-end Phase D
+// check: when the 2/3-rule preserved tail busts the configured budget,
+// the cut advances (archived range grows, tail shrinks) while every
+// structural invariant holds.
+//
+// Seed: system + 12 turns = 25 rows. TurnUsage PromptTokens=10000 →
+// perMsg = 10000/25 = 400 ("usage" basis). Window = 8000 (compaction
+// fallback; the stub service sets none), TargetFraction 0.4 →
+// budget = 3200. Assumed summary = 512 (default).
+//
+// 2/3 cut math (unchanged rule): totalNonSystem = 24, target = 16 →
+// base cut = 8 (turns 1–8, 16 msgs), tail = 8 msgs projecting
+// 512 + 400*9 = 4112 > 3200.
+//
+// Advancement: cut 9 → tail 6 → 512+400*7 = 3312 > 3200; cut 10 →
+// tail 4 → 512+400*5 = 2512 <= 3200 → stop. Final cut = 10: archived
+// range = turns 1–10 = 20 msgs (idx 1–20), tail = turns 11–12 = 4 msgs.
+func TestCompactSession_TokenAwareTailShrinks(t *testing.T) {
+	setupTestDB(t)
+
+	stub, getBodies := newRecordingSummarizerStubServer(t, "TOKEN_AWARE_SUMMARY")
+	defer stub.Close()
+	prevServices := config.Services
+	config.Services = map[string]Service{
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second, MaxHistory: 100},
+	}
+	defer func() { config.Services = prevServices }()
+
+	prevCompaction := config.Compaction
+	config.Compaction = CompactionConfig{
+		Enabled:        true,
+		MinTurns:       3,
+		ContextWindow:  8000,
+		TargetFraction: 0.4,
+	}
+	defer func() { config.Compaction = prevCompaction }()
+
+	sid := createTestSession(t, "net", "#c", "u1", "cmd", "stubsvc", "stubmodel")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+	for i := 0; i < 12; i++ {
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "u"}))
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleAssistant, Content: "a"}))
+	}
+	require.NoError(t, theDB.Create(&TurnUsage{SessionID: sid, PromptTokens: 10000, APIPath: "chat"}).Error)
+
+	original, err := loadDBSessionMessagesAll(sid)
+	require.NoError(t, err)
+	require.Len(t, original, 25)
+
+	cfg := AIConfig{Service: "stubsvc", Model: "m", Timeout: 5 * time.Second, MaxTokens: 256}
+	res, err := sessionMgr.CompactSession(context.Background(), CompactSessionInputs{
+		SessionID: sid, Network: Network{Name: "net"}, Channel: "#c", UserNick: "u1", Trigger: "auto",
+	}, cfg)
+	require.NoError(t, err)
+
+	// The archived range is LARGER than the 2/3 cut alone (2/3 would
+	// archive 16 msgs; token-aware sizing archives 20).
+	assert.Equal(t, 16, (24*2)/3, "seed sanity: 2/3 of 24 non-system msgs is 16")
+	assert.Equal(t, 20, res.ArchivedCount,
+		"token-aware sizing must archive more than the 2/3 cut (16) when the tail busts the budget")
+	assert.Equal(t, original[1].ID, res.FirstArchivedID)
+	assert.Equal(t, original[20].ID, res.LastArchivedID,
+		"archived range must extend through turn 10 (row idx 20), not the 2/3 boundary (idx 16)")
+
+	// Tail is smaller: fresh system + summary + 4 tail copies = 6 live rows.
+	assert.Equal(t, 6, res.LiveMessages)
+	live, err := loadDBSessionMessages(sid)
+	require.NoError(t, err)
+	require.Len(t, live, 6)
+	assert.Equal(t, RoleSystem, live[0].Role)
+	assert.Equal(t, RoleSystem, live[1].Role)
+	assert.Contains(t, live[1].Content, "TOKEN_AWARE_SUMMARY")
+	tailCopies := 0
+	for _, m := range live[2:] {
+		require.NotNil(t, m.SourceCompactionID)
+		assert.Equal(t, res.CompactionID, *m.SourceCompactionID)
+		tailCopies++
+	}
+	assert.Equal(t, 4, tailCopies, "preserved tail must be the 4 messages of turns 11–12")
+
+	// Structural invariant survives the advancement: first non-system
+	// live message is RoleUser.
+	idx := 0
+	for idx < len(live) && live[idx].Role == RoleSystem {
+		idx++
+	}
+	require.Less(t, idx, len(live))
+	assert.Equal(t, RoleUser, live[idx].Role)
+
+	// ContextBefore carries the real last-turn prompt tokens ("usage").
+	assert.Equal(t, 10000, res.ContextBefore)
+
+	require.Len(t, getBodies(), 1)
+}
+
+// TestCompactSession_NoWindowKeepsTwoThirdsCut pins the inert path: with
+// no resolvable context window (service 0, compaction fallback 0) the
+// budget is disabled and the archived range is EXACTLY the 2/3 cut —
+// even when usage rows exist that could otherwise drive sizing.
+//
+// Cut math for the seed: system + 12 turns; totalNonSystem = 24,
+// target = (24*2)/3 = 16 → cut = 8 → archived range = rows idx 1–16
+// (16 msgs), preserved tail = turns 9–12 = 8 msgs.
+func TestCompactSession_NoWindowKeepsTwoThirdsCut(t *testing.T) {
+	setupTestDB(t)
+
+	stub, getBodies := newRecordingSummarizerStubServer(t, "PLAIN_SUMMARY")
+	defer stub.Close()
+	prevServices := config.Services
+	config.Services = map[string]Service{
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second, MaxHistory: 100},
+	}
+	defer func() { config.Services = prevServices }()
+
+	prevCompaction := config.Compaction
+	config.Compaction = CompactionConfig{
+		Enabled:        true,
+		MinTurns:       3,
+		TargetFraction: 0.4, // active fraction, but no window to multiply
+	}
+	defer func() { config.Compaction = prevCompaction }()
+
+	sid := createTestSession(t, "net", "#c", "u1", "cmd", "stubsvc", "stubmodel")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+	for i := 0; i < 12; i++ {
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "u"}))
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleAssistant, Content: "a"}))
+	}
+	// Usage rows alone must not trigger sizing — no window, no budget.
+	require.NoError(t, theDB.Create(&TurnUsage{SessionID: sid, PromptTokens: 999999, APIPath: "chat"}).Error)
+
+	original, err := loadDBSessionMessagesAll(sid)
+	require.NoError(t, err)
+	require.Len(t, original, 25)
+
+	cfg := AIConfig{Service: "stubsvc", Model: "m", Timeout: 5 * time.Second, MaxTokens: 256}
+	res, err := sessionMgr.CompactSession(context.Background(), CompactSessionInputs{
+		SessionID: sid, Network: Network{Name: "net"}, Channel: "#c", UserNick: "u1", Trigger: "manual",
+	}, cfg)
+	require.NoError(t, err)
+
+	// Exactly the 2/3 cut: 16 archived, 8-message tail, 10 live rows.
+	assert.Equal(t, 16, res.ArchivedCount)
+	assert.Equal(t, original[1].ID, res.FirstArchivedID)
+	assert.Equal(t, original[16].ID, res.LastArchivedID,
+		"archived range must end exactly at the 2/3 boundary (row idx 16)")
+	assert.Equal(t, 10, res.LiveMessages)
+	assert.Equal(t, 999999, res.ContextBefore)
+
+	live, err := loadDBSessionMessages(sid)
+	require.NoError(t, err)
+	require.Len(t, live, 10)
+	require.Len(t, getBodies(), 1)
+}
+
+// TestCompactSession_MaxSummaryTokensCapsRequest verifies the
+// max_summary_tokens plumbing end to end: with the cap configured, the
+// summarizer request's max_tokens JSON field equals the cap (overriding
+// the command's maxtokens); with it unset (0), the command's value is
+// inherited.
+func TestCompactSession_MaxSummaryTokensCapsRequest(t *testing.T) {
+	maxTokensFromBody := func(t *testing.T, body string) float64 {
+		t.Helper()
+		var parsed map[string]interface{}
+		require.NoError(t, json.Unmarshal([]byte(body), &parsed))
+		v, ok := parsed["max_tokens"]
+		require.True(t, ok, "request must carry max_tokens: %s", body)
+		f, ok := v.(float64)
+		require.True(t, ok, "max_tokens must be numeric: %v", v)
+		return f
+	}
+
+	run := func(t *testing.T, ccfg CompactionConfig, want float64) {
+		setupTestDB(t)
+
+		stub, getBodies := newRecordingSummarizerStubServer(t, "CAPPED_SUMMARY")
+		defer stub.Close()
+		prevServices := config.Services
+		config.Services = map[string]Service{
+			"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second, MaxHistory: 100},
+		}
+		defer func() { config.Services = prevServices }()
+
+		prevCompaction := config.Compaction
+		config.Compaction = ccfg
+		defer func() { config.Compaction = prevCompaction }()
+
+		sid := createTestSession(t, "net", "#c", "u1", "cmd", "stubsvc", "stubmodel")
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+		for i := 0; i < 6; i++ {
+			require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "u"}))
+			require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleAssistant, Content: "a"}))
+		}
+
+		cfg := AIConfig{Service: "stubsvc", Model: "m", Timeout: 5 * time.Second, MaxTokens: 256}
+		_, err := sessionMgr.CompactSession(context.Background(), CompactSessionInputs{
+			SessionID: sid, Network: Network{Name: "net"}, Channel: "#c", UserNick: "u1", Trigger: "manual",
+		}, cfg)
+		require.NoError(t, err)
+
+		bodies := getBodies()
+		require.Len(t, bodies, 1)
+		assert.Equal(t, want, maxTokensFromBody(t, bodies[0]))
+	}
+
+	t.Run("cap overrides command maxtokens", func(t *testing.T) {
+		run(t, CompactionConfig{Enabled: true, MinTurns: 3, MaxSummaryTokens: 777}, 777)
+	})
+
+	t.Run("unset inherits command maxtokens", func(t *testing.T) {
+		run(t, CompactionConfig{Enabled: true, MinTurns: 3}, 256)
+	})
 }

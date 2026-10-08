@@ -138,6 +138,15 @@ type CompactionNotices struct {
 	TooShort   string `toml:"too_short"`
 	NoActive   string `toml:"no_active"`
 	InProgress string `toml:"in_progress"`
+	// Changed is sent when the compaction transaction's optimistic guard
+	// aborted because new messages arrived mid-flight (the summarizer call
+	// takes seconds). Nothing was lost — a retry is safe and advised.
+	Changed string `toml:"changed"`
+	// NothingNew is sent when a repeat compaction finds zero
+	// genuinely-new material (the 2/3 cut landed entirely on tail-copies
+	// from the prior compaction). Nothing was done; no summarizer call
+	// was spent.
+	NothingNew string `toml:"nothing_new"`
 	Disabled   string `toml:"disabled"`
 	AutoNotice string `toml:"auto_notice"`
 }
@@ -383,7 +392,17 @@ func setNoticesDefaults(n *NoticesConfig) {
 		n.Compaction.Started = "\x0314🗜 Compacting session...\x0F"
 	}
 	if n.Compaction.Completed == "" {
-		n.Compaction.Completed = "\x0303✓ Compacted {count} earlier messages into a summary (total: {total} tokens, {cached} cached, {duration}ms).\x0F"
+		// Default uses the compaction's OWN numbers: {summary_tokens} is
+		// the summarizer call's completion tokens, and {context_after}/
+		// {live_messages} describe post-compaction live history.
+		// {context_before} is the pre-compaction size (real last-turn
+		// prompt tokens when available, else estimate — see
+		// CompactionResult.ContextBefore). The last-chat-turn
+		// placeholders ({prompt}/{completion}/{total}/{cached}/
+		// {reasoning}) remain available for custom templates but are
+		// deliberately not shown here — they describe a different API
+		// call (see compactionNoticeVars).
+		n.Compaction.Completed = "\x0303✓ Compacted: summarized {count} messages into a {summary_tokens}-token summary. Context now ~{context_after} tokens across {live_messages} messages (was ~{context_before}).\x0F"
 	}
 	if n.Compaction.Failed == "" {
 		n.Compaction.Failed = "Compaction failed: {error}"
@@ -397,11 +416,19 @@ func setNoticesDefaults(n *NoticesConfig) {
 	if n.Compaction.InProgress == "" {
 		n.Compaction.InProgress = "A compaction is already running for this session."
 	}
+	if n.Compaction.Changed == "" {
+		n.Compaction.Changed = "Session received new messages during compaction; try again."
+	}
+	if n.Compaction.NothingNew == "" {
+		n.Compaction.NothingNew = "No new messages to compact since the last compaction."
+	}
 	if n.Compaction.Disabled == "" {
 		n.Compaction.Disabled = "Compaction is disabled in config."
 	}
 	if n.Compaction.AutoNotice == "" {
-		n.Compaction.AutoNotice = "\x0314🗜 Auto-compacted {count} earlier messages ({total} tokens, {cached} cached).\x0F"
+		// Same number provenance as Completed above: the compaction's own
+		// summarizer tokens and the before/after context sizes.
+		n.Compaction.AutoNotice = "\x0314🗜 Compaction: {count} messages summarized ({summary_tokens} tokens). Context: ~{context_before} → ~{context_after} tokens ({live_messages} messages).\x0F"
 	}
 	if n.Clone.Cloned == "" {
 		n.Clone.Cloned = "\x0303📋 Cloned session #{source_id} → #{id} ({count} messages)\x0F"

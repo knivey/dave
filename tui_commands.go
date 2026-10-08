@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -35,6 +36,7 @@ var tuiCommands = map[string]func(parts []string, text string){
 	"/flagged":     tuiCmdFlagged,
 	"/sessions":    tuiCmdSessions,
 	"/compact":     tuiCmdCompact,
+	"/tokencount":  tuiCmdTokenCount,
 	"/reinject":    tuiCmdReinject,
 	"/systemmsg":   tuiCmdSystemMsg,
 }
@@ -78,6 +80,7 @@ func tuiCmdHelp(_ []string, _ string) {
 	fmt.Fprintf(logView, "  /sessions <network> <nick|id> [channel]\n")
 	fmt.Fprintf(logView, "                               - List sessions for a user\n")
 	fmt.Fprintf(logView, "  /compact <session-id>        - Summarize old messages of a session\n")
+	fmt.Fprintf(logView, "  /tokencount <session-id>     - Our tokenizer count vs provider-reported usage\n")
 	fmt.Fprintf(logView, "  /reinject <session-id>       - Re-render and inject system prompt into session\n")
 	fmt.Fprintf(logView, "  /systemmsg <session-id> <text> - Inject custom system message (Go template) into session\n")
 }
@@ -698,6 +701,15 @@ func tuiCmdSessions(parts []string, _ string) {
 }
 
 func tuiCmdCompact(parts []string, _ string) {
+	// Gate on [compaction] enabled for consistency with the IRC `^compact$`
+	// handler (historyCompact) and the config docs — enabled covers the
+	// manual IRC command + TUI /compact alike.
+	var compactionEnabled bool
+	readConfig(func() { compactionEnabled = config.Compaction.Enabled })
+	if !compactionEnabled {
+		fmt.Fprintf(logView, "[yellow]Compaction is disabled in config.[white]\n")
+		return
+	}
 	if len(parts) < 2 {
 		fmt.Fprintf(logView, "[yellow]Usage: /compact <session-id>[white]\n")
 		return
@@ -744,14 +756,104 @@ func tuiCmdCompact(parts []string, _ string) {
 		}, cfg)
 		tuiApp.QueueUpdateDraw(func() {
 			if err != nil {
+				if errors.Is(err, ErrCompactionSessionChanged) {
+					fmt.Fprintf(logView, "[yellow]Session %d changed during compaction; try again.[white]\n", sessionID)
+					return
+				}
+				if errors.Is(err, ErrCompactionNothingNew) {
+					fmt.Fprintf(logView, "[yellow]Session %d has no new messages to compact since the last compaction.[white]\n", sessionID)
+					return
+				}
+				if errors.Is(err, ErrCompactionNoSystemRow) {
+					fmt.Fprintf(logView, "[red]Compaction failed for session %d: live history does not start with a system message[white]\n", sessionID)
+					return
+				}
 				fmt.Fprintf(logView, "[red]Compaction failed for session %d: %s[white]\n", sessionID, err)
 				return
 			}
 			vars := compactionNoticeVars(res, sessionID)
-			fmt.Fprintf(logView, "[green]Compacted session %d: %s messages, total: %s tokens, cached: %s, %dms[white]\n",
-				sessionID, vars["count"], vars["total"], vars["cached"], res.DurationMs)
+			// Uses the compaction's OWN numbers (summary size + post-compaction
+			// live history), not the last chat turn's usage — see the
+			// provenance note on compactionNoticeVars.
+			fmt.Fprintf(logView, "[green]Compacted session %d: %s messages, summary: %s tok, live history ~%s tok / %s msgs, %dms[white]\n",
+				sessionID, vars["count"], vars["summary_tokens"], vars["live_tokens_est"], vars["live_messages"], res.DurationMs)
 		})
 	}()
+}
+
+// tuiCmdTokenCount is the owner's on-demand provider-accounting
+// investigation tool (/tokencount <session-id>): it computes dave's OWN
+// neutral token count of exactly the payload the next turn would send
+// (real tokenizer via tokencount.go, same MaxHistory truncation
+// GetMessages applies) and lays it next to what the provider last
+// REPORTED for that session's most recent API call (prompt/completion/
+// cached from turn_usage). A provider whose cache-adjusted prompt
+// persistently exceeds our count is accounting differently (the xAI/Grok
+// ~2x prompt_tokens observation), not sending a bigger payload — this
+// command is how that gets diagnosed per-session without touching IRC.
+//
+// Purely local: DB reads + tokenizer, no API call, no bot connection
+// needed, so unlike /compact it runs synchronously.
+func tuiCmdTokenCount(parts []string, _ string) {
+	if len(parts) < 2 {
+		fmt.Fprintf(logView, "[yellow]Usage: /tokencount <session-id>[white]\n")
+		return
+	}
+	if theDB == nil {
+		fmt.Fprint(logView, tuiDBNotAvailable)
+		return
+	}
+	sessionID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		fmt.Fprintf(logView, "[red]Invalid session id: %s[white]\n", parts[1])
+		return
+	}
+	session, err := getDBSessionByID(sessionID)
+	if err != nil || session == nil {
+		fmt.Fprintf(logView, "[red]Session %d not found[white]\n", sessionID)
+		return
+	}
+	cfg, cfgOk := getSessionConfig(session)
+	if !cfgOk {
+		fmt.Fprintf(logView, "[red]Chat command %q for session %d no longer exists[white]\n", session.ChatCommand, sessionID)
+		return
+	}
+	// The same truncation a real turn would send (GetMessages applies
+	// TruncateHistory with the live config's MaxHistory).
+	msgs, err := sessionMgr.GetMessages(session.ID, cfg.MaxHistory)
+	if err != nil {
+		fmt.Fprintf(logView, "[red]Failed to load messages for session %d: %s[white]\n", sessionID, err)
+		return
+	}
+
+	ours := countMessageTokens(cfg.Model, msgs)
+
+	fmt.Fprintf(logView, "[white]Session #%d %s/%s model:%s service:%s[white]\n",
+		session.ID, tview.Escape(session.Network), tview.Escape(session.Channel),
+		tview.Escape(cfg.Model), tview.Escape(cfg.Service))
+	exactNote := "approximate — NOT this model's real tokenizer"
+	if ours.Exact {
+		exactNote = "exact"
+	}
+	fmt.Fprintf(logView, "[white]Our count: %d tokens across %d messages (encoding %s, %s; %d image part(s))[white]\n",
+		ours.Tokens, len(msgs), ours.Encoding, exactNote, ours.ImageParts)
+	if ours.ImageParts > 0 {
+		fmt.Fprintf(logView, "[white]  images counted at a flat ~%d tokens each (low-detail lower bound — real cost scales with resolution)[white]\n",
+			imageTokenEstimate)
+	}
+
+	lastUsage, err := getLastTurnUsageForSession(session.ID)
+	if err != nil || lastUsage == nil {
+		fmt.Fprintf(logView, "[yellow]No provider usage recorded for this session yet.[white]\n")
+		return
+	}
+	adjusted := lastUsage.PromptTokens - lastUsage.CachedTokens
+	fmt.Fprintf(logView, "[white]Provider last turn: prompt %d (cached %d, adjusted %d), completion %d[white]\n",
+		lastUsage.PromptTokens, lastUsage.CachedTokens, adjusted, lastUsage.CompletionTokens)
+	if ours.Tokens > 0 {
+		fmt.Fprintf(logView, "[white]Ratio provider_adjusted/our = %.2f[white]\n",
+			float64(adjusted)/float64(ours.Tokens))
+	}
 }
 
 func tuiCmdReinject(parts []string, _ string) {

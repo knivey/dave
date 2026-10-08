@@ -700,6 +700,10 @@ func historyCompact(network Network, c *girc.Client, e girc.Event, ctx context.C
 		Trigger:   "manual",
 	}, cfg)
 	if cErr != nil {
+		// The sentinels below are returned directly (unwrapped) from
+		// CompactSession, so the identity switch works. Wrapped paths
+		// (session load, message load, summarizer, tx internals) fall
+		// through to the generic Failed branch.
 		switch cErr {
 		case ErrCompactionTooShort:
 			sendOrDone(ctx, output, errorMsg(n.Compaction.TooShort))
@@ -707,6 +711,12 @@ func historyCompact(network Network, c *girc.Client, e girc.Event, ctx context.C
 			sendOrDone(ctx, output, errorMsg(n.Compaction.InProgress))
 		case ErrCompactionEmptyResult:
 			sendOrDone(ctx, output, errorNotice(n.Compaction.Failed, map[string]string{"error": "summarizer returned empty content"}))
+		case ErrCompactionSessionChanged:
+			sendOrDone(ctx, output, errorMsg(n.Compaction.Changed))
+		case ErrCompactionNothingNew:
+			sendOrDone(ctx, output, errorMsg(n.Compaction.NothingNew))
+		case ErrCompactionNoSystemRow:
+			sendOrDone(ctx, output, errorNotice(n.Compaction.Failed, map[string]string{"error": "live history does not start with a system message"}))
 		default:
 			sendOrDone(ctx, output, errorNotice(n.Compaction.Failed, map[string]string{"error": cErr.Error()}))
 		}

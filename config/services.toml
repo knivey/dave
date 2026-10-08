@@ -10,6 +10,7 @@
 #   maxcompletiontokens  (int)             Max completion tokens per response
 #   temperature          (float)           Sampling temperature (0=deterministic, default: 0)
 #   maxhistory           (int, default: 100) Max conversation turns sent as context
+#   context_window       (int, default: 0) Model context window in tokens, used by auto-compaction thresholding ([compaction] auto_enabled). 0 = fall back to [compaction] context_window
 #   imageformat          (string, default: "jpg")  Image format: "jpg", "jpeg", or "webp"
 #   imagequality         (int 1-100, default: 75)   Image quality percentage
 #   maximagesize         (string, default: "1024x1024") Max image dimensions "WxH"
@@ -35,6 +36,7 @@
 # maxcompletiontokens = 600
 # temperature = 0.7
 # maxhistory = 100
+# context_window = 200000
 # imageformat = "jpg"
 # imagequality = 75
 # maximagesize = "1024x1024"

@@ -20,6 +20,7 @@ require (
 	github.com/mgutz/logxi v0.0.0-20161027140823-aebf8a7d67ab
 	github.com/modelcontextprotocol/go-sdk v1.5.0
 	github.com/openai/openai-go/v3 v3.33.0
+	github.com/pkoukk/tiktoken-go v0.1.8
 	github.com/pressly/goose/v3 v3.27.0
 	github.com/rivo/tview v0.42.0
 	github.com/stretchr/testify v1.11.1

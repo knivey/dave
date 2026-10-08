@@ -300,3 +300,84 @@ func TestTuiCmdJoin(t *testing.T) {
 		assert.Contains(t, getLogViewText(), "Joined #x on testnet")
 	})
 }
+
+func TestTuiCmdTokenCount(t *testing.T) {
+	newSession := func(t *testing.T, model string) int64 {
+		t.Helper()
+		userID := ensureTestUser(t, "testnet", "tokennick")
+		sid, err := sessionMgr.CreateSession("testnet", "#test", userID, "chat", "svc", model)
+		require.NoError(t, err)
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "hello world"}))
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleAssistant, Content: "hi there"}))
+		return sid
+	}
+	setChats := func(t *testing.T, cfg AIConfig) {
+		t.Helper()
+		prevChats := config.Commands.Chats
+		config.Commands.Chats = map[string]AIConfig{"chat": cfg}
+		t.Cleanup(func() { config.Commands.Chats = prevChats })
+	}
+
+	t.Run("usage line", func(t *testing.T) {
+		setupTUITest(t)
+		tuiCmdTokenCount([]string{"/tokencount"}, "/tokencount")
+		assert.Contains(t, getLogViewText(), "Usage: /tokencount <session-id>")
+	})
+
+	t.Run("invalid session id", func(t *testing.T) {
+		setupTUITest(t)
+		tuiCmdTokenCount([]string{"/tokencount", "abc"}, "/tokencount abc")
+		assert.Contains(t, getLogViewText(), "Invalid session id")
+	})
+
+	t.Run("session not found", func(t *testing.T) {
+		setupTUITest(t)
+		tuiCmdTokenCount([]string{"/tokencount", "99999"}, "/tokencount 99999")
+		assert.Contains(t, getLogViewText(), "not found")
+	})
+
+	t.Run("chat command no longer exists", func(t *testing.T) {
+		setupTUITest(t)
+		sid := newSession(t, "gpt-4o")
+		setChats(t, AIConfig{Name: "chat", Service: "svc", Model: "gpt-4o", MaxHistory: 100})
+		// Point the session at a command name that is not configured.
+		require.NoError(t, theDB.Model(&Session{}).Where("id = ?", sid).Update("chat_command", "gone").Error)
+		tuiCmdTokenCount([]string{"/tokencount", fmt.Sprintf("%d", sid)}, "/tokencount "+fmt.Sprint(sid))
+		assert.Contains(t, getLogViewText(), "no longer exists")
+	})
+
+	t.Run("count without provider usage", func(t *testing.T) {
+		setupTUITest(t)
+		sid := newSession(t, "gpt-4o")
+		setChats(t, AIConfig{Name: "chat", Service: "svc", Model: "gpt-4o", MaxHistory: 100})
+
+		tuiCmdTokenCount([]string{"/tokencount", fmt.Sprintf("%d", sid)}, "/tokencount "+fmt.Sprint(sid))
+		out := getLogViewText()
+		assert.Contains(t, out, fmt.Sprintf("Session #%d testnet/#test model:gpt-4o service:svc", sid))
+		assert.Contains(t, out, "encoding o200k_base, exact")
+		assert.Contains(t, out, "across 3 messages")
+		assert.Contains(t, out, "0 image part(s)")
+		assert.Contains(t, out, "No provider usage recorded")
+		assert.NotContains(t, out, "Ratio")
+	})
+
+	t.Run("count with provider usage and ratio", func(t *testing.T) {
+		setupTUITest(t)
+		sid := newSession(t, "grok-4")
+		setChats(t, AIConfig{Name: "chat", Service: "svc", Model: "grok-4", MaxHistory: 100})
+		// Provider reported 2x-ish prompt tokens with partial cache.
+		require.NoError(t, theDB.Create(&TurnUsage{
+			SessionID: sid, Model: "grok-4", Service: "svc",
+			PromptTokens: 2000, CompletionTokens: 300, CachedTokens: 800,
+		}).Error)
+
+		tuiCmdTokenCount([]string{"/tokencount", fmt.Sprintf("%d", sid)}, "/tokencount "+fmt.Sprint(sid))
+		out := getLogViewText()
+		assert.Contains(t, out, "encoding o200k_base, approximate")
+		assert.Contains(t, out, "Provider last turn: prompt 2000 (cached 800, adjusted 1200), completion 300")
+		assert.Contains(t, out, "Ratio provider_adjusted/our = ")
+		// The ratio line must be a plausible 2-decimal number.
+		assert.Regexp(t, `Ratio provider_adjusted/our = \d+\.\d\d`, out)
+	})
+}

@@ -26,10 +26,12 @@
 #
 # [compaction] options:
 #   enabled            (bool, default: false)   Enable session compaction (manual `^compact$` IRC command + TUI `/compact`)
-#   auto_enabled       (bool, default: false)   Auto-compact when prompt tokens exceed threshold (requires context_window)
+#   auto_enabled       (bool, default: false)   Auto-compact when prompt tokens exceed threshold (requires a context_window: service or fallback)
 #   auto_threshold     (float, default: 0.7)    Fraction of context_window above which auto-compact runs
-#   context_window     (int, default: 0)        Token limit used to compute auto threshold (0 disables auto)
+#   context_window     (int, default: 0)        Fallback token limit for the auto threshold when the session's service sets no context_window (see services.toml; auto stays off when both are 0)
 #   min_turns          (int, default: 6)        Minimum turn count before any compaction will run
+#   target_fraction    (float, default: 0.4)    Post-compaction live-context target as a fraction of the effective context window; when the 2/3-rule tail would exceed it the cut advances (archives more, shrinks the tail). Explicit 0 or negative = unset and re-defaults to 0.4; >= 1.0 disables token-aware sizing; inert when no context window is resolvable
+#   max_summary_tokens (int, default: 0)        Caps the summarizer call's max_tokens (bounds summary size); 0 = inherit the command's maxtokens/none
 #   prompt_template    (string)                 Optional override for the summarizer system prompt (see commented example below for default)
 #
 # [database] options:
@@ -126,6 +128,8 @@
 # auto_threshold = 0.7
 # context_window = 128000
 # min_turns = 6
+# target_fraction = 0.4
+# max_summary_tokens = 0
 # # prompt_template = """You are summarizing the early portion of an ongoing IRC conversation between a user and an AI assistant.
 # # Produce a concise but information-dense summary of what has happened so far. The summary will replace the original messages in the conversation history, so preserve everything the assistant or user might need to continue coherently:
 # #
@@ -136,6 +140,8 @@
 # # - Tools that were called and their outcomes (success/failure + key result data).
 # # - Image content references (use abstract descriptions like "image of a sunset"; the actual images are removed).
 # # - Open threads or topics that were paused mid-conversation.
+# #
+# # If the transcript begins with a prior conversation summary, treat it as established context and carry its facts forward, merging them into the updated summary.
 # #
 # # Do NOT invent details. If something was unclear, say so. Output only the summary text — no preamble, no headers, no markdown formatting."""
 #

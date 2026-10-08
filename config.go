@@ -322,6 +322,10 @@ type Service struct {
 	DisabledBuiltinTools []string      `toml:"disabled_builtin_tools"`
 	HiddenMCPTools       []string      `toml:"hidden_mcp_tools"`
 	HiddenMCPToolSets    []string      `toml:"hidden_mcp_tool_sets"`
+	// ContextWindow is the model's context-window size in tokens, used by
+	// auto-compaction thresholding (see ShouldAutoCompact). 0 = not set,
+	// fall back to [compaction] context_window.
+	ContextWindow int `toml:"context_window"`
 }
 
 type MCPConfig struct {

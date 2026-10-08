@@ -212,10 +212,43 @@ func summarySizeRatio(promptTokens, completionTokens int) float64 {
 
 // tokensPerMessage estimates the model's token cost of one live-history
 // message, derived from the API's OWN usage accounting: the last recorded
-// turn's prompt_tokens divided by the number of live messages that prompt
-// contained (capped by MaxHistory truncation — GetMessages sends
-// min(live, maxHistory+1) rows). This captures chat framing, tool-call
-// JSON, and image tokens for the actual model.
+// turn's prompt_tokens (de-biased, see below) divided by the number of
+// live messages that prompt contained (capped by MaxHistory truncation —
+// GetMessages sends min(live, maxHistory+1) rows). This captures chat
+// framing, tool-call JSON, and image tokens for the actual model.
+//
+// TOOL-DEFINITION DE-BIAS: the provider's prompt_tokens also contains
+// the serialized tool DEFINITIONS — a near-constant prefix (name +
+// description + schema per tool; ~2.2k tokens across 19 defs in
+// production) that rides every request no matter how much history the
+// session has. Dividing the WHOLE prompt by message count amortizes
+// that prefix into per-message cost and inflates it badly on short
+// sessions — measured in production: 3724 prompt tokens over 7 messages
+// → 532/msg when the true marginal message cost was ~110, a 3-5x
+// overestimate that made advanceCutForTokenBudget archive far too
+// eagerly. When toolTokens > 0 (dave's own countToolTokens estimate of
+// the exact tool set the next request would serialize), it is
+// subtracted from the prompt before dividing. The de-biased dividend is
+// floored at `effective` (one token per message): if the tool estimate
+// ate the whole (or nearly the whole) prompt, the subtraction cannot
+// yield a meaningful per-message average and the legacy
+// prompt/effective division is used instead — never a sub-1.0 perMsg
+// (the post-division 1.0 floor stays for that path's extremes).
+//
+// RESIDUAL ERROR, BOTH DIRECTIONS: the subtracted estimate is dave's
+// own tokenization (o200k_base-approximate for most models), and a
+// provider may count tool definitions with a different ratio than it
+// counts prose — production measurements put OpenAI at ~0.8x our
+// estimate and Grok at ~1.3x — so a remainder is always left on the
+// dividend (over-subtraction inflates perMsg slightly;
+// under-subtraction deflates it). That is acceptable because the
+// decision math's structural invariants (>= 1 preserved tail turn, tail
+// starts with RoleUser) hold regardless of estimate quality, and
+// under-estimation self-corrects: ShouldAutoCompact still compares the
+// RAW provider prompt — tools included — against the auto threshold, so
+// a session sized too generously once crosses the trigger again on its
+// next turn and the tail shrinks then. Over-estimation is merely the
+// pre-de-bias status quo (conservative direction), now bounded.
 //
 // BASIS CASCADE (the returned basis string documents which path was
 // taken for logging):
@@ -225,6 +258,13 @@ func summarySizeRatio(promptTokens, completionTokens int) float64 {
 //     tool-JSON and image accounting, inflated or not. A tokenizer
 //     estimate can only replace the provider's number with ours; it
 //     cannot improve on it as a measure of what that provider charges.
+//     toolTokens <= 0 keeps this path byte-identical to the legacy
+//     behavior (configs with no tool definitions).
+//
+//   - "usage-net-tools": the usage path with toolTokens > 0 — dave's
+//     tool-definition estimate subtracted before the division.
+//     Self-describing in logs: tool_tokens is logged alongside, so the
+//     subtraction (or its floor fallback) is one diff away.
 //
 //   - "tokenizer:<enc>" / "tokenizer:<enc>,approx": no usage rows yet
 //     (fresh sessions, manual compact before any turn) and a model is
@@ -233,6 +273,9 @@ func summarySizeRatio(promptTokens, completionTokens int) float64 {
 //     min(live, maxHistory+1) TruncateHistory rule the usage path
 //     mirrors), averaged over the rows it contains. "approx" marks
 //     models whose real tokenizer is unknown (o200k_base stand-in).
+//     toolTokens does not apply here: with no usage row there is no
+//     tool-inflated dividend to de-bias — this path never counted the
+//     tool prefix in the first place.
 //
 //   - "chars/4": no usage rows AND no model — the old estimateTokens
 //     (runes/4) fallback over the live rows' Content, still reachable
@@ -240,7 +283,7 @@ func summarySizeRatio(promptTokens, completionTokens int) float64 {
 //
 // The DECISION math (budget projection) is unchanged by which basis
 // wins: every path yields perMsg with the same 1.0 floor semantics.
-func tokensPerMessage(lastUsage *TurnUsage, liveMsgs []Message, maxHistory int, model string) (perMsg float64, basis string) {
+func tokensPerMessage(lastUsage *TurnUsage, liveMsgs []Message, maxHistory int, model string, toolTokens int) (perMsg float64, basis string) {
 	if len(liveMsgs) == 0 {
 		// Nothing to average over; the floor below is the only sane
 		// answer so budget math can't divide to infinity.
@@ -264,8 +307,24 @@ func tokensPerMessage(lastUsage *TurnUsage, liveMsgs []Message, maxHistory int, 
 		// The last turn's prompt contained at most maxHistory+1 rows
 		// (TruncateHistory), so dividing by more rows than that would
 		// understate the per-message cost.
-		perMsg = float64(lastUsage.PromptTokens) / float64(effective)
-		basis = "usage"
+		//
+		// Dividend de-bias (see the TOOL-DEFINITION DE-BIAS note in the
+		// function comment): strip our estimate of the constant tool
+		// prefix before averaging. The de-biased value is only taken
+		// when it clears `effective` (a per-message cost of at least
+		// 1.0); when the tool estimate ate the whole or nearly the
+		// whole prompt, keep the raw prompt and let the legacy
+		// prompt/effective division stand.
+		msgPrompt := lastUsage.PromptTokens
+		if net := msgPrompt - toolTokens; toolTokens > 0 && net >= effective {
+			msgPrompt = net
+		}
+		perMsg = float64(msgPrompt) / float64(effective)
+		if toolTokens > 0 {
+			basis = "usage-net-tools"
+		} else {
+			basis = "usage"
+		}
 	} else if model != "" {
 		tc := countMessageTokens(model, messagesToChat(rowsForProjection))
 		perMsg = float64(tc.Tokens) / float64(len(rowsForProjection))
@@ -717,7 +776,23 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 			lastUsage = tu
 		}
 	}
-	perMsg, estBasis := tokensPerMessage(lastUsage, dbMsgs, cfg.MaxHistory, cfg.Model)
+	// Tool definitions the next request would serialize alongside those
+	// messages — counted ONCE here, BEFORE the sizing decision, and
+	// consumed in two places: the perMsg de-bias immediately below (the
+	// provider's prompt_tokens includes the tool prefix; subtracting
+	// our count of it stops that constant ~2k-token prefix from being
+	// amortized into every message's cost — see tokensPerMessage's
+	// TOOL-DEFINITION DE-BIAS note) and the trigger log's
+	// tools/tool_tokens fields (informational THERE: display and
+	// diffing against last_prompt_tokens). toolDefsForConfig reads only
+	// the live in-memory MCP tool map (getMCPTools does no MCP I/O), so
+	// computing it this early can never block the compaction path.
+	toolDefs := toolDefsForConfig(cfg)
+	toolEncName, _ := resolveEncodingForModel(cfg.Model)
+	toolEnc, _ := getEncoder(toolEncName) // nil on init failure → estimateTokens, same degradation as the message side
+	toolTokens := countToolTokens(toolEnc, toolDefs)
+
+	perMsg, estBasis := tokensPerMessage(lastUsage, dbMsgs, cfg.MaxHistory, cfg.Model, toolTokens)
 	// Dave's own neutral token count of the payload the NEXT request
 	// would send: the live rows truncated by the same min(live,
 	// maxHistory+1) TruncateHistory rule a real turn applies (GetMessages),
@@ -728,20 +803,22 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 	// model still counts via the o200k_base approximation (Exact=false).
 	ourCount := countMessageTokens(cfg.Model, TruncateHistory(chatMsgs, cfg.MaxHistory))
 
-	// Tool definitions the next request would serialize alongside those
-	// messages — INFORMATIONAL ONLY. The budget/projection decisions
-	// above and below still use the usage-derived perMsg exclusively:
-	// prompt_tokens already amortizes tool-definition overhead into
-	// prompt_tokens÷messages, so folding tool tokens into the projection
-	// would double-count them (and err in the conservative direction).
-	// tool_tokens exists for display and for diffing against the
-	// provider's last_prompt_tokens. toolDefsForConfig reads only the
-	// live in-memory MCP tool map (getMCPTools does no MCP I/O), so this
-	// can never block the compaction path.
-	toolDefs := toolDefsForConfig(cfg)
-	toolEncName, _ := resolveEncodingForModel(cfg.Model)
-	toolEnc, _ := getEncoder(toolEncName) // nil on init failure → estimateTokens, same degradation as the message side
-	toolTokens := countToolTokens(toolEnc, toolDefs)
+	// PROJECTION RECONCILIATION (supersedes the old "informational only"
+	// note that used to sit where the tool tokens are now counted): the
+	// projection formula summaryTokensAssumed + perMsg*(1+tailMessages)
+	// below stays MESSAGE-ONLY and must NOT gain a "+ toolTokens" term.
+	// Before the de-bias, perMsg amortized the tool prefix into every
+	// message, so adding toolTokens to the projection would have
+	// double-counted them. Now perMsg is NET of tools, so adding the
+	// prefix back would count it once — no longer a double count, but
+	// still wrong: the tool prefix is a CONSTANT that rides every
+	// request regardless of where the cut lands, so no amount of
+	// archiving reclaims it, and budgeting against it would push the
+	// advancement loop to archive more to make room for tokens that can
+	// never be freed — re-introducing exactly the over-eager advancement
+	// the de-bias removes. Total-context awareness stays where it
+	// belongs: ShouldAutoCompact compares the RAW provider prompt
+	// (tools included) against the auto threshold.
 
 	// The window snapshot is taken by effectiveContextWindow's own
 	// readConfig (shared with ShouldAutoCompact); a /reload racing this
@@ -894,7 +971,10 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 	// (our_token_count/our_encoding/our_exact/image_parts — diff against
 	// last_prompt_tokens to attribute provider accounting divergence)
 	// plus the tool definitions riding on the same request
-	// (tools/tool_tokens — informational only, never in the projection),
+	// (tools/tool_tokens — informational in the LOG: display and
+	// diffing; the de-biased perMsg feeding the budget above is
+	// computed from toolTokens, but the projection itself stays
+	// message-only per the reconciliation note),
 	// and the post-compaction projection evaluated at the FINAL cut (the
 	// value the advancement loop optimized against; compare it with
 	// budget_tokens for the achieved margin, and with the completion

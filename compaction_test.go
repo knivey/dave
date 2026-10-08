@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1264,13 +1265,16 @@ func TestCompactSession_RefusesWhenNothingNew(t *testing.T) {
 }
 
 // TestTokensPerMessage covers every estimate path, the MaxHistory
-// truncation cap, the 1.0 floor, and the empty-input guard. The usage
-// path divides the API's own prompt_tokens by the number of rows that
-// prompt actually contained (never more than maxHistory+1) — real
-// provider numbers stay PRIMARY over any tokenizer estimate. Without
-// usage rows the fallback basis is the real tokenizer when a model is
-// configured (basis "tokenizer:<enc>[,approx]") and chars/4 when not —
-// both must remain reachable (the second is the never-fail floor).
+// truncation cap, the 1.0 floor, the empty-input guard, and the
+// tool-definition de-bias of the usage path. The usage path divides the
+// API's own prompt_tokens (minus dave's tool-token estimate when one
+// exists) by the number of rows that prompt actually contained (never
+// more than maxHistory+1) — real provider numbers stay PRIMARY over any
+// tokenizer estimate. Without usage rows the fallback basis is the real
+// tokenizer when a model is configured (basis "tokenizer:<enc>[,approx]")
+// and chars/4 when not — both must remain reachable (the second is the
+// never-fail floor). toolTokens only ever touches the usage path: the
+// fallback paths never counted the tool prefix in the first place.
 func TestTokensPerMessage(t *testing.T) {
 	msgs := make([]Message, 10)
 	for i := range msgs {
@@ -1278,7 +1282,7 @@ func TestTokensPerMessage(t *testing.T) {
 	}
 
 	t.Run("usage path", func(t *testing.T) {
-		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, 0, "")
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, 0, "", 0)
 		assert.Equal(t, 100.0, perMsg)
 		assert.Equal(t, "usage", basis)
 	})
@@ -1286,7 +1290,7 @@ func TestTokensPerMessage(t *testing.T) {
 	t.Run("usage path wins over tokenizer", func(t *testing.T) {
 		// Real API numbers for the provider beat any tokenizer estimate
 		// — a configured model must not steal the basis from usage.
-		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, 0, "gpt-4o")
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, 0, "gpt-4o", 0)
 		assert.Equal(t, 100.0, perMsg)
 		assert.Equal(t, "usage", basis)
 	})
@@ -1295,39 +1299,100 @@ func TestTokensPerMessage(t *testing.T) {
 		// TruncateHistory sends min(live, maxHistory+1) rows, so a
 		// prompt built from 10 live rows under maxhistory=4 contained
 		// only 5 rows — dividing by 10 would understate the cost.
-		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, 4, "")
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, 4, "", 0)
 		assert.Equal(t, 200.0, perMsg)
 		assert.Equal(t, "usage", basis)
 	})
 
 	t.Run("usage path ignores non-positive maxhistory", func(t *testing.T) {
-		perMsg, _ := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, -3, "")
+		perMsg, _ := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, -3, "", 0)
 		assert.Equal(t, 100.0, perMsg)
 	})
 
+	t.Run("usage path subtracts tool tokens", func(t *testing.T) {
+		// prompt 1000 with a 600-token tool prefix over 10 messages:
+		// the messages themselves cost (1000-600)/10 = 40/msg — NOT the
+		// amortized 100/msg that divides the constant tool prefix into
+		// every message.
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, 0, "", 600)
+		assert.Equal(t, 40.0, perMsg)
+		assert.Equal(t, "usage-net-tools", basis)
+	})
+
+	t.Run("de-bias respects the maxhistory divisor cap", func(t *testing.T) {
+		// Same cap as the legacy path: only 5 of the 10 rows were in
+		// the prompt, so the de-biased dividend divides by 5:
+		// (1000-600)/5 = 80.
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, 4, "", 600)
+		assert.Equal(t, 80.0, perMsg)
+		assert.Equal(t, "usage-net-tools", basis)
+	})
+
+	t.Run("de-bias floor at exactly effective", func(t *testing.T) {
+		// net = 1000-990 = 10 = effective: the floor admits the
+		// de-biased dividend exactly at the boundary → perMsg 1.0 via
+		// the DE-BIASED path (legacy would report 100).
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, 0, "", 990)
+		assert.Equal(t, 1.0, perMsg)
+		assert.Equal(t, "usage-net-tools", basis)
+	})
+
+	t.Run("tools ate nearly the whole prompt falls back to legacy division", func(t *testing.T) {
+		// net = 1000-995 = 5 < effective 10: the subtraction cannot
+		// yield a meaningful per-message average, so the legacy
+		// prompt/effective division stands (perMsg 100, not 0.5).
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, 0, "", 995)
+		assert.Equal(t, 100.0, perMsg)
+		assert.Equal(t, "usage-net-tools", basis,
+			"basis stays self-describing: the log carries tool_tokens alongside for the reconstruction")
+	})
+
+	t.Run("tools >= prompt falls back to legacy division", func(t *testing.T) {
+		// net = -200: the tool estimate ate the whole prompt outright
+		// (provider under-counts tools or the estimate drifted) — fall
+		// back to prompt/effective; never a nonsense sub-1.0 perMsg.
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, 0, "", 1200)
+		assert.Equal(t, 100.0, perMsg)
+		assert.Equal(t, "usage-net-tools", basis)
+	})
+
 	t.Run("zero prompt tokens falls back", func(t *testing.T) {
-		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 0}, msgs, 0, "")
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 0}, msgs, 0, "", 0)
 		// 10 rows of "filler" (7 runes → estimateTokens = 1 each).
 		assert.Equal(t, 1.0, perMsg)
 		assert.Equal(t, "chars/4", basis)
 	})
 
 	t.Run("tokenizer fallback basis exact", func(t *testing.T) {
-		perMsg, basis := tokensPerMessage(nil, msgs, 0, "gpt-4o")
+		perMsg, basis := tokensPerMessage(nil, msgs, 0, "gpt-4o", 0)
 		assert.Greater(t, perMsg, 0.0)
 		assert.Equal(t, "tokenizer:o200k_base", basis)
 	})
 
 	t.Run("tokenizer fallback basis approx for unknown model", func(t *testing.T) {
-		perMsg, basis := tokensPerMessage(nil, msgs, 0, "grok-4")
+		perMsg, basis := tokensPerMessage(nil, msgs, 0, "grok-4", 0)
 		assert.Greater(t, perMsg, 0.0)
 		assert.Equal(t, "tokenizer:o200k_base,approx", basis)
+	})
+
+	t.Run("tool tokens do not touch the fallback paths", func(t *testing.T) {
+		// No usage rows → the tokenizer path never counted the tool
+		// prefix; a non-zero toolTokens must not perturb it (there is
+		// no tool-inflated dividend to de-bias).
+		perMsg, basis := tokensPerMessage(nil, msgs, 0, "gpt-4o", 5000)
+		assert.Equal(t, "tokenizer:o200k_base", basis)
+		want := float64(countMessageTokens("gpt-4o", messagesToChat(msgs)).Tokens) / float64(len(msgs))
+		assert.InDelta(t, want, perMsg, 0.0001)
+
+		perMsg, basis = tokensPerMessage(nil, msgs, 0, "", 5000)
+		assert.Equal(t, 1.0, perMsg)
+		assert.Equal(t, "chars/4", basis)
 	})
 
 	t.Run("tokenizer fallback respects maxhistory cap", func(t *testing.T) {
 		// 10 rows under maxhistory=4 → count only the 5 rows a real
 		// request would send (msgs[0] + last 4), divide by 5.
-		perMsg, basis := tokensPerMessage(nil, msgs, 4, "gpt-4o")
+		perMsg, basis := tokensPerMessage(nil, msgs, 4, "gpt-4o", 0)
 		assert.Greater(t, perMsg, 0.0)
 		assert.Equal(t, "tokenizer:o200k_base", basis)
 		projected := append([]Message{msgs[0]}, msgs[6:]...)
@@ -1340,18 +1405,18 @@ func TestTokensPerMessage(t *testing.T) {
 			{Content: strings.Repeat("x", 400)}, // 100 est
 			{Content: strings.Repeat("y", 400)}, // 100 est
 		}
-		perMsg, basis := tokensPerMessage(nil, fallbackMsgs, 0, "")
+		perMsg, basis := tokensPerMessage(nil, fallbackMsgs, 0, "", 0)
 		assert.Equal(t, 100.0, perMsg)
 		assert.Equal(t, "chars/4", basis)
 	})
 
 	t.Run("floor at one token per message", func(t *testing.T) {
-		perMsg, _ := tokensPerMessage(&TurnUsage{PromptTokens: 1}, msgs, 0, "")
+		perMsg, _ := tokensPerMessage(&TurnUsage{PromptTokens: 1}, msgs, 0, "", 0)
 		assert.Equal(t, 1.0, perMsg, "budget math must never see a sub-1.0 per-message cost")
 	})
 
 	t.Run("empty live history guards division", func(t *testing.T) {
-		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 500}, nil, 0, "gpt-4o")
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 500}, nil, 0, "gpt-4o", 0)
 		assert.Equal(t, 1.0, perMsg)
 		assert.Equal(t, "chars/4", basis)
 	})
@@ -1586,6 +1651,162 @@ func TestCompactSession_TokenAwareTailShrinks(t *testing.T) {
 
 	// ContextBefore carries the real last-turn prompt tokens ("usage").
 	assert.Equal(t, 10000, res.ContextBefore)
+
+	require.Len(t, getBodies(), 1)
+}
+
+// TestCompactSession_ToolTokensDeBiasTailSizing is the end-to-end Phase G
+// check: the tool-definition prefix riding every provider prompt must NOT
+// be amortized into per-message cost. The config carries real tool
+// definitions via a seeded mcpServers fixture (toolDefsForConfig: the 2
+// fixture MCP tools + the 3 builtins), so dave's own countToolTokens
+// estimate T > 0 is subtracted from the last turn's prompt_tokens before
+// the division — T is COMPUTED in the test over the exact tool set
+// (never hardcoded), so the seed tracks any drift in builtin tool
+// descriptions.
+//
+// Seed: system + 12 turns = 25 rows, cfg.MaxHistory unset (0 = no cap →
+// effective = 25). TurnUsage PromptTokens P = 2500:
+//
+//	AMORTIZED perMsg = P/25     = 100/msg     (pre-Phase-G behavior)
+//	DE-BIASED perMsg = (P-T)/25 = 100-T/25    (Phase G, basis
+//	                                        "usage-net-tools")
+//
+// 2/3 cut (unchanged rule): totalNonSystem = 24, target = 16 → base
+// cut = 8 (turns 1–8, 16 msgs), tail = 8 msgs. Projection at base cut =
+// summaryAssumed(512) + perMsg*(1+8) = 512 + 9*perMsg.
+//
+// The budget (window × 0.4, [compaction] fallback window) is pinned at
+// the MIDPOINT of the two base-cut projections, so decisively:
+//
+//	512 + 9*(100-T/25)  <=  budget  <  512 + 9*100
+//
+// Under the AMORTIZED perMsg the base-cut projection busts the budget →
+// the pre-fix advancement loop would move the cut (as in
+// TestCompactSession_TokenAwareTailShrinks). Under the DE-BIASED perMsg
+// it fits → NO advancement: the archived range must equal the 2/3 base
+// cut exactly (16 msgs, idx 1–16; 10 live rows).
+func TestCompactSession_ToolTokensDeBiasTailSizing(t *testing.T) {
+	setupTestDB(t)
+
+	// Same fixture shape as TestToolDefsForConfig: seed the mcpServers
+	// map directly — getMCPTools reads only that in-memory map (no MCP
+	// I/O), so no live server or transport is needed. Mutex-guarded for
+	// -race hygiene, per TestRegisterBackgroundJob's pattern.
+	mcpServersMu.Lock()
+	origServers := mcpServers
+	mcpServers = map[string]*MCPServer{"img-mcp": {
+		Tools: []*mcp.Tool{
+			{Name: "generate_image", Description: "Generate an image"},
+			{Name: "get_transcript", Description: "Fetch a transcript"},
+		},
+	}}
+	mcpServersMu.Unlock()
+	t.Cleanup(func() {
+		mcpServersMu.Lock()
+		mcpServers = origServers
+		mcpServersMu.Unlock()
+	})
+
+	stub, getBodies := newRecordingSummarizerStubServer(t, "DEBIAS_SUMMARY")
+	defer stub.Close()
+	prevServices := config.Services
+	config.Services = map[string]Service{
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second, MaxHistory: 100},
+	}
+	defer func() { config.Services = prevServices }()
+
+	cfg := AIConfig{Service: "stubsvc", Model: "m", Timeout: 5 * time.Second, MaxTokens: 256, MCPs: []string{"img-mcp"}}
+
+	// T: dave's own count of the EXACT tool set the next request
+	// serializes (2 fixture MCP tools + the 3 builtins).
+	toolDefs := toolDefsForConfig(cfg)
+	require.Len(t, toolDefs, 5, "2 fixture MCP tools + 3 builtins")
+	toolEncName, _ := resolveEncodingForModel(cfg.Model)
+	toolEnc, err := getEncoder(toolEncName)
+	require.NoError(t, err)
+	T := countToolTokens(toolEnc, toolDefs)
+	require.Greater(t, T, 0, "fixture must contribute a positive tool-token count")
+
+	sid := createTestSession(t, "net", "#c", "u1", "cmd", "stubsvc", "stubmodel")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+	for i := 0; i < 12; i++ {
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "u"}))
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleAssistant, Content: "a"}))
+	}
+	const promptTokens = 2500
+	require.NoError(t, theDB.Create(&TurnUsage{SessionID: sid, PromptTokens: promptTokens, APIPath: "chat"}).Error)
+
+	original, err := loadDBSessionMessagesAll(sid)
+	require.NoError(t, err)
+	require.Len(t, original, 25)
+
+	// Hand-computed budget math (see the function comment): pin the
+	// budget at the midpoint of the two base-cut projections, realized
+	// as [compaction] window × 0.4. int() truncation lowers the derived
+	// budget by < 0.4 tokens — far inside the margin (the gap halves at
+	// the midpoint), which the two require.True calls below pin exactly.
+	const (
+		effective        = 25
+		summaryAssumed   = 512 // defaultSummaryTokensAssumed (no max_summary_tokens set)
+		baseTailMessages = 8
+	)
+	require.GreaterOrEqual(t, promptTokens-T, effective,
+		"seed sanity: the de-biased dividend must clear the effective floor so CompactSession takes the de-bias path, not the legacy fallback")
+	amortizedPerMsg := float64(promptTokens) / effective
+	deBiasedPerMsg := float64(promptTokens-T) / effective
+	amortizedProjection := float64(summaryAssumed) + float64(1+baseTailMessages)*amortizedPerMsg
+	deBiasedProjection := float64(summaryAssumed) + float64(1+baseTailMessages)*deBiasedPerMsg
+	require.Greater(t, amortizedProjection-deBiasedProjection, 10.0,
+		"seed sanity: the fixture's tool tokens must move the projection by a decisive margin")
+	window := int((amortizedProjection + deBiasedProjection) / 2 / 0.4)
+	budget := float64(window) * 0.4
+	require.True(t, deBiasedProjection <= budget,
+		"de-biased base-cut projection (%.1f) must fit the budget (%.1f) — no advancement", deBiasedProjection, budget)
+	require.True(t, budget < amortizedProjection,
+		"amortized base-cut projection (%.1f) must bust the budget (%.1f) — the pre-fix code would have advanced", amortizedProjection, budget)
+
+	prevCompaction := config.Compaction
+	config.Compaction = CompactionConfig{
+		Enabled:        true,
+		MinTurns:       3,
+		TargetFraction: 0.4,
+		ContextWindow:  window,
+	}
+	defer func() { config.Compaction = prevCompaction }()
+
+	res, err := sessionMgr.CompactSession(context.Background(), CompactSessionInputs{
+		SessionID: sid, Network: Network{Name: "net"}, Channel: "#c", UserNick: "u1", Trigger: "auto",
+	}, cfg)
+	require.NoError(t, err)
+
+	// Final archived range is EXACTLY the 2/3 base cut: the de-biased
+	// perMsg fits the budget at cut 8, so the cut never advanced (the
+	// amortized perMsg would have, TokenAwareTailShrinks-style).
+	assert.Equal(t, 16, res.ArchivedCount,
+		"de-biased perMsg must NOT advance the cut when the message-only tail fits the budget")
+	assert.Equal(t, original[1].ID, res.FirstArchivedID)
+	assert.Equal(t, original[16].ID, res.LastArchivedID,
+		"archived range must end exactly at the 2/3 boundary (row idx 16)")
+
+	// fresh system + summary + the 8 tail copies = 10 live rows.
+	assert.Equal(t, 10, res.LiveMessages)
+	live, err := loadDBSessionMessages(sid)
+	require.NoError(t, err)
+	require.Len(t, live, 10)
+	assert.Equal(t, RoleSystem, live[0].Role)
+	assert.Equal(t, RoleSystem, live[1].Role)
+	assert.Contains(t, live[1].Content, "DEBIAS_SUMMARY")
+	tailCopies := 0
+	for _, m := range live[2:] {
+		require.NotNil(t, m.SourceCompactionID)
+		tailCopies++
+	}
+	assert.Equal(t, 8, tailCopies, "preserved tail must be the 8 messages of turns 9–12")
+
+	// ContextBefore still reports the RAW provider prompt (tools
+	// included) — the de-bias shapes the sizing decision only.
+	assert.Equal(t, promptTokens, res.ContextBefore)
 
 	require.Len(t, getBodies(), 1)
 }

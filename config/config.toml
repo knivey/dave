@@ -44,7 +44,7 @@
 #   scrollback_lines    (int, default: 5000)  Lines kept in TUI scroll buffer
 #
 # [tui.scrollbar] options:
-#   visible            (bool, default: true)   Show scrollbar
+#   visible            (bool, default: true)   Show scrollbar (Ctrl+S toggles at runtime — override is not persisted; hidden reserves no columns)
 #   show_always        (bool, default: true)   Show even when content fits
 #   color              (string, default: "gray")           Scrollbar thumb color
 #   background_color   (string, default: "black")          Scrollbar background

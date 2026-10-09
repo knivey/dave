@@ -59,3 +59,29 @@ func TestNewScrollbarDefaults(t *testing.T) {
 		})
 	}
 }
+
+func TestScrollbarToggle(t *testing.T) {
+	sb := NewScrollbar(TUIScrollbarConfig{})
+	assert.True(t, sb.Visible(), "defaults to visible")
+	assert.True(t, sb.ShouldDraw(10, 5), "draws when content overflows")
+
+	sb.Toggle()
+	assert.False(t, sb.Visible())
+	assert.False(t, sb.ShouldDraw(10, 5), "hidden scrollbar never draws")
+
+	sb.SetVisible(true)
+	assert.True(t, sb.Visible())
+	assert.True(t, sb.ShouldDraw(10, 5), "visible again")
+}
+
+func TestScrollbarReservedWidth(t *testing.T) {
+	sb := NewScrollbar(TUIScrollbarConfig{Width: 2})
+	assert.Equal(t, 2, sb.ReservedWidth(), "visible scrollbar reserves its width")
+
+	sb.Toggle()
+	assert.Equal(t, 0, sb.ReservedWidth(), "hidden scrollbar reserves nothing")
+
+	// Startup config with visible=false must not burn a column either.
+	sb = NewScrollbar(TUIScrollbarConfig{Visible: boolPtr(false), Width: 3})
+	assert.Equal(t, 0, sb.ReservedWidth())
+}

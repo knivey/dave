@@ -21,6 +21,7 @@ var (
 	logScrollbar       *Scrollbar
 	logScrollbackLines int
 	statusBar          *tview.TextView
+	sbStatusBar        *tview.TextView
 	inputField         *tview.InputField
 	shutdownOnce       int32
 	autoScroll         = true
@@ -46,6 +47,10 @@ var (
 )
 
 const cmdHistoryMax = 100
+
+// sbStatusWidth is the fixed width of the right-hand status segment showing
+// "^S sb:on/off" — 9 runes plus one cell of breathing room.
+const sbStatusWidth = 10
 
 func initTUI() (*tview.Application, error) {
 	pipeR, pipeW, err := os.Pipe()
@@ -184,9 +189,24 @@ func initTUI() (*tview.Application, error) {
 	statusBar.SetBackgroundColor(tcell.ColorBlack)
 	statusBar.SetText("[dim]flagged:0[white]")
 
+	// Right-hand segment of the status line: a nano-style shortcut hint plus
+	// the live scrollbar state, so the Ctrl+S toggle is always discoverable.
+	// Two separate widgets (not one recomposed string) keep the writers
+	// independent — pollStatusBar owns this view's flagged peer, the toggle
+	// owns this one, and neither needs the other's data to re-render.
+	sbStatusBar = tview.NewTextView().
+		SetDynamicColors(true).
+		SetTextAlign(tview.AlignRight)
+	sbStatusBar.SetBackgroundColor(tcell.ColorBlack)
+	sbStatusBar.SetText(scrollbarStatusText())
+
+	statusFlex := tview.NewFlex().SetDirection(tview.FlexColumn).
+		AddItem(statusBar, 0, 1, false).
+		AddItem(sbStatusBar, sbStatusWidth, 0, false)
+
 	flex := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(logContainer, 0, 1, true).
-		AddItem(statusBar, 1, 0, false).
+		AddItem(statusFlex, 1, 0, false).
 		AddItem(inputField, 1, 0, true)
 
 	app.SetRoot(flex, true).SetFocus(inputField)
@@ -197,6 +217,9 @@ func initTUI() (*tview.Application, error) {
 			return nil
 		}
 		switch event.Key() {
+		case tcell.KeyCtrlS:
+			toggleScrollbar()
+			return nil
 		case tcell.KeyPgUp:
 			wasAutoScroll := autoScroll
 			autoScroll = false
@@ -310,7 +333,10 @@ func initTUI() (*tview.Application, error) {
 // off by a few rows there. Row numbers are equally approximate across rewraps
 // in the clamp-restore path below; accepted.
 func drawLogView(screen tcell.Screen, x, y, width, height int) {
-	sbWidth := logScrollbar.width
+	// Re-read every frame: a Ctrl+S toggle (or visible = false config) must
+	// give the column back to the log view immediately — a hidden scrollbar
+	// reserves nothing.
+	sbWidth := logScrollbar.ReservedWidth()
 	textW := width - sbWidth
 	logView.SetRect(x, y, textW, height)
 	logView.SetSize(0, textW)
@@ -479,6 +505,29 @@ func drainPipe() {
 	fmt.Fprintln(os.Stdout, "\x00PIPE_DRAIN\x00")
 	os.Stdout.Sync()
 	<-pipeDrainSync
+}
+
+// scrollbarStatusText renders the right-hand status segment: the ^S shortcut
+// hint (nano-style, so the key is never forgotten) plus the live state.
+// Only valid after initTUI has built the scrollbar global.
+func scrollbarStatusText() string {
+	state := "off"
+	if logScrollbar.Visible() {
+		state = "on"
+	}
+	return fmt.Sprintf("[dim]^S sb:%s[white]", state)
+}
+
+// toggleScrollbar is the Ctrl+S handler: flips visibility and refreshes the
+// status segment. Runs on the tview main goroutine (input capture), so a
+// direct SetText is safe and the redraw lands on the same frame.
+//
+// The toggle is a runtime-only override of [tui.scrollbar] visible: it is not
+// persisted, deliberately survives /reload (reloadAll never rebuilds TUI
+// widgets), and resets to the config value on restart.
+func toggleScrollbar() {
+	logScrollbar.Toggle()
+	sbStatusBar.SetText(scrollbarStatusText())
 }
 
 // pollStatusBar refreshes the TUI status bar every 5 seconds with the current

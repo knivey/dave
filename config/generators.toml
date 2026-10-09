@@ -23,12 +23,21 @@
 #   streamtimeout        (duration, default: timeout) Max idle time between stream chunks. Cascade: command > service > timeout
 #   load_notice          (bool, default: true for type = "llama" services, else false) Before the turn, probe the service's /v1/models and send a "loading model" IRC notice when the requested model is not loaded yet (llama-server built-in router / llama-swap model swap). Notice text: [llm] model_load in notices.toml. Cascade: command > service > type default.
 #   toolverbose          (bool, default: true)       Show 🔧 tool call notifications in IRC (cascades from service)
+#   paralleltoolcalls    (bool, default: true)       Enable parallel MCP tool calls (cascades from service)
+#   reasoningeffort      (string)                    For o1/o3 models: "low", "medium", "high"
+#   reasoningsummary     (string)                    Responses API only: request reasoning summaries back. "auto", "concise", or "detailed". Empty = not requested (no summaries returned).
+#   servicetier          (string)                    Processing tier: "auto", "default", "flex", "priority"
+#   verbosity            (string)                    Output token count for gpt-5: "low", "medium", "high"
 #   mcps                 (string array)              Opt-in MCP server names for tool access
 #   hidden_mcp_tools     (string array)              MCP tool names to hide from the LLM. Bare names ("tool") or server-prefixed ("server.tool"). Cascade: command > service > root.
 #   hidden_mcp_tool_sets (string array)              Named tool sets from mcps.toml [hidden_mcp_tool_sets.*]. Merged with hidden_mcp_tools. Cascade: command > service > root.
 #   extra_body           (map)                       Provider-specific parameters (top-level in request body)
 #   chat_template_kwargs (map)                       Provider-specific parameters (nested in request body)
+#   responses_api        (bool, default: false)      Use POST /v1/responses instead of Chat Completions (response ids are never persisted for generators — only the endpoint shape changes)
+#   injection_role       (string, default: "system") Guidance Knob 1: wire role for injected guidance payload rows ("system" | "developer" | "user"); on generator turns this is the empty-response correction. "developer" maps to system server-side on llama.cpp; "user" is for models whose templates cannot render mid-chain system at all. Cascade: command > service > "system".
+#   needsusersuffix      (*bool, default: auto)       Guidance Knob 2: append a short user message after injected guidance when it would be the last message of the request (empty-response corrections — the only guidance site on generator turns). Auto (unset) appends it for anthropic/ models; true forces it, false suppresses it. Cascade: command > service > auto. Fix for: "This model does not support assistant message prefill. The conversation must end with a user message."
 #   api_user             (string, cascades from service)  Go template for the end-user identifier field. Variables: {{.Nick}}, {{.BotNick}}, {{.Channel}}, {{.Network}}, {{.Date}}. Empty = not sent.
+#   retry_on_empty       (int, default: 1)           Number of retries when API returns empty response (0 = disabled); retry corrections are injected per injection_role/needsusersuffix and never persisted
 #   prompt               (string)                    Default instruction when the caller gives no focus text.
 #                                               Fallback chain: focus text > prompt > built-in default.
 #
@@ -42,7 +51,10 @@
 #                                               NEWEST lines are kept and a truncation marker is prepended.
 #
 # Not useful for generators (stateless): previous_response_id, detectimages,
-# disabled_builtin_tools (builtin LLM tools are never offered to generators).
+# disabled_builtin_tools (builtin LLM tools are never offered to generators),
+# context_window (no compaction on ephemeral turns — nothing is persisted to
+# compact), async_result_delivery (no background jobs for generators —
+# session-bound).
 # toolverbose = false silences the 🔧 tool-call notices — recommended for
 # output-sensitive commands (tabloid, fakenews).
 #

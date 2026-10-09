@@ -203,6 +203,38 @@ func TestGeneratorTruncationNoticeCoverage(t *testing.T) {
 	assert.Contains(t, joined, "14:32 to 16:45", "truncation notice carries the actual coverage range")
 }
 
+func TestGeneratorTruncationNoticeCoverageRequiresBothTimes(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	outputCh := withGeneratorRunner(t, AIConfig{Model: "qwen3"}, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, streamChunk(`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"qwen3","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)+"data: [DONE]\n\n")
+	})
+	origFetch := fetchChannelLogFn
+	// FirstKept only (hand-built result): a partial range must not render —
+	// a FirstKept-only guard would produce "14:32 to 00:00". Production
+	// results always set both times together.
+	fetchChannelLogFn = func(spec LogQuerySpec, network, raw, norm, model string, now time.Time) (*LogWindowResult, error) {
+		return &LogWindowResult{Lines: []string{"[11:00] <a> x"}, Tokens: 59000, Truncated: true,
+			DroppedLines: 120, TotalLines: 420,
+			FirstKept: time.Date(2026, 10, 8, 14, 32, 0, 0, time.Local)}, nil
+	}
+	t.Cleanup(func() { fetchChannelLogFn = origFetch })
+
+	cfg := GeneratorConfig{AIConfig: AIConfig{Name: "summary"}, Log: &LogQuerySpec{MaxTokens: 60000}}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		generator(Network{Name: "testnet"}, nil, genEvent("#chan"), cfg, context.Background(), outputCh, &User{ID: 1})
+	}()
+	<-done
+	lines := drainGenOutput(t, outputCh, 8)
+	joined := strings.Join(lines, "\n")
+	assert.NotContains(t, joined, "to 00:00", "partial times must not render a half range")
+	assert.NotContains(t, joined, "14:32", "FirstKept alone must not leak into the coverage range")
+}
+
 func TestGeneratorNoFocusUsesConfiguredPrompt(t *testing.T) {
 	setupTestDB(t)
 	setupNoticesDefaults(t)

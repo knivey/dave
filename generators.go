@@ -100,11 +100,13 @@ func generator(network Network, c *girc.Client, e girc.Event, cfg GeneratorConfi
 			// template) alongside kept/total so the disclosure is direct —
 			// see the notice-default deviation note in
 			// setNoticesDefaults and task-5-report.md. "coverage" carries
-			// the kept rows' actual time range; zero FirstKept/LastKept
-			// (hand-built results) expand to empty — production results
-			// always set both when any row was kept.
+			// the kept rows' actual time range; BOTH endpoints must be set
+			// or the var stays empty (a hand-built result with only one of
+			// the two would otherwise render "14:32 to 00:00") —
+			// production results always set both together when any row was
+			// kept.
 			coverage := ""
-			if !lw.FirstKept.IsZero() {
+			if !lw.FirstKept.IsZero() && !lw.LastKept.IsZero() {
 				coverage = fmt.Sprintf("%s to %s", lw.FirstKept.Format("15:04"), lw.LastKept.Format("15:04"))
 			}
 			runner.sendWarning(expandNotice(getNotices().Generators.Truncated, map[string]string{

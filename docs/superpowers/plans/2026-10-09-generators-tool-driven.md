@@ -327,7 +327,7 @@ func TestHandleGeneratorLogQueryWindowOverrideAndResult(t *testing.T) {
 
 	assert.Equal(t, "7d", gotSpec.Window, "the tool argument overrides the configured default")
 	result := lastToolResultText(t, turn)
-	assert.Contains(t, result, "Channel activity for #st on testnet, last 168h0m0s (1 lines, 5 tokens, covering 09:00 to 09:30):")
+	assert.Contains(t, result, "Channel activity for #st on testnet, last 7d0h (1 lines, 5 tokens, covering 09:00 to 09:30):")
 	assert.Contains(t, result, "[09:00] <a> hello")
 }
 
@@ -834,7 +834,9 @@ func TestGeneratorOpensOwnAPILogSession(t *testing.T) {
 		"transport logs under the ephemeral id")
 	path := apiLogger.GetSessionFilePath(runner.apiLogSessionID)
 	assert.NotEmpty(t, path, "the run's api-log file is open")
-	assert.Contains(t, filepath.Base(path), "testnet_#chan_user7_",
+	// sanitizeKey replaces non-alphanumerics with _ — "#chan" becomes
+	// "_chan", hence the double underscore in the filename.
+	assert.Contains(t, filepath.Base(path), "testnet__chan_user7_",
 		"filename carries the runner identity shape")
 }
 ```

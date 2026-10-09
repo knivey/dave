@@ -16,12 +16,14 @@ import (
 var (
 	tuiDBNotAvailable = "[red]Database not available[white]\n"
 
-	tuiApp       *tview.Application
-	logView      *tview.TextView
-	statusBar    *tview.TextView
-	inputField   *tview.InputField
-	shutdownOnce int32
-	autoScroll   = true
+	tuiApp             *tview.Application
+	logView            *tview.TextView
+	logScrollbar       *Scrollbar
+	logScrollbackLines int
+	statusBar          *tview.TextView
+	inputField         *tview.InputField
+	shutdownOnce       int32
+	autoScroll         = true
 
 	cmdHistory []string
 	cmdHistIdx int
@@ -93,6 +95,9 @@ func initTUI() (*tview.Application, error) {
 	if scrollbackLines <= 0 {
 		scrollbackLines = 5000
 	}
+	// Must stay in sync with SetMaxLines below: drawLogView derives purge
+	// amounts from logScrollbackLines and assumes it equals the view's cap.
+	logScrollbackLines = scrollbackLines
 
 	logView = tview.NewTextView().
 		SetDynamicColors(true).
@@ -126,37 +131,10 @@ func initTUI() (*tview.Application, error) {
 		}
 	})
 
-	scrollbar := NewScrollbar(config.TUI.Scrollbar)
-	sbWidth := scrollbar.width
+	logScrollbar = NewScrollbar(config.TUI.Scrollbar)
 	logContainer := tview.NewBox()
 	logContainer.SetDrawFunc(func(screen tcell.Screen, x, y, width, height int) (int, int, int, int) {
-		logView.SetRect(x, y, width-sbWidth, height)
-		logView.SetSize(0, width-sbWidth)
-
-		var savedRow int
-		if !autoScroll {
-			savedRow, _ = logView.GetScrollOffset()
-		}
-
-		logView.Draw(screen)
-
-		if autoScroll {
-			logView.ScrollToEnd()
-		} else if savedRow > 0 {
-			newRow, _ := logView.GetScrollOffset()
-			if newRow < savedRow {
-				logView.ScrollTo(savedRow, 0)
-			}
-		}
-
-		totalLines := logView.GetWrappedLineCount()
-		row, _ := logView.GetScrollOffset()
-		if autoScroll && totalLines > height {
-			row = totalLines - height
-		}
-		if scrollbar.ShouldDraw(totalLines, height) {
-			scrollbar.Draw(screen, x, y, width, height, row, totalLines)
-		}
+		drawLogView(screen, x, y, width, height)
 		return x, y, width, height
 	})
 
@@ -293,6 +271,104 @@ func initTUI() (*tview.Application, error) {
 
 	tuiApp = app
 	return app, nil
+}
+
+// drawLogView renders the log view plus its scrollbar for one frame. It is the
+// body of logContainer's DrawFunc, extracted as a package function so tests can
+// drive the exact production draw sequence (see TestScrollPurgeKeepsViewAnchored).
+//
+// DESIGN NOTE: scroll anchoring across SetMaxLines purges. tview's
+// TextView.Draw (verified against v0.42.0) drops the oldest wrapped lines once
+// the buffer exceeds maxLines and ALSO resets the scroll offset to 0. Two
+// consequences we must handle here:
+//
+//  1. Restoring the saved ABSOLUTE row would re-anchor to the wrong content:
+//     the purge shifts every surviving row up by the number of dropped lines,
+//     so while scrolled up in history the viewport would creep forward by
+//     exactly the incoming line count on every flush — the "new messages push
+//     the text I'm reading up the screen" bug. We therefore snapshot the
+//     pre-draw wrapped-line total (the index is guaranteed complete here: the
+//     scrollbar count at the end of the previous frame parsed it fully, and
+//     appends only extend it), derive the purge amount
+//     (totalBefore - logScrollbackLines), and subtract it from the saved row
+//     so the SAME CONTENT stays on screen. The snapshot's full parse is also
+//     load-bearing for purge TIMING, not just measurement: Draw's own
+//     incremental parseAhead stops as soon as the viewport is covered, so
+//     without this parse the index would be stale-low at Draw's purge check
+//     and the purge would fire a frame late.
+//  2. At the very top (row 0) no compensation is possible: the oldest lines
+//     are being deleted out from under the viewport, so the view clamps there.
+//
+// The compensation runs AFTER Draw (which paints this frame's content at the
+// pre-purge offset — still correct); the adjusted offset takes effect on the
+// next frame. This couples to tview's purge-resets-offset behavior; if a
+// future tview instead keeps the offset content-anchored across purges, this
+// subtraction would double-compensate — re-verify on tview upgrades.
+//
+// Known limitation: on terminal-resize frames the pre-draw count can mix
+// old-width and new-width wrapping for one frame, so the compensation can be
+// off by a few rows there. Row numbers are equally approximate across rewraps
+// in the clamp-restore path below; accepted.
+func drawLogView(screen tcell.Screen, x, y, width, height int) {
+	sbWidth := logScrollbar.width
+	textW := width - sbWidth
+	logView.SetRect(x, y, textW, height)
+	logView.SetSize(0, textW)
+
+	var savedRow, totalBefore int
+	if !autoScroll && textW > 0 {
+		// Must run after SetRect/SetSize so wrapping uses the width Draw will
+		// use. Skipped on degenerate widths (container no wider than the
+		// scrollbar): Draw early-returns without purging, so a phantom
+		// pre-count here would compensate a purge that never happened.
+		totalBefore = logView.GetWrappedLineCount()
+		savedRow, _ = logView.GetScrollOffset()
+	}
+
+	logView.Draw(screen)
+
+	if autoScroll {
+		logView.ScrollToEnd()
+	} else if totalBefore > logScrollbackLines {
+		// A purge happened during Draw: tview dropped
+		// (totalBefore - logScrollbackLines) wrapped lines from the top and
+		// reset the offset to 0. Re-anchor to the same content.
+		logView.ScrollTo(compensateScrollAfterPurge(savedRow, totalBefore, logScrollbackLines), 0)
+	} else if savedRow > 0 {
+		// No purge this frame. If Draw clamped the offset down (buffer no
+		// longer reaches savedRow+height, e.g. after a rewrap), restore it.
+		newRow, _ := logView.GetScrollOffset()
+		if newRow < savedRow {
+			logView.ScrollTo(savedRow, 0)
+		}
+	}
+
+	totalLines := logView.GetWrappedLineCount()
+	row, _ := logView.GetScrollOffset()
+	if autoScroll && totalLines > height {
+		row = totalLines - height
+	}
+	if logScrollbar.ShouldDraw(totalLines, height) {
+		logScrollbar.Draw(screen, x, y, width, height, row, totalLines)
+	}
+}
+
+// compensateScrollAfterPurge returns the content-anchored scroll row for a
+// frame in which tview's SetMaxLines purge dropped (totalBefore - maxLines)
+// wrapped lines from the top of the buffer: the content previously displayed
+// at savedRow sits (totalBefore - maxLines) rows higher afterwards. Clamps at
+// 0 — when the top of the viewport was itself purged, the oldest surviving
+// line is the best available anchor. Returns savedRow unchanged when no purge
+// happened (totalBefore <= maxLines).
+func compensateScrollAfterPurge(savedRow, totalBefore, maxLines int) int {
+	if totalBefore <= maxLines {
+		return savedRow
+	}
+	dropped := totalBefore - maxLines
+	if target := savedRow - dropped; target > 0 {
+		return target
+	}
+	return 0
 }
 
 func restoreStdoutStderr() {

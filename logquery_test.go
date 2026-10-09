@@ -151,15 +151,58 @@ func TestTokenCounterForModel(t *testing.T) {
 func TestApplyLogQueryDefaults(t *testing.T) {
 	spec := &LogQuerySpec{}
 	applyLogQueryDefaults(spec)
-	assert.Equal(t, 24*time.Hour, spec.Window)
+	assert.Equal(t, "24h", spec.Window)
 	assert.Equal(t, 60000, spec.MaxTokens)
 	assert.Equal(t, []string{"PRIVMSG", "NOTICE", "TOPIC", "KICK"}, spec.Events)
 
-	set := &LogQuerySpec{Window: time.Hour, MaxTokens: 100, Events: []string{"PRIVMSG"}}
+	set := &LogQuerySpec{Window: "1h", MaxTokens: 100, Events: []string{"PRIVMSG"}}
 	applyLogQueryDefaults(set)
-	assert.Equal(t, time.Hour, set.Window, "explicit values untouched")
+	assert.Equal(t, "1h", set.Window, "explicit values untouched")
 	assert.Equal(t, 100, set.MaxTokens)
 	assert.Equal(t, []string{"PRIVMSG"}, set.Events)
+}
+
+// TestLogQuerySpecWindowDuration pins the Window string resolver: the full
+// parseWindowDuration grammar resolves, and anything else (including an
+// empty string — the contract is "call after applyLogQueryDefaults") errors
+// with a message naming the window.
+func TestLogQuerySpecWindowDuration(t *testing.T) {
+	ok := []struct {
+		in   string
+		want time.Duration
+	}{
+		{"24h", 24 * time.Hour},
+		{"7d", 168 * time.Hour},
+		{"1d12h", 36 * time.Hour},
+		{"90m", 90 * time.Minute},
+	}
+	for _, tc := range ok {
+		t.Run("ok "+tc.in, func(t *testing.T) {
+			d, err := LogQuerySpec{Window: tc.in}.windowDuration()
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, d)
+		})
+	}
+	for _, in := range []string{"", "24", "12x", "-5h", "0h", "1.5h", "7w", "focus"} {
+		t.Run("reject "+in, func(t *testing.T) {
+			_, err := LogQuerySpec{Window: in}.windowDuration()
+			require.Error(t, err, "%q must not resolve", in)
+			assert.Contains(t, err.Error(), "window")
+			assert.Contains(t, err.Error(), in)
+		})
+	}
+}
+
+// TestFetchChannelLogInvalidWindow pins the fetch-side defense in depth: a
+// hand-built spec whose window fails to resolve errors clearly instead of
+// being silently defaulted or scanning an unbounded range.
+func TestFetchChannelLogInvalidWindow(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.Local)
+	_, err := fetchChannelLogFrom(dir, "monthly", LogQuerySpec{Window: "bogus"}, "testnet", "#chan", "#chan", "qwen3", now)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid window duration")
+	assert.Contains(t, err.Error(), "bogus")
 }
 
 func writeLogRows(t *testing.T, dir, key string, rows []ircLog) {
@@ -221,7 +264,7 @@ func TestFetchChannelLogSpansMonthBoundary(t *testing.T) {
 	writeLogRows(t, dir, "2026-09", []ircLog{mkRow("PRIVMSG", "sep", "#chan", "september", sept)})
 	writeLogRows(t, dir, "2026-10", []ircLog{mkRow("PRIVMSG", "oct", "#chan", "october", now.Add(-10*time.Minute))})
 
-	res, err := fetchChannelLogFrom(dir, "monthly", LogQuerySpec{Window: 2 * time.Hour}, "testnet", "#chan", "#chan", "qwen3", now)
+	res, err := fetchChannelLogFrom(dir, "monthly", LogQuerySpec{Window: "2h"}, "testnet", "#chan", "#chan", "qwen3", now)
 	require.NoError(t, err)
 	assert.Len(t, res.Files, 2, "both period files must be queried")
 	assert.Equal(t, []string{
@@ -260,7 +303,7 @@ func TestFetchChannelLogEmptyAndMissing(t *testing.T) {
 
 	// file exists but window has nothing
 	writeLogRows(t, dir, "2026-10", []ircLog{mkRow("PRIVMSG", "a", "#chan", "old", now.Add(-48*time.Hour))})
-	res, err = fetchChannelLogFrom(dir, "monthly", LogQuerySpec{Window: time.Hour}, "testnet", "#chan", "#chan", "qwen3", now)
+	res, err = fetchChannelLogFrom(dir, "monthly", LogQuerySpec{Window: "1h"}, "testnet", "#chan", "#chan", "qwen3", now)
 	require.NoError(t, err)
 	assert.Equal(t, 0, res.TotalLines)
 }

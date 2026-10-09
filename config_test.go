@@ -2824,7 +2824,7 @@ description = "Fake news"
 	assert.Equal(t, "summary", sum.AIConfig.Name, "Name set to section key")
 	assert.Equal(t, "Summarize the following channel activity.", sum.Prompt)
 	require.NotNil(t, sum.Log, "log block parsed")
-	assert.Equal(t, 12*time.Hour, sum.Log.Window)
+	assert.Equal(t, "12h", sum.Log.Window)
 	assert.Equal(t, []string{"PRIVMSG", "KICK"}, sum.Log.Events)
 	assert.Equal(t, 30000, sum.Log.MaxTokens)
 	require.NotNil(t, sum.AIConfig.SystemTmpl, "system template parsed like chats")
@@ -2860,43 +2860,73 @@ service = "svc"
 	require.NoError(t, err)
 	log := cfg.Commands.Generators["g"].Log
 	require.NotNil(t, log)
-	assert.Equal(t, 24*time.Hour, log.Window)
+	assert.Equal(t, "24h", log.Window)
 	assert.Equal(t, 60000, log.MaxTokens)
 	assert.Equal(t, []string{"PRIVMSG", "NOTICE", "TOPIC", "KICK"}, log.Events)
 }
 
+// TestLoadConfigDirGeneratorsWindowDaySuffix pins the I1 fix: the window is a
+// duration STRING parsed with parseWindowDuration's grammar (d suffix +
+// compound units), not a TOML time.Duration — `window = "7d"` used to die
+// with a raw time.ParseDuration decode error at startup.
+func TestLoadConfigDirGeneratorsWindowDaySuffix(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": testGeneratorsServices,
+		"generators.toml": `
+[weekly]
+service = "svc"
+model = "qwen3"
+description = "Weekly digest"
+[weekly.log]
+window = "7d"
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg, err := loadConfigDir(dir)
+	require.NoError(t, err, "d-suffix windows must load (parseWindowDuration grammar, not time.ParseDuration)")
+
+	log := cfg.Commands.Generators["weekly"].Log
+	require.NotNil(t, log)
+	assert.Equal(t, "7d", log.Window)
+	w, err := log.windowDuration()
+	require.NoError(t, err)
+	assert.Equal(t, 168*time.Hour, w)
+}
+
 func TestLoadConfigDirRejectsInvalidGenerators(t *testing.T) {
 	cases := []struct {
-		name string
-		toml string
+		name    string
+		toml    string
+		wantErr string // optional substring asserted on the error; empty = any error
 	}{
 		{"bad service", `
 [g]
 service = "missing"
-`},
+`, ""},
 		{"bad event", `
 [g]
 service = "svc"
 [g.log]
 events = ["PRIVMSG", "WALLOPS"]
-`},
+`, ""},
 		{"negative window", `
 [g]
 service = "svc"
 [g.log]
 window = "-5h"
-`},
+`, "window"},
 		{"negative max tokens", `
 [g]
 service = "svc"
 [g.log]
 max_tokens = -1
-`},
+`, ""},
 		{"bad system template", `
 [g]
 service = "svc"
 system = "{{.Unclosed"
-`},
+`, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2907,6 +2937,11 @@ system = "{{.Unclosed"
 			defer os.RemoveAll(dir)
 			_, err := loadConfigDir(dir)
 			require.Error(t, err)
+			if tc.wantErr != "" {
+				// "negative window" is rejected at validation (not TOML
+				// decode) with a message naming the window.
+				assert.Contains(t, err.Error(), tc.wantErr)
+			}
 		})
 	}
 }

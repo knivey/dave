@@ -82,7 +82,7 @@ Data flow for a log-fed generator invocation:
 
 ```go
 type LogQuerySpec struct {
-    Window    time.Duration `toml:"window"`     // default 24h
+    Window    string        `toml:"window"`     // duration string, d suffix allowed (e.g. "24h", "7d", "1d12h"); default "24h"
     Events    []string      `toml:"events"`     // default PRIVMSG, NOTICE, TOPIC, KICK
     MaxTokens int           `toml:"max_tokens"` // default 60000
 }
@@ -142,6 +142,11 @@ type LogWindowResult struct {
 | QUIT    | `[HH:MM] *** nick quit (reason)` (opt-in) |
 | NICK    | `[HH:MM] *** oldnick is now known as newnick` (opt-in) |
 | MODE    | `[HH:MM] *** nick set mode +o bob` (opt-in) |
+
+NOTE: QUIT and NICK are network-scoped in the logs (no channel) and never match
+a channel query — including them in `events` has no effect. (The writer stores
+them with an empty channel; retrieval filters on channel, so their render forms
+above are unreachable in practice and kept for completeness.)
 
 A date separator line `--- 2026-10-08 ---` is emitted whenever the (server-local)
 day changes between consecutive rows. The bot's own messages are included

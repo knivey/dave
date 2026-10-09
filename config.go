@@ -1050,12 +1050,13 @@ func validateCommands(commands *Commands, config *Config) error {
 }
 
 // validateLogQuerySpec applies defaults then rejects values that can only be
-// mistakes. Explicit zero is indistinguishable from unset and takes the
-// default (documented); negatives are errors.
+// mistakes. An empty window (unset) takes the default (documented); anything
+// that does not parse with parseWindowDuration's grammar (s/m/h/d, compound,
+// d suffix — e.g. "-5h", "12x", "0h") is an error.
 func validateLogQuerySpec(spec *LogQuerySpec, name string) error {
 	applyLogQueryDefaults(spec)
-	if spec.Window < 0 {
-		return fmt.Errorf("commands.generators.%s log window must be a positive duration (got %s)", name, spec.Window)
+	if _, err := spec.windowDuration(); err != nil {
+		return fmt.Errorf("commands.generators.%s log %w", name, err)
 	}
 	if spec.MaxTokens < 0 {
 		return fmt.Errorf("commands.generators.%s log max_tokens must be positive (got %d)", name, spec.MaxTokens)

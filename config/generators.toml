@@ -44,9 +44,12 @@
 # Log-fed commands add a sub-table (argument grammar becomes "^name [duration] [focus...]",
 # duration like 90m / 12h / 2d / 1d12h; anything else is focus text):
 #   [section.log]
-#   window               (duration, default: "24h")     How far back to read channel logs.
+#   window               (duration string, default: "24h") How far back to read channel logs.
+#                                               Units: s/m/h/d, compound allowed ("1d12h").
 #   events               (string array, default: ["PRIVMSG", "NOTICE", "TOPIC", "KICK"])
 #                                               Loggable events: PRIVMSG, NOTICE, JOIN, PART, QUIT, KICK, NICK, TOPIC, MODE.
+#                                               NOTE: QUIT and NICK are network-scoped in the logs (no channel) and never match
+#                                               a channel query — including them has no effect.
 #   max_tokens           (int, default: 60000)          Token budget for the transcript; over budget the
 #                                               NEWEST lines are kept and a truncation marker is prepended.
 #

@@ -61,20 +61,32 @@ func generator(network Network, c *girc.Client, e girc.Event, cfg GeneratorConfi
 	if cfg.Log != nil {
 		spec := *cfg.Log
 		// Production specs are defaulted at config-load time; hand-built or
-		// partial specs (tests, future callers) re-default here so a zero
+		// partial specs (tests, future callers) re-default here so an empty
 		// window never renders "last 0s" in the transcript header or the
 		// no_activity notice.
 		applyLogQueryDefaults(&spec)
 		focus := userText
 		if userText != "" {
 			first, rest, has := splitFirstWord(userText)
-			if d, ok := parseWindowDuration(first); ok {
-				spec.Window = d
+			if _, ok := parseWindowDuration(first); ok {
+				// The token IS the duration string (same grammar as the
+				// config field) — assign it raw; windowDuration() below
+				// resolves it.
+				spec.Window = first
 				focus = ""
 				if has {
 					focus = rest
 				}
 			}
+		}
+		window, werr := spec.windowDuration()
+		if werr != nil {
+			// Unreachable via config (validateLogQuerySpec rejects bad
+			// windows at load) and via args (parseWindowDuration vetted the
+			// token above); guards hand-built specs. Defense in depth.
+			runner.sendError(werr.Error())
+			runner.logger.Error("generator log window invalid", "error", werr)
+			return
 		}
 		now := time.Now()
 		lw, err := fetchChannelLogFn(spec, network.Name, channelRaw, channel, cfg.Model, now)
@@ -91,24 +103,25 @@ func generator(network Network, c *girc.Client, e girc.Event, cfg GeneratorConfi
 		}
 		if lw.TotalLines == 0 {
 			runner.sendError(expandNotice(getNotices().Generators.NoActivity, map[string]string{
-				"window": formatDuration(spec.Window),
+				"window": formatDuration(window),
 			}))
 			return
+		}
+		// "coverage" carries the kept rows' actual time range; BOTH endpoints
+		// must be set or the var stays empty (a hand-built result with only
+		// one of the two would otherwise render "14:32 to 00:00") —
+		// production results always set both together when any row was kept.
+		// Shared by the truncated notice's {coverage} var and the INFO log
+		// below (the log's actual-coverage field).
+		coverage := ""
+		if !lw.FirstKept.IsZero() && !lw.LastKept.IsZero() {
+			coverage = fmt.Sprintf("%s to %s", lw.FirstKept.Format("15:04"), lw.LastKept.Format("15:04"))
 		}
 		if lw.Truncated {
 			// "dropped" rides the vars map (and the default truncated
 			// template) alongside kept/total so the disclosure is direct —
 			// see the notice-default deviation note in
-			// setNoticesDefaults and task-5-report.md. "coverage" carries
-			// the kept rows' actual time range; BOTH endpoints must be set
-			// or the var stays empty (a hand-built result with only one of
-			// the two would otherwise render "14:32 to 00:00") —
-			// production results always set both together when any row was
-			// kept.
-			coverage := ""
-			if !lw.FirstKept.IsZero() && !lw.LastKept.IsZero() {
-				coverage = fmt.Sprintf("%s to %s", lw.FirstKept.Format("15:04"), lw.LastKept.Format("15:04"))
-			}
+			// setNoticesDefaults and task-5-report.md.
 			runner.sendWarning(expandNotice(getNotices().Generators.Truncated, map[string]string{
 				"kept":     fmt.Sprintf("%d", lw.TotalLines-lw.DroppedLines),
 				"total":    fmt.Sprintf("%d", lw.TotalLines),
@@ -119,7 +132,9 @@ func generator(network Network, c *girc.Client, e girc.Event, cfg GeneratorConfi
 			}))
 		}
 		runner.logger.Info("generator log query",
-			"window", spec.Window.String(), "files", len(lw.Files),
+			"trigger", cfg.Name,
+			"window", spec.Window, "coverage", coverage,
+			"files", len(lw.Files),
 			"lines", lw.TotalLines, "dropped", lw.DroppedLines,
 			"tokens", lw.Tokens, "budget", spec.MaxTokens,
 			"truncated", lw.Truncated)
@@ -135,7 +150,7 @@ func generator(network Network, c *girc.Client, e girc.Event, cfg GeneratorConfi
 		b.WriteString(instruction)
 		b.WriteString("\n\n")
 		fmt.Fprintf(&b, "Channel activity for %s on %s, last %s (%d lines, %d tokens):\n",
-			channel, network.Name, formatDuration(spec.Window), lw.TotalLines, lw.Tokens)
+			channel, network.Name, formatDuration(window), lw.TotalLines, lw.Tokens)
 		b.WriteString(strings.Join(lw.Lines, "\n"))
 		userText = b.String()
 	} else if userText == "" {

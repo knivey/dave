@@ -20,13 +20,18 @@ import (
 // It is the reusable "log retrieval -> LLM prompt input" contract: any
 // command can carry one via [name.log] in generators.toml.
 type LogQuerySpec struct {
-	Window    time.Duration `toml:"window"`     // default 24h
-	Events    []string      `toml:"events"`     // default PRIVMSG, NOTICE, TOPIC, KICK
-	MaxTokens int           `toml:"max_tokens"` // default 60000
+	// Window is a duration STRING parsed with parseWindowDuration's grammar
+	// (s/m/h/d units, compound allowed), NOT a TOML time.Duration field:
+	// BurntSushi decodes durations via time.ParseDuration, which rejects the
+	// d suffix — `window = "7d"` would be startup-fatal as a duration field.
+	// Resolved via windowDuration() at config validation and query time.
+	Window    string   `toml:"window"`     // duration string, d suffix allowed (e.g. "24h", "7d", "1d12h"); default "24h"
+	Events    []string `toml:"events"`     // default PRIVMSG, NOTICE, TOPIC, KICK
+	MaxTokens int      `toml:"max_tokens"` // default 60000
 }
 
 const (
-	defaultLogWindow    = 24 * time.Hour
+	defaultLogWindow    = "24h"
 	defaultLogMaxTokens = 60000
 )
 
@@ -41,7 +46,7 @@ var knownLogEvents = map[string]bool{
 // applyLogQueryDefaults fills unset fields with the documented defaults.
 // Callers: config validation (load time) and fetchChannelLogFrom (defense).
 func applyLogQueryDefaults(spec *LogQuerySpec) {
-	if spec.Window == 0 {
+	if spec.Window == "" {
 		spec.Window = defaultLogWindow
 	}
 	if spec.MaxTokens == 0 {
@@ -50,6 +55,17 @@ func applyLogQueryDefaults(spec *LogQuerySpec) {
 	if len(spec.Events) == 0 {
 		spec.Events = defaultLogEvents
 	}
+}
+
+// windowDuration resolves the Window string with parseWindowDuration's full
+// grammar (d suffix + compound units). Call after applyLogQueryDefaults —
+// an empty window means unset, not invalid.
+func (s LogQuerySpec) windowDuration() (time.Duration, error) {
+	d, ok := parseWindowDuration(s.Window)
+	if !ok {
+		return 0, fmt.Errorf("invalid window duration %q (expected e.g. \"24h\", \"7d\", \"1d12h\")", s.Window)
+	}
+	return d, nil
 }
 
 // renderLogLine renders one irc_logs row as a token-cheap transcript line.
@@ -286,7 +302,11 @@ func fetchChannelLog(spec LogQuerySpec, network, channelRaw, channelNorm, model 
 // normalize-at-lookup rule).
 func fetchChannelLogFrom(dir, rotation string, spec LogQuerySpec, network, channelRaw, channelNorm, model string, now time.Time) (*LogWindowResult, error) {
 	applyLogQueryDefaults(&spec)
-	from := now.Add(-spec.Window)
+	window, err := spec.windowDuration()
+	if err != nil {
+		return nil, err
+	}
+	from := now.Add(-window)
 
 	var rows []ircLog
 	var files []string

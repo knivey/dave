@@ -865,44 +865,58 @@ StreamLoop:
 			choice := chunk.Choices[0]
 			delta := choice.Delta
 
-			if delta.Role != "" {
-				assistantRole = delta.Role
-			}
+			// DESIGN NOTE: finish_reason is NOT the end of the wire. The
+			// OpenAI spec (and llama.cpp, verified against production Oct
+			// 2026) streams a FINAL usage chunk with an empty choices
+			// array AFTER the finish chunk — closing the stream at the
+			// finish chunk is why usage was never captured on ANY
+			// streaming command (llama, OpenAI, everything). Keep reading
+			// until [DONE]; the loop guards below stop content
+			// accumulation once a finish reason has been seen.
+			if streamFinishReason == "" {
+				if delta.Role != "" {
+					assistantRole = delta.Role
+				}
 
-			for _, tc := range delta.ToolCalls {
-				idx := int(tc.Index)
-				for len(accumulatedToolCalls) <= idx {
-					accumulatedToolCalls = append(accumulatedToolCalls, ToolCall{})
+				for _, tc := range delta.ToolCalls {
+					idx := int(tc.Index)
+					for len(accumulatedToolCalls) <= idx {
+						accumulatedToolCalls = append(accumulatedToolCalls, ToolCall{})
+					}
+					if tc.ID != "" {
+						accumulatedToolCalls[idx].ID = tc.ID
+					}
+					if tc.Type != "" {
+						accumulatedToolCalls[idx].Type = tc.Type
+					}
+					accumulatedToolCalls[idx].Function.Name += tc.Function.Name
+					accumulatedToolCalls[idx].Function.Arguments += tc.Function.Arguments
 				}
-				if tc.ID != "" {
-					accumulatedToolCalls[idx].ID = tc.ID
-				}
-				if tc.Type != "" {
-					accumulatedToolCalls[idx].Type = tc.Type
-				}
-				accumulatedToolCalls[idx].Function.Name += tc.Function.Name
-				accumulatedToolCalls[idx].Function.Arguments += tc.Function.Arguments
-			}
 
-			textDelta := delta.Content
-			fullContent += textDelta
-			sOut.HandleDelta(textDelta, cr.sendIRC)
+				textDelta := delta.Content
+				fullContent += textDelta
+				sOut.HandleDelta(textDelta, cr.sendIRC)
+			}
 
 			if choice.FinishReason == "tool_calls" {
 				streamFinishReason = "tool_calls"
 				cr.logger.Info("stream finished with tool calls")
-				stream.Close()
-				break StreamLoop
+				continue
 			}
 			if choice.FinishReason == "stop" || choice.FinishReason == "length" {
 				streamFinishReason = string(choice.FinishReason)
 				streamDone = true
-				stream.Close()
-				break StreamLoop
+				continue
 			}
 
 		case <-idleTimer.C:
 			stream.Close()
+			if streamFinishReason != "" {
+				// The generation finished but the server never sent the
+				// usage trailer / [DONE] — accept what arrived instead of
+				// erroring out a completed turn.
+				break StreamLoop
+			}
 			timeoutErr := fmt.Errorf("stream timed out (no data received): timeout=%s", cr.cfg.StreamTimeout)
 			cr.sendError(timeoutErr.Error())
 			cr.logger.Error("stream idle timeout exceeded", "timeout", cr.cfg.StreamTimeout)
@@ -1779,6 +1793,10 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 			}
 			turn = newTurnContext(runner.sessionID, messages)
 			runner.runTurn(turn)
+			// Same api_log pointer the primary turn logs — continuation
+			// turns (async job delivery) write to the same api log file
+			// and deserve the same breadcrumb.
+			runner.logger.Debug("continuation finished", "api_log", apiLogger.GetSessionFilePath(runner.sessionID))
 		}
 	}
 

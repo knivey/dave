@@ -1,11 +1,19 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/glebarez/sqlite"
+	logxi "github.com/mgutz/logxi/v1"
+	"gorm.io/gorm"
 )
 
 // LogQuerySpec describes a channel-log retrieval for generator commands.
@@ -190,4 +198,158 @@ func parseWindowDuration(s string) (time.Duration, bool) {
 		}
 	}
 	return total, total > 0
+}
+
+// LogWindowResult is the outcome of a channel-log query: the rendered,
+// budgeted transcript plus the stats that feed notices and logs.
+type LogWindowResult struct {
+	Lines        []string // final transcript lines (marker first when truncated)
+	Tokens       int      // token total of the kept lines
+	Truncated    bool
+	DroppedLines int
+	TotalLines   int // rows rendered before budgeting
+	FirstKept    time.Time
+	LastKept     time.Time
+	Files        []string
+}
+
+// logQueryRowCap bounds the scan: the token cap bounds the prompt but not
+// the rows pulled into memory for an absurd window like 3650d.
+const logQueryRowCap = 1000000
+
+var errLogWindowTooLarge = errors.New("log window exceeds row cap")
+
+var logQueryLogger logxi.Logger
+
+func init() {
+	logQueryLogger = logxi.New("irclog.query")
+	logQueryLogger.SetLevel(logxi.LevelAll)
+}
+
+// logPeriodKeys lists the rotation period keys (writer's periodKey format)
+// covering [from, to], ascending. Mirrors LogWriter.periodKey — do not
+// touch the writer's live handles.
+func logPeriodKeys(rotation string, from, to time.Time) []string {
+	layout := "2006-01"
+	stepMonths := 1
+	var start time.Time
+	if rotation == "yearly" {
+		layout = "2006"
+		stepMonths = 12
+		start = time.Date(from.Year(), 1, 1, 0, 0, 0, 0, from.Location())
+	} else {
+		start = time.Date(from.Year(), from.Month(), 1, 0, 0, 0, 0, from.Location())
+	}
+	var keys []string
+	for p := start; !p.After(to); p = p.AddDate(0, stepMonths, 0) {
+		keys = append(keys, p.Format(layout))
+	}
+	return keys
+}
+
+// openLogReadHandle opens a period file for reading with its OWN short-lived
+// gorm handle (WAL readers coexist with the live LogWriter; the writer's
+// lw.mu/handles are never touched). busy_timeout coexists with writer flushes.
+func openLogReadHandle(path string) (*gorm.DB, error) {
+	dialector := sqlite.Open(path + "?_pragma=busy_timeout(5000)")
+	db, err := gorm.Open(dialector, &gorm.Config{Logger: newGormLogger(logQueryLogger)})
+	if err != nil {
+		return nil, fmt.Errorf("opening log database %s: %w", path, err)
+	}
+	if sqlDB, err := db.DB(); err == nil {
+		sqlDB.SetMaxOpenConns(1)
+	}
+	return db, nil
+}
+
+func closeLogDB(db *gorm.DB) {
+	if sqlDB, err := db.DB(); err == nil {
+		sqlDB.Close()
+	}
+}
+
+// fetchChannelLog resolves the log directory/rotation from the live config
+// and delegates to fetchChannelLogFrom.
+func fetchChannelLog(spec LogQuerySpec, network, channelRaw, channelNorm, model string, now time.Time) (*LogWindowResult, error) {
+	var dir, rotation string
+	readConfig(func() {
+		dir = config.Logging.Dir
+		rotation = config.Logging.Rotation
+	})
+	return fetchChannelLogFrom(dir, rotation, spec, network, channelRaw, channelNorm, model, now)
+}
+
+// fetchChannelLogFrom queries every covering period file, renders the
+// transcript, and applies the keep-newest token budget. channelRaw and
+// channelNorm are matched together (IRC relays channel casing as typed, so
+// one window can contain both casings — the SQL analogue of the codebase's
+// normalize-at-lookup rule).
+func fetchChannelLogFrom(dir, rotation string, spec LogQuerySpec, network, channelRaw, channelNorm, model string, now time.Time) (*LogWindowResult, error) {
+	applyLogQueryDefaults(&spec)
+	from := now.Add(-spec.Window)
+
+	var rows []ircLog
+	var files []string
+	for _, key := range logPeriodKeys(rotation, from, now) {
+		path := filepath.Join(dir, key+".db")
+		if _, err := os.Stat(path); err != nil {
+			if os.IsNotExist(err) {
+				continue // no logs that period
+			}
+			return nil, err
+		}
+		db, err := openLogReadHandle(path)
+		if err != nil {
+			return nil, err
+		}
+		var batch []ircLog
+		err = db.
+			Where("network = ? AND channel IN ? AND command IN ? AND created_at >= ? AND created_at <= ?",
+				network, []string{channelRaw, channelNorm}, spec.Events, from, now).
+			Order("created_at asc, id asc").
+			Find(&batch).Error
+		closeLogDB(db)
+		if err != nil {
+			return nil, fmt.Errorf("querying %s: %w", path, err)
+		}
+		rows = append(rows, batch...)
+		files = append(files, path)
+	}
+	if len(rows) > logQueryRowCap {
+		return nil, fmt.Errorf("%w: %d rows (cap %d)", errLogWindowTooLarge, len(rows), logQueryRowCap)
+	}
+
+	// Defensive order: period files are disjoint and ascending, but sort so
+	// degraded inputs can never scramble the transcript.
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].CreatedAt.Equal(rows[j].CreatedAt) {
+			return rows[i].ID < rows[j].ID
+		}
+		return rows[i].CreatedAt.Before(rows[j].CreatedAt)
+	})
+
+	lines := buildTranscriptLines(rows)
+	kept, tokens, dropped := applyTokenBudget(lines, spec.MaxTokens, tokenCounterForModel(model))
+
+	res := &LogWindowResult{
+		Tokens:       tokens,
+		Truncated:    dropped > 0,
+		DroppedLines: dropped,
+		TotalLines:   len(rows),
+		Files:        files,
+	}
+	if dropped > 0 {
+		marker := fmt.Sprintf("[... %d earlier lines omitted to fit the %d-token budget ...]", dropped, spec.MaxTokens)
+		kept = append([]transcriptLine{{text: marker}}, kept...)
+	}
+	for _, l := range kept {
+		res.Lines = append(res.Lines, l.text)
+		if l.row != nil {
+			if res.FirstKept.IsZero() {
+				res.FirstKept = l.row.CreatedAt
+			}
+			res.LastKept = l.row.CreatedAt
+		}
+	}
+	return res, nil
 }

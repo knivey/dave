@@ -509,7 +509,10 @@ func registerCommandsLocked(cmds Commands) error {
 			newConfigCmds[trigger] = handler
 			newConfigCmdNames[trigger] = name
 			if gc.Log != nil {
-				newOptionalArgs[trigger] = true // bare AND with-args both dispatch
+				// Log-fed generators: args are optional — the model defaults
+				// the window via the query_channel_logs tool (bare AND
+				// with-args both dispatch).
+				newOptionalArgs[trigger] = true
 			} else {
 				newTakesArgs[trigger] = true
 			}

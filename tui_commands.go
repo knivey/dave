@@ -83,6 +83,9 @@ func tuiCmdHelp(_ []string, _ string) {
 	fmt.Fprintf(logView, "  /tokencount <session-id>     - Our tokenizer count vs provider-reported usage\n")
 	fmt.Fprintf(logView, "  /reinject <session-id>       - Re-render and inject system prompt into session\n")
 	fmt.Fprintf(logView, "  /systemmsg <session-id> <text> - Inject custom system message (Go template) into session\n")
+	fmt.Fprintf(logView, "Keys:\n")
+	fmt.Fprintf(logView, "  ^S                           - Toggle scrollbar (state shown on the status line)\n")
+	fmt.Fprintf(logView, "  PgUp/PgDn                    - Scroll log view\n")
 }
 
 func tuiCmdReload(parts []string, _ string) {

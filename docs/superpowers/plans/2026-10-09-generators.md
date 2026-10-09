@@ -96,10 +96,11 @@ func TestRenderLogLine(t *testing.T) {
 
 func TestBuildTranscriptLinesDaySeparators(t *testing.T) {
 	d1 := time.Date(2026, 10, 7, 23, 59, 0, 0, time.Local)
+	midnight := time.Date(2026, 10, 8, 0, 0, 0, 0, time.Local)
 	d2 := time.Date(2026, 10, 8, 0, 1, 0, 0, time.Local)
 	rows := []ircLog{
 		mkRow("PRIVMSG", "a", "#chan", "one", d1),
-		mkRow("PRIVMSG", "b", "#chan", "two", d1.Add(time.Minute)),
+		mkRow("PRIVMSG", "b", "#chan", "two", midnight),
 		mkRow("PRIVMSG", "c", "#chan", "three", d2),
 	}
 	lines := buildTranscriptLines(rows)
@@ -110,13 +111,13 @@ func TestBuildTranscriptLinesDaySeparators(t *testing.T) {
 	assert.Equal(t, []string{
 		"--- 2026-10-07 ---",
 		"[23:59] <a> one",
-		"[00:00] <b> two",
 		"--- 2026-10-08 ---",
+		"[00:00] <b> two",
 		"[00:01] <c> three",
 	}, texts)
 	// separator lines carry no row pointer; message lines do
 	assert.Nil(t, lines[0].row)
-	assert.NotNil(t, lines[1].row)
+	assert.NotNil(t, lines[2].row)
 }
 
 func TestApplyTokenBudget(t *testing.T) {
@@ -1114,7 +1115,6 @@ func TestEphemeralRunnerGuards(t *testing.T) {
 		require.NoError(t, theDB.Model(&TurnUsage{}).Count(&before).Error)
 		cr.storeUsage(&Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15, FinishReason: "stop"}, "chat/completions", 100)
 		var after int64
-		require.NoError(t, theDB.Model(&TurnUsage{}).Count(&before).Error)
 		require.NoError(t, theDB.Model(&TurnUsage{}).Count(&after).Error)
 		assert.Equal(t, before+1, after, "ephemeral usage rows ARE written (session 0 attribution)")
 		var row TurnUsage
@@ -1379,7 +1379,7 @@ func TestGeneratorLogCommandBuildsEphemeralTurn(t *testing.T) {
 
 	ctx := context.Background()
 	go func() {
-		generator(Network{Name: "testnet"}, nil, genEvent("#chan"), cfg, ctx, outputCh, &User{ID: 1, Nick: "shrew"}, "12h", "focus on drama")
+		generator(Network{Name: "testnet"}, nil, genEvent("#chan"), cfg, ctx, outputCh, &User{ID: 1, Nick: "shrew"}, "12h focus on drama")
 	}()
 
 	lines := drainGenOutput(t, outputCh, 16)
@@ -1390,7 +1390,7 @@ func TestGeneratorLogCommandBuildsEphemeralTurn(t *testing.T) {
 	assert.Contains(t, gotBody, "focus on drama", "focus text is the instruction")
 	assert.Contains(t, gotBody, "[11:00] <alice> hi", "transcript appended to user message")
 	assert.Contains(t, gotBody, "Summarize the following channel activity.", "default instruction used when no focus")
-	assert.NotContains(t, gotBody, "12h", "duration token must not leak into the prompt")
+	assert.Contains(t, gotBody, "Channel activity for #chan on testnet", "transcript header names channel/network")
 
 	var messagesAfter int64
 	require.NoError(t, theDB.Model(&Message{}).Count(&messagesAfter).Error)
@@ -1569,7 +1569,7 @@ In `setNoticesDefaults` add:
 		n.Generators.Truncated = "Log truncated to fit the token budget: kept {kept} of {total} lines ({tokens}/{budget} tokens)."
 	}
 	if n.Generators.WindowTooLarge == "" {
-		n.Generators.WindowTooLarge = "That window is too large ({rows} rows > {cap} cap); narrow the duration."
+		n.Generators.WindowTooLarge = "That window is too large (over the {cap}-row cap); narrow the duration."
 	}
 ```
 
@@ -1656,7 +1656,7 @@ func generator(network Network, c *girc.Client, e girc.Event, cfg GeneratorConfi
 		if err != nil {
 			if errors.Is(err, errLogWindowTooLarge) {
 				runner.sendError(expandNotice(getNotices().Generators.WindowTooLarge, map[string]string{
-					"rows": fmt.Sprintf("%d", logQueryRowCap), "cap": fmt.Sprintf("%d", logQueryRowCap),
+					"cap": fmt.Sprintf("%d", logQueryRowCap),
 				}))
 				return
 			}
@@ -2125,7 +2125,7 @@ max_tokens = 60000
 # Generator command notices (summary/tabloid/fakenews...). Hot-reloadable.
 # no_activity = "No logged activity found in the last {window}."
 # truncated = "Log truncated to fit the token budget: kept {kept} of {total} lines ({tokens}/{budget} tokens)."
-# window_too_large = "That window is too large ({rows} rows > {cap} cap); narrow the duration."
+# window_too_large = "That window is too large (over the {cap}-row cap); narrow the duration."
 ```
 
 5. AGENTS.md — add one Architecture bullet after the notices.go bullet (concise, facts only):

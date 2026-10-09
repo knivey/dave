@@ -500,7 +500,11 @@ func setNoticesDefaults(n *NoticesConfig) {
 		// present in the notice — keep-newest-and-disclose truncation must
 		// tell the user how many of the requested lines were dropped, not
 		// just the kept/total pair (which requires subtraction to decode).
-		n.Generators.Truncated = "Log truncated to fit the token budget: kept {kept} of {total} lines ({dropped} dropped; {tokens}/{budget} tokens)."
+		// {coverage} (the kept rows' actual time range, added in task 7 per
+		// the review ruling) expands to empty when FirstKept is zero — the
+		// sentence's placeholder is still consumed, only hand-built results
+		// can hit that shape.
+		n.Generators.Truncated = "Log truncated to fit the token budget: kept {kept} of {total} lines ({dropped} dropped; {tokens}/{budget} tokens). Coverage: {coverage}."
 	}
 	if n.Generators.WindowTooLarge == "" {
 		n.Generators.WindowTooLarge = "That window is too large (over the {cap}-row cap); narrow the duration."

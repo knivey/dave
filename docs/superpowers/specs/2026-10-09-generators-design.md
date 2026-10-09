@@ -323,8 +323,8 @@ hidden_mcp_tools = ["generate_image_async", "enhance_and_generate_async", "wait_
 | Key | Level | Vars |
 |-----|-------|------|
 | `no_activity` | error | `{window}` |
-| `truncated` | warn | `{kept}`, `{total}`, `{tokens}`, `{budget}`, `{coverage}` |
-| `window_too_large` | error | `{rows}`, `{cap}` |
+| `truncated` | warn | `{kept}`, `{total}`, `{dropped}`, `{tokens}`, `{budget}`, `{coverage}` |
+| `window_too_large` | error | `{cap}` |
 
 Hardcoded fallbacks via `setNoticesDefaults()`; hot-reloadable like all
 notices.

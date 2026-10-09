@@ -169,6 +169,81 @@ func TestGeneratorTruncationNotice(t *testing.T) {
 	joined := strings.Join(lines, "\n")
 	assert.Contains(t, joined, "420", "truncation notice carries totals")
 	assert.Contains(t, joined, "120", "dropped count present")
+	// Hand-built result with zero FirstKept/LastKept: the coverage var must
+	// stay empty rather than render a bogus "00:00 to 00:00" range.
+	assert.NotContains(t, joined, "00:00", "zero FirstKept/LastKept must not render a bogus coverage range")
+}
+
+func TestGeneratorTruncationNoticeCoverage(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	outputCh := withGeneratorRunner(t, AIConfig{Model: "qwen3"}, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, streamChunk(`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"qwen3","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)+"data: [DONE]\n\n")
+	})
+	origFetch := fetchChannelLogFn
+	fetchChannelLogFn = func(spec LogQuerySpec, network, raw, norm, model string, now time.Time) (*LogWindowResult, error) {
+		return &LogWindowResult{Lines: []string{"[11:00] <a> x"}, Tokens: 59000, Truncated: true,
+			DroppedLines: 120, TotalLines: 420,
+			FirstKept: time.Date(2026, 10, 8, 14, 32, 0, 0, time.Local),
+			LastKept:  time.Date(2026, 10, 8, 16, 45, 0, 0, time.Local)}, nil
+	}
+	t.Cleanup(func() { fetchChannelLogFn = origFetch })
+
+	cfg := GeneratorConfig{AIConfig: AIConfig{Name: "summary"}, Log: &LogQuerySpec{MaxTokens: 60000}}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		generator(Network{Name: "testnet"}, nil, genEvent("#chan"), cfg, context.Background(), outputCh, &User{ID: 1})
+	}()
+	<-done
+	lines := drainGenOutput(t, outputCh, 8)
+	joined := strings.Join(lines, "\n")
+	assert.Contains(t, joined, "14:32 to 16:45", "truncation notice carries the actual coverage range")
+}
+
+func TestGeneratorNoFocusUsesConfiguredPrompt(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	var gotBody string
+	outputCh := withGeneratorRunner(t, AIConfig{Model: "qwen3"}, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		gotBody = string(body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, streamChunk(`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"qwen3","choices":[{"index":0,"delta":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}`)+"data: [DONE]\n\n")
+	})
+
+	origFetch := fetchChannelLogFn
+	fetchChannelLogFn = func(spec LogQuerySpec, network, raw, norm, model string, now time.Time) (*LogWindowResult, error) {
+		return &LogWindowResult{
+			Lines:  []string{"[11:00] <alice> hi"},
+			Tokens: 5, TotalLines: 1,
+			Files: []string{"x.db"},
+		}, nil
+	}
+	t.Cleanup(func() { fetchChannelLogFn = origFetch })
+
+	// Zero LogQuerySpec on purpose: the executor must re-apply log-query
+	// defaults locally (production specs are defaulted at load time), or the
+	// transcript header renders "last 0s".
+	cfg := GeneratorConfig{AIConfig: AIConfig{Name: "summary", Model: "qwen3", Streaming: true,
+		StreamTimeout: 5 * time.Second, Timeout: 10 * time.Second},
+		Prompt: "CUSTOM DEFAULT",
+		Log:    &LogQuerySpec{}}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		generator(Network{Name: "testnet"}, nil, genEvent("#chan"), cfg, context.Background(), outputCh, &User{ID: 1})
+	}()
+	<-done
+	drainGenOutput(t, outputCh, 8)
+	assert.Contains(t, gotBody, "CUSTOM DEFAULT", "no focus text -> cfg.Prompt is the instruction")
+	assert.Contains(t, gotBody, "Channel activity for #chan on testnet", "transcript header also present")
+	assert.Contains(t, gotBody, "last 1d0h", "zero log spec defaults applied at the executor (24h window)")
+	assert.NotContains(t, gotBody, "Summarize the following channel activity.", "builtin default must not be used when cfg.Prompt is set")
 }
 
 func TestGeneratorWindowTooLargeNotice(t *testing.T) {

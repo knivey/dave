@@ -510,6 +510,26 @@ func TestBuildPastebinHelpTextWithAliases(t *testing.T) {
 	assert.NotContains(t, text, "✱")
 }
 
+func TestBuildHelpTextListsGenerators(t *testing.T) {
+	readConfig(func() {
+		config.Commands.Generators = map[string]GeneratorConfig{
+			"summary": {AIConfig: AIConfig{Name: "summary", Description: "Summarize recent channel activity"}},
+		}
+	})
+	t.Cleanup(func() {
+		readConfig(func() { config.Commands.Generators = map[string]GeneratorConfig{} })
+	})
+
+	net := Network{Name: "testnet"}
+	text := buildHelpText("dave", "!", net)
+	assert.Contains(t, text, "Generators:")
+	assert.Contains(t, text, "summary", "generator trigger listed")
+	assert.Contains(t, text, "Summarize recent channel activity")
+
+	paste := buildPastebinHelpText("dave", "!", net)
+	assert.Contains(t, paste, "summary")
+}
+
 func TestFindCommandHelpByAlias(t *testing.T) {
 	config.Commands.Chats = map[string]AIConfig{
 		"chat": {Name: "chat", Aliases: []string{"gpt", "ask"}, Service: "openai", Model: "gpt-4", Description: "general chat"},

@@ -20,6 +20,7 @@ type helpEntry struct {
 func buildHelpText(botnick, trigger string, network Network) string {
 	var completions map[string]AIConfig
 	var chats map[string]AIConfig
+	var generators map[string]GeneratorConfig
 	var tools map[string]MCPCommandConfig
 	readConfig(func() {
 		completions = make(map[string]AIConfig, len(config.Commands.Completions))
@@ -29,6 +30,10 @@ func buildHelpText(botnick, trigger string, network Network) string {
 		chats = make(map[string]AIConfig, len(config.Commands.Chats))
 		for k, v := range config.Commands.Chats {
 			chats[k] = v
+		}
+		generators = make(map[string]GeneratorConfig, len(config.Commands.Generators))
+		for k, v := range config.Commands.Generators {
+			generators[k] = v
 		}
 		tools = make(map[string]MCPCommandConfig, len(config.Commands.Tools))
 		for k, v := range config.Commands.Tools {
@@ -99,6 +104,19 @@ func buildHelpText(botnick, trigger string, network Network) string {
 		}
 	}
 
+	filteredGenerators := make(map[string]GeneratorConfig)
+	for k, v := range generators {
+		if !isNetworkCommandDisabled(network, k) {
+			filteredGenerators[k] = v
+		}
+	}
+	if len(filteredGenerators) > 0 {
+		lines = append(lines, "\x02Generators:\x02")
+		for _, l := range formatTable(sortedGeneratorEntries(trigger, filteredGenerators)) {
+			lines = append(lines, "  "+l)
+		}
+	}
+
 	filteredTools := make(map[string]MCPCommandConfig)
 	for k, v := range tools {
 		if !isNetworkCommandDisabled(network, k) {
@@ -162,6 +180,7 @@ func pastebinCmd(cmd string) string {
 func buildPastebinHelpText(botnick, trigger string, network Network) string {
 	var completions map[string]AIConfig
 	var chats map[string]AIConfig
+	var generators map[string]GeneratorConfig
 	var tools map[string]MCPCommandConfig
 	readConfig(func() {
 		completions = make(map[string]AIConfig, len(config.Commands.Completions))
@@ -171,6 +190,10 @@ func buildPastebinHelpText(botnick, trigger string, network Network) string {
 		chats = make(map[string]AIConfig, len(config.Commands.Chats))
 		for k, v := range config.Commands.Chats {
 			chats[k] = v
+		}
+		generators = make(map[string]GeneratorConfig, len(config.Commands.Generators))
+		for k, v := range config.Commands.Generators {
+			generators[k] = v
 		}
 		tools = make(map[string]MCPCommandConfig, len(config.Commands.Tools))
 		for k, v := range config.Commands.Tools {
@@ -214,6 +237,18 @@ func buildPastebinHelpText(botnick, trigger string, network Network) string {
 	if len(filteredCompletions) > 0 {
 		entries := sortedPastebinEntries(trigger, filteredCompletions)
 		writeGFMCmdTable(&b, "## Completions", entries)
+		b.WriteString("\n")
+	}
+
+	filteredGenerators := make(map[string]GeneratorConfig)
+	for k, v := range generators {
+		if !isNetworkCommandDisabled(network, k) {
+			filteredGenerators[k] = v
+		}
+	}
+	if len(filteredGenerators) > 0 {
+		entries := sortedPastebinGeneratorEntries(trigger, filteredGenerators)
+		writeGFMCmdTable(&b, "## Generators", entries)
 		b.WriteString("\n")
 	}
 
@@ -313,6 +348,36 @@ func buildPastebinHelpText(botnick, trigger string, network Network) string {
 }
 
 func sortedPastebinEntries(trigger string, m map[string]AIConfig) []pastebinEntry {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return formatModelInfo(m[keys[i]].Service, m[keys[i]].Model, m[keys[i]].DetectImages) <
+			formatModelInfo(m[keys[j]].Service, m[keys[j]].Model, m[keys[j]].DetectImages)
+	})
+	entries := make([]pastebinEntry, 0, len(m))
+	for _, k := range keys {
+		c := m[k]
+		cmds := []string{trigger + c.Name}
+		for _, a := range c.Aliases {
+			cmds = append(cmds, trigger+a)
+		}
+		entries = append(entries, pastebinEntry{
+			cmds:         cmds,
+			service:      c.Service,
+			model:        c.Model,
+			detectImages: c.DetectImages,
+			desc:         formatDesc(c.Description, false),
+		})
+	}
+	return entries
+}
+
+// sortedPastebinGeneratorEntries mirrors sortedPastebinEntries for
+// GeneratorConfig (same sort and same entry shape: canonical trigger word
+// first, then aliases).
+func sortedPastebinGeneratorEntries(trigger string, m map[string]GeneratorConfig) []pastebinEntry {
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)
@@ -570,6 +635,27 @@ func sortedAIConfigEntries(trigger string, m map[string]AIConfig) []helpEntry {
 			info: formatModelInfo(c.Service, c.Model, c.DetectImages),
 			desc: formatDesc(c.Description, false),
 		})
+	}
+	return entries
+}
+
+// sortedGeneratorEntries mirrors sortedAIConfigEntries for GeneratorConfig
+// (same keys-slice copy and service/model sort as the completions/chats
+// groups; entries built via buildAIConfigEntry, which also carries mcpInfo).
+func sortedGeneratorEntries(trigger string, m map[string]GeneratorConfig) []helpEntry {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		iInfo := formatModelInfo(m[keys[i]].Service, m[keys[i]].Model, m[keys[i]].DetectImages)
+		jInfo := formatModelInfo(m[keys[j]].Service, m[keys[j]].Model, m[keys[j]].DetectImages)
+		return iInfo < jInfo
+	})
+	entries := make([]helpEntry, 0, len(m))
+	for _, k := range keys {
+		c := m[k]
+		entries = append(entries, buildAIConfigEntry(trigger, c.AIConfig))
 	}
 	return entries
 }

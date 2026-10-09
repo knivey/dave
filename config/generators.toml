@@ -1,0 +1,83 @@
+# Generators: one-shot, stateless agentic commands. The prompt is built from
+# the system template + one user message (your args, plus the channel-log
+# transcript when [name.log] is present), then run through the full agentic
+# tool loop once. Nothing is persisted: no session, no messages, no compaction.
+# Each section name becomes the command trigger. Use `aliases` for additional triggers.
+#
+# Available options (per [section]):
+#   service              (string, required)         Service name from services.toml
+#   model                (string)                    Model name (e.g. "qwen3-32b")
+#   aliases              (string array, default: []) Additional trigger names for this command
+#   description          (string)                    Short description for help listings
+#   system               (string)                    System prompt (supports Go templates)
+#   streaming            (bool, default: false)      Stream responses to IRC as they generate
+#   rendermarkdown       (bool, default: false)      Convert markdown to IRC formatting
+#   maxtokens            (int, cascades from service)     Max tokens per response (legacy, prefer maxcompletiontokens)
+#   maxcompletiontokens  (int, cascades from service)     Max completion tokens per response
+#   temperature          (float, cascades from service)   Sampling temperature
+#   topp                 (float, omitted when unset, API default typically 1.0)  Nucleus sampling (0-1)
+#   stop                 (string array)              Stop sequences
+#   presencepenalty      (float, default: 0)         -2.0 to 2.0, penalize new topics
+#   frequencypenalty      (float, default: 0)         -2.0 to 2.0, penalize repetition
+#   timeout              (duration, default: 60s)    Overall API call timeout. Cascade: command > service > 60s
+#   streamtimeout        (duration, default: timeout) Max idle time between stream chunks. Cascade: command > service > timeout
+#   load_notice          (bool, default: true for type = "llama" services, else false) Before the turn, probe the service's /v1/models and send a "loading model" IRC notice when the requested model is not loaded yet (llama-server built-in router / llama-swap model swap). Notice text: [llm] model_load in notices.toml. Cascade: command > service > type default.
+#   toolverbose          (bool, default: true)       Show 🔧 tool call notifications in IRC (cascades from service)
+#   mcps                 (string array)              Opt-in MCP server names for tool access
+#   hidden_mcp_tools     (string array)              MCP tool names to hide from the LLM. Bare names ("tool") or server-prefixed ("server.tool"). Cascade: command > service > root.
+#   hidden_mcp_tool_sets (string array)              Named tool sets from mcps.toml [hidden_mcp_tool_sets.*]. Merged with hidden_mcp_tools. Cascade: command > service > root.
+#   extra_body           (map)                       Provider-specific parameters (top-level in request body)
+#   chat_template_kwargs (map)                       Provider-specific parameters (nested in request body)
+#   api_user             (string, cascades from service)  Go template for the end-user identifier field. Variables: {{.Nick}}, {{.BotNick}}, {{.Channel}}, {{.Network}}, {{.Date}}. Empty = not sent.
+#   prompt               (string)                    Default instruction when the caller gives no focus text.
+#                                               Fallback chain: focus text > prompt > built-in default.
+#
+# Log-fed commands add a sub-table (argument grammar becomes "^name [duration] [focus...]",
+# duration like 90m / 12h / 2d / 1d12h; anything else is focus text):
+#   [section.log]
+#   window               (duration, default: "24h")     How far back to read channel logs.
+#   events               (string array, default: ["PRIVMSG", "NOTICE", "TOPIC", "KICK"])
+#                                               Loggable events: PRIVMSG, NOTICE, JOIN, PART, QUIT, KICK, NICK, TOPIC, MODE.
+#   max_tokens           (int, default: 60000)          Token budget for the transcript; over budget the
+#                                               NEWEST lines are kept and a truncation marker is prepended.
+#
+# Not useful for generators (stateless): previous_response_id, detectimages,
+# disabled_builtin_tools (builtin LLM tools are never offered to generators).
+# toolverbose = false silences the 🔧 tool-call notices — recommended for
+# output-sensitive commands (tabloid, fakenews).
+#
+# Requires [logging] enabled in config.toml — log-fed commands read data/logs/*.db.
+#
+# Example with all generator-only options:
+# [example]
+# service = "local"
+# model = "qwen3-32b"
+# streaming = true
+# rendermarkdown = true
+# toolverbose = false
+# mcps = ["img-mcp"]
+# hidden_mcp_tools = ["generate_image_async", "enhance_and_generate_async", "wait_for_job", "job_status", "list_jobs", "cancel_job"]
+# prompt = "Write a satirical article about the given topic."
+# system = "You are {{.BotNick}}, a tabloid hack for {{.Channel}} on {{.Network}}."
+# [example.log]
+# window = "24h"
+# events = ["PRIVMSG", "NOTICE", "TOPIC", "KICK"]
+# max_tokens = 60000
+
+[summary]
+description = "Summarize recent channel activity"
+service = "local"
+model = "qwen3-32b"
+streaming = true
+rendermarkdown = true
+prompt = "Summarize the following channel activity."
+system = """\
+You are {{.BotNick}}, summarizing recent activity in {{.Channel}} on {{.Network}}.
+Cover the main topics, notable events, and who participated. Be concise but
+specific. If the transcript begins with a truncation marker, say that coverage
+starts mid-window.\
+"""
+[summary.log]
+window = "24h"
+events = ["PRIVMSG", "NOTICE", "TOPIC", "KICK"]
+max_tokens = 60000

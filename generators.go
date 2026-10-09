@@ -60,6 +60,11 @@ func generator(network Network, c *girc.Client, e girc.Event, cfg GeneratorConfi
 
 	if cfg.Log != nil {
 		spec := *cfg.Log
+		// Production specs are defaulted at config-load time; hand-built or
+		// partial specs (tests, future callers) re-default here so a zero
+		// window never renders "last 0s" in the transcript header or the
+		// no_activity notice.
+		applyLogQueryDefaults(&spec)
 		focus := userText
 		if userText != "" {
 			first, rest, has := splitFirstWord(userText)
@@ -94,13 +99,21 @@ func generator(network Network, c *girc.Client, e girc.Event, cfg GeneratorConfi
 			// "dropped" rides the vars map (and the default truncated
 			// template) alongside kept/total so the disclosure is direct —
 			// see the notice-default deviation note in
-			// setNoticesDefaults and task-5-report.md.
+			// setNoticesDefaults and task-5-report.md. "coverage" carries
+			// the kept rows' actual time range; zero FirstKept/LastKept
+			// (hand-built results) expand to empty — production results
+			// always set both when any row was kept.
+			coverage := ""
+			if !lw.FirstKept.IsZero() {
+				coverage = fmt.Sprintf("%s to %s", lw.FirstKept.Format("15:04"), lw.LastKept.Format("15:04"))
+			}
 			runner.sendWarning(expandNotice(getNotices().Generators.Truncated, map[string]string{
-				"kept":    fmt.Sprintf("%d", lw.TotalLines-lw.DroppedLines),
-				"total":   fmt.Sprintf("%d", lw.TotalLines),
-				"dropped": fmt.Sprintf("%d", lw.DroppedLines),
-				"tokens":  fmt.Sprintf("%d", lw.Tokens),
-				"budget":  fmt.Sprintf("%d", spec.MaxTokens),
+				"kept":     fmt.Sprintf("%d", lw.TotalLines-lw.DroppedLines),
+				"total":    fmt.Sprintf("%d", lw.TotalLines),
+				"dropped":  fmt.Sprintf("%d", lw.DroppedLines),
+				"tokens":   fmt.Sprintf("%d", lw.Tokens),
+				"budget":   fmt.Sprintf("%d", spec.MaxTokens),
+				"coverage": coverage,
 			}))
 		}
 		runner.logger.Info("generator log query",

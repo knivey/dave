@@ -139,6 +139,18 @@ caps, event filters, queue discipline).
   the INFO logs are unchanged.
 - System notices (`sendError`, `sendWarning`, queue notices, rate/ban
   messages) are unaffected — only model-authored text is suppressed.
+- **Streaming on ephemeral turns defers emission** (all four loop
+  variants): the wire still streams — chunk logging, usage trailer,
+  idle timeouts all unchanged — but no text is emitted while the stream
+  is open, because a text delta can always be followed by tool calls and
+  finality is only known when the stream closes. The final iteration's
+  text is sent once, complete, via `sendFinalText` (render + pastebin);
+  intermediate iterations' text is discarded from IRC (still logged).
+  A stream that dies mid-flight delivers whatever text arrived (same
+  "deliver what arrived" philosophy as non-ephemeral error paths); the
+  user-stop path deliberately delivers nothing, as today. Live typing is
+  traded away for quiet channels — on ephemeral turns every reply
+  arrives as one complete message.
 - Non-ephemeral behavior is byte-identical (the existing guards pin it).
 - Dispatch truth table unchanged: log-fed generators stay optional-args
   (bare `^summary` valid — the model defaults the window via the tool).
@@ -166,8 +178,9 @@ caps, event filters, queue discipline).
   turn ends.
 - Honors `disabled_builtin_tools`; joins the default `hidden_tools` list.
 - Not streamable: a tool-delivered answer arrives as one message (tool
-  arguments are not streamed by our renderer). Documented trade-off — the
-  fallback path keeps live streaming.
+  arguments are not streamed by our renderer); with deferred emission the
+  fallback answer is also one complete message — same visible shape
+  either way. Documented trade-off.
 
 ### Fallback (respond_tool = false, or the model just finishes naturally)
 
@@ -265,7 +278,9 @@ Guard tests (table-driven, testify, existing helpers):
   can't widen its own budget.
 - **Suppression always-on (both respond modes)**: generators are one-shot
   "produce a thing" commands; chatter isn't output. The fallback path
-  preserves streaming and small-model compatibility.
+  preserves small-model compatibility (auto-send on natural completion);
+  live typing is deliberately traded for quiet channels (deferred
+  emission — finality is unknowable mid-stream).
 - **`respond` config-gated, default off**: opt-in per generator; the
   fallback guarantees output even if a model never calls it. One-message
   delivery for tool answers is the accepted cost.

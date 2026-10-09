@@ -1738,6 +1738,159 @@ func TestRunTurnStreamEmptyResponseExhausted(t *testing.T) {
 	assert.Equal(t, "...", last.Content, "reasoning is not accepted as the reply; the sentinel stays")
 }
 
+// TestRunTurnStreamReadsUsageTrailer pins the Oct 2026 production fix:
+// the OpenAI spec streams a FINAL usage chunk (empty choices) AFTER the
+// finish_reason chunk — dave used to close the stream at the finish
+// chunk, so usage was NEVER captured on any streaming command. The loop
+// must keep reading until [DONE].
+func TestRunTurnStreamReadsUsageTrailer(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	sid := createTestSession(t, "testnet", "#101", "shrew", "testcmd", "svc", "m")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "hi"}))
+	messages, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+
+	chunk := func(delta string, finish any) string {
+		return fmt.Sprintf(`data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":%s,"finish_reason":%s}]}`+"\n\n", delta, finish)
+	}
+	stream := chunk(`{"role":"assistant","content":"hello"}`, `null`) +
+		chunk(`{}`, `"stop"`) + // finish chunk — NOT the end of the wire
+		`data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[],"usage":{"prompt_tokens":123,"completion_tokens":7,"total_tokens":130,"prompt_tokens_details":{"cached_tokens":100}}}` + "\n\n" +
+		"data: [DONE]\n\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, stream)
+	}))
+	defer server.Close()
+
+	transport := newDaveTransport(nil, nil)
+	client := openai.NewClient(
+		option.WithAPIKey("test-key"),
+		option.WithBaseURL(server.URL+"/v1"),
+		option.WithHTTPClient(&http.Client{Transport: transport}),
+	)
+	outputCh := make(chan string, 8)
+	logger := logxi.New("test")
+	logger.SetLevel(logxi.LevelAll)
+	cr := &chatRunner{
+		openaiClient: &client,
+		transport:    transport,
+		httpClient:   &http.Client{Transport: transport},
+		baseURL:      server.URL + "/v1",
+		apiKey:       "test-key",
+		cfg:          AIConfig{Model: "m", Timeout: 10 * time.Second, Streaming: true, StreamTimeout: 5 * time.Second},
+		network:      Network{Name: "testnet"},
+		channel:      "#101",
+		nick:         "shrew",
+		logger:       logger,
+		ctx:          context.Background(),
+		outputCh:     outputCh,
+	}
+	cr.sessionID = sid
+
+	cr.runTurn(newTurnContext(sid, messages))
+
+	lines := drainOutput(t, outputCh, 4, time.Second)
+	assert.Contains(t, strings.Join(lines, "\n"), "hello")
+
+	// The trailer usage must land in turn_usage — this is what feeds the
+	// auto-compaction trigger and /tokencount.
+	tu, err := getLastTurnUsageForSession(sid)
+	require.NoError(t, err)
+	require.NotNil(t, tu, "turn_usage row must be written from the stream trailer")
+	assert.Equal(t, 123, tu.PromptTokens)
+	assert.Equal(t, 7, tu.CompletionTokens)
+	assert.Equal(t, 100, tu.CachedTokens)
+}
+
+// TestRunTurnStreamToleratesMissingDoneAfterFinish pins two behaviors at
+// once: the loop keeps reading AFTER the finish chunk (a usage trailer
+// arriving inside the idle window is captured — pre-fix code closed at
+// finish and never saw it), and the idle-timeout grace treats expiry
+// after a finish reason as a normal end when the server never sends
+// [DONE] (no error to the user, turn completes). Chunks are explicitly
+// flushed so the client really idles between them.
+func TestRunTurnStreamToleratesMissingDoneAfterFinish(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	sid := createTestSession(t, "testnet", "#101", "shrew", "testcmd", "svc", "m")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "hi"}))
+	messages, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+
+	chunk := func(delta string, finish any) string {
+		return fmt.Sprintf(`data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":%s,"finish_reason":%s}]}`+"\n\n", delta, finish)
+	}
+	finishStream := chunk(`{"role":"assistant","content":"done talking"}`, `null`) + chunk(`{}`, `"stop"`)
+	trailer := `data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[],"usage":{"prompt_tokens":50,"completion_tokens":3,"total_tokens":53}}` + "\n\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		rc := http.NewResponseController(w)
+		fmt.Fprint(w, finishStream)
+		if err := rc.Flush(); err != nil {
+			return
+		}
+		// Trailer arrives well inside the 1s idle window (300ms gap)…
+		time.Sleep(300 * time.Millisecond)
+		fmt.Fprint(w, trailer)
+		if err := rc.Flush(); err != nil {
+			return
+		}
+		// …then the server never sends [DONE]: hold the connection open
+		// past StreamTimeout so the grace branch is what ends the loop.
+		time.Sleep(3 * time.Second)
+	}))
+	defer server.Close()
+
+	transport := newDaveTransport(nil, nil)
+	client := openai.NewClient(
+		option.WithAPIKey("test-key"),
+		option.WithBaseURL(server.URL+"/v1"),
+		option.WithHTTPClient(&http.Client{Transport: transport}),
+	)
+	outputCh := make(chan string, 8)
+	logger := logxi.New("test")
+	logger.SetLevel(logxi.LevelAll)
+	cr := &chatRunner{
+		openaiClient: &client,
+		transport:    transport,
+		httpClient:   &http.Client{Transport: transport},
+		baseURL:      server.URL + "/v1",
+		apiKey:       "test-key",
+		cfg:          AIConfig{Model: "m", Timeout: 10 * time.Second, Streaming: true, StreamTimeout: 1 * time.Second},
+		network:      Network{Name: "testnet"},
+		channel:      "#101",
+		nick:         "shrew",
+		logger:       logger,
+		ctx:          context.Background(),
+		outputCh:     outputCh,
+	}
+	cr.sessionID = sid
+
+	cr.runTurn(newTurnContext(sid, messages))
+
+	lines := drainOutput(t, outputCh, 4, 3*time.Second)
+	joined := strings.Join(lines, "\n")
+	assert.Contains(t, joined, "done talking")
+	assert.NotContains(t, joined, "timed out", "a finished generation must not error on the missing [DONE]")
+
+	// Pre-fix this row would not exist (stream closed at the finish
+	// chunk); post-fix the late trailer inside the idle window is read.
+	tu, err := getLastTurnUsageForSession(sid)
+	require.NoError(t, err)
+	require.NotNil(t, tu, "late usage trailer inside the idle window must be captured")
+	assert.Equal(t, 50, tu.PromptTokens)
+
+	final, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	assert.Equal(t, "done talking", final[len(final)-1].Content)
+}
+
 func TestCompletionMaxTokens(t *testing.T) {
 	tests := []struct {
 		name string

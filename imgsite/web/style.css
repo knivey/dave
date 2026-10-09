@@ -49,11 +49,15 @@ header.site p { color: #999; margin: 0.25rem 0 0; }
    line (owner request, Oct 2026). The .counts wrapper is the single
    flex child on the right (likes + dislikes inside it, own gap), so
    space-between stays two-sided however many count spans exist. The
-   time keeps its own type floor; counts are the same size,
-   heart-tinted / broken-heart-tinted, and never wrap. A card with a
-   zero tally ships no span for it at all (server template guards it;
-   the SSE handler adds one when a count first moves past zero, and
-   drops the wrapper when both fall back to zero). */
+   time keeps its own type floor; counts are the same size and never
+   wrap. The glyphs are the emoji heart pair (❤️/💔 — see the details
+   page's vote CSS for why emoji, not text glyphs): color emoji ignore
+   CSS `color`, so the stance tints below reach only the DIGITS; the
+   glyphs ride natively colored (cards show tallies, not toggles — no
+   unpressed state to desaturate). A card with a zero tally ships no
+   span for it at all (server template guards it; the SSE handler adds
+   one when a count first moves past zero, and drops the wrapper when
+   both fall back to zero). */
 .card .meta { display: flex; justify-content: space-between; align-items: baseline; gap: 0.75rem; margin: 0 0.75rem 0.75rem; }
 .card .meta time { display: block; color: #999; font-size: 0.8125rem; }
 .card .counts { display: flex; align-items: baseline; gap: 0.5rem; margin-left: auto; white-space: nowrap; }

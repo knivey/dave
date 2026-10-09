@@ -779,7 +779,7 @@ func TestGalleryCardsShowReactionBadges(t *testing.T) {
 
 	// Votes + badges share the wrapper.
 	assert.Contains(t, body,
-		`<span class="counts"><span class="likes" data-count="1">&#9829; 1</span><span class="reacts"><span class="react" data-emoji="🔥">🔥 2</span><span class="react" data-emoji="😂">😂 1</span><span class="react" data-emoji="😮">😮 1</span></span></span>`,
+		`<span class="counts"><span class="likes" data-count="1">&#10084;&#65039; 1</span><span class="reacts"><span class="react" data-emoji="🔥">🔥 2</span><span class="react" data-emoji="😂">😂 1</span><span class="react" data-emoji="😮">😮 1</span></span></span>`,
 		"wrapper carries votes then the badges in count order")
 	assert.Contains(t, body,
 		`<span class="counts"><span class="reacts"><span class="react" data-emoji="🔥">🔥 3</span><span class="react" data-emoji="💀">💀 2</span><span class="react" data-emoji="🐙">🐙 1</span><span class="react" data-emoji="😂">😂 1</span><span class="react more" title="more reactions">&#8230;</span></span></span>`,

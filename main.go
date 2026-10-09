@@ -355,6 +355,10 @@ var rateExemptCmds map[string]bool
 var chatCmds map[string]bool
 var configCmdTakesArgs map[string]bool
 
+// configCmdOptionalArgs marks triggers that match both bare and with-args
+// invocations (log-fed generators: "^summary" and "^summary 6h focus").
+var configCmdOptionalArgs map[string]bool
+
 var builtinCommandNames = []string{
 	"stop", "help", "sessions", "history",
 	"mystats", "delete", "resume", "jobs",
@@ -407,6 +411,7 @@ func registerCommandsLocked(cmds Commands) error {
 	newExemptCmds := make(map[string]bool)
 	newChatCmds := make(map[string]bool)
 	newTakesArgs := make(map[string]bool)
+	newOptionalArgs := make(map[string]bool)
 
 	type triggerOwner struct {
 		canonical, section string
@@ -486,11 +491,41 @@ func registerCommandsLocked(cmds Commands) error {
 		}
 	}
 
+	for name, c := range cmds.Generators {
+		logger.Debug("added Generators command", c)
+		if err := addTrigger(name, name, "generators"); err != nil {
+			return err
+		}
+		for _, alias := range c.Aliases {
+			if err := addTrigger(alias, name, "generators"); err != nil {
+				return err
+			}
+		}
+		gc := c
+		handler := func(network Network, client *girc.Client, e girc.Event, ctx context.Context, output chan<- string, args ...string) {
+			generator(network, client, e, gc, ctx, output, resolvedUserFromCtx(ctx), args...)
+		}
+		register := func(trigger string) {
+			newConfigCmds[trigger] = handler
+			newConfigCmdNames[trigger] = name
+			if gc.Log != nil {
+				newOptionalArgs[trigger] = true // bare AND with-args both dispatch
+			} else {
+				newTakesArgs[trigger] = true
+			}
+		}
+		register(name)
+		for _, alias := range c.Aliases {
+			register(alias)
+		}
+	}
+
 	configCmds = newConfigCmds
 	configCmdNames = newConfigCmdNames
 	rateExemptCmds = newExemptCmds
 	chatCmds = newChatCmds
 	configCmdTakesArgs = newTakesArgs
+	configCmdOptionalArgs = newOptionalArgs
 	return nil
 }
 

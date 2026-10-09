@@ -88,3 +88,84 @@ func TestGetSessionConfigLiveConfigWins(t *testing.T) {
 	_, ok = getSessionConfig(session)
 	assert.False(t, ok, "missing chat command must report ok=false despite stored settings")
 }
+
+// resetRegisteredCommands re-registers empty command maps so a test's
+// registrations cannot leak into later tests (configCmds, configCmdNames,
+// configCmdTakesArgs, configCmdOptionalArgs, chatCmds, rateExemptCmds are
+// all rebuilt empty).
+func resetRegisteredCommands(t *testing.T) {
+	t.Helper()
+	require.NoError(t, registerCommands(Commands{
+		Completions: map[string]AIConfig{}, Chats: map[string]AIConfig{}, Tools: map[string]MCPCommandConfig{}, Generators: map[string]GeneratorConfig{},
+	}))
+}
+
+func TestRegisterGenerators(t *testing.T) {
+	if logger == nil {
+		logger = newTestLogger()
+	}
+	cmds := Commands{}
+	cmds.Generators = map[string]GeneratorConfig{
+		"summary":  {AIConfig: AIConfig{Name: "summary", Service: "svc"}, Log: &LogQuerySpec{}},
+		"fakenews": {AIConfig: AIConfig{Name: "fakenews", Service: "svc", Aliases: []string{"fn"}}},
+	}
+	require.NoError(t, registerCommands(cmds))
+	t.Cleanup(func() {
+		// reset maps to avoid leaking into other tests
+		resetRegisteredCommands(t)
+	})
+
+	commandsMutex.RLock()
+	defer commandsMutex.RUnlock()
+	assert.NotNil(t, configCmds["summary"], "summary registered")
+	assert.NotNil(t, configCmds["fakenews"])
+	assert.NotNil(t, configCmds["fn"], "alias registered")
+	assert.Equal(t, "fakenews", configCmdNames["fn"])
+	assert.True(t, configCmdOptionalArgs["summary"], "log-fed generator takes optional args")
+	assert.False(t, configCmdOptionalArgs["fakenews"])
+	assert.False(t, configCmdTakesArgs["summary"], "optional-args commands are NOT takesArgs")
+	assert.True(t, configCmdTakesArgs["fakenews"], "non-log generator requires args")
+	assert.False(t, chatCmds["summary"], "generators never join chatCmds (no context to clear)")
+}
+
+func TestRegisterGeneratorsConflictDetected(t *testing.T) {
+	if logger == nil {
+		logger = newTestLogger()
+	}
+	cmds := Commands{
+		Chats:      map[string]AIConfig{"dupe": {Name: "dupe", Service: "svc"}},
+		Generators: map[string]GeneratorConfig{"dupe": {AIConfig: AIConfig{Name: "dupe", Service: "svc"}}},
+	}
+	err := registerCommands(cmds)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "conflicts with")
+}
+
+func TestDispatchOptionalArgsGenerator(t *testing.T) {
+	if logger == nil {
+		logger = newTestLogger()
+	}
+	// Wire a generator into the live maps and drive the match predicate the
+	// way handleTrigger computes it.
+	cmds := Commands{Generators: map[string]GeneratorConfig{
+		"summary": {AIConfig: AIConfig{Name: "summary", Service: "svc"}, Log: &LogQuerySpec{}},
+	}}
+	require.NoError(t, registerCommands(cmds))
+	t.Cleanup(func() {
+		resetRegisteredCommands(t)
+	})
+
+	commandsMutex.RLock()
+	_, ok := configCmds["summary"]
+	optional := configCmdOptionalArgs["summary"]
+	takesArgs := configCmdTakesArgs["summary"]
+	commandsMutex.RUnlock()
+	require.True(t, ok)
+
+	// The predicate handleTrigger applies (irc_handlers.go):
+	match := func(hasArgs bool) bool {
+		return takesArgs == hasArgs || (optional && hasArgs)
+	}
+	assert.True(t, match(false), "bare ^summary dispatches")
+	assert.True(t, match(true), "^summary 6h dispatches")
+}

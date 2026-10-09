@@ -513,7 +513,10 @@ func handleTrigger(network Network, client *girc.Client, event girc.Event, chann
 		triggerWord, rest, hasArgs := splitFirstWord(stripped)
 		if cmd, ok := configCmds[triggerWord]; ok {
 			takesArgs := configCmdTakesArgs[triggerWord]
-			if takesArgs == hasArgs {
+			// Optional-args commands (log-fed generators) dispatch bare
+			// (takesArgs=false == hasArgs=false) and with args via the
+			// second clause.
+			if takesArgs == hasArgs || (configCmdOptionalArgs[triggerWord] && hasArgs) {
 				name := configCmdNames[triggerWord]
 				var args []string
 				if hasArgs {
@@ -643,6 +646,10 @@ func getServiceForConfigCmd(trigger string) string {
 		}
 		if c, ok := config.Commands.Chats[canonical]; ok {
 			svc = c.Service
+			return
+		}
+		if c, ok := config.Commands.Generators[canonical]; ok {
+			svc = c.AIConfig.Service
 			return
 		}
 	})

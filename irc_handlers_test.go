@@ -456,3 +456,29 @@ func TestHandleHostChange(t *testing.T) {
 		handleHostChange("testnet", e, newTestLogger()) // must not panic
 	})
 }
+
+func TestGetServiceForConfigCmdGenerators(t *testing.T) {
+	commandsMutex.Lock()
+	origCmds := configCmds
+	origNames := configCmdNames
+	configCmds = map[string]CmdFunc{"summary": nil}
+	configCmdNames = map[string]string{"summary": "summary"}
+	commandsMutex.Unlock()
+	defer func() {
+		commandsMutex.Lock()
+		configCmds = origCmds
+		configCmdNames = origNames
+		commandsMutex.Unlock()
+	}()
+
+	readConfig(func() {
+		config.Commands.Generators = map[string]GeneratorConfig{
+			"summary": {AIConfig: AIConfig{Name: "summary", Service: "local-llm"}},
+		}
+	})
+	t.Cleanup(func() {
+		readConfig(func() { config.Commands.Generators = map[string]GeneratorConfig{} })
+	})
+
+	assert.Equal(t, "local-llm", getServiceForConfigCmd("summary"))
+}

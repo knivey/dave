@@ -235,6 +235,13 @@ type chatRunner struct {
 	// offering (getTools), and the session-0 usage-row exception
 	// (storeUsage). Everything else in runTurn is untouched.
 	ephemeral bool
+	// apiLogSessionID overrides the id the apiLogger logs this runner's
+	// traffic under. Zero (the default) means "log under sessionID" —
+	// normal turns never touch it. Ephemeral (generator) runs set it to
+	// a unique negative id (nextEphemeralAPILogID): their sessionID is
+	// 0 (a no-op in the apiLogger, and load-bearing for usage
+	// attribution), so each run gets its own api-log session instead.
+	apiLogSessionID int64
 }
 
 func newChatRunner(network Network, client *girc.Client, cfg AIConfig) *chatRunner {
@@ -318,8 +325,17 @@ func (cr *chatRunner) setSessionInfo(sessionID int64, convID string) {
 	cr.syncConvID()
 }
 
+// apiLogID is the id api-logging paths use for this runner: the
+// ephemeral override when set, else the session id.
+func (cr *chatRunner) apiLogID() int64 {
+	if cr.apiLogSessionID != 0 {
+		return cr.apiLogSessionID
+	}
+	return cr.sessionID
+}
+
 func (cr *chatRunner) syncAPISessionID() {
-	cr.transport.setAPILogger(apiLogger, cr.sessionID)
+	cr.transport.setAPILogger(apiLogger, cr.apiLogID())
 }
 
 func (cr *chatRunner) syncConvID() {
@@ -1887,7 +1903,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 
 	turn := newTurnContext(runner.sessionID, messages)
 	runner.runTurn(turn)
-	runner.logger.Debug("completion finished", "api_log", apiLogger.GetSessionFilePath(runner.sessionID))
+	runner.logger.Debug("completion finished", "api_log", apiLogger.GetSessionFilePath(runner.apiLogID()))
 
 	if theDB != nil && sessionMgr.IsSessionActive(runner.sessionID) {
 		for {

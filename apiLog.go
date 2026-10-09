@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -35,6 +36,26 @@ type APILogger struct {
 }
 
 var apiLogger *APILogger
+
+// ephemeralAPILogSeq seeds per-run api-log session ids for ephemeral
+// (generator) turns. Seeded from the clock once at boot and stepped
+// atomically: ids are unique within a boot AND across restarts, and
+// negative so they can never collide with DB session ids (which start
+// at 1). DESIGN NOTE: the alternative — one shared session-0 bucket
+// per network/channel/user — was rejected by the owner: every
+// generator run would append into one ever-growing file; per-run ids
+// give each run its own file, exactly like real sessions.
+var ephemeralAPILogSeq atomic.Int64
+
+func init() {
+	ephemeralAPILogSeq.Store(time.Now().UnixNano())
+}
+
+// nextEphemeralAPILogID allocates the api-log session id for one
+// ephemeral run.
+func nextEphemeralAPILogID() int64 {
+	return -ephemeralAPILogSeq.Add(1)
+}
 
 var nonAlphaNum = regexp.MustCompile(`[^a-zA-Z0-9]`)
 

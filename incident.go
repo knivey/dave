@@ -175,7 +175,7 @@ func (il *IncidentLogger) logIncident(cr *chatRunner, apiErr error, messages []C
 		ResponseID:  responseID,
 	}
 
-	info.APILogCopied = copyAPILog(cr.sessionID, incidentDir)
+	info.APILogCopied = copyAPILog(cr.apiLogID(), incidentDir)
 
 	if err := writeJSONFile(filepath.Join(incidentDir, "incident.json"), info); err != nil {
 		cr.logger.Error("failed to write incident.json", "error", err)

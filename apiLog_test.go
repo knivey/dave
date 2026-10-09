@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -132,4 +133,70 @@ func TestAPILoggerDefaultDir(t *testing.T) {
 	require.NoError(t, err)
 	defer l.CloseAll()
 	assert.Equal(t, "api_logs", filepath.Base(l.dir))
+}
+
+func TestNextEphemeralAPILogIDUniqueNegative(t *testing.T) {
+	seen := make(map[int64]bool)
+	for i := 0; i < 100; i++ {
+		id := nextEphemeralAPILogID()
+		assert.Negative(t, id, "ids must never collide with DB session ids (>= 1)")
+		assert.False(t, seen[id], "id %d repeated within a boot", id)
+		seen[id] = true
+	}
+}
+
+func TestNextEphemeralAPILogIDCrossBoot(t *testing.T) {
+	// Simulate a restart: re-seed the counter as a later boot would and
+	// confirm the new ids never repeat the old boot's (clock seed differs).
+	old := map[int64]bool{
+		nextEphemeralAPILogID(): true,
+		nextEphemeralAPILogID(): true,
+	}
+	ephemeralAPILogSeq.Store(time.Now().UnixNano() + int64(time.Hour))
+	for i := 0; i < 10; i++ {
+		id := nextEphemeralAPILogID()
+		assert.False(t, old[id], "id %d repeated across boots", id)
+	}
+}
+
+func TestSyncAPISessionIDPrefersEphemeralOverride(t *testing.T) {
+	transport := newDaveTransport(nil, nil)
+	cr := &chatRunner{transport: transport, sessionID: 77}
+	cr.syncAPISessionID()
+	assert.Equal(t, int64(77), transport.sessionID, "zero override means log under sessionID")
+
+	cr.apiLogSessionID = -42
+	cr.syncAPISessionID()
+	assert.Equal(t, int64(-42), transport.sessionID, "ephemeral override wins")
+}
+
+func TestEphemeralAPILogPerRunFiles(t *testing.T) {
+	dir := t.TempDir()
+	l, err := NewAPILogger(APILogConfig{Dir: dir}, dir)
+	require.NoError(t, err)
+
+	id1, id2 := nextEphemeralAPILogID(), nextEphemeralAPILogID()
+	l.RestoreSession(id1, "net", "#a", 7)
+	l.RestoreSession(id2, "net", "#a", 7)
+	l.LogRequest(id1, []byte(`{"a":1}`))
+	l.LogRequest(id2, []byte(`{"b":2}`))
+
+	p1 := l.GetSessionFilePath(id1)
+	p2 := l.GetSessionFilePath(id2)
+	require.NotEmpty(t, p1)
+	require.NotEmpty(t, p2)
+	assert.NotEqual(t, p1, p2, "each run gets its own file")
+
+	b1, err := os.ReadFile(p1)
+	require.NoError(t, err)
+	assert.Contains(t, string(b1), `{"a":1}`)
+	assert.NotContains(t, string(b1), `{"b":2}`, "no cross-run bleed")
+
+	b2, err := os.ReadFile(p2)
+	require.NoError(t, err)
+	assert.Contains(t, string(b2), `{"b":2}`)
+	assert.NotContains(t, string(b2), `{"a":1}`)
+
+	// The legacy guard is untouched: session 0 still refuses.
+	assert.Empty(t, l.GetSessionFilePath(0))
 }

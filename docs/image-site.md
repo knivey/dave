@@ -597,6 +597,25 @@ rendered only when non-zero), and a `?sort=liked` gallery mode ranked
 by NET SCORE. Search results show tallies too but keep relevance
 ordering — sort is gallery-only by design.
 
+**Glyphs.** The vote glyphs are a matched emoji pair — ❤️ (U+2764 +
+VS16) and 💔 (U+1F494) — and that is deliberate (Oct 2026, after
+user feedback that the unclicked pair read "white heart vs red broken
+heart"). Emoji bitmaps ignore CSS `color`, while the original like
+glyph ♥ (U+2665) is a text glyph that obeys it: two different Unicode
+sets with two different rendering rules, and no text-presentation
+broken heart exists to pair the ♥ with (U+FE0E after 💔 is unreliable
+— color emoji fonts have no monochrome fallback). Pairing both on the
+emoji side evens the rules: the one lever that reaches emoji bitmaps
+is `filter`, so each button glyph sits in a `.vglyph` span
+desaturated (`grayscale(1)`) while its stance is unpressed, filter
+dropped when pressed so the native red shows; image.js never touches
+glyphs, it toggles the button classes the CSS keys on. Card badges
+have no pressed state (tallies, not toggles), so they render the pair
+natively colored and the stance-tinted `color` rules (pink/slate)
+reach only the digits; gallery.js rebuilds the like badge with the
+same ❤️ string (`\u2764\uFE0F`) so SSE-driven spans match the
+server-rendered ones.
+
 **Identity.** The `imgsite_liker` cookie (16 crypto/rand bytes, hex;
 `HttpOnly; Secure; SameSite=Lax; Path=/`; ~10y) is minted on the
 visitor's FIRST vote POST and never before — page GETs set no

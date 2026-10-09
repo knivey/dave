@@ -659,7 +659,7 @@ func TestGalleryCardsShowLikeCounts(t *testing.T) {
 
 	// Voted card: right-justified tallies on the time line — the
 	// .counts wrapper holds one span per non-zero tally.
-	assert.Contains(t, body, `<span class="counts"><span class="likes" data-count="2">&#9829; 2</span><span class="dislikes" data-count="1">&#128148; 1</span></span>`,
+	assert.Contains(t, body, `<span class="counts"><span class="likes" data-count="2">&#10084;&#65039; 2</span><span class="dislikes" data-count="1">&#128148; 1</span></span>`,
 		"voted card renders wrapped like+dislike spans")
 	// Exactly one of each span exists — zero-tally cards render none.
 	assert.Equal(t, 1, strings.Count(body, `class="likes"`), "zero-like cards show no span")
@@ -887,7 +887,16 @@ func TestDetailsPageLikeButton(t *testing.T) {
 	assert.Contains(t, body, `id="dislike-btn" formaction="/lik1046/dislike"`, "dislike button carries its formaction")
 	assert.Contains(t, body, `id="like-count">0<`, "like count renders inside the button")
 	assert.Contains(t, body, `id="dislike-count">0<`, "dislike count renders inside the button")
-	assert.Contains(t, body, `&#128148;`, "dislike button carries the broken-heart glyph")
+	// Glyph contract: BOTH glyphs are the emoji heart pair (❤️ U+2764
+	// +VS16, 💔 U+1F494 — same set, same native red) inside .vglyph
+	// spans, because emoji bitmaps ignore CSS `color` while the old ♥
+	// text glyph obeyed it (the white-heart/red-broken-heart asymmetry
+	// this pins away). The one lever that reaches emoji is `filter`:
+	// unpressed desaturates, the pressed stance drops the filter.
+	assert.Contains(t, body, `<span class="vglyph">&#10084;&#65039;</span>`, "like button carries the emoji heart glyph in a .vglyph span")
+	assert.Contains(t, body, `<span class="vglyph">&#128148;</span>`, "dislike button carries the emoji broken heart in a .vglyph span")
+	assert.Contains(t, body, `.like-btn .vglyph, .dislike-btn .vglyph { filter: grayscale(1);`, "unpressed vote glyphs desaturate (filter, not color — emoji ignore color)")
+	assert.Contains(t, body, `.like-btn.liked .vglyph, .dislike-btn.disliked .vglyph { filter: none; }`, "pressed vote glyphs drop the filter and show native red")
 	assert.Equal(t, 2, strings.Count(body, `aria-pressed="false"`), "both buttons report unpressed")
 	assert.NotContains(t, body, `class="like-btn liked"`)
 	assert.NotContains(t, body, `class="dislike-btn disliked"`)

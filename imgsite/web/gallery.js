@@ -679,7 +679,7 @@ function setCardCounts(card, likes, dislikes) {
 		// pre-reactions shape, where wrap.remove() took the spans
 		// along) stranded a stale "♥ 1" next to live badges forever.
 		if (wrap) {
-			setTallySpan(wrap, "likes", "\u2665", 0);
+			setTallySpan(wrap, "likes", "\u2764\uFE0F", 0);
 			setTallySpan(wrap, "dislikes", "\uD83D\uDC94", 0);
 			if (!wrap.querySelector(".reacts")) wrap.remove();
 		}
@@ -692,7 +692,7 @@ function setCardCounts(card, likes, dislikes) {
 		if (!meta) return; // malformed card: nothing to hang the wrapper on
 		meta.appendChild(wrap);
 	}
-	setTallySpan(wrap, "likes", "\u2665", likes);
+	setTallySpan(wrap, "likes", "\u2764\uFE0F", likes);
 	setTallySpan(wrap, "dislikes", "\uD83D\uDC94", dislikes);
 }
 

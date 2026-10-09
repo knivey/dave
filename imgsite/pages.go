@@ -202,12 +202,21 @@ table.params td { border: 1px solid #2c2c31; padding: 0.35rem 0.6rem; vertical-a
 table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
 .mono { font-family: ui-monospace, monospace; }
 .provenance { color: #999; font-size: 0.9rem; }
-/* Vote toggles: heart glyph + count, broken-heart glyph + count; the
-   pressed state tints each (the base button styles come from the
-   global button rule above). Dislike gets its own hue so the two
-   stances read apart at a glance (like keeps the warm pink, dislike a
-   cool slate). */
+/* Vote toggles: BOTH glyphs are color emoji — ❤️ (U+2764+VS16) and 💔
+   (U+1F494), a matched pair from the emoji heart family. The pairing
+   is load-bearing: emoji bitmaps ignore CSS color (the old ♥ U+2665
+   text glyph obeyed it — which is exactly why the unclicked pair used
+   to read white heart vs red broken heart: two different Unicode
+   sets, two different rendering rules, and no text-presentation
+   broken heart exists to pair the ♥ with). The one lever that reaches
+   emoji bitmaps is filter: each glyph sits in a .vglyph span,
+   desaturated to neutral gray while its stance is unpressed, filter
+   dropped when pressed so the native red shows. Pressed accents still
+   tint count + border per stance so the two read apart at a glance
+   (like keeps the warm pink, dislike a cool slate). */
 .like-form { margin: 0.25rem 0 0.5rem; display: flex; gap: 0.5rem; }
+.like-btn .vglyph, .dislike-btn .vglyph { filter: grayscale(1); transition: filter 0.15s ease; }
+.like-btn.liked .vglyph, .dislike-btn.disliked .vglyph { filter: none; }
 .like-btn.liked { color: #ff6b81; border-color: #7a3d4a; }
 .like-btn:active { border-color: #b5566c; }
 .dislike-btn.disliked { color: #7f96ad; border-color: #3d4a58; }
@@ -285,10 +294,12 @@ table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
      intercepts the submit and swaps in the fetch()-based JSON path
      against the clicked button's formaction. Counts live in their
      own spans so SSE-driven count updates (other people voting)
-     never touch the buttons' own state classes. */}}
+     never touch the buttons' own state classes. Glyphs are the emoji
+     heart pair in .vglyph spans — see the vote CSS comment above for
+     why filter (not color) drives their unpressed gray. */}}
 <form class="like-form" method="post" action="/{{.ID}}/like">
-<button type="submit" class="like-btn{{if .LikedByYou}} liked{{end}}" id="like-btn" formaction="/{{.ID}}/like" aria-pressed="{{if .LikedByYou}}true{{else}}false{{end}}" title="{{if .LikedByYou}}unlike{{else}}like{{end}}">&#9829; <span id="like-count">{{.LikeCount}}</span></button>
-<button type="submit" class="dislike-btn{{if .DislikedByYou}} disliked{{end}}" id="dislike-btn" formaction="/{{.ID}}/dislike" aria-pressed="{{if .DislikedByYou}}true{{else}}false{{end}}" title="{{if .DislikedByYou}}remove dislike{{else}}dislike{{end}}">&#128148; <span id="dislike-count">{{.DislikeCount}}</span></button>
+<button type="submit" class="like-btn{{if .LikedByYou}} liked{{end}}" id="like-btn" formaction="/{{.ID}}/like" aria-pressed="{{if .LikedByYou}}true{{else}}false{{end}}" title="{{if .LikedByYou}}unlike{{else}}like{{end}}"><span class="vglyph">&#10084;&#65039;</span> <span id="like-count">{{.LikeCount}}</span></button>
+<button type="submit" class="dislike-btn{{if .DislikedByYou}} disliked{{end}}" id="dislike-btn" formaction="/{{.ID}}/dislike" aria-pressed="{{if .DislikedByYou}}true{{else}}false{{end}}" title="{{if .DislikedByYou}}remove dislike{{else}}dislike{{end}}"><span class="vglyph">&#128148;</span> <span id="dislike-count">{{.DislikeCount}}</span></button>
 </form>
 {{/* Reactions (anonymous, cookie-token identity — see reactions.go).
       ANY emoji is reactable; the row lists only EXISTING reactions
@@ -430,7 +441,7 @@ const cardsPartialSrc = `{{define "cards"}}{{range .Cards}}<article class="card"
      whitelist), with a "…" marker when more did not fit
      (topCardReactions); the SSE image-reacted handler rebuilds
      them. */}}
-<div class="meta"><time datetime="{{.CreatedRFC3339}}" data-ts="{{.CreatedRFC3339}}">{{.Timestamp}}</time>{{if or .LikeCount .DislikeCount .TopReactions}}<span class="counts">{{if .LikeCount}}<span class="likes" data-count="{{.LikeCount}}">&#9829; {{.LikeCount}}</span>{{end}}{{if .DislikeCount}}<span class="dislikes" data-count="{{.DislikeCount}}">&#128148; {{.DislikeCount}}</span>{{end}}{{if .TopReactions}}<span class="reacts">{{range .TopReactions}}<span class="react" data-emoji="{{.Emoji}}">{{.Emoji}} {{.Count}}</span>{{end}}{{if .MoreReactions}}<span class="react more" title="more reactions">&#8230;</span>{{end}}</span>{{end}}</span>{{end}}</div>
+<div class="meta"><time datetime="{{.CreatedRFC3339}}" data-ts="{{.CreatedRFC3339}}">{{.Timestamp}}</time>{{if or .LikeCount .DislikeCount .TopReactions}}<span class="counts">{{if .LikeCount}}<span class="likes" data-count="{{.LikeCount}}">&#10084;&#65039; {{.LikeCount}}</span>{{end}}{{if .DislikeCount}}<span class="dislikes" data-count="{{.DislikeCount}}">&#128148; {{.DislikeCount}}</span>{{end}}{{if .TopReactions}}<span class="reacts">{{range .TopReactions}}<span class="react" data-emoji="{{.Emoji}}">{{.Emoji}} {{.Count}}</span>{{end}}{{if .MoreReactions}}<span class="react more" title="more reactions">&#8230;</span>{{end}}</span>{{end}}</span>{{end}}</div>
 </article>
 {{end}}{{if .NoResults}}<p class="no-results">no results for {{.Query}}</p>{{end}}{{if .NothingSearched}}<p class="no-results">nothing searched yet — type a query</p>{{end}}{{if .EmptyGallery}}<p class="no-results">nothing here yet — images appear here as they are generated</p>{{end}}{{if .HasMore}}<div class="sentinel" data-next-cursor="{{.NextCursor}}"></div>{{end}}{{end}}`
 

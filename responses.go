@@ -159,6 +159,16 @@ func parseSDKResponseOutput(resp responses.Response) (text string, reasoning str
 	return text, reasoning, toolCalls
 }
 
+// chainActive reports whether a Responses API request may rely on
+// server-side stored context: chaining is enabled AND a chain head exists.
+// Every site that rebuilds Responses API input must re-derive this (turn
+// entry, both tool loops) so the input shape (full history vs delta-only)
+// and the previous_response_id param can never disagree — the param is sent
+// iff chainActive says the input is delta-only.
+func chainActive(cfg AIConfig, responseID string) bool {
+	return cfg.PreviousResponseID && responseID != ""
+}
+
 func buildResponseParams(cfg AIConfig, input []responses.ResponseInputItemUnionParam, tools []responses.ToolUnionParam, previousResponseID string, ident apiIdentity) responses.ResponseNewParams {
 	params := responses.ResponseNewParams{
 		Model: cfg.Model,
@@ -269,6 +279,14 @@ func sdkResponseUsageToUsage(u responses.ResponseUsage, status string) *Usage {
 // response_model differs from the live config's model (sessions.response_model,
 // written atomically alongside response_id). This check is the Layer 2 net
 // for NULL-model legacy rows and provider wording variance (e.g. xAI).
+//
+// DESIGN NOTE — "previous_response_id is not supported on this proxy"
+// (code invalid_prompt): OpenRouter's Responses API proxy is STATELESS — it
+// rejects any previous_response_id outright, not because the id expired but
+// because chaining does not exist there. The retry-without-id recovery is
+// still exactly right: our full history is always sufficient. Matched on
+// code invalid_prompt + the field named in the message so unrelated
+// invalid_prompt validation errors stay out.
 func isResponseIDError(err error) bool {
 	if err == nil {
 		return false
@@ -289,14 +307,30 @@ func isResponseIDError(err error) bool {
 		case apiErr.StatusCode == http.StatusBadRequest &&
 			strings.Contains(apiErr.Message, "Reasoning input items can only be provided to a reasoning or computer use model"):
 			return true
+		case apiErr.StatusCode == http.StatusBadRequest &&
+			apiErr.Code == "invalid_prompt" &&
+			strings.Contains(apiErr.Message, "previous_response_id"):
+			return true
 		}
-		return false
+		// No structured match: fall through to the string fallback below
+		// instead of returning false. For WRAPPED error bodies the SDK
+		// populates Code/Message from gjson(body,"error") but Error()
+		// also embeds the raw inner object, so a provider whose code is
+		// not one of the enumerated cases above can still match on
+		// message wording (e.g. a "invalid_request"-coded expired-id
+		// error). NOTE: UNWRAPPED bodies (no "error" object) are dropped
+		// by the SDK entirely — UnmarshalJSON("") leaves Code, Message
+		// AND the embedded raw body empty — so no string matching can
+		// ever see them; that shape is unmatchable at this layer
+		// (verified against openai-go v3.33.0; production OpenRouter
+		// wraps, per the 2026-10-09 incident's captured response body).
 	}
 
 	s := err.Error()
 	return strings.Contains(s, `"code":"response_not_found"`) ||
 		strings.Contains(s, `"code":"invalid_previous_response_id"`) ||
 		strings.Contains(s, "previous_response_id") && strings.Contains(s, "not found") ||
+		strings.Contains(s, "previous_response_id") && strings.Contains(s, "not supported") ||
 		strings.Contains(s, "Each message must have at least one content element") ||
 		strings.Contains(s, "Reasoning input items can only be provided to a reasoning or computer use model")
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	openai "github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
 	"github.com/openai/openai-go/v3/responses"
 	"github.com/openai/openai-go/v3/shared"
 	"github.com/stretchr/testify/assert"
@@ -481,6 +483,8 @@ func TestIsResponseIDError(t *testing.T) {
 		{"openai.Error code invalid_previous_response_id", newAPIError(http.StatusBadRequest, "invalid_previous_response_id", "bad id"), true},
 		{"openai.Error 400 empty content", newAPIError(http.StatusBadRequest, "", "Each message must have at least one content element."), true},
 		{"openai.Error 400 reasoning items mismatch", newAPIError(http.StatusBadRequest, "", "Reasoning input items can only be provided to a reasoning or computer use model. Remove reasoning items from your input and try again."), true},
+		{"openai.Error 400 openrouter proxy reject", newAPIError(http.StatusBadRequest, "invalid_prompt", "previous_response_id is not supported on this proxy. Each response request is independent."), true},
+		{"openai.Error 400 invalid_prompt unrelated", newAPIError(http.StatusBadRequest, "invalid_prompt", "input messages are malformed"), false},
 		{"openai.Error 400 unrelated reasoning mention", newAPIError(http.StatusBadRequest, "invalid_request", "reasoning is not enabled for this model"), false},
 		{"openai.Error 400 other", newAPIError(http.StatusBadRequest, "invalid_request", "something else"), false},
 		{"openai.Error 401", newAPIError(http.StatusUnauthorized, "invalid_api_key", "bad key"), false},
@@ -489,6 +493,8 @@ func TestIsResponseIDError(t *testing.T) {
 		{"string fallback response_not_found", fmt.Errorf(`"code":"response_not_found"`), true},
 		{"string fallback invalid_previous_response_id", fmt.Errorf(`"code":"invalid_previous_response_id"`), true},
 		{"string fallback previous_response_id not found", fmt.Errorf("previous_response_id abc not found"), true},
+		{"string fallback openrouter proxy reject", fmt.Errorf(`POST "https://openrouter.ai/api/v1/responses": 400 Bad Request {"code":"invalid_prompt","message":"previous_response_id is not supported on this proxy. Each response request is independent."}`), true},
+		{"string fallback previous_response_id unrelated", fmt.Errorf("the previous_response_id field will be supported soon"), false},
 		{"string fallback empty content", fmt.Errorf("Invalid request content: Each message must have at least one content element."), true},
 		{"string fallback reasoning items mismatch", fmt.Errorf("Error code: 400 - {'error': {'message': 'Reasoning input items can only be provided to a reasoning or computer use model. Remove reasoning items from your input and try again.', 'type': 'invalid_request_error'}}"), true},
 	}
@@ -506,4 +512,60 @@ func TestIsResponseIDError(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestIsResponseIDErrorSDKErrorShapes drives the REAL openai-go error
+// machinery (requestconfig builds *openai.Error from the wire body) against
+// both provider body shapes for the OpenRouter stateless-proxy rejection,
+// pining the Layer 2 net to what the SDK actually surfaces:
+//
+//   - WRAPPED body ({"error":{code,message}} — production OpenRouter, per
+//     the 2026-10-09 incident's captured response body): the SDK parses
+//     Code/Message, the structured invalid_prompt case matches → retry.
+//   - UNWRAPPED body (top-level {code,message}): the SDK extracts
+//     gjson(body,"error"), gets "", and UnmarshalJSON("") leaves Code,
+//     Message AND the embedded raw body EMPTY — the error string carries
+//     no wording at all, so the shape is unmatchable at this layer. This
+//     test pins that limitation honestly instead of pretending a string
+//     fallback covers it; no known provider sends the unwrapped shape.
+func TestIsResponseIDErrorSDKErrorShapes(t *testing.T) {
+	const openRouterReject = "previous_response_id is not supported on this proxy. Each response request is independent."
+
+	makeServerError := func(t *testing.T, body string) error {
+		t.Helper()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(body))
+		}))
+		defer server.Close()
+
+		client := openai.NewClient(
+			option.WithAPIKey("test-key"),
+			option.WithBaseURL(server.URL),
+		)
+		_, err := client.Models.List(context.Background())
+		require.Error(t, err)
+		var apiErr *openai.Error
+		require.ErrorAs(t, err, &apiErr, "SDK must surface non-2xx as *openai.Error")
+		return err
+	}
+
+	t.Run("wrapped body matches", func(t *testing.T) {
+		err := makeServerError(t, fmt.Sprintf(`{"error":{"code":"invalid_prompt","message":%q}}`, openRouterReject))
+		var apiErr *openai.Error
+		require.True(t, errors.As(err, &apiErr))
+		assert.Equal(t, "invalid_prompt", apiErr.Code, "wrapped body parses into Code")
+		assert.Contains(t, apiErr.Message, "previous_response_id")
+		assert.True(t, isResponseIDError(err), "production OpenRouter shape must trigger the retry-without-id net")
+	})
+
+	t.Run("unwrapped body is unmatchable", func(t *testing.T) {
+		err := makeServerError(t, fmt.Sprintf(`{"code":"invalid_prompt","message":%q}`, openRouterReject))
+		assert.False(t, isResponseIDError(err), "SDK drops unwrapped bodies; documented limitation")
+		var apiErr *openai.Error
+		errors.As(err, &apiErr)
+		assert.Empty(t, apiErr.Message, "unwrapped body leaves Message empty")
+		assert.NotContains(t, err.Error(), "previous_response_id", "unwrapped body never reaches the error string")
+	})
 }

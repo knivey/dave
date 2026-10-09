@@ -1,0 +1,7 @@
+property: P2
+tags: indented-code
+seed: 12855671155714460258
+
+got:  " \x030,90lorem alpha                                                                     \x03 \n \x030,90[amet](hx                                                                       \x03 "
+want: " \x030,90lorem alpha                                                                     \x03 \n \x030,90                                                                                \x03 \n \x030,90[amet](hx                           …"
+doc:  "    lorem alpha\n\n    [amet](hx"

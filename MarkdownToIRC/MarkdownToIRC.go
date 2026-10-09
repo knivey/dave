@@ -343,7 +343,14 @@ func (r *Renderer) renderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 				}
 				buf.WriteString(r.segmentText(html.Lines().At(i)))
 			}
-			writes(w, node, strings.TrimSpace(buf.String()))
+			// Leading newline like every other block kind: without it an
+			// HTML block glues directly onto the previous line's text
+			// ("para<div>"). The streaming renderer also relies on every
+			// block opening with \n — its entry boundaries coincide with
+			// the render's own newlines, so a settled block can be
+			// emitted the moment the next line classifies its blank line
+			// as a boundary (streamfuzz_test.go pins the oracles).
+			writes(w, node, "\n"+strings.TrimSpace(buf.String()))
 		}
 		return ast.WalkSkipChildren
 	}
@@ -496,19 +503,6 @@ func MarkdownToIRC(response string) string {
 	return buf.String()
 }
 
-func normalizeForStreaming(input string) string {
-	lines := strings.Split(input, "\n")
-	for i, line := range lines {
-		trimmed := strings.TrimLeft(line, " \t")
-		if strings.HasPrefix(trimmed, "* ") || strings.HasPrefix(trimmed, "- ") || strings.HasPrefix(trimmed, "+ ") ||
-			(len(trimmed) > 2 && trimmed[1] == '.' && (trimmed[0] >= '0' && trimmed[0] <= '9')) {
-			// Reduce leading whitespace for list items to prevent code block misparse
-			lines[i] = "  " + trimmed
-		}
-	}
-	return strings.Join(lines, "\n")
-}
-
 func MarkdownToIRCStream(response string) string {
 	r := &Renderer{streaming: true}
 	md := goldmark.New(
@@ -522,94 +516,341 @@ func MarkdownToIRCStream(response string) string {
 	return buf.String()
 }
 
-// RenderCodeLine renders a single line inside a code block with fixed 80-char background padding (no Chroma).
-// Used by streaming to handle blank lines inside code blocks without premature cutoff.
-func RenderCodeLine(line string) string {
-	line = strings.TrimRight(line, "\r\n")
-	if line == "" {
-		line = " "
-	}
-	const padWidth = 80
-	return fmt.Sprintf(" \x030,90%-*s\x03 ", padWidth, line)
-}
-
+// StreamingRenderer incrementally converts a markdown stream to IRC text.
+//
+// DESIGN (Oct 2026 rewrite): the old implementation was a line state machine
+// that tried to detect code fences with `strings.TrimSpace(line) == "```"`.
+// It missed info-string fences (```go), ~~~ and 4+-backtick fences, misread
+// closing fences as openers after a blank-line split, and dropped buffered
+// content at flush — ~29% of generated nesting combinations diverged from a
+// whole-document render (docs/streaming-markdown-investigation.md, with the
+// fuzz harness in streamfuzz_test.go that proved it).
+//
+// The rewrite never guesses markdown structure. It only decides WHERE the
+// stream is safe to cut, and lets goldmark render each settled prefix:
+//
+//   - a prefix ending at a blank-line run is settled when the run is not
+//     interior to a block that can span blank lines — fenced code, an
+//     indented-code continuation, a list (items or 2+-space continuation
+//     content), or <pre>/<script>/<style>/<textarea> HTML spans;
+//   - settled prefixes are rendered with MarkdownToIRCStream and the
+//     not-yet-emitted complete lines are appended; rendering a longer
+//     settled prefix must extend the previous output (verified by the
+//     chunk-invariance and parity oracles), so nothing already sent ever
+//     changes;
+//   - flush renders the WHOLE buffer — an unclosed fence or trailing
+//     partial line renders exactly like the non-streaming path would,
+//     instead of being dropped.
+//
+// Settling is deliberately conservative: holding longer only delays output,
+// never corrupts it. Known (accepted) divergence: a link-reference
+// definition arriving after a paragraph that referenced it — goldmark
+// resolves references per document, and we render per prefix.
 type StreamingRenderer struct {
-	inCodeBlock bool
-	buffer      string
-	codeLines   []string
+	buf string
+
+	scanEnd  int // offset just past the last complete line scanned
+	settled  int // length of the render-final prefix (always <= scanEnd)
+	rendered int // settled length already rendered (emission bookkeeping)
+
+	fenceChar   byte // 0 = none, '`' or '~' — open fence state
+	fenceLen    int
+	fenceIndent int    // leading-column of the opener; 0 = top-level fence
+	htmlTag     string // open <pre>/<script>/<style>/<textarea> span, "" = none
+	blankEnd    int    // offset past the last blank line of the current run; 0 = none
+
+	emitted string // output prefix already returned to the caller
+	broken  bool   // monotonicity invariant broke; incremental emission stopped
 }
 
 func NewStreamingRenderer() *StreamingRenderer {
 	return &StreamingRenderer{}
 }
 
-// Process handles incremental streaming deltas, maintains state for code blocks, and returns rendered lines when complete.
-// Fence lines (```) are skipped. Non-code text accumulates until \n\n for correct multi-line structures (lists, quotes, paragraphs).
-func (s *StreamingRenderer) Process(delta string) []string {
-	var lines []string
-	s.buffer += delta
+// leadingWidth counts the display column of the leading whitespace of line
+// (a tab counts as 4).
+func leadingWidth(line string) int {
+	w := 0
+	for i := 0; i < len(line); i++ {
+		switch line[i] {
+		case ' ':
+			w++
+		case '\t':
+			w += 4
+		default:
+			return w
+		}
+	}
+	return w
+}
+
+// openingFence reports a CommonMark fence opener: up to 3 leading spaces,
+// 3+ backticks or tildes, and an info string (which for backtick fences may
+// not contain backticks).
+func openingFence(line string) (char byte, n int, ok bool) {
+	i := 0
+	for i < len(line) && line[i] == ' ' {
+		i++
+	}
+	if i > 3 || len(line)-i < 3 {
+		return 0, 0, false
+	}
+	rest := line[i:]
+	ch := rest[0]
+	if ch != '`' && ch != '~' {
+		return 0, 0, false
+	}
+	c := 0
+	for c < len(rest) && rest[c] == ch {
+		c++
+	}
+	if c < 3 {
+		return 0, 0, false
+	}
+	info := strings.TrimSpace(rest[c:])
+	if ch == '`' && strings.ContainsRune(info, '`') {
+		return 0, 0, false
+	}
+	return ch, c, true
+}
+
+// isClosingFence matches a trimmed line that closes an open fence: only
+// fence characters, at least as many as the opener, nothing after.
+func isClosingFence(trimmed string, char byte, n int) bool {
+	if trimmed == "" {
+		return false
+	}
+	c := 0
+	for c < len(trimmed) && trimmed[c] == char {
+		c++
+	}
+	return c >= n && strings.TrimSpace(trimmed[c:]) == ""
+}
+
+// isListMarkerLine matches a bullet or ordered-list marker line (marker
+// indented 0-3, followed by a space/tab or end of line).
+func isListMarkerLine(line string) bool {
+	i := 0
+	for i < len(line) && line[i] == ' ' {
+		i++
+	}
+	if i > 3 || i == len(line) {
+		return false
+	}
+	rest := line[i:]
+	switch rest[0] {
+	case '-', '*', '+':
+		rest = rest[1:]
+	default:
+		d := 0
+		for d < len(rest) && rest[d] >= '0' && rest[d] <= '9' {
+			d++
+		}
+		if d == 0 || d > 9 || d >= len(rest) || (rest[d] != '.' && rest[d] != ')') {
+			return false
+		}
+		rest = rest[d+1:]
+	}
+	return rest == "" || rest[0] == ' ' || rest[0] == '\t'
+}
+
+// afterListMarker strips a leading list-marker prefix ("  - ", "1. ",
+// "3) ") so fence and HTML-span detection also recognizes openers written
+// ON a marker line ("- ```py" — a shape LLMs emit constantly). Without
+// this, the block's real closer was misread as a NEW top-level opener and
+// the scanner held the entire remaining stream until flush (found in code
+// review: silent batch degradation, byte-correct output so no oracle
+// caught it). ok is false when the line does not start with a marker
+// followed by whitespace.
+func afterListMarker(line string) (string, bool) {
+	i := 0
+	for i < len(line) && line[i] == ' ' {
+		i++
+	}
+	if i > 3 || i == len(line) {
+		return line, false
+	}
+	rest := line[i:]
+	var m int
+	switch rest[0] {
+	case '-', '*', '+':
+		m = 1
+	default:
+		d := 0
+		for d < len(rest) && rest[d] >= '0' && rest[d] <= '9' {
+			d++
+		}
+		if d == 0 || d > 9 || d >= len(rest) || (rest[d] != '.' && rest[d] != ')') {
+			return line, false
+		}
+		m = d + 1
+	}
+	rest = rest[m:]
+	if rest == "" || (rest[0] != ' ' && rest[0] != '\t') {
+		return line, false
+	}
+	return rest[1:], true
+}
+
+var htmlSpanTags = []string{"pre", "script", "style", "textarea"}
+
+// htmlSpanOpen matches an HTML block whose close tag may be far away and
+// which can therefore span blank lines (CommonMark HTML block types 1/2).
+func htmlSpanOpen(line string) (string, bool) {
+	l := strings.ToLower(strings.TrimSpace(line))
+	for _, tag := range htmlSpanTags {
+		if !strings.HasPrefix(l, "<"+tag) {
+			continue
+		}
+		after := l[1+len(tag):]
+		if after == "" || after[0] == ' ' || after[0] == '>' || after[0] == '/' || after[0] == '\t' {
+			if strings.Contains(l, "</"+tag) {
+				return "", false // opened and closed on the same line
+			}
+			return tag, true
+		}
+	}
+	return "", false
+}
+
+// scan advances the settle scanner over complete lines. See the struct
+// comment for the rules.
+func (s *StreamingRenderer) scan() {
 	for {
-		if s.inCodeBlock {
-			before, after, found := strings.Cut(s.buffer, "\n")
-			if !found {
-				break
-			}
-			trimmed := strings.TrimSpace(before)
-			if trimmed == "```" {
-				// closing fence
-				var codeText strings.Builder
-				for _, codeLine := range s.codeLines {
-					codeText.WriteString(RenderCodeLine(codeLine))
-					codeText.WriteString("\n")
+		nl := strings.IndexByte(s.buf[s.scanEnd:], '\n')
+		if nl < 0 {
+			return
+		}
+		line := s.buf[s.scanEnd : s.scanEnd+nl]
+		lineEnd := s.scanEnd + nl + 1
+		trimmed := strings.TrimSpace(line)
+
+		switch {
+		case s.fenceChar != 0:
+			if isClosingFence(trimmed, s.fenceChar, s.fenceLen) {
+				// Fast-settle top-level fences: a column-0 fence is never
+				// container content (an indent-0 fence interrupts a list
+				// or paragraph), so the block is complete at the closing
+				// fence's newline — no need to wait for the blank line
+				// after it. Indented openers may be list-item content;
+				// those keep waiting for the blank-line rule.
+				if s.fenceIndent == 0 {
+					s.settled = max(s.settled, lineEnd)
 				}
-				lines = append(lines, strings.TrimSuffix(codeText.String(), "\n"))
-				s.codeLines = nil
-				lines = append(lines, "")
-				s.inCodeBlock = false
-				s.buffer = after
-				continue
+				s.fenceChar = 0
 			}
-			s.codeLines = append(s.codeLines, before)
-			s.buffer = after
-		} else {
-			// check for code start
-			before, after, found := strings.Cut(s.buffer, "\n")
-			if !found {
-				break
+			s.blankEnd = 0
+		case s.htmlTag != "":
+			if strings.Contains(strings.ToLower(line), "</"+s.htmlTag) {
+				s.htmlTag = ""
 			}
-			trimmed := strings.TrimSpace(before)
-			if trimmed == "```" {
-				// opening fence
-				s.inCodeBlock = true
-				s.buffer = after
-				continue
+			s.blankEnd = 0
+		case trimmed == "":
+			s.blankEnd = lineEnd
+		default:
+			if s.blankEnd != 0 {
+				// Non-blank line after a blank run: the run was a block
+				// boundary unless the line continues a blank-spanning
+				// block (indented code, list item content, or any 2+
+				// space indented continuation).
+				if leadingWidth(line) < 2 && !isListMarkerLine(line) {
+					s.settled = max(s.settled, s.blankEnd)
+				}
+				s.blankEnd = 0
 			}
-			// put back
-			s.buffer = before + "\n" + after
-			// check for paragraph
-			before, after, found = strings.Cut(s.buffer, "\n\n")
-			if !found {
-				break
+			// Fence/span openers may be written on a list-marker line
+			// ("- ```py"): detect through the marker so the block's real
+			// closer is not misread as a new opener. Marker-line fences
+			// are container content — fenceIndent >= 1 disables the
+			// top-level closing-fence fast-settle for them.
+			detect := line
+			containerFence := false
+			if stripped, ok := afterListMarker(line); ok {
+				detect = stripped
+				containerFence = true
 			}
-			text := MarkdownToIRCStream(before)
-			lines = append(lines, text)
-			s.buffer = after
+			if ch, n, ok := openingFence(detect); ok {
+				s.fenceChar, s.fenceLen = ch, n
+				s.fenceIndent = leadingWidth(line)
+				if containerFence {
+					s.fenceIndent = max(1, s.fenceIndent)
+				}
+			} else if tag, ok := htmlSpanOpen(detect); ok {
+				s.htmlTag = tag
+			}
 		}
+		s.scanEnd = lineEnd
 	}
-	if delta == "" && s.buffer != "" {
-		if s.inCodeBlock {
-			var codeText strings.Builder
-			for _, codeLine := range s.codeLines {
-				codeText.WriteString(RenderCodeLine(codeLine))
-				codeText.WriteString("\n")
-			}
-			lines = append(lines, strings.TrimSuffix(codeText.String(), "\n"))
-			s.buffer = ""
-		} else {
-			text := MarkdownToIRCStream(s.buffer)
-			lines = append(lines, text)
-			s.buffer = ""
+}
+
+// Process handles an incremental delta and returns newly settled output
+// (possibly multi-line). delta == "" is the FLUSH signal: everything still
+// held — unclosed fences, trailing partial lines — is rendered then.
+//
+// Cost note: each settle re-renders the whole settled prefix with goldmark,
+// so cumulative work is quadratic in the document size. Fine at IRC scale
+// (a 22KB/300-paragraph reply measured ~230ms total, spread across the
+// generation; pastebin wrapping kicks in long before this matters) — if the
+// renderer is ever reused for larger surfaces, cache the rendered prefix
+// and re-parse from the last block boundary instead.
+func (s *StreamingRenderer) Process(delta string) []string {
+	if delta == "" {
+		out := MarkdownToIRCStream(s.buf)
+		s.settled, s.rendered = len(s.buf), len(s.buf)
+		return s.emit(out, true)
+	}
+	s.buf += delta
+	s.scan()
+	if s.settled <= s.rendered {
+		return nil
+	}
+	out := MarkdownToIRCStream(s.buf[:s.settled])
+	s.rendered = s.settled
+	return s.emit(out, false)
+}
+
+// emit returns the portion of out beyond what was already sent. A settled
+// prefix's rendering is frozen, so the whole remainder is released at the
+// settle point — the completed block does NOT wait for a following newline.
+// This is safe because every block kind renders with a LEADING newline
+// (KindHTMLBlock included — see the note there), so the remainder always
+// begins at a clean block boundary; the boundary newline itself is trimmed
+// from the returned entry because the entry boundary already stands for it
+// (each entry is sent as its own IRC message). If a longer settled prefix
+// ever renders without the previous output as its prefix (an invariant
+// break the fuzz oracles watch for), incremental emission stops and the
+// flush emits the remainder raw — IRC lines cannot be unsent, but data
+// must not be dropped either.
+func (s *StreamingRenderer) emit(out string, flush bool) []string {
+	if s.emitted != "" && !strings.HasPrefix(out, s.emitted) {
+		s.broken = true
+	}
+	if s.broken {
+		if !flush {
+			return nil
 		}
+		n := min(len(s.emitted), len(out))
+		// Resync to a line boundary before emitting: slicing at an
+		// arbitrary byte offset can splice a token or an IRC color code
+		// mid-sequence. Bytes between the boundary and n may re-send a
+		// few already-delivered partial lines — degraded-mode duplication
+		// beats mangled bytes, and nothing is dropped.
+		if i := strings.LastIndexByte(out[:n], '\n'); i >= 0 {
+			n = i + 1
+		} else {
+			n = 0
+		}
+		s.emitted = out
+		if n < len(out) {
+			return []string{out[n:]}
+		}
+		return nil
 	}
-	return lines
+	rem := out[len(s.emitted):]
+	s.emitted = out
+	rem = strings.TrimPrefix(rem, "\n")
+	if rem != "" {
+		return []string{rem}
+	}
+	return nil
 }

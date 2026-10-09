@@ -1,0 +1,7 @@
+property: P2
+tags: html
+seed: 12855671155714460258
+
+got:  "| the | baz x\n</div>"
+want: "| the | baz x</div>"
+doc:  "| the | baz x\n\n</div>"

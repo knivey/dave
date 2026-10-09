@@ -1,0 +1,7 @@
+property: P2
+tags: fence-info,fence-longer,fence-indented,fence-in-container,blank-in-fence
+seed: 12855671155714460258
+
+got:  "fox_the quicx"
+want: " \x030,90fox_the quicx                                                                   \x03 "
+doc:  "   ````\n\nfox_the quicx"

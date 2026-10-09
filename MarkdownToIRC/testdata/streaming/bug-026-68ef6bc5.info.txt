@@ -1,0 +1,7 @@
+property: P2
+tags: fence-info,fence-indented
+seed: 12855671155714460258
+
+got:  "lorem fox"
+want: " \x030,90lorem fox                                                                       \x03 "
+doc:  "   ```json\n\nlorem fox"

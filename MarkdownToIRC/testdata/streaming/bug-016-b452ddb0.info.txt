@@ -1,0 +1,7 @@
+property: P2
+tags: fence-info,fence-indented,indented-code
+seed: 12855671155714460258
+
+got:  " \x030,90  bar over                                                                      \x03 "
+want: " \x030,90   bar over                                                                     \x03 "
+doc:  "   ```sh\n\n      bar over"

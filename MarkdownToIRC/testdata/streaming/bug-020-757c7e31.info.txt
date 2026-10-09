@@ -1,0 +1,7 @@
+property: P2
+tags: fence-info
+seed: 12855671155714460258
+
+got:  "**ipsum browx"
+want: " \x030,90**ipsum browx                                                                   \x03 "
+doc:  "```toml\n\n**ipsum browx"

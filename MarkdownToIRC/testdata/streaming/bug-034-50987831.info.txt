@@ -1,0 +1,7 @@
+property: P2
+tags: list,html
+seed: 12855671155714460258
+
+got:  "2. **quick dx\n</div>"
+want: "2. **quick dx</div>"
+doc:  "2. **quick dx\n\n</div>"

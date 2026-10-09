@@ -1,0 +1,7 @@
+property: P2
+tags: html
+seed: 12855671155714460258
+
+got:  "\x02note overx\x02\n<p>value delx"
+want: "\x02note overx\x02<p>value delx"
+doc:  "## note overx\n\n<p>value delx"

@@ -276,6 +276,17 @@ func TestStreamingFromTestData(t *testing.T) {
 
 		got := streamingRender(input)
 
+		// DAVE_GOLDEN_UPDATE=1 rewrites .irc files from current output —
+		// use after a deliberate rendering change and REVIEW THE DIFF.
+		if os.Getenv("DAVE_GOLDEN_UPDATE") != "" {
+			if got != expected {
+				if err := os.WriteFile(ircPath, []byte(humanize(got)), 0o644); err != nil {
+					t.Fatalf("update golden %s: %v", ircPath, err)
+				}
+			}
+			continue
+		}
+
 		assert.Equal(t, expected, got, "output mismatch for %s\ngot:\n%s\nwant:\n%s", name, humanize(got), humanize(expected))
 	}
 }

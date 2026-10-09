@@ -1,0 +1,7 @@
+property: P2
+tags: fence-info,fence-indented
+seed: 12855671155714460258
+
+got:  "dolor the"
+want: " \x030,90dolor the                                                                       \x03 "
+doc:  "   ```text ex\n\ndolor the"

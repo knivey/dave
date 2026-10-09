@@ -1,0 +1,7 @@
+property: P2
+tags: indented-code
+seed: 12855671155714460258
+
+got:  " \x030,90`lazy fox                                                                       \x03 \n \x030,90value                                                                           \x03 "
+want: " \x030,90`lazy fox                                                                       \x03 \n \x030,90                                                                                \x03 \n \x030,90value                               …"
+doc:  "    `lazy fox\n\n    value"

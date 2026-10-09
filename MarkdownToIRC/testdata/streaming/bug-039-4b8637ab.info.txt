@@ -1,0 +1,7 @@
+property: P2
+tags: fence-info,fence-indented,list,setext
+seed: 12855671155714460258
+
+got:  " • [ ] amet\n   \nover\n----------------------------------------"
+want: " • [ ] amet\n   \nover\n \x030,90---                                                                             \x03 "
+doc:  "+ [ ] amet\n  ```\nover\n  ```\n\n---"

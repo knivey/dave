@@ -1,0 +1,7 @@
+property: P2
+tags: fence-info,fence-tilde,indented-code
+seed: 12855671155714460258
+
+got:  " \x030,90dolor                                                                           \x03 "
+want: " \x030,90    dolor                                                                       \x03 "
+doc:  "~~~\n\n    dolor"

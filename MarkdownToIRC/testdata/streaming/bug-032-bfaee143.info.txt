@@ -1,0 +1,7 @@
+property: P2
+tags: indented-code,list
+seed: 12855671155714460258
+
+got:  "1. delta_quix\n \x030,90item                                                                            \x03 "
+want: "1. delta_quixitem"
+doc:  "1. delta_quix\n\n    item"

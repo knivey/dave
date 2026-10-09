@@ -559,13 +559,27 @@ type streamOutput struct {
 }
 
 func (so *streamOutput) HandleDelta(delta string, send func(string)) {
-	so.buffer += delta
+	if delta == "" {
+		// DESIGN NOTE: empty content deltas are routine on the wire —
+		// tool-call chunks, finish chunks, keepalives and interleaved
+		// reasoning chunks all carry content:"" — but the markdown
+		// renderer's Process("") IS the end-of-stream flush signal.
+		// Forwarding the empty delta here flushed the renderer's held
+		// paragraph mid-stream, splitting output at arbitrary chunk
+		// boundaries. Flushing is Flush()'s job and nothing else's.
+		return
+	}
 	if so.renderer != nil {
 		for _, line := range so.renderer.Process(delta) {
 			send(line)
 		}
 		return
 	}
+	// Plain (no-markdown) mode: buffer is the dangling partial line,
+	// released on the next newline. The renderer keeps its own buffer —
+	// accumulating the raw text here too was pure O(n²) waste once the
+	// historical re-render of it went away.
+	so.buffer += delta
 	if strings.Contains(so.buffer, "\n") {
 		send(so.buffer)
 		so.buffer = ""
@@ -810,6 +824,10 @@ StreamLoop:
 			if res.done {
 				if res.err != nil {
 					stream.Close()
+					// The stream died mid-generation: deliver whatever
+					// complete text the renderer is still holding before
+					// the error notice, instead of silently dropping it.
+					sOut.Flush(cr.sendIRC)
 					cr.sendError(res.err.Error())
 					cr.logger.Error(res.err.Error())
 					cr.logAPIIncident(res.err, turn.Messages(), iterations, "chat_completions_stream")
@@ -917,6 +935,9 @@ StreamLoop:
 				// erroring out a completed turn.
 				break StreamLoop
 			}
+			// Idle before any finish: the tail the renderer is holding is
+			// incomplete but real — show it, then the timeout error.
+			sOut.Flush(cr.sendIRC)
 			timeoutErr := fmt.Errorf("stream timed out (no data received): timeout=%s", cr.cfg.StreamTimeout)
 			cr.sendError(timeoutErr.Error())
 			cr.logger.Error("stream idle timeout exceeded", "timeout", cr.cfg.StreamTimeout)
@@ -983,13 +1004,12 @@ StreamLoop:
 		ToolCalls:        accumulatedToolCalls,
 	}
 
-	if sOut.buffer != "" {
-		text := ExtractFinalText(sOut.buffer)
-		if cr.cfg.RenderMarkdown {
-			text = markdowntoirc.MarkdownToIRC(text)
-		}
-		cr.sendIRC(text)
-	}
+	// Flush ONLY the renderer's unsent tail. The historical code re-rendered
+	// sOut.buffer here, which in renderer mode held the FULL raw text —
+	// duplicating every line already streamed to IRC. Flush() sends exactly
+	// the pending remainder in both modes (the no-renderer tail is
+	// sOut.buffer's dangling partial line).
+	sOut.Flush(cr.sendIRC)
 
 	turn.Add(assistantMsg)
 
@@ -1565,6 +1585,8 @@ func (cr *chatRunner) callResponsesStream(ctx context.Context, params responses.
 			if res.done {
 				if res.err != nil {
 					stream.Close()
+					// Deliver the held tail before the error notice.
+					sOut.Flush(cr.sendIRC)
 					return nil, res.err
 				}
 				cr.logger.Info("Responses stream completed")
@@ -1600,18 +1622,23 @@ func (cr *chatRunner) callResponsesStream(ctx context.Context, params responses.
 
 		case <-idleTimer.C:
 			stream.Close()
+			// Deliver the held tail before the timeout error.
+			sOut.Flush(cr.sendIRC)
 			return nil, fmt.Errorf("responses stream timed out (no data received)")
 		}
 	}
 
 streamDone:
+	// Flush before the completed-response check: the text is real even when
+	// the terminal event never arrived, and the historical ordering dropped
+	// it on that error path.
+	sOut.Flush(cr.sendIRC)
+
 	if completedResponse == nil {
 		return nil, fmt.Errorf("responses stream ended without response.completed event")
 	}
 
 	logStreamCompletion(cr.transport.sessionID, cr.cfg.Model, fullText, reasoningBuffer, nil, sdkResponseUsageToUsage(completedResponse.Usage, string(completedResponse.Status)), RoleAssistant)
-
-	sOut.Flush(cr.sendIRC)
 
 	cr.logger.Info(FormatOutput(fullText))
 	if reasoningBuffer != "" {

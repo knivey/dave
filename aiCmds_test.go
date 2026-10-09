@@ -411,6 +411,69 @@ func makeResponsesAPIResponse(id, text string) map[string]any {
 	}
 }
 
+// makeResponsesAPIToolCallResponse builds a Responses API payload whose
+// output carries a single function_call item, driving the tool-call loop.
+func makeResponsesAPIToolCallResponse(id, name, args string) map[string]any {
+	return map[string]any{
+		"id":     id,
+		"object": "response",
+		"model":  "test-model",
+		"output": []any{
+			map[string]any{
+				"type":      "function_call",
+				"id":        "fc_" + id,
+				"call_id":   "call_" + id,
+				"name":      name,
+				"arguments": args,
+				"status":    "completed",
+			},
+		},
+	}
+}
+
+// makeResponsesRunner builds a chatRunner pointed at a Responses API test
+// server, for tests that drive runTurn end to end.
+func makeResponsesRunner(t *testing.T, serverURL string, sid int64, cfg AIConfig) *chatRunner {
+	t.Helper()
+	client := openai.NewClient(
+		option.WithAPIKey("test-key"),
+		option.WithBaseURL(serverURL+"/v1"),
+	)
+	transport := newDaveTransport(nil, nil)
+	logger := logxi.New("test")
+	logger.SetLevel(logxi.LevelAll)
+	return &chatRunner{
+		openaiClient: &client,
+		transport:    transport,
+		httpClient:   &http.Client{Transport: transport},
+		cfg:          cfg,
+		network:      Network{Name: "testnet"},
+		channel:      "#101",
+		nick:         "shrew",
+		userID:       ensureTestUser(t, "testnet", "shrew"),
+		sessionID:    sid,
+		logger:       logger,
+		ctx:          context.Background(),
+		outputCh:     make(chan string, 100),
+	}
+}
+
+// parseRecordedRequestBody decodes a captured Responses API request body
+// into its previous_response_id ("" when absent) and input items. Must run
+// on the test goroutine, not the HTTP handler goroutine.
+func parseRecordedRequestBody(t *testing.T, raw string) (prevID string, input []json.RawMessage) {
+	t.Helper()
+	var body map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(raw), &body))
+	if rawID, ok := body["previous_response_id"]; ok {
+		require.NoError(t, json.Unmarshal(rawID, &prevID))
+	}
+	if rawInput, ok := body["input"]; ok {
+		require.NoError(t, json.Unmarshal(rawInput, &input))
+	}
+	return prevID, input
+}
+
 func TestRunTurnResponses_ConcurrentSerialization(t *testing.T) {
 	setupSessionWithResponseID(t, "resp-initial")
 
@@ -849,6 +912,248 @@ func TestRunTurnResponsesEmptyRetryDropsChainAndCorrects(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, s.ResponseID)
 	assert.Equal(t, "resp-good", *s.ResponseID)
+}
+
+// TestRunTurnResponsesDisabledPrevIDSendsNoID reproduces the OpenRouter
+// incident (2026-10-09, session 1806): a command with responses_api = true
+// but previous_response_id = false still attached the session's stored
+// response_id to the request. OpenRouter's stateless Responses proxy
+// rejects any previous_response_id with 400 invalid_prompt, so the stored
+// id must only ever be sent when chaining is actually enabled.
+func TestRunTurnResponsesDisabledPrevIDSendsNoID(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	// The stored id is a real OpenRouter generation id, saved by an earlier
+	// successful turn (handleResponseIDSave stores every response id).
+	sid := setupSessionWithResponseID(t, "gen-1791535207-prodIncident")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "one"}))
+
+	var mu sync.Mutex
+	var bodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, string(raw))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(makeResponsesAPIResponse("resp-ok", "fine"))
+	}))
+	defer server.Close()
+
+	cfg := AIConfig{
+		Model:              "test-model",
+		ResponsesAPI:       true,
+		PreviousResponseID: false,
+		Timeout:            10 * time.Second,
+	}
+	runner := makeResponsesRunner(t, server.URL, sid, cfg)
+	messages, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	runner.runTurn(newTurnContext(sid, messages))
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, bodies, 1, "expected exactly one API call")
+	prevID, input := parseRecordedRequestBody(t, bodies[0])
+	assert.Empty(t, prevID, "previous_response_id must NOT be sent when the command disables it")
+	assert.Len(t, input, 2, "full history (system + user) must be sent when chaining is disabled")
+}
+
+// TestRunTurnResponsesDisabledPrevIDToolLoopSendsNoID pins the tool-call
+// round of the disabled-chaining path: the follow-up request after a tool
+// result must also be id-free and carry the full history (the model's
+// function_call + the tool result ride along as input items).
+func TestRunTurnResponsesDisabledPrevIDToolLoopSendsNoID(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	sid := setupSessionWithResponseID(t, "gen-toolloop")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "one"}))
+
+	var mu sync.Mutex
+	var bodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		n := len(bodies)
+		bodies = append(bodies, string(raw))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if n == 0 {
+			json.NewEncoder(w).Encode(makeResponsesAPIToolCallResponse("resp-1", "fake_tool", "{}"))
+			return
+		}
+		json.NewEncoder(w).Encode(makeResponsesAPIResponse("resp-2", "done"))
+	}))
+	defer server.Close()
+
+	cfg := AIConfig{
+		Model:              "test-model",
+		ResponsesAPI:       true,
+		PreviousResponseID: false,
+		Timeout:            10 * time.Second,
+	}
+	runner := makeResponsesRunner(t, server.URL, sid, cfg)
+	messages, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	runner.runTurn(newTurnContext(sid, messages))
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, bodies, 2, "expected tool round-trip (call + follow-up)")
+	for i, raw := range bodies {
+		prevID, input := parseRecordedRequestBody(t, raw)
+		assert.Empty(t, prevID, "request %d: previous_response_id must NOT be sent when chaining is disabled", i+1)
+		if i == 1 {
+			// Full history resend: system + user + assistant function_call
+			// + tool result.
+			assert.GreaterOrEqual(t, len(input), 4, "follow-up must resend the full history, not just the tool result")
+			var joined string
+			for _, item := range input {
+				joined += string(item)
+			}
+			assert.Contains(t, joined, "function_call", "follow-up input must carry the model's function_call")
+			assert.Contains(t, joined, "function_call_output", "follow-up input must carry the tool result")
+		}
+	}
+}
+
+// TestRunTurnResponsesToolLoopChainsFreshID guards the chaining half of the
+// invariant: with previous_response_id enabled but NO stored id (the first
+// turn of a session), the opening request must be id-free full history, and
+// the follow-up after a tool round-trip must chain the id saved from THIS
+// turn's response, sending only the tool results as input. Gating the
+// previous_response_id param must never break this path.
+func TestRunTurnResponsesToolLoopChainsFreshID(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		t.Run(fmt.Sprintf("streaming=%v", streaming), func(t *testing.T) {
+			setupTestDB(t)
+			setupNoticesDefaults(t)
+
+			sid := setupSessionWithResponseID(t, "")
+			require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+			require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "one"}))
+
+			var mu sync.Mutex
+			var bodies []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				raw, _ := io.ReadAll(r.Body)
+				mu.Lock()
+				n := len(bodies)
+				bodies = append(bodies, string(raw))
+				mu.Unlock()
+				var payload map[string]any
+				if n == 0 {
+					payload = makeResponsesAPIToolCallResponse("resp-1", "fake_tool", "{}")
+				} else {
+					payload = makeResponsesAPIResponse("resp-2", "done")
+				}
+				if streaming {
+					w.Header().Set("Content-Type", "text/event-stream")
+					event, _ := json.Marshal(map[string]any{"type": "response.completed", "response": payload})
+					fmt.Fprintf(w, "data: %s\n\n", event)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(payload)
+			}))
+			defer server.Close()
+
+			cfg := AIConfig{
+				Model:              "test-model",
+				ResponsesAPI:       true,
+				PreviousResponseID: true,
+				Streaming:          streaming,
+				Timeout:            10 * time.Second,
+				StreamTimeout:      10 * time.Second,
+			}
+			runner := makeResponsesRunner(t, server.URL, sid, cfg)
+			messages, err := sessionMgr.GetMessages(sid)
+			require.NoError(t, err)
+			runner.runTurn(newTurnContext(sid, messages))
+
+			mu.Lock()
+			defer mu.Unlock()
+			require.Len(t, bodies, 2, "expected tool round-trip (call + follow-up)")
+
+			prevID0, input0 := parseRecordedRequestBody(t, bodies[0])
+			assert.Empty(t, prevID0, "opening request of an id-less session must not send previous_response_id")
+			assert.Len(t, input0, 2, "opening request must send the full history")
+
+			prevID1, input1 := parseRecordedRequestBody(t, bodies[1])
+			assert.Equal(t, "resp-1", prevID1, "tool-loop follow-up must chain the id saved from this turn's response")
+			assert.Len(t, input1, 1, "chained follow-up must send only the tool result")
+			assert.Contains(t, string(input1[0]), "function_call_output", "follow-up input must be the tool result")
+		})
+	}
+}
+
+// TestRunTurnResponsesProxyRejectRetriesWithoutID covers the Layer 2 net
+// for stateless Responses proxies (OpenRouter): when chaining IS enabled
+// and the proxy rejects previous_response_id outright, the turn must retry
+// once with the full history and no id instead of surfacing the 400 to the
+// user. OpenRouter's rejection is 400 invalid_prompt with a
+// "previous_response_id is not supported on this proxy" message — wording
+// the 404/expired-id cases never see.
+func TestRunTurnResponsesProxyRejectRetriesWithoutID(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	sid := setupSessionWithResponseID(t, "gen-rejected")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "one"}))
+
+	var mu sync.Mutex
+	var bodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		n := len(bodies)
+		bodies = append(bodies, string(raw))
+		mu.Unlock()
+		if n == 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]any{
+					"code":    "invalid_prompt",
+					"message": "previous_response_id is not supported on this proxy. Each response request is independent.",
+				},
+			})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(makeResponsesAPIResponse("resp-good", "recovered answer"))
+	}))
+	defer server.Close()
+
+	cfg := AIConfig{
+		Model:              "test-model",
+		ResponsesAPI:       true,
+		PreviousResponseID: true,
+		Timeout:            10 * time.Second,
+	}
+	outputCh := make(chan string, 100)
+	runner := makeResponsesRunner(t, server.URL, sid, cfg)
+	runner.outputCh = outputCh
+	messages, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	runner.runTurn(newTurnContext(sid, messages))
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, bodies, 2, "expected initial chained attempt + 1 retry without the id")
+	prevID0, _ := parseRecordedRequestBody(t, bodies[0])
+	assert.Equal(t, "gen-rejected", prevID0, "initial attempt chains the stored id")
+	prevID1, input1 := parseRecordedRequestBody(t, bodies[1])
+	assert.Empty(t, prevID1, "retry must drop previous_response_id")
+	assert.Len(t, input1, 2, "retry must resend the full history")
+
+	lines := drainOutput(t, outputCh, 2, time.Second)
+	assert.Contains(t, strings.Join(lines, "\n"), "recovered answer")
 }
 
 func TestHandleResponseIDSave_SavesToRunnerSessionNotActive(t *testing.T) {

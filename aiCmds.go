@@ -755,7 +755,12 @@ func (cr *chatRunner) runTurnResponsesStream(
 	cr.executeToolCalls(turn, toolCalls)
 
 	var newInput []responses.ResponseInputItemUnionParam
-	if cr.cfg.PreviousResponseID && currentResponseID != "" {
+	// Mirror the non-streaming tool-loop: input shape and the chain
+	// decision are ONE choice — delta-only input (tool results) must chain
+	// currentResponseID on the next request or the provider loses all
+	// context; full-history input must drop the id to match.
+	chain := chainActive(cr.cfg, currentResponseID)
+	if chain {
 		toolResultMsgs := turn.LastN(numToolCalls)
 		newInput = toolResultMsgsToInputItems(toolResultMsgs)
 	} else {
@@ -764,7 +769,7 @@ func (cr *chatRunner) runTurnResponsesStream(
 	return responsesStreamResult{
 		emptyRetries:      emptyRetries,
 		currentResponseID: currentResponseID,
-		usePrevID:         usePrevID,
+		usePrevID:         chain,
 		input:             newInput,
 	}
 }
@@ -1418,7 +1423,7 @@ func (cr *chatRunner) runTurnResponses(turn *turnContext) bool {
 	if session != nil && session.ResponseID != nil {
 		currentResponseID = *session.ResponseID
 	}
-	usePrevID := cr.cfg.PreviousResponseID && currentResponseID != ""
+	usePrevID := chainActive(cr.cfg, currentResponseID)
 	// Layer 1 chain guard: never chain a stored response across a model
 	// change. Cross-model previous_response_id either errors with wording
 	// we may not recognize or silently drops the prior assistant history —
@@ -1455,7 +1460,20 @@ func (cr *chatRunner) runTurnResponses(turn *turnContext) bool {
 			return true
 		}
 
-		params := buildResponseParams(cr.cfg, input, responseTools, currentResponseID, cr.apiIdentity(true))
+		// The previous_response_id param and the input shape are two halves
+		// of ONE decision: previous_response_id must be sent if and only if
+		// the input is NOT the full history (we are relying on the server's
+		// stored context). usePrevID tracks that decision at every site
+		// that rebuilds input below. Passing currentResponseID through
+		// unconditionally leaked chain ids into requests for commands with
+		// previous_response_id disabled — OpenRouter's stateless Responses
+		// proxy 400s on any previous_response_id (incident
+		// 2026-10-09-084153, session 1806).
+		prevID := ""
+		if usePrevID {
+			prevID = currentResponseID
+		}
+		params := buildResponseParams(cr.cfg, input, responseTools, prevID, cr.apiIdentity(true))
 
 		if cr.cfg.Streaming {
 			r := cr.runTurnResponsesStream(ctx, params, turn, iteration, emptyRetries, maxEmptyRetries, currentResponseID, usePrevID)
@@ -1531,11 +1549,16 @@ func (cr *chatRunner) runTurnResponses(turn *turnContext) bool {
 		numToolCalls := len(toolCalls)
 		cr.handleToolCallResponse(turn, text, toolCalls, reasoning)
 
-		if cr.cfg.PreviousResponseID && currentResponseID != "" {
+		if chainActive(cr.cfg, currentResponseID) {
 			toolResultMsgs := turn.LastN(numToolCalls)
 			input = toolResultMsgsToInputItems(toolResultMsgs)
+			// Input is now delta-only (tool results): the next request must
+			// chain currentResponseID or the provider loses all context.
+			usePrevID = true
 		} else {
 			input = messagesToResponseInputItems(turn.Messages())
+			// Full-history resend: the chain id must be dropped to match.
+			usePrevID = false
 		}
 	}
 }

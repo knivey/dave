@@ -526,11 +526,27 @@ func TestAllSessionTemplatesHavePlaceholders(t *testing.T) {
 	}
 }
 
-func TestGeneratorNoticesDefaults(t *testing.T) {
-	nc := &NoticesConfig{}
-	setNoticesDefaults(nc)
-	assert.NotEmpty(t, nc.Generators.NoActivity)
-	assert.Contains(t, nc.Generators.Truncated, "{kept}")
-	assert.Contains(t, nc.Generators.Truncated, "{total}")
-	assert.Contains(t, nc.Generators.WindowTooLarge, "{cap}")
+// TestNoticesLoadWithStaleGeneratorsSection: old notices.toml files
+// still carrying a [generators] section load fine — unknown TOML keys
+// are ignored; the section is dead, not fatal.
+func TestNoticesLoadWithStaleGeneratorsSection(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"notices.toml": `
+[queue]
+msg = "q"
+
+[generators]
+no_activity = "stale"
+truncated = "stale"
+window_too_large = "stale"
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg, err := loadConfigDir(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "q", cfg.Notices.Queue.Msg)
+	setNoticesDefaults(&cfg.Notices)
+	assert.NotContains(t, fmt.Sprintf("%+v", cfg.Notices), "stale",
+		"the dead section's values must not leak anywhere")
 }

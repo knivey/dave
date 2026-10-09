@@ -131,11 +131,6 @@
 #   empty_response     (string)  Sent when the model returns no response text and retry_on_empty retries are exhausted (previously the user got no feedback at all). Placeholders: {attempts}
 #   reasoning_only     (string)  Sent instead of empty_response when the model produced reasoning but no response text (it put its answer in the reasoning channel); the reasoning content itself is delivered as a normal rendered message right after this notice. Placeholders: {attempts}
 #
-# [generators] options:
-#   no_activity        (string)  No logged activity found in the requested window (log-fed generator commands). Placeholders: {window}
-#   truncated          (string)  Log transcript truncated to fit the token budget (newest lines kept). Placeholders: {kept}, {total}, {dropped}, {tokens}, {budget}, {coverage}
-#   window_too_large   (string)  Requested window exceeds the row cap. Placeholders: {cap}
-#
 # support           (string)     Support message
 #
 # Example with all options set to defaults:
@@ -257,11 +252,6 @@
 # empty_response = "\x0307⚠️ empty response from model after {attempts} attempt(s) — retries exhausted, giving up\x0F"
 # reasoning_only = "\x0307⚠️ empty response from model after {attempts} attempt(s) — retries exhausted; the model put its reply in the reasoning channel instead, showing that below:\x0F"
 #
-# [generators]
-# no_activity = "No logged activity found in the last {window}."
-# truncated = "Log truncated to fit the token budget: kept {kept} of {total} lines ({dropped} dropped; {tokens}/{budget} tokens). Coverage: {coverage}."
-# window_too_large = "That window is too large (over the {cap}-row cap); narrow the duration."
-#
 # support = "If you enjoy using dave, consider supporting development at https://patreon.com/shrew269 ❤️"
 
 # Live config below:
@@ -272,9 +262,3 @@ msg = "queued (position {position})"
 msgs = [
     "whoa!! slow down!!!1~ AHHHHHHHHHHHHHHHH AHhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhA HHHHHHHHHHHHHhhhhhhhhhhhhhhhhhhhAAAAAAAAAAAAAAAAAAHhhhhhhhhhhhhhhhh"
 ]
-
-[generators]
-# Generator command notices (summary/tabloid/fakenews...). Hot-reloadable.
-# no_activity = "No logged activity found in the last {window}."
-# truncated = "Log truncated to fit the token budget: kept {kept} of {total} lines ({dropped} dropped; {tokens}/{budget} tokens). Coverage: {coverage}."
-# window_too_large = "That window is too large (over the {cap}-row cap); narrow the duration."

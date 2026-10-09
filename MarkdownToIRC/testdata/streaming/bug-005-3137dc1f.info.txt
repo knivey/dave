@@ -1,0 +1,7 @@
+property: P2
+tags: indented-code,list
+seed: 12855671155714460258
+
+got:  " • [gamma](htx\n \x030,90value beta                                                                      \x03 "
+want: " • [gamma](htxvalue beta"
+doc:  "+ [gamma](htx\n\n    value beta"

@@ -1,0 +1,7 @@
+property: P2
+tags: html
+seed: 12855671155714460258
+
+got:  "\x030,90alpha dog\x03 x\n<br>"
+want: "\x030,90alpha dog\x03 x<br>"
+doc:  "`alpha dog` x\n\n<br>"

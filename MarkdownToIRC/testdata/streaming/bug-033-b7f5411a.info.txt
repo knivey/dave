@@ -1,0 +1,7 @@
+property: P2
+tags: fence-info,fence-tilde,fence-indented,list,html
+seed: 12855671155714460258
+
+got:  "3. foo bar <x"
+want: " \x030,903. foo bar <x                                                                   \x03 "
+doc:  "   ~~~\n\n3. foo bar <x"

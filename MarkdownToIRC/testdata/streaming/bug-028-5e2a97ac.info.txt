@@ -1,0 +1,7 @@
+property: P2
+tags: setext,html
+seed: 12855671155714460258
+
+got:  "----------------------------------------\n<p>quick baz</p>"
+want: "----------------------------------------<p>quick baz</p>"
+doc:  "----\n\n<p>quick baz</p>"

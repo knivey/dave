@@ -1,0 +1,7 @@
+property: P2
+tags: quote
+seed: 12855671155714460258
+
+got:  ""
+want: " \x030,90> > note_lorem                                                                  \x03 "
+doc:  "```\n> > note_lorem"

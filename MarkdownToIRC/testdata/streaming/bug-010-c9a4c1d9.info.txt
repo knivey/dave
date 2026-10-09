@@ -1,0 +1,7 @@
+property: P2
+tags: html
+seed: 12855671155714460258
+
+got:  "| over | thex\n<br>"
+want: "| over | thex<br>"
+doc:  "| over | thex\n\n<br>"

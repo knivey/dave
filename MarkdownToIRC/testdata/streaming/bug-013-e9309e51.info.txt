@@ -1,0 +1,7 @@
+property: P2
+tags: fence-info,fence-indented
+seed: 12855671155714460258
+
+got:  ""
+want: " \x030,90note_overx                                                                      \x03 "
+doc:  "   ```\n   note_overx"

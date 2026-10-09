@@ -1,0 +1,7 @@
+property: P2
+tags: list,html
+seed: 12855671155714460258
+
+got:  "3. <br>\nlorem alpx"
+want: "3. <br>lorem alpx"
+doc:  "3. <br>\n\n   lorem alpx"

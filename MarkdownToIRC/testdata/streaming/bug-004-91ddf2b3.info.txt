@@ -1,0 +1,7 @@
+property: P2
+tags: fence-indented,quote
+seed: 12855671155714460258
+
+got:  ""
+want: " \x030,90> - dolor dox                                                                   \x03 "
+doc:  "   ```\n> - dolor dox"

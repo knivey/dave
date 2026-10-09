@@ -1,0 +1,7 @@
+property: P2
+tags: indented-code,html
+seed: 12855671155714460258
+
+got:  " \x030,90delta itx                                                                       \x03 \n<br>"
+want: " \x030,90delta itx                                                                       \x03 <br>"
+doc:  "    delta itx\n\n<br>"

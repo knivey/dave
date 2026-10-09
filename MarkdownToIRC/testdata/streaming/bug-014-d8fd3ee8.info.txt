@@ -1,0 +1,7 @@
+property: P2
+tags: fence-info,fence-tilde
+seed: 12855671155714460258
+
+got:  "beta beta"
+want: " \x030,90beta beta                                                                       \x03 "
+doc:  "~~~\n\nbeta beta"

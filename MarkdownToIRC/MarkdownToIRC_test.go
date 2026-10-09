@@ -327,6 +327,16 @@ func TestEdgeCases(t *testing.T) {
 			input:   "**bold** and `code` and *italic*",
 			contain: []string{"\x02bold\x02", "\x030,90code\x03", "\x1Ditalic\x1D"},
 		},
+		{
+			// HTML blocks lead with a newline like every other block kind
+			// (they used to glue onto the previous line: "para<div>"). This
+			// pins the NON-streaming renderer's behavior — the streaming
+			// goldens pin the same change on the streaming side.
+			name:       "HTMLBlockSeparatedFromParagraph",
+			input:      "para text\n\n<div>x</div>",
+			contain:    []string{"para text\n<div>x</div>"},
+			notContain: []string{"para text<div>"},
+		},
 	})
 }
 

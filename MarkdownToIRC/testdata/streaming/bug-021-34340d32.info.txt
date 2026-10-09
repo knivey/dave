@@ -1,0 +1,7 @@
+property: P2
+tags: indented-code,list
+seed: 12855671155714460258
+
+got:  "1. sit sit `x\n \x030,90lazy brown                                                                      \x03 "
+want: "1. sit sit `xlazy brown"
+doc:  "1. sit sit `x\n\n    lazy brown"

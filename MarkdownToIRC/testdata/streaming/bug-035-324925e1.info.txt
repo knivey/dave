@@ -1,0 +1,7 @@
+property: P2
+tags: html
+seed: 12855671155714460258
+
+got:  "\x02brown\x02\n<br>"
+want: "\x02brown\x02<br>"
+doc:  "# brown\n\n<br>"

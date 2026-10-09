@@ -1,0 +1,7 @@
+property: P2
+tags: plain
+seed: 12855671155714460258
+
+got:  ""
+want: " \x030,90`lazy over` x                                                                   \x03 "
+doc:  "```\n`lazy over` x"

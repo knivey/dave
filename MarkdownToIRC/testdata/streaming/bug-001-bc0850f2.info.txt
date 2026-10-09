@@ -1,0 +1,7 @@
+property: P2
+tags: indented-code,list,quote,html
+seed: 12855671155714460258
+
+got:  "\x0309> [jumps](htx"
+want: "\x0309> [jumps](htx\n \x030,90 ```                                                                            \x03 \n1) \n    **qux"
+doc:  "> [jumps](htx\n\n     ```\n1) <br> **qux"

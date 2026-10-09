@@ -17,6 +17,8 @@ var fetchChannelLogFn = fetchChannelLog
 
 const queryChannelLogsToolName = "query_channel_logs"
 
+const respondToolName = "respond"
+
 // generatorLogQuery is the per-run log-retrieval context a log-fed
 // generator carries on its runner: the defaulted spec plus the raw and
 // normalized channel names the SQL match needs (setChannel keeps only
@@ -60,13 +62,14 @@ type generatorToolEntry struct {
 }
 
 // generatorTools are the ephemeral-turn-only tools generators offer
-// (query_channel_logs for log-fed commands; respond joins in a later
-// task for respond_tool generators). Deliberately separate from the
-// global builtinTools map: definitions are per-run and handlers need
-// the runner's generator context. Both honor disabled_builtin_tools
-// and hidden_tools exactly like builtins.
+// (query_channel_logs for log-fed commands; respond for respond_tool
+// generators). Deliberately separate from the global builtinTools map:
+// definitions are per-run and handlers need the runner's generator
+// context. Both honor disabled_builtin_tools and hidden_tools exactly
+// like builtins.
 var generatorTools = map[string]generatorToolEntry{
 	queryChannelLogsToolName: {handler: handleGeneratorLogQuery},
+	respondToolName:          {handler: handleGeneratorRespond},
 }
 
 // handleGeneratorLogQuery executes query_channel_logs: resolves the
@@ -136,6 +139,63 @@ func handleGeneratorLogQuery(cr *chatRunner, turn *turnContext, call ToolCall) {
 	turn.Add(toolResultMsg(call.ID, b.String()))
 }
 
+// generatorRespondToolDef builds the respond tool definition. Its text
+// argument is the model's complete final answer for the user.
+func generatorRespondToolDef() Tool {
+	return Tool{
+		Type: "function",
+		Function: &FunctionDefinition{
+			Name:        respondToolName,
+			Description: "Deliver your complete final answer to the user and end your turn. Use this once your task is finished; the text is rendered and sent verbatim. Do not call any other tool after this.",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"text": map[string]any{
+						"type":        "string",
+						"description": "Your complete final answer for the user.",
+					},
+				},
+				"required": []string{"text"},
+			},
+		},
+	}
+}
+
+// handleGeneratorRespond delivers the model's final answer and ends
+// the turn: the text goes through the normal render/pastebin plumbing,
+// and the responded flag tells every runTurn variant to return right
+// after executeToolCalls — no second API round-trip (a respond
+// iteration carries a tool call, so it never hits the empty-response
+// machinery by the existing definition: tool-call branches reset
+// emptyRetries). When respond rides alongside other tool calls in one
+// iteration, calls execute in order and the rest still run (results
+// logged; the turn is ephemeral anyway) — the flag simply ends the
+// loop after the batch.
+func handleGeneratorRespond(cr *chatRunner, turn *turnContext, call ToolCall) {
+	if !cr.ephemeral {
+		// Offered only on ephemeral turns; a hallucinated call from a
+		// chat turn gets an error result.
+		turn.Add(toolResultMsg(call.ID, "error: respond is not available on this command"))
+		return
+	}
+	var args struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+		turn.Add(toolResultMsg(call.ID, "error: failed to parse tool arguments: "+err.Error()))
+		return
+	}
+	text := strings.TrimSpace(args.Text)
+	if text == "" {
+		turn.Add(toolResultMsg(call.ID, "error: respond requires a non-empty \"text\" argument — provide your complete final answer"))
+		return
+	}
+	cr.sendRendered(text)
+	cr.responded = true
+	cr.logger.Info("generator respond delivered", "chars", len(text))
+	turn.Add(toolResultMsg(call.ID, "delivered"))
+}
+
 // generator is the executor for one-shot generator commands (spec
 // docs/superpowers/specs/2026-10-09-generators-tool-driven-design.md):
 // chat() minus persistence. It renders the system prompt, builds one
@@ -176,6 +236,7 @@ func generator(network Network, c *girc.Client, e girc.Event, cfg GeneratorConfi
 	runner.userID = resolvedUser.ID
 	runner.hostmask = e.Source.Name + "!" + e.Source.Ident + "@" + e.Source.Host
 	runner.ephemeral = true
+	runner.respondTool = cfg.RespondTool
 	if cfg.Log != nil {
 		spec := *cfg.Log
 		// Production specs are defaulted at config-load time; hand-built

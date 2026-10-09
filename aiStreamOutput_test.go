@@ -254,3 +254,62 @@ func TestCallResponsesStreamMissingCompletedFlushesTail(t *testing.T) {
 	joined := strings.Join(lines, "\n")
 	assert.Contains(t, joined, "responses tail text", "streamed text must be flushed before the error return")
 }
+
+// TestRunTurnRespondEndsTurnSingleRequest: a respond tool call ends the
+// turn with NO second API request — the completion signal is checked
+// right after executeToolCalls in every loop variant.
+func TestRunTurnRespondEndsTurnSingleRequest(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	respondStream := streamChunk(`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}`) +
+		streamChunk(`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"respond","arguments":"{\"text\":\"ALL DONE\"}"}}]},"finish_reason":null}]}`) +
+		streamChunk(`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`) +
+		"data: [DONE]\n\n"
+
+	// Always serve the respond stream: if the loop erroneously continues,
+	// a second request would re-deliver "ALL DONE" and both post-hoc
+	// assertions (reqs == 1, single delivery) catch it. No assertions
+	// inside the handler goroutine (require is test-goroutine-only).
+	var reqs int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		atomic.AddInt32(&reqs, 1)
+		fmt.Fprint(w, respondStream)
+	}))
+	defer server.Close()
+
+	outputCh := make(chan string, 64)
+	cr := newStreamTestRunner(t, server, AIConfig{
+		Model: "m", Timeout: 10 * time.Second, Streaming: true,
+		StreamTimeout: 5 * time.Second,
+	}, 0, outputCh)
+	cr.ephemeral = true
+	cr.respondTool = true
+
+	done := make(chan struct{})
+	go func() {
+		cr.runTurn(newEphemeralTurnContext([]ChatMessage{{Role: RoleUser, Content: "sum"}}))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("runTurn did not finish")
+	}
+
+	var sent []string
+	for {
+		select {
+		case s := <-outputCh:
+			sent = append(sent, s)
+		default:
+			goto asserted
+		}
+	}
+asserted:
+	joined := strings.Join(sent, "\n")
+	assert.Contains(t, joined, "ALL DONE")
+	assert.Equal(t, 1, strings.Count(joined, "ALL DONE"), "delivered exactly once")
+	assert.EqualValues(t, 1, atomic.LoadInt32(&reqs), "respond ends the turn — no second request")
+}

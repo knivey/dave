@@ -240,6 +240,13 @@ type chatRunner struct {
 	// query_channel_logs offering and carries the channel names and
 	// generator name its handler needs.
 	logQuery *generatorLogQuery
+	// respondTool mirrors the generator's respond_tool config: offer
+	// the respond tool on this ephemeral turn.
+	respondTool bool
+	// responded is set by handleGeneratorRespond; every runTurn variant
+	// checks it after executeToolCalls and ends the turn without
+	// another API round-trip.
+	responded bool
 	// apiLogSessionID overrides the id the apiLogger logs this runner's
 	// traffic under. Zero (the default) means "log under sessionID" —
 	// normal turns never touch it. Ephemeral (generator) runs set it to
@@ -503,6 +510,9 @@ func (cr *chatRunner) getTools() []Tool {
 		tools := mcpToolDefsForConfig(cr.cfg)
 		if cr.logQuery != nil {
 			tools = append(tools, generatorLogToolDef(cr.logQuery))
+		}
+		if cr.respondTool {
+			tools = append(tools, generatorRespondToolDef())
 		}
 		return tools
 	}
@@ -848,6 +858,11 @@ func (cr *chatRunner) runTurnResponsesStream(
 
 	numToolCalls := len(toolCalls)
 	cr.executeToolCalls(turn, toolCalls)
+	if cr.responded {
+		// respond delivered the final answer — the turn is complete,
+		// no further API round-trip.
+		return responsesStreamResult{done: true, currentResponseID: currentResponseID, usePrevID: usePrevID, emptyRetries: emptyRetries}
+	}
 
 	var newInput []responses.ResponseInputItemUnionParam
 	// Mirror the non-streaming tool-loop: input shape and the chain
@@ -1114,6 +1129,11 @@ StreamLoop:
 	turn.Add(assistantMsg)
 
 	cr.executeToolCalls(turn, accumulatedToolCalls)
+	if cr.responded {
+		// respond delivered the final answer — the turn is complete,
+		// no further API round-trip.
+		return true, emptyRetries
+	}
 	return false, emptyRetries
 }
 
@@ -1211,6 +1231,11 @@ func (cr *chatRunner) runTurn(turn *turnContext) bool {
 		cr.storeUsage(usage, "chat_completions", durationMs)
 		logTimings(cr.logger, nonStreamTimings)
 		cr.handleToolCallResponse(turn, content, toolCalls, reasoning)
+		if cr.responded {
+			// respond delivered the final answer — the turn is complete,
+			// no further API round-trip.
+			return true
+		}
 	}
 }
 
@@ -1656,6 +1681,12 @@ func (cr *chatRunner) runTurnResponses(turn *turnContext) bool {
 		cr.storeUsage(sdkResponseUsageToUsage(resp.Usage, string(resp.Status)), "responses", durationMs)
 		numToolCalls := len(toolCalls)
 		cr.handleToolCallResponse(turn, text, toolCalls, reasoning)
+		if cr.responded {
+			// respond delivered the final answer — the turn is complete,
+			// no further API round-trip (skip the chain rebuild too: the
+			// ephemeral turn is over and nothing chains from it).
+			return true
+		}
 
 		if chainActive(cr.cfg, currentResponseID) {
 			toolResultMsgs := turn.LastN(numToolCalls)

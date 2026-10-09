@@ -247,16 +247,24 @@ type MCPCommandConfig struct {
 }
 
 // GeneratorConfig is a one-shot agentic command (spec
-// docs/superpowers/specs/2026-10-09-generators-design.md): an AIConfig
-// plus a default instruction and an optional channel-log query whose
-// transcript is appended to the user message. Commands with Log set get
-// the "[duration] [focus...]" argument grammar; without it, plain
-// required args. BurntSushi decodes the embedded AIConfig fields at the
-// parent level and [name.log] into Log.
+// docs/superpowers/specs/2026-10-09-generators-tool-driven-design.md,
+// which supersedes the retrieval/output model of the v1
+// 2026-10-09-generators-design.md; its config/registration/dispatch model
+// is unchanged and still binding): an AIConfig plus a default
+// instruction, an optional channel-log query tool ([name.log] configures
+// query_channel_logs — the model retrieves its own windows under
+// host-side caps), and an optional respond tool (respond_tool: the model
+// submits its final answer through it and the turn ends there; when
+// false, or the model finishes with plain text, the final no-tool-call
+// reply is auto-sent). Log-fed generators dispatch with optional args
+// (bare or with-args — the model defaults the window via the tool);
+// without Log, args are required. BurntSushi decodes the embedded AIConfig
+// fields at the parent level and [name.log] into Log.
 type GeneratorConfig struct {
 	AIConfig
-	Prompt string        `toml:"prompt"`
-	Log    *LogQuerySpec `toml:"log"`
+	Prompt      string        `toml:"prompt"`
+	Log         *LogQuerySpec `toml:"log"`
+	RespondTool bool          `toml:"respond_tool"`
 }
 
 func (c MCPCommandConfig) GetAsyncTool() string {
@@ -638,7 +646,7 @@ func loadConfigDir(dir string) (Config, error) {
 		config.MaxImagePixels = defaultMaxImagePixels
 	}
 	if len(config.HiddenTools) == 0 {
-		config.HiddenTools = []string{"register_background_job", "check_ban_history", "query_channel_logs"}
+		config.HiddenTools = []string{"register_background_job", "check_ban_history", "query_channel_logs", "respond"}
 	}
 	if config.Bans.MaxDuration == "" {
 		config.Bans.MaxDuration = "6h"

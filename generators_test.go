@@ -429,3 +429,165 @@ func TestHandleGeneratorLogQueryDisabled(t *testing.T) {
 	turn := handleLogQueryForTest(t, cr, `{}`)
 	assert.Contains(t, lastToolResultText(t, turn), "is disabled for this command")
 }
+
+// TestHandleGeneratorLogQueryFetchError pins the generic fetch-failure
+// branch (carried finding from Task 3's review): a fetch error that is
+// NOT the row cap surfaces as "error: <err>" tool-result content the
+// model can act on — never the row-cap wording.
+func TestHandleGeneratorLogQueryFetchError(t *testing.T) {
+	setupNoticesDefaults(t)
+	orig := fetchChannelLogFn
+	fetchChannelLogFn = func(spec LogQuerySpec, network, channelRaw, channelNorm, model string, now time.Time) (*LogWindowResult, error) {
+		return nil, fmt.Errorf("log database is locked")
+	}
+	t.Cleanup(func() { fetchChannelLogFn = orig })
+
+	cr := newGeneratorToolTestRunner(true, &generatorLogQuery{
+		spec:       LogQuerySpec{Window: "24h", MaxTokens: 60000, Events: defaultLogEvents},
+		channelRaw: "#St", channel: "#st", name: "summary",
+	})
+	turn := handleLogQueryForTest(t, cr, `{}`)
+	result := lastToolResultText(t, turn)
+	assert.Contains(t, result, "error: log database is locked")
+	assert.NotContains(t, result, "row cap", "generic fetch errors must not read as the row-cap branch")
+	assert.NotContains(t, result, "narrower window")
+}
+
+// --- respond tool ---
+
+func TestGetToolsEphemeralOffersRespondWhenEnabled(t *testing.T) {
+	setupNoticesDefaults(t)
+	cr := newGeneratorToolTestRunner(true, nil)
+	cr.respondTool = true
+	tools := cr.getTools()
+	require.Len(t, tools, 1)
+	assert.Equal(t, respondToolName, tools[0].Function.Name)
+	// FunctionDefinition.Parameters is `any` — assert the map shape, then
+	// the required list (the brief's verbatim line indexed `any` directly,
+	// which does not compile; same fix as the log-tool test above).
+	params, ok := tools[0].Function.Parameters.(map[string]any)
+	require.True(t, ok, "parameters must be an object schema")
+	assert.Equal(t, []string{"text"}, params["required"])
+}
+
+func respondToolCall(id, argsJSON string) ToolCall {
+	return ToolCall{
+		ID:       id,
+		Type:     "function",
+		Function: FunctionCall{Name: respondToolName, Arguments: argsJSON},
+	}
+}
+
+func TestHandleGeneratorRespondSendsAndFlags(t *testing.T) {
+	setupNoticesDefaults(t)
+	out := make(chan string, 16)
+	cr := &chatRunner{
+		cfg:     AIConfig{Name: "summary", ToolVerbose: boolPtr(false)},
+		network: Network{Name: "testnet"},
+		logger:  newTestLogger(), ctx: context.Background(),
+		outputCh: out, ephemeral: true, responded: false,
+	}
+	turn := newEphemeralTurnContext(nil)
+	turn.Add(ChatMessage{Role: RoleUser, Content: "go"})
+	cr.executeToolCalls(turn, []ToolCall{respondToolCall("call_1", `{"text":"FINAL ANSWER"}`)})
+
+	assert.True(t, cr.responded, "responded flag ends the turn")
+	select {
+	case got := <-out:
+		assert.Contains(t, got, "FINAL ANSWER")
+	default:
+		t.Fatal("respond text was not sent")
+	}
+	last := turn.Messages()[len(turn.Messages())-1]
+	assert.Equal(t, RoleTool, last.Role, "a tool result closes the round trip")
+}
+
+func TestHandleGeneratorRespondEmptyText(t *testing.T) {
+	setupNoticesDefaults(t)
+	out := make(chan string, 16)
+	cr := &chatRunner{
+		cfg:     AIConfig{Name: "summary", ToolVerbose: boolPtr(false)},
+		network: Network{Name: "testnet"},
+		logger:  newTestLogger(), ctx: context.Background(),
+		outputCh: out, ephemeral: true,
+	}
+	turn := newEphemeralTurnContext(nil)
+	turn.Add(ChatMessage{Role: RoleUser, Content: "go"})
+	cr.executeToolCalls(turn, []ToolCall{respondToolCall("call_1", `{"text":"   "}`)})
+	assert.False(t, cr.responded)
+	assert.Contains(t, turn.Messages()[len(turn.Messages())-1].Content, "non-empty")
+	select {
+	case <-out:
+		t.Fatal("nothing is sent for an empty respond")
+	default:
+	}
+}
+
+func TestHandleGeneratorRespondGuardNonEphemeral(t *testing.T) {
+	setupNoticesDefaults(t)
+	out := make(chan string, 16)
+	cr := &chatRunner{
+		cfg:     AIConfig{Name: "chat", ToolVerbose: boolPtr(false)},
+		network: Network{Name: "testnet"},
+		logger:  newTestLogger(), ctx: context.Background(),
+		outputCh: out, // ephemeral false — hallucinated call
+	}
+	turn := newEphemeralTurnContext(nil)
+	turn.Add(ChatMessage{Role: RoleUser, Content: "go"})
+	cr.executeToolCalls(turn, []ToolCall{respondToolCall("call_1", `{"text":"x"}`)})
+	assert.False(t, cr.responded)
+	assert.Contains(t, turn.Messages()[len(turn.Messages())-1].Content, "not available on this command")
+}
+
+func TestHandleGeneratorRespondAlongsideOtherTools(t *testing.T) {
+	setupNoticesDefaults(t)
+	out := make(chan string, 16)
+	cr := &chatRunner{
+		cfg:     AIConfig{Name: "summary", ToolVerbose: boolPtr(false)},
+		network: Network{Name: "testnet"},
+		logger:  newTestLogger(), ctx: context.Background(),
+		outputCh: out, ephemeral: true,
+	}
+	turn := newEphemeralTurnContext(nil)
+	turn.Add(ChatMessage{Role: RoleUser, Content: "go"})
+	cr.executeToolCalls(turn, []ToolCall{
+		{ID: "call_1", Type: "function", Function: FunctionCall{Name: "nonexistent_tool", Arguments: "{}"}},
+		respondToolCall("call_2", `{"text":"THE ANSWER"}`),
+	})
+
+	// Calls execute in order; both produce tool results (the turn is
+	// ephemeral anyway); respond's text is sent exactly once and the
+	// flag ends the turn after the batch.
+	msgs := turn.Messages()
+	toolResults := 0
+	for _, m := range msgs {
+		if m.Role == RoleTool {
+			toolResults++
+		}
+	}
+	assert.Equal(t, 2, toolResults, "both calls produce results")
+	assert.True(t, cr.responded)
+
+	var sent []string
+	for {
+		select {
+		case s := <-out:
+			sent = append(sent, s)
+		default:
+			goto done
+		}
+	}
+done:
+	require.Len(t, sent, 1, "exactly one send")
+	assert.Contains(t, sent[0], "THE ANSWER")
+}
+
+func TestHandleGeneratorRespondDisabled(t *testing.T) {
+	setupNoticesDefaults(t)
+	cr := newGeneratorToolTestRunner(true, nil)
+	cr.cfg.DisabledBuiltinTools = []string{respondToolName}
+	turn := newEphemeralTurnContext(nil)
+	turn.Add(ChatMessage{Role: RoleUser, Content: "go"})
+	cr.executeToolCalls(turn, []ToolCall{respondToolCall("call_1", `{"text":"x"}`)})
+	assert.Contains(t, turn.Messages()[len(turn.Messages())-1].Content, "is disabled for this command")
+}

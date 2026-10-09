@@ -1461,7 +1461,7 @@ host = "irc.example.com"
 		defer os.RemoveAll(dir)
 
 		cfg := loadConfigDirOrDie(dir)
-		assert.Equal(t, []string{"register_background_job", "check_ban_history", "query_channel_logs"}, cfg.HiddenTools)
+		assert.Equal(t, []string{"register_background_job", "check_ban_history", "query_channel_logs", "respond"}, cfg.HiddenTools)
 	})
 
 	t.Run("hidden_tools explicit value overrides default", func(t *testing.T) {
@@ -2843,6 +2843,34 @@ func TestLoadConfigDirGeneratorsMissingFileOK(t *testing.T) {
 	cfg, err := loadConfigDir(dir)
 	require.NoError(t, err)
 	assert.Empty(t, cfg.Commands.Generators)
+}
+
+// TestLoadConfigDirGeneratorsRespondTool pins the respond_tool config
+// gate: true loads, absent stays false (the tool is opt-in per
+// generator). Mirrors TestLoadConfigDirGenerators' service-block shape —
+// generators load from generators.toml with top-level section keys.
+func TestLoadConfigDirGeneratorsRespondTool(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": testGeneratorsServices,
+		"generators.toml": `
+[responder]
+service = "svc"
+model = "m"
+respond_tool = true
+prompt = "p"
+
+[summary]
+service = "svc"
+model = "qwen3"
+prompt = "s"
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg, err := loadConfigDir(dir)
+	require.NoError(t, err)
+	assert.True(t, cfg.Commands.Generators["responder"].RespondTool)
+	assert.False(t, cfg.Commands.Generators["summary"].RespondTool, "default false")
 }
 
 func TestLoadConfigDirGeneratorsLogDefaults(t *testing.T) {

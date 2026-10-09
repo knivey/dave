@@ -117,10 +117,13 @@ type LogWindowResult struct {
   `AND created_at BETWEEN ? AND ?` `ORDER BY created_at ASC, id ASC` — rides
   `idx_irc_logs_channel_time`. Results across files (disjoint ranges) are merged
   in timestamp order.
-- **Channel matching is exact on the stored string**: the writer persists raw
-  `event.Params[0]`, and the reader's channel comes from the same girc delivery,
-  so they agree by construction. No casemapping normalization is applied,
-  deliberately matching writer behavior.
+- **Channel matching**: the writer persists raw `event.Params[0]`, but IRC
+  relays channel casing as the sender typed it, so a window can contain mixed
+  casings of the same channel. The query therefore matches both the raw
+  invoking param and its casemapping-normalized form
+  (`channel IN (raw, normalized)` — index-friendly; a row can't match both).
+  This is the codebase's "normalize at lookup time, never at store time" rule
+  applied to SQL.
 - **Row cap**: 1,000,000 rows across the window aborts with a distinct error →
   user-facing `window_too_large` notice (bounds memory on absurd durations; the
   token cap bounds the prompt but not the scan).

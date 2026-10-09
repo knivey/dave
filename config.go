@@ -228,6 +228,7 @@ type Commands struct {
 	Completions map[string]AIConfig
 	Chats       map[string]AIConfig
 	Tools       map[string]MCPCommandConfig
+	Generators  map[string]GeneratorConfig
 }
 
 type MCPCommandConfig struct {
@@ -243,6 +244,19 @@ type MCPCommandConfig struct {
 	AsyncTool      string `toml:"async_tool"`
 	OutputTemplate string `toml:"template"`
 	outputTmpl     *template.Template
+}
+
+// GeneratorConfig is a one-shot agentic command (spec
+// docs/superpowers/specs/2026-10-09-generators-design.md): an AIConfig
+// plus a default instruction and an optional channel-log query whose
+// transcript is appended to the user message. Commands with Log set get
+// the "[duration] [focus...]" argument grammar; without it, plain
+// required args. BurntSushi decodes the embedded AIConfig fields at the
+// parent level and [name.log] into Log.
+type GeneratorConfig struct {
+	AIConfig
+	Prompt string        `toml:"prompt"`
+	Log    *LogQuerySpec `toml:"log"`
 }
 
 func (c MCPCommandConfig) GetAsyncTool() string {
@@ -886,6 +900,10 @@ func loadCommandsDir(dir string, config *Config) (Commands, error) {
 	if err := loadCommandFile(filepath.Join(dir, "tools.toml"), &commands.Tools); err != nil {
 		return commands, fmt.Errorf("loading tools: %w", err)
 	}
+	commands.Generators = make(map[string]GeneratorConfig)
+	if err := loadCommandFile(filepath.Join(dir, "generators.toml"), &commands.Generators); err != nil {
+		return commands, fmt.Errorf("loading generators: %w", err)
+	}
 
 	if err := validateCommands(&commands, config); err != nil {
 		return commands, err
@@ -998,6 +1016,55 @@ func validateCommands(commands *Commands, config *Config) error {
 		commands.Tools[name] = cfg
 	}
 
+	for name, cfg := range commands.Generators {
+		ai, err := validateAIConfig(cfg.AIConfig, name, "generators", config)
+		if err != nil {
+			return err
+		}
+		cfg.AIConfig = ai
+		if cfg.System != "" {
+			tmpl, err := template.New(name + "_system").Parse(cfg.System)
+			if err != nil {
+				return fmt.Errorf("commands.generators.%s system prompt template parse error: %w", name, err)
+			}
+			cfg.SystemTmpl = tmpl
+			if err := validateTemplate(cfg.SystemTmpl); err != nil {
+				return fmt.Errorf("commands.generators.%s system prompt template validation error: %w", name, err)
+			}
+		}
+		if err := validateMCPRefsFor("generators", name, cfg.MCPs, config); err != nil {
+			return err
+		}
+		if err := validateAndSetAPIUserTemplate(&cfg.AIConfig, name, "generators"); err != nil {
+			return err
+		}
+		if cfg.Log != nil {
+			if err := validateLogQuerySpec(cfg.Log, name); err != nil {
+				return err
+			}
+		}
+		commands.Generators[name] = cfg
+	}
+
+	return nil
+}
+
+// validateLogQuerySpec applies defaults then rejects values that can only be
+// mistakes. Explicit zero is indistinguishable from unset and takes the
+// default (documented); negatives are errors.
+func validateLogQuerySpec(spec *LogQuerySpec, name string) error {
+	applyLogQueryDefaults(spec)
+	if spec.Window < 0 {
+		return fmt.Errorf("commands.generators.%s log window must be a positive duration (got %s)", name, spec.Window)
+	}
+	if spec.MaxTokens < 0 {
+		return fmt.Errorf("commands.generators.%s log max_tokens must be positive (got %d)", name, spec.MaxTokens)
+	}
+	for _, ev := range spec.Events {
+		if !knownLogEvents[ev] {
+			return fmt.Errorf("commands.generators.%s log events: %q is not a loggable IRC command", name, ev)
+		}
+	}
 	return nil
 }
 

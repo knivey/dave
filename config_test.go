@@ -2786,3 +2786,127 @@ auto_rejoin = true
 		assert.True(t, *net.Channels["#x"].AutoRejoin)
 	})
 }
+
+const testGeneratorsServices = `
+[svc]
+baseurl = "http://localhost"
+`
+
+func TestLoadConfigDirGenerators(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": testGeneratorsServices,
+		"generators.toml": `
+[summary]
+service = "svc"
+model = "qwen3"
+description = "Summarize activity"
+prompt = "Summarize the following channel activity."
+system = "You are {{.BotNick}}."
+[summary.log]
+window = "12h"
+events = ["PRIVMSG", "KICK"]
+max_tokens = 30000
+
+[fakenews]
+service = "svc"
+model = "qwen3"
+description = "Fake news"
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg, err := loadConfigDir(dir)
+	require.NoError(t, err)
+
+	sum := cfg.Commands.Generators["summary"]
+	require.NotNil(t, sum, "summary generator loaded")
+	assert.Equal(t, "svc", sum.AIConfig.Service)
+	assert.Equal(t, "summary", sum.AIConfig.Name, "Name set to section key")
+	assert.Equal(t, "Summarize the following channel activity.", sum.Prompt)
+	require.NotNil(t, sum.Log, "log block parsed")
+	assert.Equal(t, 12*time.Hour, sum.Log.Window)
+	assert.Equal(t, []string{"PRIVMSG", "KICK"}, sum.Log.Events)
+	assert.Equal(t, 30000, sum.Log.MaxTokens)
+	require.NotNil(t, sum.AIConfig.SystemTmpl, "system template parsed like chats")
+
+	fn := cfg.Commands.Generators["fakenews"]
+	require.NotNil(t, fn, "fakenews generator loaded")
+	assert.Nil(t, fn.Log, "no log block -> nil")
+}
+
+func TestLoadConfigDirGeneratorsMissingFileOK(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": testGeneratorsServices,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg, err := loadConfigDir(dir)
+	require.NoError(t, err)
+	assert.Empty(t, cfg.Commands.Generators)
+}
+
+func TestLoadConfigDirGeneratorsLogDefaults(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": testGeneratorsServices,
+		"generators.toml": `
+[g]
+service = "svc"
+[g.log]
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg, err := loadConfigDir(dir)
+	require.NoError(t, err)
+	log := cfg.Commands.Generators["g"].Log
+	require.NotNil(t, log)
+	assert.Equal(t, 24*time.Hour, log.Window)
+	assert.Equal(t, 60000, log.MaxTokens)
+	assert.Equal(t, []string{"PRIVMSG", "NOTICE", "TOPIC", "KICK"}, log.Events)
+}
+
+func TestLoadConfigDirRejectsInvalidGenerators(t *testing.T) {
+	cases := []struct {
+		name string
+		toml string
+	}{
+		{"bad service", `
+[g]
+service = "missing"
+`},
+		{"bad event", `
+[g]
+service = "svc"
+[g.log]
+events = ["PRIVMSG", "WALLOPS"]
+`},
+		{"negative window", `
+[g]
+service = "svc"
+[g.log]
+window = "-5h"
+`},
+		{"negative max tokens", `
+[g]
+service = "svc"
+[g.log]
+max_tokens = -1
+`},
+		{"bad system template", `
+[g]
+service = "svc"
+system = "{{.Unclosed"
+`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := createTestConfigDir(t, "", map[string]string{
+				"services.toml":   testGeneratorsServices,
+				"generators.toml": tc.toml,
+			})
+			defer os.RemoveAll(dir)
+			_, err := loadConfigDir(dir)
+			require.Error(t, err)
+		})
+	}
+}

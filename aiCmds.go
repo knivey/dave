@@ -718,7 +718,12 @@ func (cr *chatRunner) handleToolCallResponse(turn *turnContext, text string, too
 		ToolCalls:        toolCalls,
 	}
 	turn.Add(assistantMsg)
-	if text != "" {
+	if text != "" && !cr.ephemeral {
+		// Ephemeral (generator) turns suppress intermediate tool-loop
+		// text: it enters the turn history (the model sees its own
+		// words) and the logs, but never IRC — the channel only sees
+		// the curated answer (respond tool or the final no-tool-call
+		// iteration).
 		t := ExtractFinalText(text)
 		if cr.cfg.RenderMarkdown {
 			t = markdowntoirc.MarkdownToIRC(t)
@@ -847,6 +852,12 @@ func (cr *chatRunner) runTurnResponsesStream(
 		if reasoning != "" {
 			cr.logger.Info("reasoning", "content", reasoning)
 		}
+		if cr.ephemeral {
+			// Deferred emission (suppression): the collector no longer
+			// flushes; the final iteration's text is sent here,
+			// complete — mirroring the non-streaming Responses path.
+			cr.sendFinalText(text)
+		}
 		return responsesStreamResult{done: true, currentResponseID: currentResponseID, usePrevID: usePrevID, emptyRetries: emptyRetries}
 	}
 
@@ -891,7 +902,11 @@ func (cr *chatRunner) runTurnStream(ctx context.Context, params openai.ChatCompl
 	fullContent := ""
 	reasoningBuffer := ""
 	var sOut streamOutput
-	if cr.cfg.RenderMarkdown {
+	// Ephemeral (generator) turns never render live: emission is
+	// deferred to the iteration's classification (final text via
+	// sendFinalText, stream-death text via sendFinalText, intermediate
+	// text never). No renderer means no accidental live path.
+	if cr.cfg.RenderMarkdown && !cr.ephemeral {
 		sOut.renderer = markdowntoirc.NewStreamingRenderer()
 	}
 
@@ -942,7 +957,13 @@ StreamLoop:
 					// The stream died mid-generation: deliver whatever
 					// complete text the renderer is still holding before
 					// the error notice, instead of silently dropping it.
-					sOut.Flush(cr.sendIRC)
+					if cr.ephemeral {
+						// Deferred emission: deliver what arrived (parity
+						// with the non-ephemeral flush), complete.
+						cr.sendFinalText(fullContent)
+					} else {
+						sOut.Flush(cr.sendIRC)
+					}
 					cr.sendError(res.err.Error())
 					cr.logger.Error(res.err.Error())
 					cr.logAPIIncident(res.err, turn.Messages(), iterations, "chat_completions_stream")
@@ -1028,7 +1049,12 @@ StreamLoop:
 
 				textDelta := delta.Content
 				fullContent += textDelta
-				sOut.HandleDelta(textDelta, cr.sendIRC)
+				// Ephemeral (generator) turns accumulate without emitting —
+				// finality is unknowable mid-stream, so emission waits for
+				// the iteration's classification.
+				if !cr.ephemeral {
+					sOut.HandleDelta(textDelta, cr.sendIRC)
+				}
 			}
 
 			if choice.FinishReason == "tool_calls" {
@@ -1052,7 +1078,13 @@ StreamLoop:
 			}
 			// Idle before any finish: the tail the renderer is holding is
 			// incomplete but real — show it, then the timeout error.
-			sOut.Flush(cr.sendIRC)
+			if cr.ephemeral {
+				// Deferred emission: deliver what arrived (parity with
+				// the non-ephemeral flush), complete.
+				cr.sendFinalText(fullContent)
+			} else {
+				sOut.Flush(cr.sendIRC)
+			}
 			timeoutErr := fmt.Errorf("stream timed out (no data received): timeout=%s", cr.cfg.StreamTimeout)
 			cr.sendError(timeoutErr.Error())
 			cr.logger.Error("stream idle timeout exceeded", "timeout", cr.cfg.StreamTimeout)
@@ -1079,7 +1111,14 @@ StreamLoop:
 			Content:          content,
 			ReasoningContent: reasoningBuffer,
 		})
-		sOut.Flush(cr.sendIRC)
+		if cr.ephemeral {
+			// Deferred emission: the final iteration's text, complete.
+			// (content may be the "..." sentinel — sendFinalText skips
+			// it exactly like the non-streaming path.)
+			cr.sendFinalText(content)
+		} else {
+			sOut.Flush(cr.sendIRC)
+		}
 		cr.storeUsage(streamUsage, "chat_completions_stream", streamDurationMs)
 		logTimings(cr.logger, streamTimings)
 		if reasoningBuffer != "" {
@@ -1119,12 +1158,21 @@ StreamLoop:
 		ToolCalls:        accumulatedToolCalls,
 	}
 
-	// Flush ONLY the renderer's unsent tail. The historical code re-rendered
-	// sOut.buffer here, which in renderer mode held the FULL raw text —
-	// duplicating every line already streamed to IRC. Flush() sends exactly
-	// the pending remainder in both modes (the no-renderer tail is
-	// sOut.buffer's dangling partial line).
-	sOut.Flush(cr.sendIRC)
+	if cr.ephemeral {
+		// Suppressed from IRC (intermediate iteration); keep it visible
+		// in logs for parity with the non-ephemeral path, where the
+		// streamed text reached the channel (and the logs).
+		if fullContent != "" {
+			cr.logger.Info(FormatOutput(fullContent))
+		}
+	} else {
+		// Flush ONLY the renderer's unsent tail. The historical code re-rendered
+		// sOut.buffer here, which in renderer mode held the FULL raw text —
+		// duplicating every line already streamed to IRC. Flush() sends exactly
+		// the pending remainder in both modes (the no-renderer tail is
+		// sOut.buffer's dangling partial line).
+		sOut.Flush(cr.sendIRC)
+	}
 
 	turn.Add(assistantMsg)
 
@@ -1715,7 +1763,12 @@ func (cr *chatRunner) callResponsesStream(ctx context.Context, params responses.
 	var reasoningBuffer string
 	var completedResponse *responses.Response
 	var sOut streamOutput
-	if cr.cfg.RenderMarkdown {
+	// Ephemeral (generator) turns never render live: emission is deferred
+	// to the caller's classification of the iteration (final text via
+	// sendFinalText in runTurnResponsesStream; stream-death text via
+	// sendFinalText on the error/timeout branches below; intermediate
+	// text never).
+	if cr.cfg.RenderMarkdown && !cr.ephemeral {
 		sOut.renderer = markdowntoirc.NewStreamingRenderer()
 	}
 
@@ -1748,7 +1801,13 @@ func (cr *chatRunner) callResponsesStream(ctx context.Context, params responses.
 				if res.err != nil {
 					stream.Close()
 					// Deliver the held tail before the error notice.
-					sOut.Flush(cr.sendIRC)
+					if cr.ephemeral {
+						// Deferred emission: deliver what arrived (parity
+						// with the non-ephemeral flush), complete.
+						cr.sendFinalText(fullText)
+					} else {
+						sOut.Flush(cr.sendIRC)
+					}
 					return nil, res.err
 				}
 				cr.logger.Info("Responses stream completed")
@@ -1768,7 +1827,12 @@ func (cr *chatRunner) callResponsesStream(ctx context.Context, params responses.
 			case "response.output_text.delta":
 				textDelta := event.Delta
 				fullText += textDelta
-				sOut.HandleDelta(textDelta, cr.sendIRC)
+				// Ephemeral (generator) turns accumulate without emitting —
+				// finality is unknowable mid-stream, so emission waits for
+				// the caller's classification.
+				if !cr.ephemeral {
+					sOut.HandleDelta(textDelta, cr.sendIRC)
+				}
 
 			case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
 				reasoningBuffer += event.Delta
@@ -1785,7 +1849,13 @@ func (cr *chatRunner) callResponsesStream(ctx context.Context, params responses.
 		case <-idleTimer.C:
 			stream.Close()
 			// Deliver the held tail before the timeout error.
-			sOut.Flush(cr.sendIRC)
+			if cr.ephemeral {
+				// Deferred emission: deliver what arrived (parity with
+				// the non-ephemeral flush), complete.
+				cr.sendFinalText(fullText)
+			} else {
+				sOut.Flush(cr.sendIRC)
+			}
 			return nil, fmt.Errorf("responses stream timed out (no data received)")
 		}
 	}
@@ -1793,8 +1863,15 @@ func (cr *chatRunner) callResponsesStream(ctx context.Context, params responses.
 streamDone:
 	// Flush before the completed-response check: the text is real even when
 	// the terminal event never arrived, and the historical ordering dropped
-	// it on that error path.
-	sOut.Flush(cr.sendIRC)
+	// it on that error path. Ephemeral (generator) turns never flush here —
+	// the CALLER classifies the iteration: the final no-tool-call iteration
+	// sends the text via sendFinalText (runTurnResponsesStream), and a
+	// tool-call iteration is suppressed (intermediate). Consequence: an
+	// ephemeral stream that ends without response.completed surfaces only
+	// the error there; the delta text stays in the api log.
+	if !cr.ephemeral {
+		sOut.Flush(cr.sendIRC)
+	}
 
 	if completedResponse == nil {
 		return nil, fmt.Errorf("responses stream ended without response.completed event")

@@ -591,3 +591,49 @@ func TestHandleGeneratorRespondDisabled(t *testing.T) {
 	cr.executeToolCalls(turn, []ToolCall{respondToolCall("call_1", `{"text":"x"}`)})
 	assert.Contains(t, turn.Messages()[len(turn.Messages())-1].Content, "is disabled for this command")
 }
+
+// TestHandleToolCallResponseEphemeralSuppressesIntermediateText:
+// non-streaming intermediate text enters the turn history but never
+// IRC; the non-ephemeral send is pinned by existing aiCmds tests.
+func TestHandleToolCallResponseEphemeralSuppressesIntermediateText(t *testing.T) {
+	setupNoticesDefaults(t)
+	out := make(chan string, 16)
+	for _, ephemeral := range []bool{true, false} {
+		// ToolVerbose=false: executeToolCalls would otherwise emit a
+		// per-tool notice into `out` for the nonexistent tool, breaking
+		// the exactly-one-send assertion below.
+		cr := &chatRunner{
+			cfg:     AIConfig{Name: "x", ToolVerbose: boolPtr(false)},
+			network: Network{Name: "testnet"},
+			logger:  newTestLogger(), ctx: context.Background(),
+			outputCh: out, ephemeral: ephemeral,
+		}
+		turn := newEphemeralTurnContext(nil)
+		turn.Add(ChatMessage{Role: RoleUser, Content: "go"})
+		// DEVIATION from the brief (house precedent, recorded in
+		// task-5-report.md): ToolCall.Function is FunctionCall{Name,
+		// Arguments}, not FunctionDefinition (which has no Arguments
+		// field — the brief's literal does not compile).
+		cr.handleToolCallResponse(turn, "preamble text", []ToolCall{{
+			ID: "c1", Type: "function",
+			Function: FunctionCall{Name: "nonexistent_tool", Arguments: "{}"},
+		}}, "")
+
+		msgs := turn.Messages()
+		require.GreaterOrEqual(t, len(msgs), 2)
+		assert.Equal(t, "preamble text", msgs[1].Content, "text enters the turn history in both modes")
+	}
+	// drain: only the non-ephemeral run's preamble was sent
+	var sent []string
+	for {
+		select {
+		case s := <-out:
+			sent = append(sent, s)
+		default:
+			goto done
+		}
+	}
+done:
+	require.Len(t, sent, 1, "exactly one send — the non-ephemeral one")
+	assert.Contains(t, sent[0], "preamble text")
+}

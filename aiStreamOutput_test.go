@@ -10,6 +10,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -312,4 +313,206 @@ asserted:
 	assert.Contains(t, joined, "ALL DONE")
 	assert.Equal(t, 1, strings.Count(joined, "ALL DONE"), "delivered exactly once")
 	assert.EqualValues(t, 1, atomic.LoadInt32(&reqs), "respond ends the turn — no second request")
+}
+
+// TestRunTurnStreamEphemeralSuppressesIntermediateText: on an
+// ephemeral turn, text streamed before a tool call never reaches IRC;
+// only the final iteration's text is sent, once, complete (deferred
+// emission — finality is unknowable mid-stream).
+func TestRunTurnStreamEphemeralSuppressesIntermediateText(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	toolStream := streamChunk(`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"let me fetch"},"finish_reason":null}]}`) +
+		streamChunk(`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"nonexistent_tool","arguments":"{}"}}]},"finish_reason":null}]}`) +
+		streamChunk(`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`) +
+		"data: [DONE]\n\n"
+	finalStream := streamChunk(`{"id":"c2","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"THE FINAL"},"finish_reason":null}]}`) +
+		streamChunk(`{"id":"c2","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`) +
+		"data: [DONE]\n\n"
+
+	var reqs int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if atomic.AddInt32(&reqs, 1) == 1 {
+			fmt.Fprint(w, toolStream)
+			return
+		}
+		fmt.Fprint(w, finalStream)
+	}))
+	defer server.Close()
+
+	outputCh := make(chan string, 64)
+	cr := newStreamTestRunner(t, server, AIConfig{
+		Model: "m", Timeout: 10 * time.Second, Streaming: true,
+		RenderMarkdown: true, StreamTimeout: 5 * time.Second,
+	}, 0, outputCh)
+	cr.ephemeral = true
+
+	done := make(chan struct{})
+	go func() {
+		cr.runTurn(newEphemeralTurnContext([]ChatMessage{{Role: RoleUser, Content: "sum"}}))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("runTurn did not finish")
+	}
+
+	var sent []string
+collect:
+	for {
+		select {
+		case s := <-outputCh:
+			sent = append(sent, s)
+		default:
+			break collect
+		}
+	}
+	joined := strings.Join(sent, "\n")
+	assert.NotContains(t, joined, "let me fetch", "intermediate chatter is suppressed")
+	assert.Contains(t, joined, "THE FINAL", "the final answer is delivered once")
+	assert.EqualValues(t, 2, atomic.LoadInt32(&reqs), "the nonexistent tool result drives a second iteration")
+}
+
+// TestRunTurnStreamEphemeralErrorDeliversPartialText: a stream that
+// dies mid-flight delivers whatever text arrived before the error
+// notice — parity with the non-ephemeral "deliver what arrived"
+// philosophy — and does not misbehave when nothing arrived.
+func TestRunTurnStreamEphemeralErrorDeliversPartialText(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, streamChunk(`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"partial wisdom"},"finish_reason":null}]}`))
+		w.(http.Flusher).Flush()
+		// DEVIATION from the brief (recorded in task-5-report.md): the
+		// brief's handler returned cleanly after the chunk, which the
+		// openai-go ssestream decoder treats as a CLEAN end (EOF without
+		// [DONE] is not an error — bufio.Scanner EOF → Next()=false,
+		// Err()=nil), so the text was delivered by flushStreamedOutput
+		// and the error branch was never reached. Aborting the handler
+		// mid-stream (the TestRunTurnStreamErrorFlushesTail shape) makes
+		// the reader see an unexpected EOF, so the ephemeral error-path
+		// delivery (sendFinalText(fullContent)) is what this pins.
+		panic(http.ErrAbortHandler)
+	}))
+	defer server.Close()
+
+	outputCh := make(chan string, 64)
+	cr := newStreamTestRunner(t, server, AIConfig{
+		Model: "m", Timeout: 10 * time.Second, Streaming: true,
+		StreamTimeout: 5 * time.Second,
+	}, 0, outputCh)
+	cr.ephemeral = true
+
+	done := make(chan struct{})
+	go func() {
+		cr.runTurn(newEphemeralTurnContext([]ChatMessage{{Role: RoleUser, Content: "sum"}}))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("runTurn did not finish")
+	}
+
+	var sent []string
+	for {
+		select {
+		case s := <-outputCh:
+			sent = append(sent, s)
+		default:
+			goto check
+		}
+	}
+check:
+	joined := strings.Join(sent, "\n")
+	assert.Contains(t, joined, "partial wisdom", "deferred text is delivered before the error notice")
+}
+
+// TestRunTurnResponsesStreamEphemeralSuppressesIntermediateText: the
+// Responses-API mirror of the chat-completions suppression test — on an
+// ephemeral turn, delta text streamed before a function call never
+// reaches IRC; only the final iteration's text is sent, once, complete.
+// Event shapes mirror the existing responses stream tests: live
+// response.output_text.delta events plus a response.completed event
+// whose payload carries the output items (parseSDKResponseOutput reads
+// the completed response; the first iteration's payload carries BOTH
+// the intermediate message text and the function_call item, exactly
+// like the chat test's text+tool-call iteration).
+func TestRunTurnResponsesStreamEphemeralSuppressesIntermediateText(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	combinedPayload := map[string]any{
+		"id":     "resp-1",
+		"object": "response",
+		"model":  "test-model",
+		"output": []any{
+			map[string]any{
+				"type": "message", "role": "assistant", "id": "msg_1", "status": "completed",
+				"content": []any{map[string]any{"type": "output_text", "text": "let me fetch"}},
+			},
+			map[string]any{
+				"type": "function_call", "id": "fc_1", "call_id": "call_1", "status": "completed",
+				"name": "nonexistent_tool", "arguments": "{}",
+			},
+		},
+	}
+	firstCompleted, err := json.Marshal(map[string]any{"type": "response.completed", "response": combinedPayload})
+	require.NoError(t, err)
+	finalCompleted, err := json.Marshal(map[string]any{"type": "response.completed", "response": makeResponsesAPIResponse("resp-2", "THE FINAL")})
+	require.NoError(t, err)
+	toolStream := streamChunk(`{"type":"response.output_text.delta","sequence_number":1,"item_id":"msg_1","output_index":0,"content_index":0,"logprobs":[],"delta":"let me fetch"}`) +
+		"data: " + string(firstCompleted) + "\n\n"
+	finalStream := streamChunk(`{"type":"response.output_text.delta","sequence_number":1,"item_id":"msg_2","output_index":0,"content_index":0,"logprobs":[],"delta":"THE FINAL"}`) +
+		"data: " + string(finalCompleted) + "\n\n"
+
+	var reqs int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if atomic.AddInt32(&reqs, 1) == 1 {
+			fmt.Fprint(w, toolStream)
+			return
+		}
+		fmt.Fprint(w, finalStream)
+	}))
+	defer server.Close()
+
+	outputCh := make(chan string, 64)
+	cr := newStreamTestRunner(t, server, AIConfig{
+		Model: "test-model", ResponsesAPI: true, Streaming: true,
+		RenderMarkdown: true, Timeout: 10 * time.Second, StreamTimeout: 5 * time.Second,
+	}, 0, outputCh)
+	cr.ephemeral = true
+
+	done := make(chan struct{})
+	go func() {
+		cr.runTurn(newEphemeralTurnContext([]ChatMessage{{Role: RoleUser, Content: "sum"}}))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("runTurn did not finish")
+	}
+
+	var sent []string
+collect:
+	for {
+		select {
+		case s := <-outputCh:
+			sent = append(sent, s)
+		default:
+			break collect
+		}
+	}
+	joined := strings.Join(sent, "\n")
+	assert.NotContains(t, joined, "let me fetch", "intermediate chatter is suppressed")
+	assert.Contains(t, joined, "THE FINAL", "the final answer is delivered once")
+	assert.Equal(t, 1, strings.Count(joined, "THE FINAL"), "the final answer is delivered exactly once")
+	assert.EqualValues(t, 2, atomic.LoadInt32(&reqs), "the nonexistent tool result drives a second iteration")
 }

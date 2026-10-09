@@ -6,7 +6,7 @@
 #   max_queue_depth     (int, default: 5)     Max queued requests per network
 #   maximagepixels      (int, default: 50000000) Max total pixels (width*height*framecount) for downloaded images; larger claims are skipped before decode (decompression-bomb guard)
 #   sessions_display_limit (int, default: 10) Max sessions shown in sessions list command
-#   hidden_tools        (string array)        Tool names to hide from IRC notifications (default: ["register_background_job", "check_ban_history"])
+#   hidden_tools        (string array)        Tool names to hide from IRC notifications (default: ["register_background_job", "check_ban_history", "query_channel_logs"])
 #   disabled_builtins   (string array)        Builtin commands to disable (e.g. ["support", "mystats"])
 #   disabled_builtin_tools (string array)     Builtin LLM tools to disable (default: []); cascades to services/chats
 #   hidden_mcp_tools    (string array)        MCP tool names to hide from the LLM (default: []). Bare names or "server.tool" prefixed. Cascades to services/chats.
@@ -16,6 +16,8 @@
 #   register_background_job  — Monitor an async tool job for its result
 #   ban_user                 — Ban a user from bot commands for a duration
 #   check_ban_history        — View ban history for a user
+# Generator tools (offered only on log-fed generator commands' turns; not gated on MCP tools):
+#   query_channel_logs       — Retrieve the channel's recent log transcript
 #
 # [bans] options:
 #   max_duration        (string, default: "6h")   Maximum ban duration (supports s/m/h/d)
@@ -111,7 +113,7 @@
 # max_queue_depth = 5
 # maximagepixels = 50000000
 # sessions_display_limit = 10
-# hidden_tools = ["register_background_job", "check_ban_history"]
+# hidden_tools = ["register_background_job", "check_ban_history", "query_channel_logs"]
 # disabled_builtins = []
 # disabled_builtin_tools = []
 #

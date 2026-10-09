@@ -1461,7 +1461,7 @@ host = "irc.example.com"
 		defer os.RemoveAll(dir)
 
 		cfg := loadConfigDirOrDie(dir)
-		assert.Equal(t, []string{"register_background_job", "check_ban_history"}, cfg.HiddenTools)
+		assert.Equal(t, []string{"register_background_job", "check_ban_history", "query_channel_logs"}, cfg.HiddenTools)
 	})
 
 	t.Run("hidden_tools explicit value overrides default", func(t *testing.T) {

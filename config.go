@@ -638,7 +638,7 @@ func loadConfigDir(dir string) (Config, error) {
 		config.MaxImagePixels = defaultMaxImagePixels
 	}
 	if len(config.HiddenTools) == 0 {
-		config.HiddenTools = []string{"register_background_job", "check_ban_history"}
+		config.HiddenTools = []string{"register_background_job", "check_ban_history", "query_channel_logs"}
 	}
 	if config.Bans.MaxDuration == "" {
 		config.Bans.MaxDuration = "6h"

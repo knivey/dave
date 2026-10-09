@@ -235,6 +235,11 @@ type chatRunner struct {
 	// offering (getTools), and the session-0 usage-row exception
 	// (storeUsage). Everything else in runTurn is untouched.
 	ephemeral bool
+	// logQuery is the generator's log-retrieval context — nil on
+	// non-generator turns and log-less generators. Gates the
+	// query_channel_logs offering and carries the channel names and
+	// generator name its handler needs.
+	logQuery *generatorLogQuery
 	// apiLogSessionID overrides the id the apiLogger logs this runner's
 	// traffic under. Zero (the default) means "log under sessionID" —
 	// normal turns never touch it. Ephemeral (generator) runs set it to
@@ -490,10 +495,16 @@ func (cr *chatRunner) sendWarning(msg string) {
 
 func (cr *chatRunner) getTools() []Tool {
 	if cr.ephemeral {
-		// Generators never offer the builtin LLM tools:
-		// register_background_job delivery is session-bound; ban tools are
-		// chat-moderation concerns. MCP tools work normally.
-		return mcpToolDefsForConfig(cr.cfg)
+		// Generator turns: MCP tools work normally, but the builtin LLM
+		// tools are never offered (register_background_job delivery is
+		// session-bound; ban tools are chat-moderation concerns). The
+		// generator tools below are offered per-config — NOT gated on
+		// MCP tools existing, unlike the regular builtins.
+		tools := mcpToolDefsForConfig(cr.cfg)
+		if cr.logQuery != nil {
+			tools = append(tools, generatorLogToolDef(cr.logQuery))
+		}
+		return tools
 	}
 	return toolDefsForConfig(cr.cfg)
 }
@@ -1245,6 +1256,19 @@ func (cr *chatRunner) executeToolCalls(turn *turnContext, toolCalls []ToolCall) 
 	}
 
 	for _, tc := range toolCalls {
+		if entry, ok := generatorTools[tc.Function.Name]; ok {
+			if isToolDisabled(tc.Function.Name, cr.cfg.DisabledBuiltinTools) {
+				toolMsg := toolResultMsg(tc.ID, fmt.Sprintf("error: tool %q is disabled for this command", tc.Function.Name))
+				turn.Add(toolMsg)
+				continue
+			}
+			if verbose && !isToolHidden(tc.Function.Name, hiddenTools) && len(visibleTools) <= 1 {
+				cr.sendIRC(expandNotice(getNotices().Tools.Call, map[string]string{"server": "builtin", "tool": tc.Function.Name}))
+			}
+			cr.logger.Info("generator tool call", "tool", tc.Function.Name)
+			entry.handler(cr, turn, tc)
+			continue
+		}
 		if entry, ok := builtinTools[tc.Function.Name]; ok {
 			if isToolDisabled(tc.Function.Name, cr.cfg.DisabledBuiltinTools) {
 				toolMsg := toolResultMsg(tc.ID, fmt.Sprintf("error: tool %q is disabled for this command", tc.Function.Name))
@@ -2062,6 +2086,9 @@ func isToolHidden(toolName string, hidden []string) bool {
 }
 
 func getToolServerName(toolName string) string {
+	if _, ok := generatorTools[toolName]; ok {
+		return "builtin"
+	}
 	if _, ok := builtinTools[toolName]; ok {
 		return "builtin"
 	}

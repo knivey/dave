@@ -335,6 +335,221 @@ func TestGeneratorNonLogArgsPassedThrough(t *testing.T) {
 	assert.Contains(t, gotBody, "the moon landing", "args become the user message verbatim")
 }
 
+func newGeneratorToolTestRunner(ephemeral bool, lq *generatorLogQuery) *chatRunner {
+	return &chatRunner{
+		// ToolVerbose=false keeps output-channel assertions
+		// deterministic: executeToolCalls would otherwise emit
+		// per-tool notices into outputCh depending on global config
+		// state left by other tests.
+		cfg:       AIConfig{Name: "summary", Model: "m", ToolVerbose: boolPtr(false)},
+		network:   Network{Name: "testnet"},
+		channel:   "#st",
+		logger:    newTestLogger(),
+		ctx:       context.Background(),
+		outputCh:  make(chan string, 16),
+		ephemeral: ephemeral,
+		logQuery:  lq,
+	}
+}
+
+func generatorLogToolCall(id, argsJSON string) ToolCall {
+	return ToolCall{
+		ID:       id,
+		Type:     "function",
+		Function: FunctionCall{Name: queryChannelLogsToolName, Arguments: argsJSON},
+	}
+}
+
+func TestGetToolsEphemeralOffersLogTool(t *testing.T) {
+	setupNoticesDefaults(t)
+	lq := &generatorLogQuery{
+		spec:       LogQuerySpec{Window: "24h", MaxTokens: 60000, Events: defaultLogEvents},
+		channelRaw: "#St", channel: "#st", name: "summary",
+	}
+	cr := newGeneratorToolTestRunner(true, lq)
+	tools := cr.getTools()
+	require.Len(t, tools, 1, "no MCP servers configured → only the log tool")
+	assert.Equal(t, queryChannelLogsToolName, tools[0].Function.Name)
+	assert.Contains(t, tools[0].Function.Description, `Default: 24h.`)
+	// FunctionDefinition.Parameters is `any` — assert the map shape, then
+	// the required list (brief's verbatim line indexed `any` directly,
+	// which does not compile).
+	params, ok := tools[0].Function.Parameters.(map[string]any)
+	require.True(t, ok, "parameters must be an object schema")
+	assert.Equal(t, []string{}, params["required"], "window must be optional")
+}
+
+func TestGetToolsEphemeralWithoutLogBlock(t *testing.T) {
+	setupNoticesDefaults(t)
+	cr := newGeneratorToolTestRunner(true, nil)
+	assert.Empty(t, cr.getTools())
+}
+
+func TestGetToolsNonEphemeralNeverOffersGeneratorTools(t *testing.T) {
+	setupNoticesDefaults(t)
+	// Even an (impossible-in-production) non-ephemeral runner carrying a
+	// logQuery must not offer the generator tool: chats never see it.
+	cr := newGeneratorToolTestRunner(false, &generatorLogQuery{name: "x"})
+	assert.Equal(t, toolDefsForConfig(cr.cfg), cr.getTools())
+}
+
+func TestGetToolServerNameLabelsGeneratorToolsBuiltin(t *testing.T) {
+	assert.Equal(t, "builtin", getToolServerName(queryChannelLogsToolName))
+}
+
+func handleLogQueryForTest(t *testing.T, cr *chatRunner, argsJSON string) *turnContext {
+	t.Helper()
+	turn := newEphemeralTurnContext(nil)
+	turn.Add(ChatMessage{Role: RoleUser, Content: "go"})
+	cr.executeToolCalls(turn, []ToolCall{generatorLogToolCall("call_1", argsJSON)})
+	return turn
+}
+
+func lastToolResultText(t *testing.T, turn *turnContext) string {
+	t.Helper()
+	msgs := turn.Messages()
+	require.NotEmpty(t, msgs, "expected a tool result row")
+	last := msgs[len(msgs)-1]
+	require.Equal(t, RoleTool, last.Role)
+	return last.Content
+}
+
+func TestHandleGeneratorLogQueryWindowOverrideAndResult(t *testing.T) {
+	setupNoticesDefaults(t)
+	orig := fetchChannelLogFn
+	var gotSpec LogQuerySpec
+	fetchChannelLogFn = func(spec LogQuerySpec, network, channelRaw, channelNorm, model string, now time.Time) (*LogWindowResult, error) {
+		gotSpec = spec
+		return &LogWindowResult{
+			Lines:  []string{"[09:00] <a> hello"},
+			Tokens: 5, TotalLines: 1,
+			FirstKept: time.Date(2026, 10, 9, 9, 0, 0, 0, time.Local),
+			LastKept:  time.Date(2026, 10, 9, 9, 30, 0, 0, time.Local),
+		}, nil
+	}
+	t.Cleanup(func() { fetchChannelLogFn = orig })
+
+	lq := &generatorLogQuery{
+		spec:       LogQuerySpec{Window: "24h", MaxTokens: 60000, Events: defaultLogEvents},
+		channelRaw: "#St", channel: "#st", name: "summary",
+	}
+	cr := newGeneratorToolTestRunner(true, lq)
+	turn := handleLogQueryForTest(t, cr, `{"window":"7d"}`)
+
+	assert.Equal(t, "7d", gotSpec.Window, "the tool argument overrides the configured default")
+	result := lastToolResultText(t, turn)
+	assert.Contains(t, result, "Channel activity for #st on testnet, last 7d0h (1 lines, 5 tokens, covering 09:00 to 09:30):")
+	assert.Contains(t, result, "[09:00] <a> hello")
+}
+
+func TestHandleGeneratorLogQueryDefaultsWindow(t *testing.T) {
+	setupNoticesDefaults(t)
+	orig := fetchChannelLogFn
+	var gotSpec LogQuerySpec
+	fetchChannelLogFn = func(spec LogQuerySpec, network, channelRaw, channelNorm, model string, now time.Time) (*LogWindowResult, error) {
+		gotSpec = spec
+		return &LogWindowResult{Lines: []string{"x"}}, nil
+	}
+	t.Cleanup(func() { fetchChannelLogFn = orig })
+
+	cr := newGeneratorToolTestRunner(true, &generatorLogQuery{
+		spec:       LogQuerySpec{Window: "12h", MaxTokens: 60000, Events: defaultLogEvents},
+		channelRaw: "#St", channel: "#st", name: "summary",
+	})
+	handleLogQueryForTest(t, cr, `{}`)
+	assert.Equal(t, "12h", gotSpec.Window, "omitted window → configured default")
+}
+
+func TestHandleGeneratorLogQueryInvalidWindow(t *testing.T) {
+	setupNoticesDefaults(t)
+	orig := fetchChannelLogFn
+	fetchChannelLogFn = func(spec LogQuerySpec, network, channelRaw, channelNorm, model string, now time.Time) (*LogWindowResult, error) {
+		t.Fatal("fetch must not run for an invalid window")
+		return nil, nil
+	}
+	t.Cleanup(func() { fetchChannelLogFn = orig })
+
+	cr := newGeneratorToolTestRunner(true, &generatorLogQuery{
+		spec:       LogQuerySpec{Window: "24h", MaxTokens: 60000, Events: defaultLogEvents},
+		channelRaw: "#St", channel: "#st", name: "summary",
+	})
+	turn := handleLogQueryForTest(t, cr, `{"window":"12x"}`)
+	assert.Contains(t, lastToolResultText(t, turn), "invalid window duration")
+}
+
+func TestHandleGeneratorLogQueryRowCap(t *testing.T) {
+	setupNoticesDefaults(t)
+	orig := fetchChannelLogFn
+	fetchChannelLogFn = func(spec LogQuerySpec, network, channelRaw, channelNorm, model string, now time.Time) (*LogWindowResult, error) {
+		return nil, fmt.Errorf("%w: %d rows (cap %d)", errLogWindowTooLarge, 2, logQueryRowCap)
+	}
+	t.Cleanup(func() { fetchChannelLogFn = orig })
+
+	cr := newGeneratorToolTestRunner(true, &generatorLogQuery{
+		spec:       LogQuerySpec{Window: "24h", MaxTokens: 60000, Events: defaultLogEvents},
+		channelRaw: "#St", channel: "#st", name: "summary",
+	})
+	turn := handleLogQueryForTest(t, cr, `{}`)
+	assert.Contains(t, lastToolResultText(t, turn), "row cap")
+	assert.Contains(t, lastToolResultText(t, turn), "narrower window")
+}
+
+func TestHandleGeneratorLogQueryNoActivity(t *testing.T) {
+	setupNoticesDefaults(t)
+	orig := fetchChannelLogFn
+	fetchChannelLogFn = func(spec LogQuerySpec, network, channelRaw, channelNorm, model string, now time.Time) (*LogWindowResult, error) {
+		return &LogWindowResult{}, nil
+	}
+	t.Cleanup(func() { fetchChannelLogFn = orig })
+
+	cr := newGeneratorToolTestRunner(true, &generatorLogQuery{
+		spec:       LogQuerySpec{Window: "24h", MaxTokens: 60000, Events: defaultLogEvents},
+		channelRaw: "#St", channel: "#st", name: "summary",
+	})
+	turn := handleLogQueryForTest(t, cr, `{}`)
+	assert.Contains(t, lastToolResultText(t, turn), "No channel activity found in the last")
+}
+
+func TestHandleGeneratorLogQueryTruncationMarkerRides(t *testing.T) {
+	setupNoticesDefaults(t)
+	orig := fetchChannelLogFn
+	fetchChannelLogFn = func(spec LogQuerySpec, network, channelRaw, channelNorm, model string, now time.Time) (*LogWindowResult, error) {
+		return &LogWindowResult{
+			Lines:  []string{"[... 40 earlier lines omitted to fit the 60000-token budget ...]", "[09:00] <a> hi"},
+			Tokens: 10, TotalLines: 41, DroppedLines: 40, Truncated: true,
+		}, nil
+	}
+	t.Cleanup(func() { fetchChannelLogFn = orig })
+
+	cr := newGeneratorToolTestRunner(true, &generatorLogQuery{
+		spec:       LogQuerySpec{Window: "24h", MaxTokens: 60000, Events: defaultLogEvents},
+		channelRaw: "#St", channel: "#st", name: "summary",
+	})
+	turn := handleLogQueryForTest(t, cr, `{}`)
+	assert.Contains(t, lastToolResultText(t, turn), "omitted to fit")
+}
+
+func TestHandleGeneratorLogQueryGuardNonEphemeral(t *testing.T) {
+	setupNoticesDefaults(t)
+	// A hallucinated call from a non-ephemeral turn (logQuery nil or
+	// ephemeral false) must error, not panic or succeed silently.
+	for _, cr := range []*chatRunner{
+		newGeneratorToolTestRunner(false, &generatorLogQuery{name: "x"}),
+		newGeneratorToolTestRunner(true, nil),
+	} {
+		turn := handleLogQueryForTest(t, cr, `{}`)
+		assert.Contains(t, lastToolResultText(t, turn), "not available on this command")
+	}
+}
+
+func TestHandleGeneratorLogQueryDisabled(t *testing.T) {
+	setupNoticesDefaults(t)
+	cr := newGeneratorToolTestRunner(true, &generatorLogQuery{name: "x"})
+	cr.cfg.DisabledBuiltinTools = []string{queryChannelLogsToolName}
+	turn := handleLogQueryForTest(t, cr, `{}`)
+	assert.Contains(t, lastToolResultText(t, turn), "is disabled for this command")
+}
+
 func TestGeneratorErrorsWrappedFromFetch(t *testing.T) {
 	setupTestDB(t)
 	setupNoticesDefaults(t)

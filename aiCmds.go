@@ -167,7 +167,44 @@ func logUsage(logger logxi.Logger, usage *Usage) {
 
 func (cr *chatRunner) storeUsage(usage *Usage, apiPath string, durationMs int) {
 	logUsage(cr.logger, usage)
-	if theDB == nil || usage == nil || cr.sessionID == 0 {
+	if theDB == nil || usage == nil || (cr.sessionID == 0 && !cr.ephemeral) {
+		return
+	}
+	if cr.sessionID == 0 {
+		// Reaching here means cr.ephemeral (the guard above kept the legacy
+		// session-0 skip for non-ephemeral runners). Ephemeral (generator)
+		// runs have no session row, but their usage is still worth
+		// attributing: the row is written with SessionID 0 — the column is
+		// not-null but FK-less, and the denormalized Model/Service/
+		// ReasoningEffort columns give generator calls the same cost
+		// attribution as chat turns (spec §Ephemeral Turn Machinery).
+		// insertDBTurnUsage defensively skips session 0 (legacy callers
+		// could never legitimately have one), so this path builds the row
+		// directly — a mirror of insertDBTurnUsage's field mapping (db.go);
+		// keep the two in sync.
+		var cachedTokens, reasoningTokens int
+		if usage.PromptTokensDetails != nil {
+			cachedTokens = int(usage.PromptTokensDetails.CachedTokens)
+		}
+		if usage.CompletionTokensDetails != nil {
+			reasoningTokens = int(usage.CompletionTokensDetails.ReasoningTokens)
+		}
+		row := TurnUsage{
+			SessionID:        0,
+			Model:            cr.cfg.Model,
+			Service:          cr.cfg.Service,
+			ReasoningEffort:  cr.cfg.ReasoningEffort,
+			PromptTokens:     int(usage.PromptTokens),
+			CompletionTokens: int(usage.CompletionTokens),
+			CachedTokens:     cachedTokens,
+			ReasoningTokens:  reasoningTokens,
+			FinishReason:     usage.FinishReason,
+			APIPath:          apiPath,
+			DurationMs:       durationMs,
+		}
+		if err := theDB.Create(&row).Error; err != nil {
+			cr.logger.Error("Failed to store ephemeral turn usage", "error", err)
+		}
 		return
 	}
 	if err := insertDBTurnUsage(cr.sessionID, cr.cfg, usage, usage.FinishReason, apiPath, durationMs); err != nil {
@@ -193,6 +230,11 @@ type chatRunner struct {
 	outputCh     chan<- string
 	sessionID    int64
 	convID       string
+	// ephemeral marks a generator run: no session row backs this runner.
+	// Gates: response-id persistence (handleResponseIDSave), builtin tool
+	// offering (getTools), and the session-0 usage-row exception
+	// (storeUsage). Everything else in runTurn is untouched.
+	ephemeral bool
 }
 
 func newChatRunner(network Network, client *girc.Client, cfg AIConfig) *chatRunner {
@@ -431,7 +473,24 @@ func (cr *chatRunner) sendWarning(msg string) {
 }
 
 func (cr *chatRunner) getTools() []Tool {
+	if cr.ephemeral {
+		// Generators never offer the builtin LLM tools:
+		// register_background_job delivery is session-bound; ban tools are
+		// chat-moderation concerns. MCP tools work normally.
+		return mcpToolDefsForConfig(cr.cfg)
+	}
 	return toolDefsForConfig(cr.cfg)
+}
+
+// mcpToolDefsForConfig is the config's live MCP tools minus its hidden set.
+// Extracted from toolDefsForConfig so the ephemeral (generator) path can
+// take exactly this subset without the builtins.
+func mcpToolDefsForConfig(cfg AIConfig) []Tool {
+	var hiddenMCPTools []string
+	readConfig(func() {
+		hiddenMCPTools = cfg.resolveHiddenMCPTools(config.MCPToolSets)
+	})
+	return getMCPTools(cfg.MCPs, hiddenMCPTools)
 }
 
 // toolDefsForConfig assembles the full tool-definition list a turn run
@@ -449,11 +508,7 @@ func (cr *chatRunner) getTools() []Tool {
 // request as it would actually go out. No MCP I/O happens (in-memory
 // map reads only), so this is safe to call from any accounting path.
 func toolDefsForConfig(cfg AIConfig) []Tool {
-	var hiddenMCPTools []string
-	readConfig(func() {
-		hiddenMCPTools = cfg.resolveHiddenMCPTools(config.MCPToolSets)
-	})
-	mcpTools := getMCPTools(cfg.MCPs, hiddenMCPTools)
+	mcpTools := mcpToolDefsForConfig(cfg)
 	if len(mcpTools) > 0 {
 		mcpTools = append(mcpTools, getBuiltinToolDefs(cfg, cfg.DisabledBuiltinTools)...)
 	}
@@ -640,6 +695,19 @@ func (cr *chatRunner) handleToolCallResponse(turn *turnContext, text string, too
 }
 
 func (cr *chatRunner) handleResponseIDSave(respID, text string, toolCalls []ToolCall, currentResponseID string) string {
+	if cr.ephemeral {
+		// Generator runs have no session row to persist a response id on —
+		// skip every sessionMgr write. The RETURN-value contract is
+		// preserved: a content-bearing response still yields its id so the
+		// tool loop can chain server-side WITHIN the turn; an empty output
+		// keeps the previous id, mirroring the non-ephemeral decision
+		// (never chain onto an empty response). Across-turn chaining is
+		// impossible for generators — nothing is persisted to chain from.
+		if respID != "" && (text != "" || len(toolCalls) > 0) {
+			return respID
+		}
+		return currentResponseID
+	}
 	if respID != "" && (text != "" || len(toolCalls) > 0) {
 		if err := sessionMgr.UpdateResponseID(cr.sessionID, &respID, cr.cfg.Model); err != nil {
 			cr.logger.Error("failed to save response_id", "session", cr.sessionID, "error", err)

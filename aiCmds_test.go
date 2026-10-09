@@ -2238,3 +2238,76 @@ func TestCompletionMaxTokens(t *testing.T) {
 		})
 	}
 }
+
+func TestEphemeralRunnerGuards(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	t.Run("ephemeral getTools excludes builtins", func(t *testing.T) {
+		fixtureServer := &MCPServer{
+			Tools: []*mcp.Tool{{Name: "generate_image", Description: "gen"}},
+		}
+		origServers := mcpServers
+		mcpServers = map[string]*MCPServer{"img-mcp": fixtureServer}
+		t.Cleanup(func() { mcpServers = origServers })
+
+		cfg := AIConfig{Name: "tabloid", MCPs: []string{"img-mcp"}}
+		reg := &chatRunner{cfg: cfg}
+		ephe := &chatRunner{cfg: cfg, ephemeral: true}
+
+		names := func(tools []Tool) map[string]bool {
+			out := map[string]bool{}
+			for _, tl := range tools {
+				out[tl.Function.Name] = true
+			}
+			return out
+		}
+		assert.True(t, names(reg.getTools())["register_background_job"], "regular runner keeps builtins")
+		assert.True(t, names(ephe.getTools())["generate_image"], "ephemeral keeps MCP tools")
+		assert.False(t, names(ephe.getTools())["register_background_job"], "ephemeral drops builtins")
+	})
+
+	t.Run("ephemeral storeUsage writes session-0 row", func(t *testing.T) {
+		cr := &chatRunner{
+			cfg:       AIConfig{Name: "summary", Model: "qwen3", Service: "svc"},
+			logger:    newTestLogger(),
+			ephemeral: true,
+			// sessionID stays 0
+		}
+		var before int64
+		require.NoError(t, theDB.Model(&TurnUsage{}).Count(&before).Error)
+		cr.storeUsage(&Usage{PromptTokens: 10, CompletionTokens: 5, TotalTokens: 15, FinishReason: "stop"}, "chat/completions", 100)
+		var after int64
+		require.NoError(t, theDB.Model(&TurnUsage{}).Count(&after).Error)
+		assert.Equal(t, before+1, after, "ephemeral usage rows ARE written (session 0 attribution)")
+		var row TurnUsage
+		require.NoError(t, theDB.Order("id desc").First(&row).Error)
+		assert.Equal(t, int64(0), row.SessionID)
+		assert.Equal(t, "qwen3", row.Model)
+		assert.Equal(t, "svc", row.Service)
+	})
+
+	t.Run("non-ephemeral session-0 runner still skips usage rows", func(t *testing.T) {
+		cr := &chatRunner{
+			cfg:    AIConfig{Name: "x"},
+			logger: newTestLogger(),
+			// sessionID 0, ephemeral false — legacy defensive skip
+		}
+		var before int64
+		require.NoError(t, theDB.Model(&TurnUsage{}).Count(&before).Error)
+		cr.storeUsage(&Usage{PromptTokens: 1}, "chat/completions", 1)
+		var after int64
+		require.NoError(t, theDB.Model(&TurnUsage{}).Count(&after).Error)
+		assert.Equal(t, before, after)
+	})
+
+	t.Run("ephemeral handleResponseIDSave does not persist", func(t *testing.T) {
+		sid := createTestSession(t, "testnet", "#st", "shrew", "cmd", "svc", "m")
+		cr := &chatRunner{cfg: AIConfig{Name: "g"}, logger: newTestLogger(), sessionID: sid, ephemeral: true}
+		got := cr.handleResponseIDSave("resp_1", "text", nil, "")
+		assert.Equal(t, "resp_1", got, "return value contract preserved")
+		var sess Session
+		require.NoError(t, theDB.First(&sess, sid).Error)
+		assert.Nil(t, sess.ResponseID, "no response id persisted for ephemeral runs")
+	})
+}

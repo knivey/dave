@@ -525,3 +525,12 @@ func TestAllSessionTemplatesHavePlaceholders(t *testing.T) {
 		})
 	}
 }
+
+func TestGeneratorNoticesDefaults(t *testing.T) {
+	nc := &NoticesConfig{}
+	setNoticesDefaults(nc)
+	assert.NotEmpty(t, nc.Generators.NoActivity)
+	assert.Contains(t, nc.Generators.Truncated, "{kept}")
+	assert.Contains(t, nc.Generators.Truncated, "{total}")
+	assert.Contains(t, nc.Generators.WindowTooLarge, "{cap}")
+}

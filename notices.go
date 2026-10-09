@@ -27,6 +27,7 @@ type NoticesConfig struct {
 	Clone      CloneNotices      `toml:"clone"`
 	Users      UsersNotices      `toml:"users"`
 	LLM        LLMNotices        `toml:"llm"`
+	Generators GeneratorNotices  `toml:"generators"`
 	Support    string            `toml:"support"`
 }
 
@@ -190,6 +191,16 @@ type LLMNotices struct {
 	ModelLoad     string `toml:"model_load"`
 	EmptyResponse string `toml:"empty_response"`
 	ReasoningOnly string `toml:"reasoning_only"`
+}
+
+// GeneratorNotices governs user-facing messages for one-shot generator
+// commands (generators.go): NoActivity when a log query found zero rows,
+// Truncated when the transcript had to drop head lines to fit the token
+// budget, WindowTooLarge when the window exceeds the row cap.
+type GeneratorNotices struct {
+	NoActivity     string `toml:"no_activity"`
+	Truncated      string `toml:"truncated"`
+	WindowTooLarge string `toml:"window_too_large"`
 }
 
 var (
@@ -478,6 +489,21 @@ func setNoticesDefaults(n *NoticesConfig) {
 	}
 	if n.LLM.ReasoningOnly == "" {
 		n.LLM.ReasoningOnly = "\x0307⚠️ empty response from model after {attempts} attempt(s) — retries exhausted; the model put its reply in the reasoning channel instead, showing that below:\x0F"
+	}
+	if n.Generators.NoActivity == "" {
+		n.Generators.NoActivity = "No logged activity found in the last {window}."
+	}
+	if n.Generators.Truncated == "" {
+		// DEVIATION from the task brief (recorded in task-5-report.md): the
+		// brief's default omitted {dropped}, but its test
+		// (TestGeneratorTruncationNotice) asserts the dropped count is
+		// present in the notice — keep-newest-and-disclose truncation must
+		// tell the user how many of the requested lines were dropped, not
+		// just the kept/total pair (which requires subtraction to decode).
+		n.Generators.Truncated = "Log truncated to fit the token budget: kept {kept} of {total} lines ({dropped} dropped; {tokens}/{budget} tokens)."
+	}
+	if n.Generators.WindowTooLarge == "" {
+		n.Generators.WindowTooLarge = "That window is too large (over the {cap}-row cap); narrow the duration."
 	}
 	if n.Support == "" {
 		n.Support = "If you enjoy using dave, consider supporting development at https://patreon.com/shrew269 ❤️"

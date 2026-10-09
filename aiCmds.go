@@ -1866,14 +1866,21 @@ streamDone:
 	// it on that error path. Ephemeral (generator) turns never flush here —
 	// the CALLER classifies the iteration: the final no-tool-call iteration
 	// sends the text via sendFinalText (runTurnResponsesStream), and a
-	// tool-call iteration is suppressed (intermediate). Consequence: an
-	// ephemeral stream that ends without response.completed surfaces only
-	// the error there; the delta text stays in the api log.
+	// tool-call iteration is suppressed (intermediate). The one shape the
+	// caller cannot classify is a stream that ended without its terminal
+	// event — the completedResponse == nil branch below delivers that text
+	// before returning the error.
 	if !cr.ephemeral {
 		sOut.Flush(cr.sendIRC)
 	}
 
 	if completedResponse == nil {
+		if cr.ephemeral {
+			// Deferred emission parity: the stream died without its terminal
+			// event — the caller will error out; deliver what arrived first
+			// (the non-ephemeral arm flushed just above).
+			cr.sendFinalText(fullText)
+		}
 		return nil, fmt.Errorf("responses stream ended without response.completed event")
 	}
 

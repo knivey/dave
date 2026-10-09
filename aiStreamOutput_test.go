@@ -256,6 +256,61 @@ func TestCallResponsesStreamMissingCompletedFlushesTail(t *testing.T) {
 	assert.Contains(t, joined, "responses tail text", "streamed text must be flushed before the error return")
 }
 
+// TestRunTurnResponsesStreamEphemeralMissingCompletedDeliversText: the
+// ephemeral twin of TestCallResponsesStreamMissingCompletedFlushesTail —
+// a Responses stream that ends cleanly without response.completed must
+// deliver its delta text (deferred emission parity: "deliver what
+// arrived") before the error notice, not silently drop it. The streamDone
+// flush is correctly gated (the caller classifies successful completions);
+// the delivery belongs to the completedResponse == nil error branch.
+func TestRunTurnResponsesStreamEphemeralMissingCompletedDeliversText(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, streamChunk(`{"type":"response.output_text.delta","sequence_number":1,"item_id":"msg_1","output_index":0,"content_index":0,"logprobs":[],"delta":"responses tail text"}`))
+		w.(http.Flusher).Flush()
+		// clean end-of-stream, but no response.completed event ever arrives
+	}))
+	defer server.Close()
+
+	outputCh := make(chan string, 64)
+	cr := newStreamTestRunner(t, server, AIConfig{
+		Model: "test-model", ResponsesAPI: true, Streaming: true,
+		Timeout: 10 * time.Second, StreamTimeout: 5 * time.Second,
+	}, 0, outputCh)
+	cr.ephemeral = true
+
+	done := make(chan struct{})
+	go func() {
+		cr.runTurn(newEphemeralTurnContext([]ChatMessage{{Role: RoleUser, Content: "sum"}}))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("runTurn did not finish")
+	}
+
+	var sent []string
+	for {
+		select {
+		case s := <-outputCh:
+			sent = append(sent, s)
+		default:
+			goto check
+		}
+	}
+check:
+	joined := strings.Join(sent, "\n")
+	assert.Contains(t, joined, "responses tail text", "delta text must be delivered before the error notice on ephemeral turns")
+	assert.Equal(t, 1, strings.Count(joined, "responses tail text"), "delta text delivered exactly once")
+	assert.Contains(t, joined, "response.completed", "the turn still surfaces the stream error")
+	assert.Less(t, strings.Index(joined, "responses tail text"), strings.Index(joined, "❗"),
+		"the delta text is delivered before the error notice")
+}
+
 // TestRunTurnRespondEndsTurnSingleRequest: a respond tool call ends the
 // turn with NO second API request — the completion signal is checked
 // right after executeToolCalls in every loop variant.
@@ -373,6 +428,9 @@ collect:
 	joined := strings.Join(sent, "\n")
 	assert.NotContains(t, joined, "let me fetch", "intermediate chatter is suppressed")
 	assert.Contains(t, joined, "THE FINAL", "the final answer is delivered once")
+	// M3 (fix round 1): the once-pin its Responses twin already carries —
+	// deferred emission must not double-send (live path + sendFinalText).
+	assert.Equal(t, 1, strings.Count(joined, "THE FINAL"), "final text delivered exactly once")
 	assert.EqualValues(t, 2, atomic.LoadInt32(&reqs), "the nonexistent tool result drives a second iteration")
 }
 
@@ -431,6 +489,11 @@ func TestRunTurnStreamEphemeralErrorDeliversPartialText(t *testing.T) {
 check:
 	joined := strings.Join(sent, "\n")
 	assert.Contains(t, joined, "partial wisdom", "deferred text is delivered before the error notice")
+	// M2 (fix round 1): order pin — the partial text must land BEFORE the
+	// error notice ("❗" marks the notice prefix; empirically the turn sends
+	// exactly ["partial wisdom", "❗ unexpected EOF"]).
+	assert.Less(t, strings.Index(joined, "partial wisdom"), strings.Index(joined, "❗"),
+		"the partial text is delivered before the error notice")
 }
 
 // TestRunTurnResponsesStreamEphemeralSuppressesIntermediateText: the

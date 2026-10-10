@@ -1,8 +1,10 @@
 # Generators: one-shot, stateless agentic commands. The prompt is built from
-# the system template + one user message (your args, plus the channel-log
-# transcript when [name.log] is present), then run through the full agentic
-# tool loop once. Nothing is persisted: no session, no messages, no compaction.
-# Each section name becomes the command trigger. Use `aliases` for additional triggers.
+# the system template + one user message (your verbatim args), then run
+# through the full agentic tool loop once — the model retrieves channel logs
+# itself (query_channel_logs) and delivers its answer (respond tool, or its
+# final no-tool-call reply). Nothing is persisted: no session, no messages,
+# no compaction. Each section name becomes the command trigger. Use `aliases`
+# for additional triggers.
 #
 # Available options (per [section]):
 #   service              (string, required)         Service name from services.toml
@@ -10,15 +12,24 @@
 #   aliases              (string array, default: []) Additional trigger names for this command
 #   description          (string)                    Short description for help listings
 #   system               (string)                    System prompt (supports Go templates)
-#   streaming            (bool, default: false)      Stream responses to IRC as they generate
+#   streaming            (bool, default: false)      Stream responses from the API. On generators text
+#                                               is never typed live into IRC — emission is deferred
+#                                               and the final answer arrives as one complete message
+#                                               (chunk logging, usage capture, stream timeouts
+#                                               still apply).
 #   rendermarkdown       (bool, default: false)      Convert markdown to IRC formatting
+#   respond_tool         (bool, default: false)      Offer the respond tool; the model submits its
+#                                               final answer through it and the turn ends there.
+#                                               When false (or the model finishes with plain text),
+#                                               the final no-tool-call reply is sent automatically.
+#                                               Intermediate model text is never sent to IRC either way.
 #   maxtokens            (int, cascades from service)     Max tokens per response (legacy, prefer maxcompletiontokens)
 #   maxcompletiontokens  (int, cascades from service)     Max completion tokens per response
 #   temperature          (float, cascades from service)   Sampling temperature
 #   topp                 (float, omitted when unset, API default typically 1.0)  Nucleus sampling (0-1)
 #   stop                 (string array)              Stop sequences
 #   presencepenalty      (float, default: 0)         -2.0 to 2.0, penalize new topics
-#   frequencypenalty      (float, default: 0)         -2.0 to 2.0, penalize repetition
+#   frequencypenalty     (float, default: 0)         -2.0 to 2.0, penalize repetition
 #   timeout              (duration, default: 60s)    Overall API call timeout. Cascade: command > service > 60s
 #   streamtimeout        (duration, default: timeout) Max idle time between stream chunks. Cascade: command > service > timeout
 #   load_notice          (bool, default: true for type = "llama" services, else false) Before the turn, probe the service's /v1/models and send a "loading model" IRC notice when the requested model is not loaded yet (llama-server built-in router / llama-swap model swap). Notice text: [llm] model_load in notices.toml. Cascade: command > service > type default.
@@ -41,27 +52,46 @@
 #   prompt               (string)                    Default instruction when the caller gives no focus text.
 #                                               Fallback chain: focus text > prompt > built-in default.
 #
-# Log-fed commands add a sub-table (argument grammar becomes "^name [duration] [focus...]",
-# duration like 90m / 12h / 2d / 1d12h; anything else is focus text):
+# Log-fed commands add a sub-table that configures the query_channel_logs
+# tool offered to the model — window is the tool's default window, max_tokens
+# the per-call transcript budget, events the transcript shape. The model can
+# call the tool multiple times with different windows; caps are host-enforced.
+# (A [section.log] also makes the command's args optional — bare "^name"
+# dispatches too; the model maps any time range in the request to the tool's
+# window argument. Without it, args are required.)
 #   [section.log]
-#   window               (duration string, default: "24h") How far back to read channel logs.
-#                                               Units: s/m/h/d, compound allowed ("1d12h").
+#   window               (duration string, default: "24h") The tool's DEFAULT window — how far back the
+#                                               transcript reaches when the model omits the window
+#                                               argument. Units: s/m/h/d, compound allowed ("1d12h").
 #   events               (string array, default: ["PRIVMSG", "NOTICE", "TOPIC", "KICK"])
-#                                               Loggable events: PRIVMSG, NOTICE, JOIN, PART, QUIT, KICK, NICK, TOPIC, MODE.
+#                                               Transcript shape — which loggable events the
+#                                               transcript includes: PRIVMSG, NOTICE, JOIN, PART,
+#                                               QUIT, KICK, NICK, TOPIC, MODE.
 #                                               NOTE: QUIT and NICK are network-scoped in the logs (no channel) and never match
 #                                               a channel query — including them has no effect.
-#   max_tokens           (int, default: 60000)          Token budget for the transcript; over budget the
-#                                               NEWEST lines are kept and a truncation marker is prepended.
+#   max_tokens           (int, default: 60000)          Per-call token budget for the transcript; over budget
+#                                               the NEWEST lines are kept and a truncation marker is
+#                                               prepended (instruct the model to disclose it). Every
+#                                               call gets the full budget; multi-call is bounded only
+#                                               by the 20-iteration tool-loop cap.
+#
+# Both generator tools (query_channel_logs, respond) are hidden by default —
+# the root hidden_tools default is ["register_background_job",
+# "check_ban_history", "query_channel_logs", "respond"], so no 🔧 tool-call
+# IRC notice fires unless an admin unhides them; toolverbose = false silences
+# 🔧 tool-call notices entirely — recommended for output-sensitive commands
+# (tabloid, fakenews). disabled_builtin_tools DOES apply to the generator
+# tools (cascade: command > service > root — a disabled call returns an
+# error tool result naming the disable); the builtin LLM tools themselves
+# (register_background_job, ban tools) are never offered on generator turns.
 #
 # Not useful for generators (stateless): previous_response_id, detectimages,
-# disabled_builtin_tools (builtin LLM tools are never offered to generators),
 # context_window (no compaction on ephemeral turns — nothing is persisted to
 # compact), async_result_delivery (no background jobs for generators —
 # session-bound).
-# toolverbose = false silences the 🔧 tool-call notices — recommended for
-# output-sensitive commands (tabloid, fakenews).
 #
-# Requires [logging] enabled in config.toml — log-fed commands read data/logs/*.db.
+# Requires [logging] enabled in config.toml — the query_channel_logs tool
+# reads data/logs/*.db.
 #
 # Example with all generator-only options:
 # [example]
@@ -69,11 +99,12 @@
 # model = "qwen3-32b"
 # streaming = true
 # rendermarkdown = true
+# respond_tool = true
 # toolverbose = false
 # mcps = ["img-mcp"]
 # hidden_mcp_tools = ["generate_image_async", "enhance_and_generate_async", "wait_for_job", "job_status", "list_jobs", "cancel_job"]
 # prompt = "Write a satirical article about the given topic."
-# system = "You are {{.BotNick}}, a tabloid hack for {{.Channel}} on {{.Network}}."
+# system = "You are {{.BotNick}}, a tabloid hack for {{.Channel}} on {{.Network}}. Mine query_channel_logs for material; deliver the finished article with the respond tool."
 # [example.log]
 # window = "24h"
 # events = ["PRIVMSG", "NOTICE", "TOPIC", "KICK"]
@@ -85,12 +116,17 @@ service = "local"
 model = "qwen3-32b"
 streaming = true
 rendermarkdown = true
-prompt = "Summarize the following channel activity."
+respond_tool = true
+prompt = "Summarize recent channel activity."
 system = """\
 You are {{.BotNick}}, summarizing recent activity in {{.Channel}} on {{.Network}}.
-Cover the main topics, notable events, and who participated. Be concise but
-specific. If the transcript begins with a truncation marker, say that coverage
-starts mid-window.\
+First call query_channel_logs to retrieve the channel transcript — map any
+time range in the request (e.g. "7d", "since yesterday", "the last 12 hours")
+to the window argument, defaulting to the tool's default when none is given.
+Then summarize: cover the main topics, notable events, and who participated;
+be concise but specific. If the result begins with a truncation marker, say
+that coverage starts mid-window. Deliver your complete summary with the
+respond tool.\
 """
 [summary.log]
 window = "24h"

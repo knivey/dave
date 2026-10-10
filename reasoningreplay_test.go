@@ -28,41 +28,13 @@ func TestReasoningReplayResolver(t *testing.T) {
 	}
 }
 
-func TestLastUserRoleIndex(t *testing.T) {
-	tests := []struct {
-		name string
-		msgs []ChatMessage
-		want int
-	}{
-		{"empty history", nil, -1},
-		{"no user rows", []ChatMessage{
-			{Role: RoleSystem, Content: "s"},
-			{Role: RoleAssistant, Content: "a"},
-		}, -1},
-		{"single user row", []ChatMessage{
-			{Role: RoleSystem, Content: "s"},
-			{Role: RoleUser, Content: "u"},
-			{Role: RoleAssistant, Content: "a"},
-		}, 1},
-		{"last user wins", []ChatMessage{
-			{Role: RoleUser, Content: "u1"},
-			{Role: RoleAssistant, Content: "a1"},
-			{Role: RoleUser, Content: "u2"},
-			{Role: RoleAssistant, Content: "a2"},
-		}, 2},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, lastUserRoleIndex(tt.msgs))
-		})
-	}
-}
-
-// TestReplayReasoningRow is the policy heart. It mirrors the gemma4 chat
-// template's gate: assistant rows AFTER the last user row (current turn)
-// always replay reasoning; earlier (historical) rows only in "always" mode;
-// "tool_calls" mode additionally requires the row to carry tool calls. The
-// off mode never replays, and empty reasoning never qualifies in any mode.
+// TestReplayReasoningRow is the policy heart. "tool_calls" mirrors the gemma4
+// template's preserve_thinking arm per row, position-independent: every
+// assistant row that carries tool calls replays reasoning — the current
+// turn's agentic loop AND past tool-call turns (the owner's cross-turn
+// thought-context choice). Plain rows (no tool calls) only replay in "always"
+// mode. The off mode never replays, and empty reasoning never qualifies in
+// any mode.
 func TestReplayReasoningRow(t *testing.T) {
 	// History shape: [system, user, assistant+tc(reasoning), tool,
 	// assistant(reasoning), user, assistant+tc(reasoning), tool,
@@ -94,7 +66,7 @@ func TestReplayReasoningRow(t *testing.T) {
 		{"off mode skips current-turn plain row", ReasoningReplayOff, 8, false},
 		{"always replays current-turn plain row", ReasoningReplayAlways, 8, true},
 		// Historical tool-call row (idx 2).
-		{"tool_calls mode skips historical tool row", ReasoningReplayToolCalls, 2, false},
+		{"tool_calls mode replays past-turn tool row", ReasoningReplayToolCalls, 2, true},
 		{"off mode skips historical tool row", ReasoningReplayOff, 2, false},
 		{"always replays historical tool row", ReasoningReplayAlways, 2, true},
 		// Historical plain reply (idx 4).
@@ -107,7 +79,7 @@ func TestReplayReasoningRow(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, replayReasoningRow(msgs, tt.idx, tt.mode))
+			assert.Equal(t, tt.want, replayReasoningRow(msgs[tt.idx], tt.mode))
 		})
 	}
 
@@ -116,22 +88,22 @@ func TestReplayReasoningRow(t *testing.T) {
 	// including the empty raw string, which the predicate arm matches
 	// directly).
 	t.Run("unknown raw mode falls back to tool_calls semantics", func(t *testing.T) {
-		assert.True(t, replayReasoningRow(msgs, 6, "bogus"))
-		assert.False(t, replayReasoningRow(msgs, 8, "bogus"))
+		assert.True(t, replayReasoningRow(msgs[6], "bogus"))
+		assert.False(t, replayReasoningRow(msgs[8], "bogus"))
 	})
 	t.Run("empty raw mode falls back to tool_calls semantics", func(t *testing.T) {
-		assert.True(t, replayReasoningRow(msgs, 6, ""))
-		assert.False(t, replayReasoningRow(msgs, 8, ""))
+		assert.True(t, replayReasoningRow(msgs[6], ""))
+		assert.False(t, replayReasoningRow(msgs[8], ""))
 	})
 
-	// Empty reasoning never qualifies in any mode, even eligible positions.
+	// Empty reasoning never qualifies in any mode, even eligible rows.
 	t.Run("empty reasoning never qualifies", func(t *testing.T) {
 		empty := []ChatMessage{
 			{Role: RoleUser, Content: "u"},
 			{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "t"}}},
 		}
 		for _, mode := range []string{ReasoningReplayOff, ReasoningReplayToolCalls, ReasoningReplayAlways} {
-			assert.False(t, replayReasoningRow(empty, 1, mode), mode)
+			assert.False(t, replayReasoningRow(empty[1], mode), mode)
 		}
 	})
 
@@ -147,7 +119,7 @@ func TestReplayReasoningRow(t *testing.T) {
 		}
 		for _, mode := range []string{ReasoningReplayOff, ReasoningReplayToolCalls, ReasoningReplayAlways} {
 			for idx := range summaryOnly {
-				assert.False(t, replayReasoningRow(summaryOnly, idx, mode), "mode %q row %d", mode, idx)
+				assert.False(t, replayReasoningRow(summaryOnly[idx], mode), "mode %q row %d", mode, idx)
 			}
 		}
 	})
@@ -156,13 +128,20 @@ func TestReplayReasoningRow(t *testing.T) {
 // TestSummaryOnlyRowNeverReplays pins the summary-never-replays rule at the
 // serializer levels too: a row carrying only a stored summary must gain no
 // reasoning on the wire in ANY mode, on either API path — the summary is
-// display/log-only (see reasoningParts in aiMessages.go).
+// display/log-only (see reasoningParts in aiMessages.go). The fixture includes
+// a summary-only TOOL row in a PAST position (a later user message follows
+// it): under tool_calls mode tool calls are the only eligibility lever left
+// besides real content, and a summary is never content — position is gone,
+// tool calls must not rescue it.
 func TestSummaryOnlyRowNeverReplays(t *testing.T) {
 	summaryOnly := []ChatMessage{
 		{Role: RoleSystem, Content: "system"},
-		{Role: RoleUser, Content: "u"},
-		{Role: RoleAssistant, Content: "reply", ReasoningSummary: "summarized thinking", ToolCalls: []ToolCall{{ID: "t"}}},
-		{Role: RoleTool, Content: "result", ToolCallID: "t"},
+		{Role: RoleUser, Content: "u1"},
+		{Role: RoleAssistant, Content: "reply", ReasoningSummary: "summarized past tool thinking", ToolCalls: []ToolCall{{ID: "t1"}}},
+		{Role: RoleTool, Content: "result 1", ToolCallID: "t1"},
+		{Role: RoleUser, Content: "u2"},
+		{Role: RoleAssistant, ReasoningSummary: "summarized current tool thinking", ToolCalls: []ToolCall{{ID: "t2"}}},
+		{Role: RoleTool, Content: "result 2", ToolCallID: "t2"},
 	}
 	modes := []string{ReasoningReplayOff, ReasoningReplayToolCalls, ReasoningReplayAlways}
 
@@ -182,7 +161,7 @@ func TestSummaryOnlyRowNeverReplays(t *testing.T) {
 			for _, raw := range rawItems {
 				assert.NotContains(t, string(raw), `"type":"reasoning"`,
 					"mode %q must not emit a reasoning item", mode)
-				assert.NotContains(t, string(raw), "summarized thinking",
+				assert.NotContains(t, string(raw), "summarized",
 					"mode %q must never serialize the summary", mode)
 			}
 		}
@@ -194,32 +173,43 @@ func TestSummaryOnlyRowNeverReplays(t *testing.T) {
 // lose their ReasoningContent, eligible rows keep it, and the ORIGINAL slice
 // must never be mutated (compaction callers share rows with live history).
 func TestReplayReasoningFilter(t *testing.T) {
+	// History shape: [user, assistant+tc(past reasoning), tool,
+	// assistant plain(past reasoning), user, assistant+tc(current
+	// reasoning), tool] — the past-turn tool row (idx 1) pins the
+	// position independence of tool_calls mode.
 	build := func() []ChatMessage {
 		return []ChatMessage{
-			{Role: RoleUser, Content: "u"},
-			{Role: RoleAssistant, Content: "hist reply", ReasoningContent: "hist think"},
+			{Role: RoleUser, Content: "u1"},
+			{Role: RoleAssistant, ReasoningContent: "hist tool think", ToolCalls: []ToolCall{{ID: "t1"}}},
+			{Role: RoleTool, Content: "result 1", ToolCallID: "t1"},
+			{Role: RoleAssistant, Content: "hist reply", ReasoningContent: "hist plain think"},
 			{Role: RoleUser, Content: "u2"},
-			{Role: RoleAssistant, ReasoningContent: "cur think", ToolCalls: []ToolCall{{ID: "t"}}},
-			{Role: RoleTool, Content: "result", ToolCallID: "t"},
+			{Role: RoleAssistant, ReasoningContent: "cur think", ToolCalls: []ToolCall{{ID: "t2"}}},
+			{Role: RoleTool, Content: "result 2", ToolCallID: "t2"},
 		}
 	}
 
-	t.Run("tool_calls mode strips historical + plain reasoning", func(t *testing.T) {
+	t.Run("tool_calls mode keeps tool-row reasoning, strips plain reasoning", func(t *testing.T) {
 		msgs := build()
 		filtered := replayReasoningFilter(msgs, ReasoningReplayToolCalls)
-		assert.Equal(t, "cur think", filtered[3].ReasoningContent)
-		assert.Empty(t, filtered[1].ReasoningContent)
+		// Tool rows keep their reasoning at ANY position — past turn
+		// (idx 1) and current turn (idx 5); the plain rows are stripped.
+		assert.Equal(t, "hist tool think", filtered[1].ReasoningContent)
+		assert.Equal(t, "cur think", filtered[5].ReasoningContent)
+		assert.Empty(t, filtered[3].ReasoningContent)
 		assert.Empty(t, filtered[0].ReasoningContent)
 		// Originals untouched.
-		assert.Equal(t, "hist think", msgs[1].ReasoningContent)
-		assert.Equal(t, "cur think", msgs[3].ReasoningContent)
+		assert.Equal(t, "hist tool think", msgs[1].ReasoningContent)
+		assert.Equal(t, "hist plain think", msgs[3].ReasoningContent)
+		assert.Equal(t, "cur think", msgs[5].ReasoningContent)
 	})
 
 	t.Run("always mode keeps everything", func(t *testing.T) {
 		msgs := build()
 		filtered := replayReasoningFilter(msgs, ReasoningReplayAlways)
-		assert.Equal(t, "hist think", filtered[1].ReasoningContent)
-		assert.Equal(t, "cur think", filtered[3].ReasoningContent)
+		assert.Equal(t, "hist tool think", filtered[1].ReasoningContent)
+		assert.Equal(t, "hist plain think", filtered[3].ReasoningContent)
+		assert.Equal(t, "cur think", filtered[5].ReasoningContent)
 	})
 
 	t.Run("off mode strips all reasoning", func(t *testing.T) {
@@ -227,6 +217,7 @@ func TestReplayReasoningFilter(t *testing.T) {
 		filtered := replayReasoningFilter(msgs, ReasoningReplayOff)
 		assert.Empty(t, filtered[1].ReasoningContent)
 		assert.Empty(t, filtered[3].ReasoningContent)
+		assert.Empty(t, filtered[5].ReasoningContent)
 	})
 
 	t.Run("clean slice returned unwrapped", func(t *testing.T) {

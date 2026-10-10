@@ -494,18 +494,27 @@ func TestMessagesToResponseInputItemsReplayReasoning(t *testing.T) {
 		assert.Empty(t, reasonings(t, ReasoningReplayOff))
 	})
 
-	t.Run("tool_calls mode emits only the current-turn tool row, content-only", func(t *testing.T) {
+	t.Run("tool_calls mode emits one item per tool row, past and current, content-only", func(t *testing.T) {
 		items := reasonings(t, ReasoningReplayToolCalls)
-		require.Len(t, items, 1)
-		assert.Equal(t, "rs_dave_6", items[0]["id"], "deterministic row-derived id")
-		content, ok := items[0]["content"].([]any)
-		require.True(t, ok, "reasoning item must carry content parts")
-		require.Len(t, content, 1)
-		assert.Equal(t, "reasoning_text", content[0].(map[string]any)["type"])
-		assert.Equal(t, "cur think tc", content[0].(map[string]any)["text"],
-			"the content part text is the stored REAL content")
-		assert.NotContains(t, items[0], "summary",
-			"the wire item must carry NO summary key — a summary is not the thinking")
+		require.Len(t, items, 2)
+		want := []struct {
+			id   string
+			text string
+		}{
+			{"rs_dave_2", "hist think tc"},
+			{"rs_dave_6", "cur think tc"},
+		}
+		for i, w := range want {
+			assert.Equal(t, w.id, items[i]["id"], "deterministic row-derived id, item %d", i)
+			content, ok := items[i]["content"].([]any)
+			require.True(t, ok, "reasoning item %d must carry content parts", i)
+			require.Len(t, content, 1)
+			assert.Equal(t, "reasoning_text", content[0].(map[string]any)["type"])
+			assert.Equal(t, w.text, content[0].(map[string]any)["text"],
+				"the content part text is the stored REAL content, item %d", i)
+			assert.NotContains(t, items[i], "summary",
+				"the wire item must carry NO summary key — a summary is not the thinking")
+		}
 	})
 
 	t.Run("always mode emits one item per assistant reasoning row in history order", func(t *testing.T) {
@@ -523,16 +532,25 @@ func TestMessagesToResponseInputItemsReplayReasoning(t *testing.T) {
 
 	t.Run("raw JSON shape is content-parts-only with no summary key", func(t *testing.T) {
 		rawItems := marshalInputItems(messagesToResponseInputItems(msgs, ReasoningReplayToolCalls))
+		wantShapes := map[string]string{
+			"rs_dave_2": `{"type":"reasoning","id":"rs_dave_2","content":[{"type":"reasoning_text","text":"hist think tc"}]}`,
+			"rs_dave_6": `{"type":"reasoning","id":"rs_dave_6","content":[{"type":"reasoning_text","text":"cur think tc"}]}`,
+		}
+		found := map[string]bool{}
 		for _, raw := range rawItems {
 			if !strings.Contains(string(raw), `"type":"reasoning"`) {
 				continue
 			}
-			assert.JSONEq(t,
-				`{"type":"reasoning","id":"rs_dave_6","content":[{"type":"reasoning_text","text":"cur think tc"}]}`,
-				string(raw), "exact marshaled wire shape of the replay item")
-			return
+			var item map[string]any
+			require.NoError(t, json.Unmarshal(raw, &item))
+			id, _ := item["id"].(string)
+			want, ok := wantShapes[id]
+			require.True(t, ok, "unexpected reasoning item id %q", id)
+			assert.JSONEq(t, want, string(raw),
+				"exact marshaled wire shape of the replay item")
+			found[id] = true
 		}
-		t.Fatal("no reasoning item found")
+		assert.Len(t, found, len(wantShapes), "both tool rows' reasoning items present")
 	})
 
 	t.Run("summary-only rows emit no reasoning item in any mode", func(t *testing.T) {
@@ -560,18 +578,61 @@ func TestMessagesToResponseInputItemsReplayReasoning(t *testing.T) {
 			require.NoError(t, json.Unmarshal(raw, &item))
 			items = append(items, item)
 		}
-		// The current-turn assistant tool-call row (row 6, no content)
-		// serializes to [reasoning, function_call t2].
+		// Row 2 (past-turn, content + tool calls) serializes to
+		// [reasoning, message, function_call t1]; row 6 (current-turn,
+		// tool calls only) serializes to [reasoning, function_call t2].
 		for i, item := range items {
-			if item["type"] == "reasoning" {
-				require.Greater(t, len(items), i+1, "reasoning item must not be last")
-				follow := items[i+1]
-				assert.Equal(t, "function_call", follow["type"])
-				assert.Equal(t, "t2", follow["call_id"])
-				return
+			if item["type"] != "reasoning" {
+				continue
+			}
+			id, _ := item["id"].(string)
+			require.Greater(t, len(items), i+1, "reasoning item %s must not be last", id)
+			switch id {
+			case "rs_dave_2":
+				assert.Equal(t, "assistant", items[i+1]["role"],
+					"row 2's message item follows its reasoning item")
+				require.Greater(t, len(items), i+2, "row 2's function call must follow its message")
+				assert.Equal(t, "function_call", items[i+2]["type"])
+				assert.Equal(t, "t1", items[i+2]["call_id"])
+			case "rs_dave_6":
+				assert.Equal(t, "function_call", items[i+1]["type"])
+				assert.Equal(t, "t2", items[i+1]["call_id"])
+			default:
+				t.Fatalf("unexpected reasoning item id %q", id)
 			}
 		}
-		t.Fatal("no reasoning item found")
+	})
+
+	// Production incident pin (session 1891): the position rule is gone —
+	// a tool-call row from a closed past turn (a later user message sits
+	// after it) still gets its stored reasoning on the wire as a reasoning
+	// input item in tool_calls mode. Per-row tool calls decide eligibility.
+	t.Run("tool_calls mode emits a reasoning item for a past-turn tool row before a later user message", func(t *testing.T) {
+		past := []ChatMessage{
+			{Role: RoleUser, Content: "u1"},
+			{Role: RoleAssistant, ReasoningContent: "past tool think", ToolCalls: []ToolCall{{ID: "t1", Type: "function", Function: FunctionCall{Name: "f", Arguments: "{}"}}}},
+			{Role: RoleTool, Content: "result", ToolCallID: "t1"},
+			{Role: RoleUser, Content: "u2"},
+			{Role: RoleAssistant, Content: "final", ReasoningContent: "past plain think"},
+		}
+		rawItems := marshalInputItems(messagesToResponseInputItems(past, ReasoningReplayToolCalls))
+		var reasoningItems []map[string]any
+		for _, raw := range rawItems {
+			var item map[string]any
+			require.NoError(t, json.Unmarshal(raw, &item))
+			if item["type"] == "reasoning" {
+				reasoningItems = append(reasoningItems, item)
+			}
+		}
+		require.Len(t, reasoningItems, 1,
+			"only the tool row gains an item — the plain final row stays stripped")
+		item := reasoningItems[0]
+		assert.Equal(t, "rs_dave_1", item["id"])
+		content, ok := item["content"].([]any)
+		require.True(t, ok, "reasoning item must carry content parts")
+		require.Len(t, content, 1)
+		assert.Equal(t, "past tool think", content[0].(map[string]any)["text"],
+			"the item carries the stored REAL content")
 	})
 }
 

@@ -54,9 +54,9 @@ func TestMessagesToChatCompletionParamsReplayReasoning(t *testing.T) {
 			want: map[int]string{},
 		},
 		{
-			name: "tool_calls mode attaches only current-turn tool rows",
+			name: "tool_calls mode attaches every tool row, past and current turns",
 			mode: ReasoningReplayToolCalls,
-			want: map[int]string{6: "cur think tc"},
+			want: map[int]string{2: "hist think tc", 6: "cur think tc"},
 		},
 		{
 			name: "always mode attaches every assistant reasoning row",
@@ -71,7 +71,7 @@ func TestMessagesToChatCompletionParamsReplayReasoning(t *testing.T) {
 		{
 			name: "unknown raw mode falls back to tool_calls semantics",
 			mode: "bogus",
-			want: map[int]string{6: "cur think tc"},
+			want: map[int]string{2: "hist think tc", 6: "cur think tc"},
 		},
 	}
 	for _, tt := range tests {
@@ -98,6 +98,26 @@ func TestMessagesToChatCompletionParamsReplayReasoning(t *testing.T) {
 		serialized := marshalChatParams(t, messagesToChatCompletionParams(msgs, ReasoningReplayToolCalls))
 		assert.Equal(t, "cur think tc", serialized[6]["reasoning_content"])
 		assert.NotEmpty(t, serialized[6]["tool_calls"], "tool calls preserved with the reasoning")
+	})
+
+	// Production incident pin (session 1891): a tool-call assistant row
+	// from a CLOSED past turn — a later user message sits after it —
+	// still gets its stored reasoning on the wire in tool_calls mode.
+	// Per-row tool calls decide eligibility; position no longer does.
+	t.Run("tool_calls mode attaches reasoning on a past-turn tool row before a later user message", func(t *testing.T) {
+		past := []ChatMessage{
+			{Role: RoleUser, Content: "u1"},
+			{Role: RoleAssistant, ReasoningContent: "past tool think", ToolCalls: []ToolCall{{ID: "t1", Type: "function", Function: FunctionCall{Name: "f", Arguments: "{}"}}}},
+			{Role: RoleTool, Content: "result", ToolCallID: "t1"},
+			{Role: RoleUser, Content: "u2"},
+			{Role: RoleAssistant, Content: "final", ReasoningContent: "past plain think"},
+		}
+		serialized := marshalChatParams(t, messagesToChatCompletionParams(past, ReasoningReplayToolCalls))
+		require.Len(t, serialized, len(past))
+		require.Equal(t, "past tool think", serialized[1]["reasoning_content"],
+			"the past-turn tool row (before the later user message) must carry reasoning_content")
+		_, ok := serialized[4]["reasoning_content"]
+		assert.False(t, ok, "the past-turn plain final answer stays stripped — no tool calls on the row")
 	})
 }
 

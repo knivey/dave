@@ -1421,16 +1421,19 @@ func TestTokensPerMessage(t *testing.T) {
 	t.Run("replay mode shapes the tokenizer fallback", func(t *testing.T) {
 		// The replay knob decides whether stored reasoning rides the wire;
 		// the tokenizer fallback must count EXACTLY the wire payload:
-		// tool_calls mode keeps current-turn tool-row reasoning, strips
-		// historical/plain reasoning; off strips everything; always
-		// charges everything.
-		rC := "long historical thinking that must not ride the wire under tool_calls mode"
+		// tool_calls mode keeps tool-row reasoning (current AND past
+		// turns — position no longer decides), strips plain reasoning;
+		// off strips everything; always charges everything.
+		rP := "long historical plain thinking that must not ride the wire under tool_calls mode"
+		rT := "past-turn tool-call reasoning that tool_calls mode keeps on the wire"
 		cC := "current turn reasoning that tool_calls mode keeps"
 		rows := []Message{
 			buildDBMessage(0, ChatMessage{Role: RoleUser, Content: "hello"}),
-			buildDBMessage(0, ChatMessage{Role: RoleAssistant, Content: "hist answer", ReasoningContent: rC}),
+			buildDBMessage(0, ChatMessage{Role: RoleAssistant, ReasoningContent: rT, ToolCalls: []ToolCall{{ID: "t1", Type: "function", Function: FunctionCall{Name: "f", Arguments: "{}"}}}}),
+			buildDBMessage(0, ChatMessage{Role: RoleTool, Content: "tool result", ToolCallID: "t1"}),
+			buildDBMessage(0, ChatMessage{Role: RoleAssistant, Content: "hist answer", ReasoningContent: rP}),
 			buildDBMessage(0, ChatMessage{Role: RoleUser, Content: "hello again"}),
-			buildDBMessage(0, ChatMessage{Role: RoleAssistant, ReasoningContent: cC, ToolCalls: []ToolCall{{ID: "t1", Type: "function", Function: FunctionCall{Name: "f", Arguments: "{}"}}}}),
+			buildDBMessage(0, ChatMessage{Role: RoleAssistant, ReasoningContent: cC, ToolCalls: []ToolCall{{ID: "t2", Type: "function", Function: FunctionCall{Name: "g", Arguments: "{}"}}}}),
 		}
 
 		perMsg, basis := tokensPerMessage(nil, rows, "gpt-4o", 0, ReasoningReplayToolCalls)
@@ -1446,7 +1449,7 @@ func TestTokensPerMessage(t *testing.T) {
 		wantOff := float64(countMessageTokens("gpt-4o", replayReasoningFilter(messagesToChat(rows), ReasoningReplayOff)).Tokens) /
 			float64(len(rows))
 		assert.InDelta(t, wantOff, perMsg, 0.0001)
-		assert.Less(t, wantOff, want, "off mode strips both rows' reasoning")
+		assert.Less(t, wantOff, want, "off mode strips every row's reasoning while tool_calls keeps the tool rows'")
 
 		perMsg, _ = tokensPerMessage(nil, rows, "gpt-4o", 0, ReasoningReplayAlways)
 		wantAlways := float64(countMessageTokens("gpt-4o", messagesToChat(rows)).Tokens) / float64(len(rows))

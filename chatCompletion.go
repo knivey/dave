@@ -9,7 +9,7 @@ import (
 
 func messagesToChatCompletionParams(messages []ChatMessage, replay string) []openai.ChatCompletionMessageParamUnion {
 	params := make([]openai.ChatCompletionMessageParamUnion, 0, len(messages))
-	for i, msg := range messages {
+	for _, msg := range messages {
 		switch msg.Role {
 		case RoleSystem:
 			params = append(params, openai.SystemMessage(msg.Content))
@@ -70,7 +70,7 @@ func messagesToChatCompletionParams(messages []ChatMessage, replay string) []ope
 			// so the serializer and the token accounting can never drift.
 			// The stored Summary (messages.reasoning_summary) never rides
 			// the wire on any path — it is display/log-only.
-			if replayReasoningRow(messages, i, replay) {
+			if replayReasoningRow(msg, replay) {
 				param.OfAssistant.SetExtraFields(map[string]any{
 					"reasoning_content": msg.ReasoningContent,
 				})

@@ -36,15 +36,25 @@ package main
 // rejected at load by validateReasoningReplay) selects the mode:
 //
 //   - "off":        never replay (the pre-2026-10 behavior).
-//   - "tool_calls": replay reasoning ONLY on assistant rows that carry
-//     tool calls and sit after the last user row — the
-//     current turn's agentic loop. Historical turns are
-//     stripped before the next user turn, per the gemma rule.
-//   - "always":     every assistant row with reasoning, historical
-//     included — for models/proxies that want the full
-//     reasoning history (the gemma template will still strip
-//     pre-user-turn thoughts itself unless the admin passes
-//     preserve_thinking = true).
+//   - "tool_calls": replay reasoning on EVERY assistant row that carries
+//     tool calls, current turn AND past turns — the owner's
+//     cross-turn thought-context choice. The template's
+//     preserve_thinking arm gates exactly these rows
+//     server-side: with the template default (false) dave
+//     still SENDS past-turn rows but the server does not
+//     render them (stripped at prompt assembly); the admin
+//     enables preserve_thinking = true via
+//     chat_template_kwargs to render cross-turn thoughts.
+//     Final-answer rows of past turns (no tool calls on the
+//     row) stay stripped — per the gemma rule "the historical
+//     output should be only the final response" (the response
+//     content is kept; only its thought block is not).
+//   - "always":     every assistant row with reasoning, plain non-tool
+//     rows included — note gemma templates can NEVER render
+//     historical plain rows regardless of kwargs (the gate's
+//     preserve arm requires tool_calls on the row), so on
+//     gemma "always" sends wire bytes the template will not
+//     render; it exists for non-gemma providers/templates.
 //
 // Replay fidelity split (aiMessages.go reasoningParts): capture stores the
 // model's REAL thinking text (messages.reasoning_content) separately from
@@ -74,22 +84,7 @@ func reasoningReplay(cfg AIConfig) string {
 	return ReasoningReplayToolCalls
 }
 
-// lastUserRoleIndex reports the position of the last user row — the same
-// scan the gemma4 template runs to find its `last_user_idx` reasoning-gate
-// boundary. Rows after it belong to the current turn (the tool loop's own
-// iterations); everything before it is closed history. -1 when no user row
-// exists. Developer/system guidance rows do not reset the boundary: the
-// template scans the user role only, and the wire behavior must match.
-func lastUserRoleIndex(messages []ChatMessage) int {
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == RoleUser {
-			return i
-		}
-	}
-	return -1
-}
-
-// replayReasoningRow is the single eligibility predicate — whether row i's
+// replayReasoningRow is the single eligibility predicate — whether row m's
 // stored reasoning goes on the wire in mode replay. Both serializers (add
 // reasoning_content / reasoning items) and the token-accounting filter
 // (strip what won't be serialized) call this, so the two can never drift.
@@ -98,13 +93,14 @@ func lastUserRoleIndex(messages []ChatMessage) int {
 // text). A summary-only row — ReasoningSummary set, ReasoningContent empty
 // — is NEVER eligible in any mode: the summary is display/log-only and
 // never rides the wire. Then: "always" takes any such row; "tool_calls"
-// takes tool-call rows of the CURRENT turn (historical tool-call rows stay
-// stripped — the gemma rule is per-turn); "off" and unknown raw modes replay
-// nothing except that unknown modes are mapped to tool_calls semantics,
-// mirroring the resolver so a hand-built-AIConfig call can never widen what
-// validation rejected.
-func replayReasoningRow(messages []ChatMessage, i int, replay string) bool {
-	m := messages[i]
+// takes tool-call rows at ANY position — the current turn's agentic loop
+// AND past tool-call turns (the owner's cross-turn thought-context choice;
+// rendering of past-turn rows is the server's preserve_thinking gate, the
+// admin's chat_template_kwargs — dave only decides what is on the wire);
+// "off" and unknown raw modes replay nothing except that unknown modes are
+// mapped to tool_calls semantics, mirroring the resolver so a hand-built-
+// AIConfig call can never widen what validation rejected.
+func replayReasoningRow(m ChatMessage, replay string) bool {
 	if m.Role != RoleAssistant || m.ReasoningContent == "" {
 		return false
 	}
@@ -112,12 +108,12 @@ func replayReasoningRow(messages []ChatMessage, i int, replay string) bool {
 	case ReasoningReplayAlways:
 		return true
 	case ReasoningReplayToolCalls /* defensive default */, "":
-		return len(m.ToolCalls) > 0 && i > lastUserRoleIndex(messages)
+		return len(m.ToolCalls) > 0
 	case ReasoningReplayOff:
 		return false
 	}
 	// Unknown raw value: same semantics as tool_calls (resolver's fallback).
-	return len(m.ToolCalls) > 0 && i > lastUserRoleIndex(messages)
+	return len(m.ToolCalls) > 0
 }
 
 // replayReasoningFilter pre-strips ReasoningContent from rows that mode
@@ -136,7 +132,7 @@ func replayReasoningFilter(messages []ChatMessage, replay string) []ChatMessage 
 	filtered := messages
 	changed := false
 	for i := range messages {
-		if replayReasoningRow(messages, i, replay) || messages[i].ReasoningContent == "" {
+		if replayReasoningRow(messages[i], replay) || messages[i].ReasoningContent == "" {
 			continue
 		}
 		if !changed {

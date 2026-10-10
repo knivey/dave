@@ -75,7 +75,7 @@ func messagesToResponseInputItems(messages []ChatMessage, replay string) []respo
 			// replays its own reasoning. With reasoningsummary unset AND
 			// no content captured this is a structural no-op: nothing was
 			// ever captured to replay.
-			if replayReasoningRow(messages, i, replay) {
+			if replayReasoningRow(msg, replay) {
 				items = append(items, reasoningReplayInputItem(i, msg.ReasoningContent))
 			}
 			if len(msg.ToolCalls) > 0 {

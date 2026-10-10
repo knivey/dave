@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -2182,6 +2183,96 @@ func TestRunTurnStreamSplitReasoningCapture(t *testing.T) {
 	// by higher-priority sources (per-field fallback).
 	assert.Equal(t, "sum more sum", last.ReasoningSummary,
 		"reasoning.summary deltas accumulate into the separate Summary buffer")
+}
+
+// TestRunTurnStreamToolCallIterationLogsReasoning pins the INFO-log gap in
+// the streaming-chat tool round: the tool-call branch stores both reasoning
+// slots on the assistant tool-call message but skips flushStreamedOutput
+// (final iteration only), which was the only place the streaming path
+// logged reasoning — tool-round thinking reached the DB, the replay path,
+// and the api-logs, but never the TUI/INFO log. The branch must log it
+// itself; the sibling tool-round paths (handleToolCallResponse,
+// callResponsesStream) already log theirs, so this call must remain the
+// only one on this path.
+func TestRunTurnStreamToolCallIterationLogsReasoning(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	sid := createTestSession(t, "testnet", "#101", "shrew", "testcmd", "svc", "m")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "hi"}))
+	messages, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+
+	chunk := func(delta string, finish any) string {
+		return fmt.Sprintf(`data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":%s,"finish_reason":%s}]}`+"\n\n", delta, finish)
+	}
+	// Iteration 1: reasoning in BOTH fidelity slots, then a tool call.
+	// Iteration 2: plain final answer, no reasoning — so any reasoning
+	// line in the captured log can only come from the tool round.
+	toolStream := chunk(`{"role":"assistant","content":"","reasoning_details":[{"type":"reasoning.text","text":"planning the tool call"},{"type":"reasoning.summary","summary":"brief plan"}]}`, `null`) +
+		chunk(`{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"nonexistent_tool","arguments":"{}"}}]}`, `null`) +
+		chunk(`{}`, `"tool_calls"`) + "data: [DONE]\n\n"
+	doneStream := chunk(`{"role":"assistant","content":"done now"}`, `null`) +
+		chunk(`{}`, `"stop"`) + "data: [DONE]\n\n"
+
+	var reqs int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if atomic.AddInt32(&reqs, 1) == 1 {
+			fmt.Fprint(w, toolStream)
+			return
+		}
+		fmt.Fprint(w, doneStream)
+	}))
+	defer server.Close()
+
+	// Capture the runner's INFO log: logxi over a buffer writer, with the
+	// JSON formatter pinned explicitly via NewLogger3 so the line shape
+	// does not depend on logxi's TTY detection (the default format is
+	// only JSON when stdout is not a terminal). SetLevel(LevelAll) per
+	// the house convention.
+	var buf bytes.Buffer
+	logger := logxi.NewLogger3(logxi.NewConcurrentWriter(&buf), "test", logxi.NewJSONFormatter("test"))
+	logger.SetLevel(logxi.LevelAll)
+
+	transport := newDaveTransport(nil, nil)
+	client := openai.NewClient(
+		option.WithAPIKey("test-key"),
+		option.WithBaseURL(server.URL+"/v1"),
+		option.WithHTTPClient(&http.Client{Transport: transport}),
+	)
+	outputCh := make(chan string, 8)
+	cr := &chatRunner{
+		openaiClient: &client,
+		transport:    transport,
+		httpClient:   &http.Client{Transport: transport},
+		baseURL:      server.URL + "/v1",
+		apiKey:       "test-key",
+		cfg:          AIConfig{Model: "m", Timeout: 10 * time.Second, Streaming: true, StreamTimeout: 5 * time.Second},
+		network:      Network{Name: "testnet"},
+		channel:      "#101",
+		nick:         "shrew",
+		logger:       logger,
+		ctx:          context.Background(),
+		outputCh:     outputCh,
+	}
+	cr.sessionID = sid
+
+	done := make(chan struct{})
+	go func() { cr.runTurn(newTurnContext(sid, messages)); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("runTurn did not finish")
+	}
+
+	logged := buf.String()
+	assert.Contains(t, logged, `"_m":"reasoning"`, "tool-call iteration must emit the reasoning content Info line")
+	assert.Contains(t, logged, `"content":"planning the tool call"`, "captured reasoning content must reach the INFO log")
+	assert.Contains(t, logged, `"_m":"reasoning summary"`, "tool-call iteration must emit the reasoning summary Info line")
+	assert.Contains(t, logged, `"content":"brief plan"`, "captured reasoning summary must reach the INFO log")
+	assert.Equal(t, 1, strings.Count(logged, `"content":"planning the tool call"`),
+		"reasoning content logged exactly once — no double-logging")
 }
 
 // TestLogStreamCompletionEmitsBothReasoningFidelities pins the api-log

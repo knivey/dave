@@ -1171,6 +1171,12 @@ StreamLoop:
 	cr.logger.Info("stream made tool calls", "count", len(accumulatedToolCalls))
 	cr.storeUsage(streamUsage, "chat_completions_stream", streamDurationMs)
 	logTimings(cr.logger, streamTimings)
+	// Tool-call iterations skip flushStreamedOutput (final no-tool-call
+	// iteration only), which is where the streaming path otherwise logs
+	// reasoning — log it here so tool-round thinking reaches the INFO
+	// log; without this it was stored, replayed, and api-logged, but
+	// never shown. logReasoning no-ops on empty slots.
+	logReasoning(cr.logger, reasoningBuffer)
 
 	if assistantRole == "" {
 		assistantRole = RoleAssistant

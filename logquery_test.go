@@ -283,6 +283,28 @@ func TestFetchChannelLogFromRange(t *testing.T) {
 		"--- 2026-10-12 ---",
 		"[13:00] <after> today",
 	}, resOpen.Lines)
+
+	// A past-only range must NOT walk to now's period file — the walk
+	// ends at `to`, not `now` (Files is the observable pin: reverting the
+	// walk to `now` would scan the extra period and list it here even
+	// though the SQL `to` bound filters its rows).
+	other := t.TempDir()
+	writeLogRows(t, other, "2026-08", []ircLog{
+		mkRow("PRIVMSG", "aug", "#chan", "august", time.Date(2026, 8, 15, 12, 0, 0, 0, time.Local)),
+	})
+	writeLogRows(t, other, "2026-10", []ircLog{
+		mkRow("PRIVMSG", "oct", "#chan", "october", now.Add(-time.Hour)),
+	})
+	resPast, err := fetchChannelLogFrom(other, "monthly",
+		LogQuerySpec{From: "2026-08-15 10:00", To: "2026-08-15 18:00"},
+		"testnet", "#chan", "#chan", "qwen3", now)
+	require.NoError(t, err)
+	require.Len(t, resPast.Files, 1)
+	assert.Contains(t, resPast.Files[0], "2026-08", "only the range's period file is walked")
+	assert.Equal(t, []string{
+		"--- 2026-08-15 ---",
+		"[12:00] <aug> august",
+	}, resPast.Lines)
 }
 
 func writeLogRows(t *testing.T, dir, key string, rows []ircLog) {

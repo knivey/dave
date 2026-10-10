@@ -149,7 +149,7 @@ func handleGeneratorLogQuery(cr *chatRunner, turn *turnContext, call ToolCall) {
 	if err != nil {
 		if errors.Is(err, errLogWindowTooLarge) {
 			turn.Add(toolResultMsg(call.ID, fmt.Sprintf(
-				"error: that window exceeds the row cap (%d rows) — request a narrower window", logQueryRowCap)))
+				"error: that request exceeds the row cap (%d rows) — request a narrower window or range", logQueryRowCap)))
 			return
 		}
 		cr.logger.Error("generator log query failed", "trigger", cr.logQuery.name, "error", err)

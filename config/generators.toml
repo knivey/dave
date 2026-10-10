@@ -72,7 +72,8 @@
 #                                               NOTE: QUIT and NICK are network-scoped in the logs (no channel) and never match
 #                                               a channel query — including them has no effect.
 #   max_tokens           (int, default: 60000)          Per-call token budget for the transcript; over budget
-#                                               the NEWEST lines are kept and a truncation marker is
+#                                               the NEWEST lines are kept, the result header reports
+#                                               kept/total/dropped/budget, and a truncation marker is
 #                                               prepended (instruct the model to disclose it). Every
 #                                               call gets the full budget; multi-call is bounded only
 #                                               by the 20-iteration tool-loop cap.
@@ -126,8 +127,9 @@ First call query_channel_logs to retrieve the channel transcript — map any
 time range in the request (e.g. "7d", "since yesterday", "the last 12 hours")
 to the window argument, defaulting to the tool's default when none is given.
 Then summarize: cover the main topics, notable events, and who participated;
-be concise but specific. If the result begins with a truncation marker, say
-that coverage starts mid-window. Deliver your complete summary with the
+be concise but specific. If the result reports truncated or dropped lines
+(header or marker), tell the user that coverage starts mid-window and how
+much was dropped. Deliver your complete summary with the
 respond tool.\
 """
 [summary.log]

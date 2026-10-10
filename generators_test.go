@@ -406,7 +406,37 @@ func TestHandleGeneratorLogQueryTruncationMarkerRides(t *testing.T) {
 		channelRaw: "#St", channel: "#st", name: "summary",
 	})
 	turn := handleLogQueryForTest(t, cr, `{}`)
-	assert.Contains(t, lastToolResultText(t, turn), "omitted to fit")
+	result := lastToolResultText(t, turn)
+	assert.Contains(t, result, "omitted to fit")
+	// The header must be SELF-DISCLOSING when clipped: kept/total/dropped
+	// + budget in the header line itself, so the model cannot miss the
+	// truncation even without parsing the marker (and the header stops
+	// overstating the pre-budget total as the delivered line count).
+	assert.Contains(t, result,
+		"1 of 41 lines (40 dropped to fit the 60000-token budget), 10 tokens")
+}
+
+func TestHandleGeneratorLogQueryHeaderHonestWhenNotTruncated(t *testing.T) {
+	setupNoticesDefaults(t)
+	orig := fetchChannelLogFn
+	fetchChannelLogFn = func(spec LogQuerySpec, network, channelRaw, channelNorm, model string, now time.Time) (*LogWindowResult, error) {
+		return &LogWindowResult{
+			Lines:  []string{"[09:00] <a> hi"},
+			Tokens: 5, TotalLines: 1,
+			FirstKept: time.Date(2026, 10, 9, 9, 0, 0, 0, time.Local),
+			LastKept:  time.Date(2026, 10, 9, 9, 30, 0, 0, time.Local),
+		}, nil
+	}
+	t.Cleanup(func() { fetchChannelLogFn = orig })
+
+	cr := newGeneratorToolTestRunner(true, &generatorLogQuery{
+		spec:       LogQuerySpec{Window: "24h", MaxTokens: 60000, Events: defaultLogEvents},
+		channelRaw: "#St", channel: "#st", name: "summary",
+	})
+	turn := handleLogQueryForTest(t, cr, `{}`)
+	// Unclipped: the header keeps its exact historical shape.
+	assert.Contains(t, lastToolResultText(t, turn),
+		"(1 lines, 5 tokens, covering 09:00 to 09:30):")
 }
 
 func TestHandleGeneratorLogQueryGuardNonEphemeral(t *testing.T) {

@@ -149,8 +149,18 @@ func handleGeneratorLogQuery(cr *chatRunner, turn *turnContext, call ToolCall) {
 		return
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Channel activity for %s on %s, last %s (%d lines, %d tokens%s):\n",
-		cr.logQuery.channel, cr.network.Name, formatDuration(window), lw.TotalLines, lw.Tokens, coverage)
+	// The header's line counts must describe what the result ACTUALLY
+	// delivers. When the budget clipped lines, the header is
+	// SELF-DISCLOSING (kept/total/dropped + budget) so the model cannot
+	// miss the truncation even without parsing the marker — the raw
+	// TotalLines would overstate the delivered lines as if unclipped.
+	counts := fmt.Sprintf("%d lines, %d tokens", lw.TotalLines, lw.Tokens)
+	if lw.Truncated {
+		counts = fmt.Sprintf("%d of %d lines (%d dropped to fit the %d-token budget), %d tokens",
+			lw.TotalLines-lw.DroppedLines, lw.TotalLines, lw.DroppedLines, spec.MaxTokens, lw.Tokens)
+	}
+	fmt.Fprintf(&b, "Channel activity for %s on %s, last %s (%s%s):\n",
+		cr.logQuery.channel, cr.network.Name, formatDuration(window), counts, coverage)
 	b.WriteString(strings.Join(lw.Lines, "\n"))
 	turn.Add(toolResultMsg(call.ID, b.String()))
 }

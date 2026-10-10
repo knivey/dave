@@ -66,11 +66,15 @@ func messagesToResponseInputItems(messages []ChatMessage, replay string) []respo
 			// Reasoning history replay (reasoningreplay.go): eligible rows
 			// lead with a reasoning item so the provider (OpenRouter's
 			// stateless proxy, llama.cpp's /v1/responses-adjacent paths)
-			// can rebuild the model's thought context. On
+			// can rebuild the model's thought context. The item carries the
+			// stored REAL content only (reasoningReplayInputItem — content
+			// parts, no summary key: a summary is not the thinking and is
+			// display/log-only, never serialized). On
 			// previous_response_id chains this never fires — the chained
 			// turns send delta-only tool-result items, and the server
-			// replays its own reasoning. With reasoningsummary unset this
-			// is a structural no-op: nothing was ever captured to replay.
+			// replays its own reasoning. With reasoningsummary unset AND
+			// no content captured this is a structural no-op: nothing was
+			// ever captured to replay.
 			if replayReasoningRow(messages, i, replay) {
 				items = append(items, reasoningReplayInputItem(i, msg.ReasoningContent))
 			}
@@ -113,11 +117,19 @@ func messagesToResponseInputItems(messages []ChatMessage, replay string) []respo
 // stable id keeps the request shape stable, and OpenAI proper never sees
 // the item on validated paths (its chains are delta-only,
 // previous_response_id; see the reasoningReplay doc block for the scope).
+//
+// The item carries the stored REAL content ONLY — content parts, never a
+// summary: a summary is not the thinking (the split's whole point), Summary
+// is omitzero in the SDK so the nil passed here omits the key entirely, and
+// the wire shape is {"type":"reasoning","id":"rs_dave_<row>","content":
+// [{"type":"reasoning_text","text":…}]} with no "summary" key.
 func reasoningReplayInputItem(rowIdx int, text string) responses.ResponseInputItemUnionParam {
-	return responses.ResponseInputItemParamOfReasoning(
+	item := responses.ResponseInputItemParamOfReasoning(
 		fmt.Sprintf("rs_dave_%d", rowIdx),
-		[]responses.ResponseReasoningItemSummaryParam{{Text: text}},
+		nil,
 	)
+	item.OfReasoning.Content = []responses.ResponseReasoningItemContentParam{{Text: text}}
+	return item
 }
 
 func toolResultMsgsToInputItems(messages []ChatMessage) []responses.ResponseInputItemUnionParam {
@@ -157,7 +169,7 @@ func toolsToResponseToolParams(tools []Tool) []responses.ToolUnionParam {
 	return result
 }
 
-func parseSDKResponseOutput(resp responses.Response) (text string, reasoning string, toolCalls []ToolCall) {
+func parseSDKResponseOutput(resp responses.Response) (text string, parts reasoningParts, toolCalls []ToolCall) {
 	for _, item := range resp.Output {
 		switch item.Type {
 		case "message":
@@ -169,8 +181,18 @@ func parseSDKResponseOutput(resp responses.Response) (text string, reasoning str
 				}
 			}
 		case "reasoning":
+			// The reasoning split (aiMessages.go): item.Content parts
+			// (type reasoning_text) are the model's REAL thinking text —
+			// the only replayable fidelity; item.Summary entries are the
+			// provider's summarized form — display/log-only. Both are
+			// captured, into separate slots.
+			for _, part := range item.Content {
+				if part.Type == "reasoning_text" {
+					parts.Content += part.Text
+				}
+			}
 			for _, s := range item.Summary {
-				reasoning += s.Text
+				parts.Summary += s.Text
 			}
 		case "function_call":
 			toolCalls = append(toolCalls, ToolCall{
@@ -183,7 +205,7 @@ func parseSDKResponseOutput(resp responses.Response) (text string, reasoning str
 			})
 		}
 	}
-	return text, reasoning, toolCalls
+	return text, parts, toolCalls
 }
 
 // chainActive reports whether a Responses API request may rely on

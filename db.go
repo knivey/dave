@@ -92,6 +92,10 @@ type Message struct {
 	ToolCalls        *string `gorm:"type:text"`
 	ToolCallID       *string
 	ReasoningContent *string `gorm:"type:text"`
+	// ReasoningSummary is the provider's summarized/annotated reasoning
+	// form — display/log-only, never replayed (see reasoningParts in
+	// aiMessages.go).
+	ReasoningSummary *string `gorm:"type:text"`
 	MultiContent     *string `gorm:"type:text"`
 	IsAsyncResult    bool    `gorm:"default:false"`
 	// Note: the DB still has a nullable settings_id column from an abandoned
@@ -336,7 +340,7 @@ func updateDBSessionResponseID(sessionID int64, responseID *string, model string
 		Updates(map[string]interface{}{"response_id": *responseID, "response_model": model}).Error
 }
 
-func insertDBMessage(sessionID int64, role, content string, toolCallsJSON *string, toolCallID *string, reasoningContent *string, multiContentJSON *string) error {
+func insertDBMessage(sessionID int64, role, content string, toolCallsJSON *string, toolCallID *string, reasoningContent *string, reasoningSummary *string, multiContentJSON *string) error {
 	msg := Message{
 		SessionID:        sessionID,
 		Role:             role,
@@ -344,6 +348,7 @@ func insertDBMessage(sessionID int64, role, content string, toolCallsJSON *strin
 		ToolCalls:        toolCallsJSON,
 		ToolCallID:       toolCallID,
 		ReasoningContent: reasoningContent,
+		ReasoningSummary: reasoningSummary,
 		MultiContent:     multiContentJSON,
 	}
 	if err := theDB.Create(&msg).Error; err != nil {
@@ -828,6 +833,7 @@ func cloneDBSession(sourceSessionID int64, targetNetwork, targetChannel string, 
 			ToolCalls:          m.ToolCalls,
 			ToolCallID:         m.ToolCallID,
 			ReasoningContent:   m.ReasoningContent,
+			ReasoningSummary:   m.ReasoningSummary,
 			MultiContent:       m.MultiContent,
 			IsAsyncResult:      m.IsAsyncResult,
 			Archived:           false,

@@ -61,13 +61,15 @@ func messagesToChatCompletionParams(messages []ChatMessage, replay string) []ope
 			} else {
 				param = openai.AssistantMessage(msg.Content)
 			}
-			// Reasoning history replay (reasoningreplay.go): the stored
-			// reasoning rides the assistant row as reasoning_content — the
-			// field llama.cpp feeds the gemma4 chat template (which renders
+			// Reasoning history replay (reasoningreplay.go): the stored REAL
+			// reasoning content rides the assistant row as reasoning_content —
+			// the field llama.cpp feeds the gemma4 chat template (which renders
 			// it as a thought channel per its own gate), the field
 			// DeepSeek's API defines natively, and OpenRouter's documented
 			// alias of `reasoning`. replayReasoningRow decides eligibility
 			// so the serializer and the token accounting can never drift.
+			// The stored Summary (messages.reasoning_summary) never rides
+			// the wire on any path — it is display/log-only.
 			if replayReasoningRow(messages, i, replay) {
 				param.OfAssistant.SetExtraFields(map[string]any{
 					"reasoning_content": msg.ReasoningContent,
@@ -163,9 +165,9 @@ func buildChatCompletionParams(cfg AIConfig, messages []ChatMessage, tools []Too
 	return params
 }
 
-func parseChatCompletionResponse(resp openai.ChatCompletion) (string, string, []ToolCall, *Usage) {
+func parseChatCompletionResponse(resp openai.ChatCompletion) (string, reasoningParts, []ToolCall, *Usage) {
 	if len(resp.Choices) == 0 {
-		return "", "", nil, nil
+		return "", reasoningParts{}, nil, nil
 	}
 	choice := resp.Choices[0]
 	msg := choice.Message
@@ -188,20 +190,22 @@ func parseChatCompletionResponse(resp openai.ChatCompletion) (string, string, []
 		usage.FinishReason = string(choice.FinishReason)
 	}
 
-	reasoning := ""
+	parts := reasoningParts{}
 	// DESIGN NOTE: deliberately NOT gating on raw.Valid() — the openai-go
 	// SDK marks fields it has no typed destination for (everything lands
 	// in ExtraFields) with status=invalid, so Valid() is always false for
 	// reasoning_content even though Raw() carries the value. Map presence
 	// + a successful string unmarshal is the correct test (null/omitted
-	// shapes leave reasoning empty).
+	// shapes leave reasoning empty). reasoning_content is the model's REAL
+	// thinking text (llama.cpp / DeepSeek) → Content only; the summarized
+	// form only ever arrives via reasoning_details (see aiMessages.go).
 	if raw, ok := msg.JSON.ExtraFields["reasoning_content"]; ok {
-		if err := json.Unmarshal([]byte(raw.Raw()), &reasoning); err != nil {
-			reasoning = ""
+		if err := json.Unmarshal([]byte(raw.Raw()), &parts.Content); err != nil {
+			parts.Content = ""
 		}
 	}
 
-	return msg.Content, reasoning, toolCalls, usage
+	return msg.Content, parts, toolCalls, usage
 }
 
 func sdkChatUsageToUsage(u openai.CompletionUsage) *Usage {

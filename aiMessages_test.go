@@ -88,3 +88,119 @@ func TestExtendedMessageBackwardCompatible(t *testing.T) {
 	assert.Equal(t, stdMsg.Role, result.Role, "Role mismatch")
 	assert.Equal(t, stdMsg.Content, result.Content, "Content mismatch")
 }
+
+// TestReasoningPartsAnyDisplay pins the split-capture helpers: any() reports
+// either fidelity, display() prefers the REAL content (the stranded answer
+// is usually there) and falls back to the summary.
+func TestReasoningPartsAnyDisplay(t *testing.T) {
+	tests := []struct {
+		name        string
+		parts       reasoningParts
+		wantAny     bool
+		wantDisplay string
+	}{
+		{"empty", reasoningParts{}, false, ""},
+		{"content only", reasoningParts{Content: "real thinking"}, true, "real thinking"},
+		{"summary only", reasoningParts{Summary: "summarized"}, true, "summarized"},
+		{"both — content preferred", reasoningParts{Content: "real thinking", Summary: "summarized"}, true, "real thinking"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.wantAny, tt.parts.any())
+			assert.Equal(t, tt.wantDisplay, tt.parts.display())
+		})
+	}
+}
+
+// TestSplitReasoningDetails pins the OpenRouter reasoning_details split:
+// `reasoning.text` entries land in Content (the REAL thinking — the only
+// replayable fidelity); `reasoning.summary` entries land in Summary
+// (display/log-only); `reasoning.encrypted` entries keep the existing
+// non-replayable marker text and land in Summary. Same-fidelity entries
+// keep the old extractReasoningText join's newline separation; unknown
+// entry types and empty texts are ignored.
+func TestSplitReasoningDetails(t *testing.T) {
+	tests := []struct {
+		name    string
+		details []ReasoningDetail
+		want    reasoningParts
+	}{
+		{
+			name:    "no details",
+			details: nil,
+			want:    reasoningParts{},
+		},
+		{
+			name: "text detail lands in content only",
+			details: []ReasoningDetail{
+				{Type: "reasoning.text", Text: "the real thinking"},
+			},
+			want: reasoningParts{Content: "the real thinking"},
+		},
+		{
+			name: "summary detail lands in summary only",
+			details: []ReasoningDetail{
+				{Type: "reasoning.summary", Summary: "the summarized form"},
+			},
+			want: reasoningParts{Summary: "the summarized form"},
+		},
+		{
+			name: "encrypted detail keeps the marker in summary",
+			details: []ReasoningDetail{
+				{Type: "reasoning.encrypted", Data: "encblob", ID: "rc_1"},
+			},
+			want: reasoningParts{Summary: "[encrypted reasoning, id=rc_1]"},
+		},
+		{
+			name: "mixed details split by fidelity with newline joins",
+			details: []ReasoningDetail{
+				{Type: "reasoning.text", Text: "think one"},
+				{Type: "reasoning.summary", Summary: "sum one"},
+				{Type: "reasoning.text", Text: "think two"},
+				{Type: "reasoning.summary", Summary: "sum two"},
+				{Type: "reasoning.encrypted", Data: "enc", ID: "rc_9"},
+			},
+			want: reasoningParts{
+				Content: "think one\nthink two",
+				Summary: "sum one\nsum two\n[encrypted reasoning, id=rc_9]",
+			},
+		},
+		{
+			name: "empty texts and unknown types are ignored",
+			details: []ReasoningDetail{
+				{Type: "reasoning.text", Text: ""},
+				{Type: "reasoning.summary", Summary: ""},
+				{Type: "reasoning.encrypted", Data: "", ID: "rc_0"},
+				{Type: "reasoning.other", Text: "mystery"},
+			},
+			want: reasoningParts{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, splitReasoningDetails(tt.details))
+		})
+	}
+}
+
+// TestExtractStreamReasoning pins the stream-chunk reasoning_details walk:
+// it returns the split parts (Content from reasoning.text deltas, Summary
+// from reasoning.summary deltas) and never merges them.
+func TestExtractStreamReasoning(t *testing.T) {
+	t.Run("reasoning_details delta splits into parts", func(t *testing.T) {
+		raw := []byte(`{"choices":[{"index":0,"delta":{"reasoning_details":[` +
+			`{"type":"reasoning.text","text":"real chunk"},` +
+			`{"type":"reasoning.summary","summary":"summary chunk"}]}}]}`)
+		got := extractStreamReasoning(raw)
+		assert.Equal(t, reasoningParts{Content: "real chunk", Summary: "summary chunk"}, got)
+	})
+
+	t.Run("no details yield empty parts", func(t *testing.T) {
+		got := extractStreamReasoning([]byte(`{"choices":[{"index":0,"delta":{"content":"hi"}}]}`))
+		assert.Equal(t, reasoningParts{}, got)
+	})
+
+	t.Run("unparseable bytes yield empty parts", func(t *testing.T) {
+		assert.Equal(t, reasoningParts{}, extractStreamReasoning([]byte(`not json`)))
+	})
+}

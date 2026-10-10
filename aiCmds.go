@@ -599,8 +599,8 @@ const correctionUserSuffix = "Respond now with your complete answer in the respo
 // later turns for models that chronically strand answers in reasoning.
 // Back-to-back identical injections (payload+suffix tail) collapse — one
 // nudge per failure shape per turn.
-func (cr *chatRunner) addEmptyResponseCorrection(turn *turnContext, reasoning string) {
-	seq := guidanceMessages(cr.cfg, emptyResponseCorrection(reasoning != ""), correctionUserSuffix, true)
+func (cr *chatRunner) addEmptyResponseCorrection(turn *turnContext, parts reasoningParts) {
+	seq := guidanceMessages(cr.cfg, emptyResponseCorrection(parts.any()), correctionUserSuffix, true)
 	if messagesEndWith(turn.Messages(), seq) {
 		return
 	}
@@ -620,10 +620,12 @@ func (cr *chatRunner) addEmptyResponseCorrection(turn *turnContext, reasoning st
 // (sendFinalText skips it), so without an explicit notice the user would be
 // left waiting for a reply that already failed. When the model produced
 // reasoning but no text, the notice explains what happened and the
-// reasoning content itself is delivered as a normal rendered message —
-// shown to the user as a fallback, but deliberately NOT accepted as the
-// reply (the stored assistant content stays the "..." sentinel).
-func (cr *chatRunner) checkEmptyRetry(content, reasoning string, emptyRetries, maxEmptyRetries int) (bool, string) {
+// reasoning itself is delivered as a normal rendered message — parts.
+// display() prefers the REAL content (the stranded answer is usually
+// there) and falls back to the summary — shown to the user as a fallback,
+// but deliberately NOT accepted as the reply (the stored assistant content
+// stays the "..." sentinel).
+func (cr *chatRunner) checkEmptyRetry(content string, parts reasoningParts, emptyRetries, maxEmptyRetries int) (bool, string) {
 	if content != "" {
 		return false, content
 	}
@@ -634,10 +636,10 @@ func (cr *chatRunner) checkEmptyRetry(content, reasoning string, emptyRetries, m
 	// emptyRetries == maxEmptyRetries here, so the turn made
 	// maxEmptyRetries+1 API attempts in total.
 	vars := map[string]string{"attempts": fmt.Sprintf("%d", maxEmptyRetries+1)}
-	if reasoning != "" {
+	if parts.any() {
 		cr.logger.Warn("empty response from API, max retries reached, reasoning was present but no text output")
 		cr.sendIRC(expandNotice(getNotices().LLM.ReasoningOnly, vars))
-		cr.sendRendered(reasoning)
+		cr.sendRendered(parts.display())
 	} else {
 		cr.logger.Warn("empty response from API, max retries reached")
 		cr.sendIRC(expandNotice(getNotices().LLM.EmptyResponse, vars))
@@ -709,12 +711,13 @@ func (cr *chatRunner) sendFinalText(content string) {
 	}
 }
 
-func (cr *chatRunner) handleToolCallResponse(turn *turnContext, text string, toolCalls []ToolCall, reasoning string) {
+func (cr *chatRunner) handleToolCallResponse(turn *turnContext, text string, toolCalls []ToolCall, parts reasoningParts) {
 	cr.logger.Info("assistant made tool calls", "count", len(toolCalls))
 	assistantMsg := ChatMessage{
 		Role:             RoleAssistant,
 		Content:          text,
-		ReasoningContent: reasoning,
+		ReasoningContent: parts.Content,
+		ReasoningSummary: parts.Summary,
 		ToolCalls:        toolCalls,
 	}
 	turn.Add(assistantMsg)
@@ -730,8 +733,8 @@ func (cr *chatRunner) handleToolCallResponse(turn *turnContext, text string, too
 		}
 		cr.sendIRC(t)
 	}
-	if reasoning != "" {
-		cr.logger.Info("reasoning", "content", reasoning)
+	if parts.any() {
+		logReasoning(cr.logger, parts)
 	}
 	cr.executeToolCalls(turn, toolCalls)
 }
@@ -818,18 +821,19 @@ func (cr *chatRunner) runTurnResponsesStream(
 	if resp == nil {
 		return responsesStreamResult{done: true, currentResponseID: currentResponseID, usePrevID: usePrevID, emptyRetries: emptyRetries}
 	}
-	text, reasoning, toolCalls := parseSDKResponseOutput(*resp)
+	text, parts, toolCalls := parseSDKResponseOutput(*resp)
 	currentResponseID = cr.handleResponseIDSave(resp.ID, text, toolCalls, currentResponseID)
 
 	assistantMsg := ChatMessage{
 		Role:             RoleAssistant,
 		Content:          text,
-		ReasoningContent: reasoning,
+		ReasoningContent: parts.Content,
+		ReasoningSummary: parts.Summary,
 	}
 
 	if len(toolCalls) == 0 {
-		if retry, newText := cr.checkEmptyRetry(text, reasoning, emptyRetries, maxEmptyRetries); retry {
-			cr.addEmptyResponseCorrection(turn, reasoning)
+		if retry, newText := cr.checkEmptyRetry(text, parts, emptyRetries, maxEmptyRetries); retry {
+			cr.addEmptyResponseCorrection(turn, parts)
 			// Full-history retry (correction included) with the chain
 			// dropped: handleResponseIDSave already cleared the stored
 			// response_id after the empty output, and keeping the old
@@ -849,8 +853,8 @@ func (cr *chatRunner) runTurnResponsesStream(
 		turn.Add(assistantMsg)
 		cr.logger.Info(FormatOutput(text))
 		cr.storeUsage(sdkResponseUsageToUsage(resp.Usage, string(resp.Status)), "responses_stream", durationMs)
-		if reasoning != "" {
-			cr.logger.Info("reasoning", "content", reasoning)
+		if parts.any() {
+			logReasoning(cr.logger, parts)
 		}
 		if cr.ephemeral {
 			// Deferred emission (suppression): the collector no longer
@@ -900,7 +904,7 @@ func (cr *chatRunner) runTurnStream(ctx context.Context, params openai.ChatCompl
 	apiStart := time.Now()
 
 	fullContent := ""
-	reasoningBuffer := ""
+	reasoningBuffer := reasoningParts{}
 	var sOut streamOutput
 	// Ephemeral (generator) turns never render live: emission is
 	// deferred to the iteration's classification (final text via
@@ -981,7 +985,16 @@ StreamLoop:
 				apiLogger.LogStreamChunk(cr.transport.sessionID, rawBytes)
 			}
 
-			chunkReasoning := ""
+			// Per-chunk reasoning capture, split by fidelity (the
+			// fallback priority is applied PER FIELD — a higher-priority
+			// source never overwrites a lower one, but a source that
+			// fills one slot does not hide another source's yield for
+			// the still-empty slot):
+			//   Content: reasoning_content ExtraFields → stream
+			//   reasoning_details (reasoning.text) → `reasoning` field
+			//   Summary: stream reasoning_details (reasoning.summary)
+			//   — the only source that ever produces a summary.
+			chunkParts := reasoningParts{}
 			if len(chunk.Choices) > 0 {
 				// DESIGN NOTE: deliberately NOT gating on f.Valid() —
 				// the openai-go SDK marks fields it has no typed
@@ -995,17 +1008,28 @@ StreamLoop:
 				if f, ok := chunk.Choices[0].Delta.JSON.ExtraFields["reasoning_content"]; ok {
 					var rc string
 					if err := json.Unmarshal([]byte(f.Raw()), &rc); err == nil && rc != "" {
-						chunkReasoning = rc
+						chunkParts.Content = rc
 					}
 				}
 			}
-			if chunkReasoning == "" {
-				chunkReasoning = extractStreamReasoning(rawBytes)
+			// The details walk runs even when reasoning_content filled
+			// Content: Summary's only source is reasoning_details, and
+			// per-field capture must not drop a summary just because a
+			// higher-priority source filled the other slot.
+			d := extractStreamReasoning(rawBytes)
+			if chunkParts.Content == "" {
+				chunkParts.Content = d.Content
 			}
-			if chunkReasoning == "" {
-				chunkReasoning = extractReasoningFromField(rawBytes)
+			if chunkParts.Summary == "" {
+				chunkParts.Summary = d.Summary
 			}
-			reasoningBuffer += chunkReasoning
+			if chunkParts.Content == "" {
+				if r := extractReasoningFromField(rawBytes); r != "" {
+					chunkParts.Content = r
+				}
+			}
+			reasoningBuffer.Content += chunkParts.Content
+			reasoningBuffer.Summary += chunkParts.Summary
 
 			if chunk.Usage.CompletionTokens > 0 || chunk.Usage.PromptTokens > 0 {
 				streamUsage = sdkChatUsageToUsage(chunk.Usage)
@@ -1103,13 +1127,14 @@ StreamLoop:
 	flushStreamedOutput := func() {
 		cr.logger.Info(FormatOutput(fullContent))
 		content := fullContent
-		if content == "" && reasoningBuffer == "" {
+		if content == "" && !reasoningBuffer.any() {
 			content = "..."
 		}
 		turn.Add(ChatMessage{
 			Role:             RoleAssistant,
 			Content:          content,
-			ReasoningContent: reasoningBuffer,
+			ReasoningContent: reasoningBuffer.Content,
+			ReasoningSummary: reasoningBuffer.Summary,
 		})
 		if cr.ephemeral {
 			// Deferred emission: the final iteration's text, complete.
@@ -1121,8 +1146,8 @@ StreamLoop:
 		}
 		cr.storeUsage(streamUsage, "chat_completions_stream", streamDurationMs)
 		logTimings(cr.logger, streamTimings)
-		if reasoningBuffer != "" {
-			cr.logger.Info("reasoning", "content", reasoningBuffer)
+		if reasoningBuffer.any() {
+			logReasoning(cr.logger, reasoningBuffer)
 		}
 	}
 
@@ -1154,7 +1179,8 @@ StreamLoop:
 	assistantMsg := ChatMessage{
 		Role:             assistantRole,
 		Content:          fullContent,
-		ReasoningContent: reasoningBuffer,
+		ReasoningContent: reasoningBuffer.Content,
+		ReasoningSummary: reasoningBuffer.Summary,
 		ToolCalls:        accumulatedToolCalls,
 	}
 
@@ -1235,24 +1261,35 @@ func (cr *chatRunner) runTurn(turn *turnContext) bool {
 		}
 		durationMs := int(time.Since(apiStart).Milliseconds())
 
-		content, reasoning, toolCalls, usage := parseChatCompletionResponse(*resp)
+		content, parts, toolCalls, usage := parseChatCompletionResponse(*resp)
 
 		capturedBody := cr.transport.getCapturedBody()
 		rawReasoning, rawDetails := extractResponseReasoning(capturedBody)
-		if reasoning == "" && rawReasoning != "" {
-			reasoning = rawReasoning
+		// Non-streaming fallback priority, applied PER FIELD (the same
+		// rule as the stream path's per-chunk capture): Content falls
+		// back through parsed reasoning_content → raw `reasoning` → raw
+		// reasoning_details' reasoning.text entries; Summary's only
+		// source is the reasoning_details' reasoning.summary entries.
+		if parts.Content == "" && rawReasoning != "" {
+			parts.Content = rawReasoning
 		}
-		if reasoning == "" && len(rawDetails) > 0 {
-			reasoning = extractReasoningText(rawDetails)
+		if len(rawDetails) > 0 {
+			detailParts := splitReasoningDetails(rawDetails)
+			if parts.Content == "" {
+				parts.Content = detailParts.Content
+			}
+			if parts.Summary == "" {
+				parts.Summary = detailParts.Summary
+			}
 		}
 		nonStreamTimings := extractTimings(capturedBody)
 
 		if len(toolCalls) == 0 {
-			if retry, newContent := cr.checkEmptyRetry(content, reasoning, emptyRetries, maxEmptyRetries); retry {
+			if retry, newContent := cr.checkEmptyRetry(content, parts, emptyRetries, maxEmptyRetries); retry {
 				// Tell the model what went wrong so the retry can
 				// correct itself; params are rebuilt from
 				// turn.Messages() at the top of the loop.
-				cr.addEmptyResponseCorrection(turn, reasoning)
+				cr.addEmptyResponseCorrection(turn, parts)
 				emptyRetries++
 				continue
 			} else {
@@ -1261,14 +1298,15 @@ func (cr *chatRunner) runTurn(turn *turnContext) bool {
 			turn.Add(ChatMessage{
 				Role:             RoleAssistant,
 				Content:          content,
-				ReasoningContent: reasoning,
+				ReasoningContent: parts.Content,
+				ReasoningSummary: parts.Summary,
 			})
 			out := FormatOutput(content)
 			cr.logger.Info(out)
 			cr.storeUsage(usage, "chat_completions", durationMs)
 			logTimings(cr.logger, nonStreamTimings)
-			if reasoning != "" {
-				cr.logger.Info("reasoning", "content", reasoning)
+			if parts.any() {
+				logReasoning(cr.logger, parts)
 			}
 
 			cr.sendFinalText(content)
@@ -1278,7 +1316,7 @@ func (cr *chatRunner) runTurn(turn *turnContext) bool {
 		emptyRetries = 0
 		cr.storeUsage(usage, "chat_completions", durationMs)
 		logTimings(cr.logger, nonStreamTimings)
-		cr.handleToolCallResponse(turn, content, toolCalls, reasoning)
+		cr.handleToolCallResponse(turn, content, toolCalls, parts)
 		if cr.responded {
 			// respond delivered the final answer — the turn is complete,
 			// no further API round-trip.
@@ -1685,13 +1723,13 @@ func (cr *chatRunner) runTurnResponses(turn *turnContext) bool {
 		}
 		durationMs := int(time.Since(apiStart).Milliseconds())
 
-		text, reasoning, toolCalls := parseSDKResponseOutput(*resp)
+		text, parts, toolCalls := parseSDKResponseOutput(*resp)
 		currentResponseID = cr.handleResponseIDSave(resp.ID, text, toolCalls, currentResponseID)
 
 		if len(toolCalls) == 0 {
 			content := text
-			if retry, newContent := cr.checkEmptyRetry(content, reasoning, emptyRetries, maxEmptyRetries); retry {
-				cr.addEmptyResponseCorrection(turn, reasoning)
+			if retry, newContent := cr.checkEmptyRetry(content, parts, emptyRetries, maxEmptyRetries); retry {
+				cr.addEmptyResponseCorrection(turn, parts)
 				emptyRetries++
 				// Rebuild the input from the turn so the correction
 				// rides along, and drop the response chain for the
@@ -1710,15 +1748,16 @@ func (cr *chatRunner) runTurnResponses(turn *turnContext) bool {
 			assistantMsg := ChatMessage{
 				Role:             RoleAssistant,
 				Content:          content,
-				ReasoningContent: reasoning,
+				ReasoningContent: parts.Content,
+				ReasoningSummary: parts.Summary,
 			}
 			turn.Add(assistantMsg)
 			out := FormatOutput(content)
 			cr.logger.Info(out)
 
 			cr.storeUsage(sdkResponseUsageToUsage(resp.Usage, string(resp.Status)), "responses", durationMs)
-			if reasoning != "" {
-				cr.logger.Info("reasoning", "content", reasoning)
+			if parts.any() {
+				logReasoning(cr.logger, parts)
 			}
 
 			cr.sendFinalText(content)
@@ -1728,7 +1767,7 @@ func (cr *chatRunner) runTurnResponses(turn *turnContext) bool {
 		emptyRetries = 0
 		cr.storeUsage(sdkResponseUsageToUsage(resp.Usage, string(resp.Status)), "responses", durationMs)
 		numToolCalls := len(toolCalls)
-		cr.handleToolCallResponse(turn, text, toolCalls, reasoning)
+		cr.handleToolCallResponse(turn, text, toolCalls, parts)
 		if cr.responded {
 			// respond delivered the final answer — the turn is complete,
 			// no further API round-trip (skip the chain rebuild too: the
@@ -1760,7 +1799,14 @@ func (cr *chatRunner) callResponsesStream(ctx context.Context, params responses.
 	}
 
 	var fullText string
-	var reasoningBuffer string
+	// Streaming reasoning capture is split by fidelity (aiMessages.go
+	// reasoningParts): reasoning_text deltas are the model's REAL thinking
+	// text (Content), reasoning_summary_text deltas are the provider's
+	// summarized form (Summary). NOTE: these buffers feed LOGGING ONLY —
+	// the authoritative parse for the stored message is
+	// parseSDKResponseOutput(*completedResponse) in runTurnResponsesStream,
+	// which reads the full output items from response.completed.
+	reasoningBuffer := reasoningParts{}
 	var completedResponse *responses.Response
 	var sOut streamOutput
 	// Ephemeral (generator) turns never render live: emission is deferred
@@ -1834,8 +1880,11 @@ func (cr *chatRunner) callResponsesStream(ctx context.Context, params responses.
 					sOut.HandleDelta(textDelta, cr.sendIRC)
 				}
 
-			case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
-				reasoningBuffer += event.Delta
+			case "response.reasoning_text.delta":
+				reasoningBuffer.Content += event.Delta
+
+			case "response.reasoning_summary_text.delta":
+				reasoningBuffer.Summary += event.Delta
 
 			case "response.function_call_arguments.delta":
 				// accumulated via response.completed
@@ -1887,8 +1936,8 @@ streamDone:
 	logStreamCompletion(cr.transport.sessionID, cr.cfg.Model, fullText, reasoningBuffer, nil, sdkResponseUsageToUsage(completedResponse.Usage, string(completedResponse.Status)), RoleAssistant)
 
 	cr.logger.Info(FormatOutput(fullText))
-	if reasoningBuffer != "" {
-		cr.logger.Info("reasoning", "content", reasoningBuffer)
+	if reasoningBuffer.any() {
+		logReasoning(cr.logger, reasoningBuffer)
 	}
 
 	return completedResponse, nil
@@ -2273,7 +2322,7 @@ disabledLoop:
 	return tools
 }
 
-func logStreamCompletion(sessionID int64, model, content, reasoning string, toolCalls []ToolCall, usage *Usage, role string) {
+func logStreamCompletion(sessionID int64, model, content string, parts reasoningParts, toolCalls []ToolCall, usage *Usage, role string) {
 	if apiLogger == nil {
 		return
 	}
@@ -2292,8 +2341,15 @@ func logStreamCompletion(sessionID int64, model, content, reasoning string, tool
 		},
 		"model": model,
 	}
-	if reasoning != "" {
-		msg["choices"].([]map[string]any)[0]["message"].(map[string]any)["reasoning_content"] = reasoning
+	// Both captured fidelities appear in the api-log JSON (each only when
+	// non-empty): reasoning_content is the real thinking text,
+	// reasoning_summary is the provider's summarized form — display/log-only
+	// (see reasoningParts in aiMessages.go).
+	if parts.Content != "" {
+		msg["choices"].([]map[string]any)[0]["message"].(map[string]any)["reasoning_content"] = parts.Content
+	}
+	if parts.Summary != "" {
+		msg["choices"].([]map[string]any)[0]["message"].(map[string]any)["reasoning_summary"] = parts.Summary
 	}
 	if len(toolCalls) > 0 {
 		msg["choices"].([]map[string]any)[0]["tool_calls"] = toolCalls

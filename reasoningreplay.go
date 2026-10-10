@@ -45,6 +45,17 @@ package main
 //     reasoning history (the gemma template will still strip
 //     pre-user-turn thoughts itself unless the admin passes
 //     preserve_thinking = true).
+//
+// Replay fidelity split (aiMessages.go reasoningParts): capture stores the
+// model's REAL thinking text (messages.reasoning_content) separately from
+// the provider's summarized form (messages.reasoning_summary). Replay
+// sends ONLY the real content — a summary is not the thinking. Chat
+// Completions: reasoning_content on eligible assistant rows (never the
+// summary). Responses API: a reasoning input item carrying content parts
+// ONLY, with no summary key (reasoningReplayInputItem). The stored summary
+// is display/log-only and is NEVER serialized, replayed, or token-counted
+// on any path; with reasoningsummary unset AND no content captured,
+// Responses replay stays a structural no-op.
 const (
 	ReasoningReplayOff       = "off"
 	ReasoningReplayToolCalls = "tool_calls"
@@ -83,12 +94,15 @@ func lastUserRoleIndex(messages []ChatMessage) int {
 // reasoning_content / reasoning items) and the token-accounting filter
 // (strip what won't be serialized) call this, so the two can never drift.
 //
-// Requires: assistant role, non-empty reasoning. Then: "always" takes any
-// such row; "tool_calls" takes tool-call rows of the CURRENT turn
-// (historical tool-call rows stay stripped — the gemma rule is per-turn);
-// "off" and unknown raw modes replay nothing except that unknown modes are
-// mapped to tool_calls semantics, mirroring the resolver so a
-// hand-built-AIConfig call can never widen what validation rejected.
+// Requires: assistant role, non-empty ReasoningContent (the REAL thinking
+// text). A summary-only row — ReasoningSummary set, ReasoningContent empty
+// — is NEVER eligible in any mode: the summary is display/log-only and
+// never rides the wire. Then: "always" takes any such row; "tool_calls"
+// takes tool-call rows of the CURRENT turn (historical tool-call rows stay
+// stripped — the gemma rule is per-turn); "off" and unknown raw modes replay
+// nothing except that unknown modes are mapped to tool_calls semantics,
+// mirroring the resolver so a hand-built-AIConfig call can never widen what
+// validation rejected.
 func replayReasoningRow(messages []ChatMessage, i int, replay string) bool {
 	m := messages[i]
 	if m.Role != RoleAssistant || m.ReasoningContent == "" {
@@ -110,9 +124,11 @@ func replayReasoningRow(messages []ChatMessage, i int, replay string) bool {
 // replay would NOT put on the wire: the token accounting passes its
 // messages through this so countMessageTokens sees exactly the payload
 // that will be serialized ("neutral count of the payload it sends" holds
-// in both directions of the knob). Copy-on-write: the original slice and
-// rows are never mutated (compaction callers share rows with the live
-// history), and an input that needs no stripping is returned unchanged.
+// in both directions of the knob). ReasoningSummary is irrelevant here —
+// it never rides the wire in any mode, so it is never counted. Copy-on-
+// write: the original slice and rows are never mutated (compaction callers
+// share rows with the live history), and an input that needs no stripping
+// is returned unchanged.
 func replayReasoningFilter(messages []ChatMessage, replay string) []ChatMessage {
 	if replay == ReasoningReplayAlways {
 		return messages

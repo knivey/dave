@@ -280,6 +280,10 @@ func TestParseSDKResponseOutput(t *testing.T) {
 			},
 			{
 				"type": "reasoning",
+				"content": [
+					{"type": "reasoning_text", "text": "the real thinking"},
+					{"type": "reasoning_text", "text": " continued"}
+				],
 				"summary": [
 					{"type": "summary_text", "text": "I thought about it"}
 				]
@@ -303,9 +307,12 @@ func TestParseSDKResponseOutput(t *testing.T) {
 	var resp responses.Response
 	require.NoError(t, json.Unmarshal([]byte(responseJSON), &resp), "unmarshal")
 
-	text, reasoning, toolCalls := parseSDKResponseOutput(resp)
+	text, parts, toolCalls := parseSDKResponseOutput(resp)
 	assert.Equal(t, "Hello!", text, "text")
-	assert.Equal(t, "I thought about it", reasoning, "reasoning")
+	assert.Equal(t, "the real thinking continued", parts.Content,
+		"reasoning item content parts (type reasoning_text) are the model's REAL thinking text")
+	assert.Equal(t, "I thought about it", parts.Summary,
+		"reasoning item summary entries land in the summary slot")
 	require.Len(t, toolCalls, 1, "toolCalls")
 	assert.Equal(t, "call_abc", toolCalls[0].ID, "toolCall.ID")
 	assert.Equal(t, "get_weather", toolCalls[0].Function.Name, "toolCall.Name")
@@ -459,9 +466,11 @@ func TestMessagesToResponseInputItems_NoReasoningItems(t *testing.T) {
 
 // TestMessagesToResponseInputItemsReplayReasoning pins the Responses-API
 // wire shape of reasoning replay: eligible assistant rows gain a
-// {type:"reasoning", summary:[{type:"summary_text", text:<stored>}]} input
-// item placed BEFORE the message/function-call items they produced. Note
-// the row indices in the item ids (rs_dave_<row>) — full-history replay
+// {type:"reasoning", id:"rs_dave_<row>", content:[{type:"reasoning_text",
+// text:<stored REAL content>}]} input item placed BEFORE the
+// message/function-call items they produced — with NO summary key (the
+// stored summary is display/log-only and never rides the wire). Note the
+// row indices in the item ids (rs_dave_<row>) — full-history replay
 // rebuilds this every request, so the ids are deterministic per row to
 // keep the request shape stable.
 func TestMessagesToResponseInputItemsReplayReasoning(t *testing.T) {
@@ -485,12 +494,18 @@ func TestMessagesToResponseInputItemsReplayReasoning(t *testing.T) {
 		assert.Empty(t, reasonings(t, ReasoningReplayOff))
 	})
 
-	t.Run("tool_calls mode emits only the current-turn tool row", func(t *testing.T) {
+	t.Run("tool_calls mode emits only the current-turn tool row, content-only", func(t *testing.T) {
 		items := reasonings(t, ReasoningReplayToolCalls)
 		require.Len(t, items, 1)
 		assert.Equal(t, "rs_dave_6", items[0]["id"], "deterministic row-derived id")
-		assert.Equal(t, "cur think tc", items[0]["summary"].([]any)[0].(map[string]any)["text"])
-		assert.Equal(t, "summary_text", items[0]["summary"].([]any)[0].(map[string]any)["type"])
+		content, ok := items[0]["content"].([]any)
+		require.True(t, ok, "reasoning item must carry content parts")
+		require.Len(t, content, 1)
+		assert.Equal(t, "reasoning_text", content[0].(map[string]any)["type"])
+		assert.Equal(t, "cur think tc", content[0].(map[string]any)["text"],
+			"the content part text is the stored REAL content")
+		assert.NotContains(t, items[0], "summary",
+			"the wire item must carry NO summary key — a summary is not the thinking")
 	})
 
 	t.Run("always mode emits one item per assistant reasoning row in history order", func(t *testing.T) {
@@ -498,9 +513,42 @@ func TestMessagesToResponseInputItemsReplayReasoning(t *testing.T) {
 		require.Len(t, items, 4)
 		wantTexts := []string{"hist think tc", "hist think plain", "cur think tc", "cur think plain"}
 		for i, want := range wantTexts {
-			summary := items[i]["summary"].([]any)
-			require.Len(t, summary, 1)
-			assert.Equal(t, want, summary[0].(map[string]any)["text"], "item %d", i)
+			content, ok := items[i]["content"].([]any)
+			require.True(t, ok, "item %d must carry content parts", i)
+			require.Len(t, content, 1)
+			assert.Equal(t, want, content[0].(map[string]any)["text"], "item %d", i)
+			assert.NotContains(t, items[i], "summary", "item %d", i)
+		}
+	})
+
+	t.Run("raw JSON shape is content-parts-only with no summary key", func(t *testing.T) {
+		rawItems := marshalInputItems(messagesToResponseInputItems(msgs, ReasoningReplayToolCalls))
+		for _, raw := range rawItems {
+			if !strings.Contains(string(raw), `"type":"reasoning"`) {
+				continue
+			}
+			assert.JSONEq(t,
+				`{"type":"reasoning","id":"rs_dave_6","content":[{"type":"reasoning_text","text":"cur think tc"}]}`,
+				string(raw), "exact marshaled wire shape of the replay item")
+			return
+		}
+		t.Fatal("no reasoning item found")
+	})
+
+	t.Run("summary-only rows emit no reasoning item in any mode", func(t *testing.T) {
+		msgs := []ChatMessage{
+			{Role: RoleSystem, Content: "system"},
+			{Role: RoleUser, Content: "u"},
+			{Role: RoleAssistant, Content: "reply", ReasoningSummary: "summarized thinking"},
+		}
+		for _, mode := range []string{ReasoningReplayOff, ReasoningReplayToolCalls, ReasoningReplayAlways} {
+			rawItems := marshalInputItems(messagesToResponseInputItems(msgs, mode))
+			for _, raw := range rawItems {
+				assert.NotContains(t, string(raw), `"type":"reasoning"`,
+					"a summary-only row must never gain a reasoning item in mode %q", mode)
+				assert.NotContains(t, string(raw), "summarized thinking",
+					"the summary must never ride the wire in mode %q", mode)
+			}
 		}
 	})
 

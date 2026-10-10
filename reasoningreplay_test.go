@@ -134,6 +134,59 @@ func TestReplayReasoningRow(t *testing.T) {
 			assert.False(t, replayReasoningRow(empty, 1, mode), mode)
 		}
 	})
+
+	// A summary-only row — ReasoningSummary set, ReasoningContent empty —
+	// is NEVER eligible in any mode: the summary is display/log-only and
+	// never rides the wire. No exception for tool calls or "always".
+	t.Run("summary-only row never qualifies in any mode", func(t *testing.T) {
+		summaryOnly := []ChatMessage{
+			{Role: RoleUser, Content: "u"},
+			{Role: RoleAssistant, Content: "reply", ReasoningSummary: "summarized thinking"},
+			{Role: RoleUser, Content: "u2"},
+			{Role: RoleAssistant, ReasoningSummary: "summarized tool thinking", ToolCalls: []ToolCall{{ID: "t"}}},
+		}
+		for _, mode := range []string{ReasoningReplayOff, ReasoningReplayToolCalls, ReasoningReplayAlways} {
+			for idx := range summaryOnly {
+				assert.False(t, replayReasoningRow(summaryOnly, idx, mode), "mode %q row %d", mode, idx)
+			}
+		}
+	})
+}
+
+// TestSummaryOnlyRowNeverReplays pins the summary-never-replays rule at the
+// serializer levels too: a row carrying only a stored summary must gain no
+// reasoning on the wire in ANY mode, on either API path — the summary is
+// display/log-only (see reasoningParts in aiMessages.go).
+func TestSummaryOnlyRowNeverReplays(t *testing.T) {
+	summaryOnly := []ChatMessage{
+		{Role: RoleSystem, Content: "system"},
+		{Role: RoleUser, Content: "u"},
+		{Role: RoleAssistant, Content: "reply", ReasoningSummary: "summarized thinking", ToolCalls: []ToolCall{{ID: "t"}}},
+		{Role: RoleTool, Content: "result", ToolCallID: "t"},
+	}
+	modes := []string{ReasoningReplayOff, ReasoningReplayToolCalls, ReasoningReplayAlways}
+
+	t.Run("chat completions carries no reasoning_content", func(t *testing.T) {
+		for _, mode := range modes {
+			serialized := marshalChatParams(t, messagesToChatCompletionParams(summaryOnly, mode))
+			for i, row := range serialized {
+				_, ok := row["reasoning_content"]
+				assert.False(t, ok, "mode %q row %d must not carry reasoning_content", mode, i)
+			}
+		}
+	})
+
+	t.Run("responses carries no reasoning items", func(t *testing.T) {
+		for _, mode := range modes {
+			rawItems := marshalInputItems(messagesToResponseInputItems(summaryOnly, mode))
+			for _, raw := range rawItems {
+				assert.NotContains(t, string(raw), `"type":"reasoning"`,
+					"mode %q must not emit a reasoning item", mode)
+				assert.NotContains(t, string(raw), "summarized thinking",
+					"mode %q must never serialize the summary", mode)
+			}
+		}
+	})
 }
 
 // TestReplayReasoningFilter pins the copy-on-write filter used by the token

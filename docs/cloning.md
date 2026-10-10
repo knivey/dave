@@ -89,7 +89,7 @@ Inside a single DB transaction:
    - `CompactionID` = `nil`
    - `SourceCompactionID` = `nil`
    - `Superseded` = `false`
-   - All other fields (`Role`, `Content`, `ToolCalls`, `ToolCallID`, `ReasoningContent`, `MultiContent`, `IsAsyncResult`) copied as-is
+   - All other fields (`Role`, `Content`, `ToolCalls`, `ToolCallID`, `ReasoningContent`, `ReasoningSummary`, `MultiContent`, `IsAsyncResult`) copied as-is
 8. Set `first_message` from the first user-role message in the cloned messages.
 9. Return new session ID.
 

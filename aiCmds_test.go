@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1509,25 +1510,23 @@ func TestCheckEmptyRetry(t *testing.T) {
 	tests := []struct {
 		name            string
 		content         string
-		reasoning       string
+		parts           reasoningParts
 		emptyRetries    int
 		maxEmptyRetries int
 		wantRetry       bool
 		wantContent     string
 		wantOutput      []string
+		wantNotOutput   []string
 	}{
 		{
 			name:            "content present, no retry",
 			content:         "hello",
-			reasoning:       "",
 			maxEmptyRetries: 3,
 			wantRetry:       false,
 			wantContent:     "hello",
 		},
 		{
 			name:            "both empty, retries remaining",
-			content:         "",
-			reasoning:       "",
 			emptyRetries:    0,
 			maxEmptyRetries: 3,
 			wantRetry:       true,
@@ -1535,8 +1534,6 @@ func TestCheckEmptyRetry(t *testing.T) {
 		},
 		{
 			name:            "both empty, max retries reached",
-			content:         "",
-			reasoning:       "",
 			emptyRetries:    3,
 			maxEmptyRetries: 3,
 			wantRetry:       false,
@@ -1546,18 +1543,16 @@ func TestCheckEmptyRetry(t *testing.T) {
 			wantOutput: []string{"empty response from model after 4 attempt(s)"},
 		},
 		{
-			name:            "reasoning only, retries remaining",
-			content:         "",
-			reasoning:       "let me think about this",
+			name:            "reasoning content only, retries remaining",
+			parts:           reasoningParts{Content: "let me think about this"},
 			emptyRetries:    0,
 			maxEmptyRetries: 3,
 			wantRetry:       true,
 			wantContent:     "",
 		},
 		{
-			name:            "reasoning only, max retries reached",
-			content:         "",
-			reasoning:       "let me think about this",
+			name:            "reasoning content only, max retries reached",
+			parts:           reasoningParts{Content: "let me think about this"},
 			emptyRetries:    3,
 			maxEmptyRetries: 3,
 			wantRetry:       false,
@@ -1566,9 +1561,8 @@ func TestCheckEmptyRetry(t *testing.T) {
 			wantOutput: []string{"reasoning channel", "let me think about this"},
 		},
 		{
-			name:            "reasoning only, zero max retries",
-			content:         "",
-			reasoning:       "thinking...",
+			name:            "reasoning content only, zero max retries",
+			parts:           reasoningParts{Content: "thinking..."},
 			emptyRetries:    0,
 			maxEmptyRetries: 0,
 			wantRetry:       false,
@@ -1576,9 +1570,31 @@ func TestCheckEmptyRetry(t *testing.T) {
 			wantOutput:      []string{"reasoning channel", "thinking..."},
 		},
 		{
+			name: "summary only, max retries reached — display falls back to summary",
+			parts: reasoningParts{
+				Summary: "the summarized thinking",
+			},
+			emptyRetries:    3,
+			maxEmptyRetries: 3,
+			wantRetry:       false,
+			wantContent:     "...",
+			wantOutput:      []string{"reasoning channel", "the summarized thinking"},
+		},
+		{
+			name: "content and summary, max retries reached — content preferred",
+			parts: reasoningParts{
+				Content: "the real stranded answer",
+				Summary: "the summarized thinking",
+			},
+			emptyRetries:    3,
+			maxEmptyRetries: 3,
+			wantRetry:       false,
+			wantContent:     "...",
+			wantOutput:      []string{"reasoning channel", "the real stranded answer"},
+			wantNotOutput:   []string{"the summarized thinking"},
+		},
+		{
 			name:            "both empty, zero max retries",
-			content:         "",
-			reasoning:       "",
 			emptyRetries:    0,
 			maxEmptyRetries: 0,
 			wantRetry:       false,
@@ -1588,7 +1604,7 @@ func TestCheckEmptyRetry(t *testing.T) {
 		{
 			name:            "content present with reasoning, no retry",
 			content:         "here is my answer",
-			reasoning:       "let me think",
+			parts:           reasoningParts{Content: "let me think"},
 			maxEmptyRetries: 3,
 			wantRetry:       false,
 			wantContent:     "here is my answer",
@@ -1607,7 +1623,7 @@ func TestCheckEmptyRetry(t *testing.T) {
 			}
 			cr.logger.SetLevel(logxi.LevelAll)
 
-			retry, content := cr.checkEmptyRetry(tt.content, tt.reasoning, tt.emptyRetries, tt.maxEmptyRetries)
+			retry, content := cr.checkEmptyRetry(tt.content, tt.parts, tt.emptyRetries, tt.maxEmptyRetries)
 			assert.Equal(t, tt.wantRetry, retry)
 			assert.Equal(t, tt.wantContent, content)
 
@@ -1622,6 +1638,10 @@ func TestCheckEmptyRetry(t *testing.T) {
 			require.Len(t, lines, len(tt.wantOutput), "unexpected IRC output: %q", lines)
 			for i, want := range tt.wantOutput {
 				assert.Contains(t, lines[i], want)
+			}
+			joined := strings.Join(lines, "\n")
+			for _, notWant := range tt.wantNotOutput {
+				assert.NotContains(t, joined, notWant)
 			}
 		})
 	}
@@ -1793,6 +1813,48 @@ func TestRunTurnEmptyResponseExhaustedNoReasoning(t *testing.T) {
 	assert.Contains(t, strings.Join(lines, "\n"), "retries exhausted", "notice must state retries were exhausted")
 }
 
+// TestRunTurnEmptyResponseExhaustedSummaryOnly verifies the OpenRouter
+// reasoning_details exhaustion path end to end: summary-only details (no
+// reasoning.text entries) are captured into the Summary slot alone, the
+// user is told via the reasoning_only notice, and the summary is displayed
+// as the fallback (no content was captured). The per-field fallback itself
+// (a higher-priority Content source not hiding the details' summary) is
+// pinned by TestRunTurnStreamSplitReasoningCapture.
+func TestRunTurnEmptyResponseExhaustedSummaryOnly(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	sid := createTestSession(t, "testnet", "#101", "shrew", "testcmd", "svc", "m")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "hi"}))
+	messages, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+
+	var requests []string
+	outputCh := make(chan string, 8)
+	cr := newEmptyRetryTurnRunner(t, []string{
+		`{"id":"cmpl-1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning_details":[{"type":"reasoning.summary","summary":"the summarized answer"}]},"finish_reason":"stop"}]}`,
+	}, &requests, outputCh)
+	cr.sessionID = sid
+
+	cr.runTurn(newTurnContext(sid, messages))
+
+	lines := drainOutput(t, outputCh, 6, time.Second)
+	joined := strings.Join(lines, "\n")
+	assert.Contains(t, joined, "reasoning channel", "explanation notice expected, got %q", lines)
+	assert.Contains(t, joined, "the summarized answer",
+		"summary-only capture must display the summary as the fallback")
+
+	// The stored row carries the summary in its own slot and the sentinel
+	// stays the reply (a summary is not the thinking, not the reply).
+	final, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	last := final[len(final)-1]
+	assert.Equal(t, RoleAssistant, last.Role)
+	assert.Equal(t, "...", last.Content)
+	assert.Empty(t, last.ReasoningContent, "no reasoning.text detail means no content captured")
+	assert.Equal(t, "the summarized answer", last.ReasoningSummary)
+}
+
 // TestAddEmptyResponseCorrection pins the correction shape (guidance
 // Knob 1 payload role — system by default, user/developer when configured;
 // Knob 2 suffix appended for anthropic-class models), persistence (D7 —
@@ -1812,7 +1874,7 @@ func TestAddEmptyResponseCorrection(t *testing.T) {
 
 	t.Run("default role system, no suffix for plain models", func(t *testing.T) {
 		cr := newRunner(AIConfig{Model: "qwen3"})
-		cr.addEmptyResponseCorrection(turn, "some reasoning")
+		cr.addEmptyResponseCorrection(turn, reasoningParts{Content: "some reasoning"})
 		require.Len(t, turn.Messages(), 2) // real + correction
 		c := turn.Messages()[1]
 		assert.Equal(t, RoleSystem, c.Role)
@@ -1820,14 +1882,14 @@ func TestAddEmptyResponseCorrection(t *testing.T) {
 		assert.Contains(t, c.Content, "automated notice", "correction must be marked as not-from-the-user")
 
 		// identical repeat collapses (in-turn dedupe)
-		cr.addEmptyResponseCorrection(turn, "more reasoning")
+		cr.addEmptyResponseCorrection(turn, reasoningParts{Content: "more reasoning"})
 		require.Len(t, turn.Messages(), 2)
 
 		// different failure shape earns its own nudge, and its repeat collapses
-		cr.addEmptyResponseCorrection(turn, "")
+		cr.addEmptyResponseCorrection(turn, reasoningParts{})
 		require.Len(t, turn.Messages(), 3)
 		assert.Contains(t, turn.Messages()[2].Content, "completely empty")
-		cr.addEmptyResponseCorrection(turn, "")
+		cr.addEmptyResponseCorrection(turn, reasoningParts{})
 		require.Len(t, turn.Messages(), 3)
 
 		// D7: correction rows persist to the session store
@@ -1845,21 +1907,21 @@ func TestAddEmptyResponseCorrection(t *testing.T) {
 		turn2.Add(ChatMessage{Role: RoleUser, Content: "q"})
 		cr := newRunner(AIConfig{Model: "anthropic/claude-4"})
 
-		cr.addEmptyResponseCorrection(turn2, "")
+		cr.addEmptyResponseCorrection(turn2, reasoningParts{})
 		require.Len(t, turn2.Messages(), 3) // user + system payload + user suffix
 		assert.Equal(t, RoleSystem, turn2.Messages()[1].Role)
 		assert.Equal(t, RoleUser, turn2.Messages()[2].Role)
 		assert.Equal(t, correctionUserSuffix, turn2.Messages()[2].Content)
 
 		// dedupe covers payload+suffix tail
-		cr.addEmptyResponseCorrection(turn2, "")
+		cr.addEmptyResponseCorrection(turn2, reasoningParts{})
 		require.Len(t, turn2.Messages(), 3)
 	})
 
 	t.Run("explicit false suppresses even anthropic suffix", func(t *testing.T) {
 		turn3 := newTurnContext(0, nil)
 		cr := newRunner(AIConfig{Model: "anthropic/claude-4", NeedsUserSuffix: boolPtr(false)})
-		cr.addEmptyResponseCorrection(turn3, "")
+		cr.addEmptyResponseCorrection(turn3, reasoningParts{})
 		require.Len(t, turn3.Messages(), 1)
 		assert.Equal(t, RoleSystem, turn3.Messages()[0].Role)
 	})
@@ -1867,7 +1929,7 @@ func TestAddEmptyResponseCorrection(t *testing.T) {
 	t.Run("user payload role gets no suffix", func(t *testing.T) {
 		turn4 := newTurnContext(0, nil)
 		cr := newRunner(AIConfig{Model: "anthropic/claude-4", InjectionRole: RoleUser})
-		cr.addEmptyResponseCorrection(turn4, "")
+		cr.addEmptyResponseCorrection(turn4, reasoningParts{})
 		require.Len(t, turn4.Messages(), 1)
 		assert.Equal(t, RoleUser, turn4.Messages()[0].Role)
 	})
@@ -1960,14 +2022,17 @@ func TestRunTurnStreamEmptyResponseRetry(t *testing.T) {
 // Raw() carries the value. Producers that strand their whole answer in
 // reasoning_content (DeepSeek-style, llama-server reasoning models) must be
 // detected so the reasoning-only failure path can show the user what happened.
+// reasoning_content is the model's REAL thinking text → reasoningParts.Content
+// only; a provider summary never arrives on this field.
 func TestParseChatCompletionResponseReasoningContent(t *testing.T) {
 	body := `{"id":"cmpl-1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning_content":"the answer is in the reasoning"},"finish_reason":"stop"}]}`
 	var resp openai.ChatCompletion
 	require.NoError(t, json.Unmarshal([]byte(body), &resp))
 
-	content, reasoning, toolCalls, usage := parseChatCompletionResponse(resp)
+	content, parts, toolCalls, usage := parseChatCompletionResponse(resp)
 	assert.Empty(t, content)
-	assert.Equal(t, "the answer is in the reasoning", reasoning)
+	assert.Equal(t, "the answer is in the reasoning", parts.Content)
+	assert.Empty(t, parts.Summary, "reasoning_content never fills the summary slot")
 	assert.Nil(t, toolCalls)
 	require.NotNil(t, usage)
 	assert.Equal(t, "stop", usage.FinishReason)
@@ -2041,6 +2106,111 @@ func TestRunTurnStreamEmptyResponseExhausted(t *testing.T) {
 	last := final[len(final)-1]
 	assert.Equal(t, RoleAssistant, last.Role)
 	assert.Equal(t, "...", last.Content, "reasoning is not accepted as the reply; the sentinel stays")
+}
+
+// TestRunTurnStreamSplitReasoningCapture pins the streaming split capture:
+// OpenRouter reasoning_details chunks split per fidelity — reasoning.text
+// deltas accumulate into the Content buffer, reasoning.summary deltas into
+// the Summary buffer — and the stored assistant row carries BOTH slots.
+// The per-chunk fallback priority also applies per field: a reasoning_content
+// delta fills Content without hiding the same chunk's details summary.
+func TestRunTurnStreamSplitReasoningCapture(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	sid := createTestSession(t, "testnet", "#101", "shrew", "testcmd", "svc", "m")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "hi"}))
+	messages, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+
+	chunk := func(delta string, finish any) string {
+		return fmt.Sprintf(`data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":%s,"finish_reason":%s}]}`+"\n\n", delta, finish)
+	}
+	stream := chunk(`{"role":"assistant","content":"","reasoning_details":[{"type":"reasoning.text","text":"real think "},{"type":"reasoning.summary","summary":"sum "}]}`, `null`) +
+		chunk(`{"reasoning_content":"more real think","reasoning_details":[{"type":"reasoning.summary","summary":"more sum"}]}`, `null`) +
+		chunk(`{"content":"the answer"}`, `"stop"`) + "data: [DONE]\n\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, stream)
+	}))
+	defer server.Close()
+
+	transport := newDaveTransport(nil, nil)
+	client := openai.NewClient(
+		option.WithAPIKey("test-key"),
+		option.WithBaseURL(server.URL+"/v1"),
+		option.WithHTTPClient(&http.Client{Transport: transport}),
+	)
+	outputCh := make(chan string, 8)
+	logger := logxi.New("test")
+	logger.SetLevel(logxi.LevelAll)
+	cr := &chatRunner{
+		openaiClient: &client,
+		transport:    transport,
+		httpClient:   &http.Client{Transport: transport},
+		baseURL:      server.URL + "/v1",
+		apiKey:       "test-key",
+		cfg:          AIConfig{Model: "m", Timeout: 10 * time.Second, RetryOnEmpty: intPtr(1), Streaming: true, StreamTimeout: 5 * time.Second},
+		network:      Network{Name: "testnet"},
+		channel:      "#101",
+		nick:         "shrew",
+		logger:       logger,
+		ctx:          context.Background(),
+		outputCh:     outputCh,
+	}
+	cr.sessionID = sid
+
+	cr.runTurn(newTurnContext(sid, messages))
+
+	final, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	last := final[len(final)-1]
+	assert.Equal(t, RoleAssistant, last.Role)
+	assert.Equal(t, "the answer", last.Content)
+	// Chunk 1 details: "real think " + chunk 2 reasoning_content fills the
+	// Content slot (details' text parts do not overwrite the higher-priority
+	// reasoning_content yield).
+	assert.Equal(t, "real think more real think", last.ReasoningContent,
+		"reasoning.text deltas + reasoning_content deltas accumulate into the Content buffer")
+	// The details summaries land in Summary even though Content was filled
+	// by higher-priority sources (per-field fallback).
+	assert.Equal(t, "sum more sum", last.ReasoningSummary,
+		"reasoning.summary deltas accumulate into the separate Summary buffer")
+}
+
+// TestLogStreamCompletionEmitsBothReasoningFidelities pins the api-log
+// JSON shape of the reconstructed stream response: BOTH captured reasoning
+// fidelities appear — reasoning_content (the real thinking text) and
+// reasoning_summary (the provider's summarized form) — each only when
+// non-empty, and neither key when nothing was captured.
+func TestLogStreamCompletionEmitsBothReasoningFidelities(t *testing.T) {
+	dir := t.TempDir()
+	l, err := NewAPILogger(APILogConfig{Dir: dir}, "")
+	require.NoError(t, err)
+	defer l.CloseAll()
+
+	prevLogger := apiLogger
+	apiLogger = l
+	t.Cleanup(func() { apiLogger = prevLogger })
+
+	const sessionID = int64(4242)
+	l.RestoreSession(sessionID, "testnet", "#log", 7)
+
+	logStreamCompletion(sessionID, "m", "the answer",
+		reasoningParts{Content: "the real thinking", Summary: "the summarized thinking"},
+		nil, nil, RoleAssistant)
+	logStreamCompletion(sessionID, "m", "another",
+		reasoningParts{}, nil, nil, RoleAssistant)
+
+	data, err := os.ReadFile(l.GetSessionFilePath(sessionID))
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	require.Len(t, lines, 2)
+	assert.Contains(t, lines[0], `"reasoning_content":"the real thinking"`)
+	assert.Contains(t, lines[0], `"reasoning_summary":"the summarized thinking"`)
+	assert.NotContains(t, lines[1], "reasoning_content", "empty parts must omit the key entirely")
+	assert.NotContains(t, lines[1], "reasoning_summary", "empty parts must omit the key entirely")
 }
 
 // TestRunTurnStreamReadsUsageTrailer pins the Oct 2026 production fix:

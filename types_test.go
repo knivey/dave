@@ -107,6 +107,22 @@ func TestSummarizeMessages(t *testing.T) {
 			wantContains: []string{"[reasoning]"},
 		},
 		{
+			name: "summary-only reasoning noted distinctly",
+			messages: []ChatMessage{
+				{Role: RoleAssistant, Content: "answer", ReasoningSummary: "summarized thinking"},
+			},
+			wantContains:    []string{"[reasoning_summary]"},
+			wantNotContains: []string{"[reasoning]"},
+		},
+		{
+			name: "both fidelities noted as reasoning",
+			messages: []ChatMessage{
+				{Role: RoleAssistant, Content: "answer", ReasoningContent: "thinking...", ReasoningSummary: "summarized"},
+			},
+			wantContains:    []string{"[reasoning]"},
+			wantNotContains: []string{"[reasoning_summary]"},
+		},
+		{
 			name: "newlines replaced with spaces",
 			messages: []ChatMessage{
 				{Role: RoleUser, Content: "hello\nworld\nfoo"},

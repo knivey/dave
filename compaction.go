@@ -1270,6 +1270,7 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 				ToolCalls:          orig.ToolCalls,
 				ToolCallID:         orig.ToolCallID,
 				ReasoningContent:   orig.ReasoningContent,
+				ReasoningSummary:   orig.ReasoningSummary,
 				MultiContent:       orig.MultiContent,
 				IsAsyncResult:      orig.IsAsyncResult,
 				SourceCompactionID: &compIDForTag,

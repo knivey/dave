@@ -264,7 +264,9 @@ var daveExtraModelPrefixes = map[string]string{
 //	  base64 the provider does not count as text), ImageParts++
 //	+ tokens(name) + tokens(arguments) + 3 per ToolCall
 //	+ tokens(ToolCallID) + 1 for RoleTool rows
-//	+ tokens(ReasoningContent) when set
+//	+ tokens(ReasoningContent) when set — ReasoningSummary is NEVER
+//	  counted: it never rides the wire on any path (display/log-only,
+//	  see reasoningParts in aiMessages.go)
 //
 // plus replyPrimingTokens (3) once for the final assistant reply. The
 // wire format sends MultiContent INSTEAD of Content for user messages,

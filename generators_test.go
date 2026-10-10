@@ -765,7 +765,7 @@ func TestHandleToolCallResponseEphemeralSuppressesIntermediateText(t *testing.T)
 		cr.handleToolCallResponse(turn, "preamble text", []ToolCall{{
 			ID: "c1", Type: "function",
 			Function: FunctionCall{Name: "nonexistent_tool", Arguments: "{}"},
-		}}, "")
+		}}, reasoningParts{})
 
 		msgs := turn.Messages()
 		require.GreaterOrEqual(t, len(msgs), 2)

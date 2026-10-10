@@ -579,3 +579,77 @@ collect:
 	assert.Equal(t, 1, strings.Count(joined, "THE FINAL"), "the final answer is delivered exactly once")
 	assert.EqualValues(t, 2, atomic.LoadInt32(&reqs), "the nonexistent tool result drives a second iteration")
 }
+
+// TestRunTurnResponsesStreamSplitReasoningCapture pins the Responses-API
+// streaming reasoning split end to end: response.reasoning_text.delta and
+// response.reasoning_summary_text.delta are SEPARATE event cases feeding
+// SEPARATE logging buffers, and the STORED assistant row (the authoritative
+// parse — parseSDKResponseOutput over the response.completed payload, not
+// the delta buffers) carries the reasoning item's content parts in
+// ReasoningContent and its summary entries in ReasoningSummary.
+func TestRunTurnResponsesStreamSplitReasoningCapture(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	sid := createTestSession(t, "testnet", "#r", "shrew", "testcmd", "svc", "test-model")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "hi"}))
+	messages, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+
+	completedPayload := map[string]any{
+		"id":     "resp-r",
+		"object": "response",
+		"model":  "test-model",
+		"output": []any{
+			map[string]any{
+				"type": "reasoning", "id": "rs_1", "status": "completed",
+				"content": []any{map[string]any{"type": "reasoning_text", "text": "the real thinking"}},
+				"summary": []any{map[string]any{"type": "summary_text", "text": "the summarized thinking"}},
+			},
+			map[string]any{
+				"type": "message", "role": "assistant", "id": "msg_1", "status": "completed",
+				"content": []any{map[string]any{"type": "output_text", "text": "the answer"}},
+			},
+		},
+	}
+	completed, err := json.Marshal(map[string]any{"type": "response.completed", "response": completedPayload})
+	require.NoError(t, err)
+	stream := streamChunk(`{"type":"response.reasoning_text.delta","sequence_number":1,"item_id":"rs_1","output_index":0,"content_index":0,"logprobs":[],"delta":"the real thinking"}`) +
+		streamChunk(`{"type":"response.reasoning_summary_text.delta","sequence_number":2,"item_id":"rs_1","summary_index":0,"delta":"the summarized thinking"}`) +
+		streamChunk(`{"type":"response.output_text.delta","sequence_number":3,"item_id":"msg_1","output_index":1,"content_index":0,"logprobs":[],"delta":"the answer"}`) +
+		"data: " + string(completed) + "\n\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, stream)
+	}))
+	defer server.Close()
+
+	outputCh := make(chan string, 16)
+	cr := newStreamTestRunner(t, server, AIConfig{
+		Model: "test-model", ResponsesAPI: true, Streaming: true,
+		Timeout: 10 * time.Second, StreamTimeout: 5 * time.Second,
+	}, sid, outputCh)
+	cr.ctx = context.Background()
+
+	done := make(chan struct{})
+	go func() {
+		cr.runTurn(newTurnContext(sid, messages))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("runTurn did not finish")
+	}
+
+	final, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	last := final[len(final)-1]
+	assert.Equal(t, RoleAssistant, last.Role)
+	assert.Equal(t, "the answer", last.Content)
+	assert.Equal(t, "the real thinking", last.ReasoningContent,
+		"the reasoning item's content parts are the stored REAL content")
+	assert.Equal(t, "the summarized thinking", last.ReasoningSummary,
+		"the reasoning item's summary entries land in the separate summary slot")
+}

@@ -30,6 +30,10 @@ type ChatMessage struct {
 	Role             string
 	Content          string
 	ReasoningContent string
+	// ReasoningSummary is the provider's summarized/annotated reasoning
+	// form — display/log-only, never serialized, replayed, or counted
+	// (see reasoningParts in aiMessages.go).
+	ReasoningSummary string
 	MultiContent     []MessagePart
 	ToolCalls        []ToolCall
 	ToolCallID       string
@@ -153,6 +157,8 @@ func summarizeMessages(messages []ChatMessage) string {
 		}
 		if m.ReasoningContent != "" {
 			s += " [reasoning]"
+		} else if m.ReasoningSummary != "" {
+			s += " [reasoning_summary]"
 		}
 		return s
 	}

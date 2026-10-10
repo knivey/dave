@@ -617,7 +617,7 @@ func TestGetUserInfo(t *testing.T) {
 		LastActive:  time.Now(),
 	}
 	require.NoError(t, theDB.Create(&session).Error)
-	require.NoError(t, insertDBMessage(session.ID, "user", "hello", nil, nil, nil, nil))
+	require.NoError(t, insertDBMessage(session.ID, "user", "hello", nil, nil, nil, nil, nil))
 
 	info, err := getUserInfo(user.ID)
 	require.NoError(t, err)
@@ -852,8 +852,8 @@ func TestGetUserDBStatsAllNetworks(t *testing.T) {
 		CreatedAt: time.Now(), LastActive: time.Now(),
 	}
 	require.NoError(t, theDB.Create(&s1).Error)
-	require.NoError(t, insertDBMessage(s1.ID, "user", "hello", nil, nil, nil, nil))
-	require.NoError(t, insertDBMessage(s1.ID, "assistant", "hi", nil, nil, nil, nil))
+	require.NoError(t, insertDBMessage(s1.ID, "user", "hello", nil, nil, nil, nil, nil))
+	require.NoError(t, insertDBMessage(s1.ID, "assistant", "hi", nil, nil, nil, nil, nil))
 
 	s2 := Session{
 		Network: "testnet", Channel: "#chan2", ChatCommand: "chat",
@@ -861,7 +861,7 @@ func TestGetUserDBStatsAllNetworks(t *testing.T) {
 		CreatedAt: time.Now(), LastActive: time.Now(),
 	}
 	require.NoError(t, theDB.Create(&s2).Error)
-	require.NoError(t, insertDBMessage(s2.ID, "user", "msg", nil, nil, nil, nil))
+	require.NoError(t, insertDBMessage(s2.ID, "user", "msg", nil, nil, nil, nil, nil))
 
 	sessions, messages, err := getUserDBStats(user.ID, "", "")
 	require.NoError(t, err)

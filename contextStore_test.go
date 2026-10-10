@@ -272,7 +272,7 @@ func TestDBToolCalls(t *testing.T) {
 	tcJSON := string(tcData)
 	toolCallID := "tc1"
 
-	err := insertDBMessage(sid, "assistant", "", &tcJSON, &toolCallID, nil, nil)
+	err := insertDBMessage(sid, "assistant", "", &tcJSON, &toolCallID, nil, nil, nil)
 	require.NoError(t, err, "insertDBMessage with tool calls failed")
 
 	msgs, err := loadDBSessionMessages(sid)
@@ -408,11 +408,74 @@ func TestDBFirstMessageMultiContentNoText(t *testing.T) {
 	assert.Equal(t, "", session.FirstMessage, "first_message should be empty when MultiContent has no text part")
 }
 
+// TestDBReasoningSummaryRoundtrip mirrors the ReasoningContent roundtrip:
+// both captured fidelities persist through buildDBMessage → Message row →
+// messageFromDB (GetMessages) — Content in messages.reasoning_content,
+// Summary in messages.reasoning_summary (display/log-only, never replayed).
+func TestDBReasoningSummaryRoundtrip(t *testing.T) {
+	setupTestDB(t)
+
+	sid := createTestSession(t, "net", "#chan", "nick", "chat", "", "")
+
+	msg := ChatMessage{
+		Role:             RoleAssistant,
+		Content:          "answer",
+		ReasoningContent: "the real thinking",
+		ReasoningSummary: "the summarized form",
+	}
+
+	require.NoError(t, sessionMgr.AddMessage(sid, msg))
+
+	msgs, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	assert.Equal(t, "the real thinking", msgs[0].ReasoningContent, "ReasoningContent")
+	assert.Equal(t, "the summarized form", msgs[0].ReasoningSummary, "ReasoningSummary")
+}
+
+// TestMessageFromDBReasoningSummary pins the row→message conversion for the
+// split columns, including each-in-isolation shapes (content-only rows read
+// an empty summary and vice versa — the columns are independent).
+func TestMessageFromDBReasoningSummary(t *testing.T) {
+	t.Run("both columns", func(t *testing.T) {
+		content := "real thinking"
+		summary := "summarized thinking"
+		msg := messageFromDB(Message{
+			Role:             RoleAssistant,
+			ReasoningContent: &content,
+			ReasoningSummary: &summary,
+		})
+		assert.Equal(t, "real thinking", msg.ReasoningContent)
+		assert.Equal(t, "summarized thinking", msg.ReasoningSummary)
+	})
+
+	t.Run("content-only row keeps summary empty", func(t *testing.T) {
+		content := "real thinking"
+		msg := messageFromDB(Message{ReasoningContent: &content})
+		assert.Equal(t, "real thinking", msg.ReasoningContent)
+		assert.Empty(t, msg.ReasoningSummary)
+	})
+
+	t.Run("summary-only row keeps content empty", func(t *testing.T) {
+		summary := "summarized thinking"
+		msg := messageFromDB(Message{ReasoningSummary: &summary})
+		assert.Empty(t, msg.ReasoningContent)
+		assert.Equal(t, "summarized thinking", msg.ReasoningSummary)
+	})
+
+	t.Run("null columns read empty", func(t *testing.T) {
+		msg := messageFromDB(Message{Role: RoleAssistant, Content: "x"})
+		assert.Empty(t, msg.ReasoningContent)
+		assert.Empty(t, msg.ReasoningSummary)
+	})
+}
+
 func TestMessageFromDB(t *testing.T) {
 	mcJSON := `[{"Type":"text","Text":"hello"},{"Type":"image_url","ImageURL":{"URL":"data:image/png;base64,abc","Detail":"auto"}}]`
 	tcJSON := `[{"ID":"tc1","Type":"function","Function":{"Name":"test","Arguments":"{}"}}]`
 	toolCallID := "tc1"
 	reasoning := "thinking"
+	reasoningSummary := "thinking, summarized"
 	content := "some content"
 
 	dm := Message{
@@ -421,6 +484,7 @@ func TestMessageFromDB(t *testing.T) {
 		ToolCalls:        &tcJSON,
 		ToolCallID:       &toolCallID,
 		ReasoningContent: &reasoning,
+		ReasoningSummary: &reasoningSummary,
 		MultiContent:     &mcJSON,
 	}
 
@@ -428,6 +492,7 @@ func TestMessageFromDB(t *testing.T) {
 	assert.Equal(t, "assistant", msg.Role)
 	assert.Equal(t, "some content", msg.Content)
 	assert.Equal(t, "thinking", msg.ReasoningContent)
+	assert.Equal(t, "thinking, summarized", msg.ReasoningSummary)
 	assert.Equal(t, "tc1", msg.ToolCallID)
 	require.Len(t, msg.ToolCalls, 1)
 	assert.Equal(t, "tc1", msg.ToolCalls[0].ID)

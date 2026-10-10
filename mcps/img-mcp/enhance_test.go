@@ -126,6 +126,51 @@ func TestEnhancePromptResponsesReturnsReasoningSummary(t *testing.T) {
 		"responses path must surface the reasoning summary for the prompt note")
 }
 
+// TestEnhancePromptResponsesReasoningFallsBackToContent pins the enhancer's
+// display-only merge: the summary stays the PREFERRED source, but the
+// reasoning item's content parts (the model's real reasoning text) are the
+// fallback when no summary entries exist, so content-only providers still
+// produce the reasoning note/logs.
+func TestEnhancePromptResponsesReasoningFallsBackToContent(t *testing.T) {
+	reply := EnhancementResponse{EnhancedPrompt: "a majestic cat", NegativePrompt: "blurry"}
+	content, _ := json.Marshal(reply)
+	makeServer := func(reasoningItem string) *httptest.Server {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"resp_1","object":"response","created_at":1,"status":"completed","model":"stub",` +
+				`"output":[{"type":"reasoning","id":"rs_1"` + reasoningItem + `},` +
+				`{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":` + string(content) + `,"annotations":[]}]}` +
+				`],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}`))
+		}))
+		t.Cleanup(srv.Close)
+		return srv
+	}
+
+	t.Run("content parts are the fallback when summary is empty", func(t *testing.T) {
+		srv := makeServer(`,"content":[{"type":"reasoning_text","text":"the real "},{"type":"reasoning_text","text":"thinking"}]`)
+		result, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, true, ""), "default", "a cat", "")
+		require.NoError(t, err)
+		assert.Equal(t, "the real thinking", result.Reasoning,
+			"content-only providers must still produce the reasoning note/logs")
+	})
+
+	t.Run("summary is preferred when both are present", func(t *testing.T) {
+		srv := makeServer(`,"summary":[{"type":"summary_text","text":"the summarized thinking"}],` +
+			`"content":[{"type":"reasoning_text","text":"the real thinking"}]`)
+		result, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, true, ""), "default", "a cat", "")
+		require.NoError(t, err)
+		assert.Equal(t, "the summarized thinking", result.Reasoning,
+			"the summary stays the preferred source when both forms are present")
+	})
+
+	t.Run("neither form yields empty reasoning", func(t *testing.T) {
+		srv := makeServer(``)
+		result, err := enhancePrompt(context.Background(), testEnhanceConfig(srv.URL, true, ""), "default", "a cat", "")
+		require.NoError(t, err)
+		assert.Empty(t, result.Reasoning)
+	})
+}
+
 func TestEnhancePromptChatCompletionsHasNoReasoning(t *testing.T) {
 	reply := EnhancementResponse{EnhancedPrompt: "a majestic cat"}
 	srv, _ := newEnhancementStubServer(t, reply)

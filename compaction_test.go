@@ -632,6 +632,8 @@ func TestCallSummarizerMissingServiceErrorsEarly(t *testing.T) {
 // invariant that re-inserted preserved-tail rows are tagged with
 // SourceCompactionID = comp.ID. This tag is what the next compaction uses
 // to identify duplicates so it can supersede them instead of double-counting.
+// It also pins that the tail copy carries BOTH reasoning fidelities —
+// ReasoningContent and ReasoningSummary — like every other copied column.
 func TestCompactSession_TagsTailCopiesWithSourceCompactionID(t *testing.T) {
 	setupTestDB(t)
 
@@ -647,7 +649,15 @@ func TestCompactSession_TagsTailCopiesWithSourceCompactionID(t *testing.T) {
 	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
 	for i := 0; i < 6; i++ {
 		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "u"}))
-		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleAssistant, Content: "a"}))
+		// The last assistant row carries both reasoning fidelities — the
+		// preserved tail always contains it, so the copy assertion is
+		// deterministic.
+		reasoningMsg := ChatMessage{Role: RoleAssistant, Content: "a"}
+		if i == 5 {
+			reasoningMsg.ReasoningContent = "the real thinking"
+			reasoningMsg.ReasoningSummary = "the summarized thinking"
+		}
+		require.NoError(t, sessionMgr.AddMessage(sid, reasoningMsg))
 	}
 
 	cfg := AIConfig{Service: "stubsvc", Model: "m", Timeout: 5 * time.Second, MaxTokens: 256}
@@ -673,13 +683,22 @@ func TestCompactSession_TagsTailCopiesWithSourceCompactionID(t *testing.T) {
 		"summary row should not be tagged as a tail-copy")
 
 	tailCopies := 0
+	reasoningCarried := false
 	for _, m := range live[2:] {
 		require.NotNil(t, m.SourceCompactionID,
 			"every preserved-tail row must be tagged with SourceCompactionID")
 		assert.Equal(t, res.CompactionID, *m.SourceCompactionID)
+		if m.ReasoningContent != nil && *m.ReasoningContent == "the real thinking" {
+			reasoningCarried = true
+			require.NotNil(t, m.ReasoningSummary,
+				"the tail copy must carry ReasoningSummary alongside ReasoningContent")
+			assert.Equal(t, "the summarized thinking", *m.ReasoningSummary)
+		}
 		tailCopies++
 	}
 	assert.Greater(t, tailCopies, 0)
+	assert.True(t, reasoningCarried,
+		"the seeded reasoning-bearing assistant row must survive in the preserved tail")
 }
 
 // TestRepeatCompaction_DoesNotInflateArchivedCount is the core regression for

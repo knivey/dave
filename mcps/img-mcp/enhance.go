@@ -33,12 +33,16 @@ type EnhanceResult struct {
 	// safety stage (true → safety unsafe, vet call skipped). False/absent
 	// on the response means "no signal" — it never asserts safety.
 	NSFW bool
-	// Reasoning is the enhancement model's reasoning summary (Responses API
-	// path only — Chat Completions does not return summaries). Carried into
-	// the workflow's prompt note node so it is embedded in the image
-	// metadata alongside the original prompt. Deliberately NOT trimmed
-	// (unlike its siblings): it is verbatim provenance, concatenated
-	// as-is from the summary items exactly like the log line emits it.
+	// Reasoning is the enhancement model's reasoning (Responses API path
+	// only — Chat Completions does not return summaries): the concatenated
+	// reasoning SUMMARY when present, else the item.Content parts (the
+	// model's real reasoning text) — a display-only merge, unlike dave's
+	// content-vs-summary split (replay fidelity does not apply here; the
+	// note/logs never ride the wire). Carried into the workflow's prompt
+	// note node so it is embedded in the image metadata alongside the
+	// original prompt. Deliberately NOT trimmed (unlike its siblings): it
+	// is verbatim provenance, concatenated as-is from the response items
+	// exactly like the log line emits it.
 	Reasoning string
 }
 
@@ -63,7 +67,8 @@ var enhancementSchema = map[string]any{
 
 // callEnhancementLLM runs one structured-output LLM call against the named
 // enhancement config and returns the raw assistant JSON text plus the
-// Responses-API reasoning summary (empty on Chat Completions). This is the
+// Responses-API reasoning string (the summary when present, else the content
+// parts; empty on Chat Completions). This is the
 // shared machinery behind BOTH prompt enhancement and the safety vet
 // (safety.go): config lookup, per-workflow instruction merging, client
 // construction, timeouts, both API paths, and reasoning_effort live here so
@@ -202,11 +207,15 @@ func enhanceViaChatCompletions(ctx context.Context, client openai.Client, enhCfg
 
 // enhanceViaResponses calls the OpenAI Responses API (POST /v1/responses) and
 // returns the concatenated output_text of the assistant message plus the
-// concatenated reasoning summary (empty when the model emitted none).
-// Reasoning summaries are logged at INFO — the Responses API is the only way
-// to get them back from reasoning models. Structured output goes in
-// Text.Format, NOT a top-level ResponseFormat (different mechanism than Chat
-// Completions). schemaName/schema select the structured-output contract
+// reasoning string for the note/logs: the concatenated reasoning SUMMARY
+// when the model emitted one, else the concatenated item.Content parts (the
+// model's real reasoning text — providers that return content parts without
+// summaries). Unlike dave's content-vs-summary split (which exists for replay
+// fidelity), the enhancer's single string is display-only (the prompt-note
+// metadata and the INFO logs never ride the wire), so preferring the
+// summary and falling back to content is correct HERE. Structured output goes
+// in Text.Format, NOT a top-level ResponseFormat (different mechanism than
+// Chat Completions). schemaName/schema select the structured-output contract
 // (enhancement or safety verdict).
 func enhanceViaResponses(ctx context.Context, client openai.Client, enhCfg EnhancementConfig, rawPrompt, schemaName string, schema map[string]any) (string, string, error) {
 	params := responses.ResponseNewParams{
@@ -248,11 +257,14 @@ func enhanceViaResponses(ctx context.Context, client openai.Client, enhCfg Enhan
 		return "", "", err
 	}
 
-	// Same output-walk as dave's parseSDKResponseOutput (responses.go): message
-	// items yield output_text, reasoning items yield summary text. Summary is
-	// an array of {Text, Type} entries — concatenate all of them. We log
-	// Summary only (never Content, the raw reasoning) for consistency with dave.
-	var text, reasoning string
+	// Same output-walk as dave's parseSDKResponseOutput (responses.go), but
+	// with the enhancer's display-only merge: message items yield output_text;
+	// reasoning items yield the summary (an array of {Text, Type} entries —
+	// concatenate all of them) as the PREFERRED source, with the item.Content
+	// parts (type reasoning_text) as the fallback when the response carries no
+	// summary entries at all, so content-only providers still produce the
+	// reasoning note/logs.
+	var text, reasoningSummary, reasoningContent string
 	for _, item := range resp.Output {
 		switch item.Type {
 		case "message":
@@ -263,9 +275,18 @@ func enhanceViaResponses(ctx context.Context, client openai.Client, enhCfg Enhan
 			}
 		case "reasoning":
 			for _, s := range item.Summary {
-				reasoning += s.Text
+				reasoningSummary += s.Text
+			}
+			for _, part := range item.Content {
+				if part.Type == "reasoning_text" {
+					reasoningContent += part.Text
+				}
 			}
 		}
+	}
+	reasoning := reasoningSummary
+	if reasoning == "" {
+		reasoning = reasoningContent
 	}
 	if reasoning != "" {
 		loggerTools.Info("enhancement reasoning",

@@ -167,6 +167,19 @@ func TestCountMessageTokens(t *testing.T) {
 		assert.Greater(t, got.Tokens, base.Tokens)
 	})
 
+	t.Run("reasoning summary is never counted", func(t *testing.T) {
+		// ReasoningSummary never rides the wire on any path (display/
+		// log-only — see reasoningParts in aiMessages.go), so it must
+		// contribute exactly zero tokens however long it is.
+		without := []ChatMessage{{Role: RoleAssistant, Content: "answer"}}
+		with := []ChatMessage{{Role: RoleAssistant, Content: "answer",
+			ReasoningSummary: "a very long provider-side summary of the thinking that must not affect the count"}}
+		got := countMessageTokens("gpt-4o", with)
+		base := countMessageTokens("gpt-4o", without)
+		assert.Equal(t, base.Tokens, got.Tokens,
+			"a stored summary must not change the neutral count")
+	})
+
 	t.Run("unknown model is flagged inexact", func(t *testing.T) {
 		tc := countMessageTokens("grok-4", []ChatMessage{{Role: RoleUser, Content: "hello"}})
 		assert.Equal(t, "o200k_base", tc.Encoding)

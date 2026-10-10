@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"strings"
+
+	logxi "github.com/mgutz/logxi/v1"
 )
 
 type ExtendedMessage struct {
@@ -93,40 +95,91 @@ type ExtendedMessageResponse struct {
 	Choices []extendedChoiceRaw `json:"choices,omitempty"`
 }
 
-func extractReasoningText(details []ReasoningDetail) string {
-	var parts []string
+// reasoningParts is captured model reasoning split by fidelity. The split
+// exists for replay fidelity: Content is the model's REAL thinking text and
+// the only thing that ever rides the wire back to a provider (Chat
+// Completions `reasoning_content` on assistant rows; Responses API
+// `reasoning` input items with content parts only); Summary is the
+// provider's summarized/annotated form (Responses `item.Summary[]`,
+// OpenRouter `reasoning_details` `reasoning.summary` entries, the
+// `[encrypted reasoning, id=…]` marker) — a summary is NOT the thinking, so
+// it is display/log-only and is NEVER serialized, replayed, or
+// token-counted. The two are deliberately never concatenated (except
+// display(), which prefers Content and falls back to Summary, and the
+// img-mcp enhancer's display-only note string).
+type reasoningParts struct {
+	Content string
+	Summary string
+}
+
+// any reports whether either fidelity was captured.
+func (p reasoningParts) any() bool { return p.Content != "" || p.Summary != "" }
+
+// display returns the human-facing form: the REAL content when captured
+// (the stranded answer is usually there), else the summary.
+func (p reasoningParts) display() string {
+	if p.Content != "" {
+		return p.Content
+	}
+	return p.Summary
+}
+
+// logReasoning shows BOTH captured reasoning forms in the logs — the real
+// content and the provider's summary — each only when non-empty, so an
+// operator can see exactly what was captured in which fidelity slot.
+func logReasoning(logger logxi.Logger, parts reasoningParts) {
+	if parts.Content != "" {
+		logger.Info("reasoning", "content", parts.Content)
+	}
+	if parts.Summary != "" {
+		logger.Info("reasoning summary", "content", parts.Summary)
+	}
+}
+
+// splitReasoningDetails splits OpenRouter reasoning_details entries by
+// fidelity: `reasoning.text` → Content (the real thinking, replayable);
+// `reasoning.summary` → Summary (display/log-only); `reasoning.encrypted` →
+// Summary with the existing `[encrypted reasoning, id=…]` marker text (a
+// non-replayable annotation — encrypted content is deliberately never
+// captured, stored, or replayed). Entries of the same fidelity keep the old
+// extractReasoningText join's newline separation.
+func splitReasoningDetails(details []ReasoningDetail) reasoningParts {
+	var contentParts, summaryParts []string
 	for _, d := range details {
 		switch d.Type {
 		case "reasoning.text":
 			if d.Text != "" {
-				parts = append(parts, d.Text)
+				contentParts = append(contentParts, d.Text)
 			}
 		case "reasoning.summary":
 			if d.Summary != "" {
-				parts = append(parts, d.Summary)
+				summaryParts = append(summaryParts, d.Summary)
 			}
 		case "reasoning.encrypted":
 			if d.Data != "" {
-				parts = append(parts, "[encrypted reasoning, id="+d.ID+"]")
+				summaryParts = append(summaryParts, "[encrypted reasoning, id="+d.ID+"]")
 			}
 		}
 	}
-	return strings.Join(parts, "\n")
+	return reasoningParts{
+		Content: strings.Join(contentParts, "\n"),
+		Summary: strings.Join(summaryParts, "\n"),
+	}
 }
 
-func extractStreamReasoning(rawBytes []byte) string {
+func extractStreamReasoning(rawBytes []byte) reasoningParts {
 	var extResp ExtendedStreamResponse
 	if err := json.Unmarshal(rawBytes, &extResp); err != nil {
-		return ""
+		return reasoningParts{}
 	}
 	if len(extResp.Choices) == 0 {
-		return ""
+		return reasoningParts{}
 	}
 	details := extResp.Choices[0].Delta.ReasoningDetails
 	if len(details) == 0 {
-		return ""
+		return reasoningParts{}
 	}
-	return extractReasoningText(details)
+	return splitReasoningDetails(details)
 }
 
 func extractReasoningFromField(rawBytes []byte) string {

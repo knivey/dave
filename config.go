@@ -315,6 +315,10 @@ type AIConfig struct {
 	NeedsUserSuffix     *bool          `toml:"needsusersuffix"`       // guidance Knob 2: tri-state, nil = auto (anthropic/)
 	InjectionRole       string         `toml:"injection_role"`        // guidance Knob 1: system (default) | developer | user
 	AsyncResultDelivery string         `toml:"async_result_delivery"` // async results: "message" (default) | "tool" round-trip
+	// ReasoningReplay controls reasoning history replay: "off" | "tool_calls"
+	// (default) | "always". See reasoningreplay.go for the gemma4-derived
+	// semantics and the per-provider wire contracts.
+	ReasoningReplay string `toml:"reasoningreplay"`
 	// ContextWindow is the model's context-window size in tokens for
 	// THIS command's model — compaction budgeting varies per model more
 	// than per service, so the command can override the service value.
@@ -351,6 +355,7 @@ type Service struct {
 	NeedsUserSuffix      *bool         `toml:"needsusersuffix"`       // guidance Knob 2: tri-state, nil = auto (anthropic/)
 	InjectionRole        string        `toml:"injection_role"`        // guidance Knob 1: system (default) | developer | user
 	AsyncResultDelivery  string        `toml:"async_result_delivery"` // async results: "message" (default) | "tool" round-trip
+	ReasoningReplay      string        `toml:"reasoningreplay"`       // reasoning history replay: "off" | "tool_calls" (default) | "always"
 	DisabledBuiltinTools []string      `toml:"disabled_builtin_tools"`
 	HiddenMCPTools       []string      `toml:"hidden_mcp_tools"`
 	HiddenMCPToolSets    []string      `toml:"hidden_mcp_tool_sets"`
@@ -499,6 +504,15 @@ func (cfg *AIConfig) ApplyDefaults(service Service) {
 	}
 	if cfg.AsyncResultDelivery == "" {
 		cfg.AsyncResultDelivery = asyncDeliveryMessage
+	}
+	// Reasoning history replay (see reasoningreplay.go for the semantics
+	// and the per-provider contracts it is pinned to): command > service >
+	// "tool_calls". "off" at any level opts that level out of the default.
+	if cfg.ReasoningReplay == "" {
+		cfg.ReasoningReplay = service.ReasoningReplay
+	}
+	if cfg.ReasoningReplay == "" {
+		cfg.ReasoningReplay = ReasoningReplayToolCalls
 	}
 	if cfg.DisabledBuiltinTools == nil {
 		cfg.DisabledBuiltinTools = service.DisabledBuiltinTools
@@ -746,6 +760,9 @@ func loadServicesFile(dir string, config *Config) error {
 			return err
 		}
 		if err := validateAsyncResultDelivery(service.AsyncResultDelivery, fmt.Sprintf("services.%s", name)); err != nil {
+			return err
+		}
+		if err := validateReasoningReplay(service.ReasoningReplay, fmt.Sprintf("services.%s", name)); err != nil {
 			return err
 		}
 		if service.Parallel <= 0 {
@@ -1110,6 +1127,17 @@ func validateAsyncResultDelivery(mode, where string) error {
 	return fmt.Errorf("%s async_result_delivery must be one of \"message\", \"tool\" (got %q)", where, mode)
 }
 
+// validateReasoningReplay rejects unknown reasoning-replay modes at load
+// time (reasoningReplay's fallback exists only for hand-built configs that
+// skip ApplyDefaults — e.g. unit-test construction).
+func validateReasoningReplay(mode, where string) error {
+	switch mode {
+	case "", ReasoningReplayOff, ReasoningReplayToolCalls, ReasoningReplayAlways:
+		return nil
+	}
+	return fmt.Errorf("%s reasoningreplay must be one of \"off\", \"tool_calls\", \"always\" (got %q)", where, mode)
+}
+
 func validateAndSetAPIUserTemplate(cfg *AIConfig, name, section string) error {
 	if cfg.APIUser == "" {
 		return nil
@@ -1145,6 +1173,9 @@ func validateAIConfig(cfg AIConfig, name, section string, config *Config) (AICon
 			return cfg, err
 		}
 		if err := validateAsyncResultDelivery(cfg.AsyncResultDelivery, fmt.Sprintf("commands.%s.%s", section, name)); err != nil {
+			return cfg, err
+		}
+		if err := validateReasoningReplay(cfg.ReasoningReplay, fmt.Sprintf("commands.%s.%s", section, name)); err != nil {
 			return cfg, err
 		}
 		cfg.ApplyDefaults(service)

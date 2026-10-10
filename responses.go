@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -10,9 +11,9 @@ import (
 	"github.com/openai/openai-go/v3/shared"
 )
 
-func messagesToResponseInputItems(messages []ChatMessage) []responses.ResponseInputItemUnionParam {
+func messagesToResponseInputItems(messages []ChatMessage, replay string) []responses.ResponseInputItemUnionParam {
 	input := make([]responses.ResponseInputItemUnionParam, 0, len(messages)*2)
-	for _, msg := range messages {
+	for i, msg := range messages {
 		switch msg.Role {
 		case RoleSystem, RoleDeveloper:
 			// Developer is guidance Knob 1's payload role; llama.cpp maps
@@ -61,9 +62,21 @@ func messagesToResponseInputItems(messages []ChatMessage) []responses.ResponseIn
 			}
 
 		case RoleAssistant:
+			items := make([]responses.ResponseInputItemUnionParam, 0, 2+len(msg.ToolCalls))
+			// Reasoning history replay (reasoningreplay.go): eligible rows
+			// lead with a reasoning item so the provider (OpenRouter's
+			// stateless proxy, llama.cpp's /v1/responses-adjacent paths)
+			// can rebuild the model's thought context. On
+			// previous_response_id chains this never fires — the chained
+			// turns send delta-only tool-result items, and the server
+			// replays its own reasoning. With reasoningsummary unset this
+			// is a structural no-op: nothing was ever captured to replay.
+			if replayReasoningRow(messages, i, replay) {
+				items = append(items, reasoningReplayInputItem(i, msg.ReasoningContent))
+			}
 			if len(msg.ToolCalls) > 0 {
 				if msg.Content != "" {
-					input = append(input, responses.ResponseInputItemUnionParam{
+					items = append(items, responses.ResponseInputItemUnionParam{
 						OfMessage: &responses.EasyInputMessageParam{
 							Role:    responses.EasyInputMessageRoleAssistant,
 							Content: responses.EasyInputMessageContentUnionParam{OfString: openai.String(msg.Content)},
@@ -71,18 +84,19 @@ func messagesToResponseInputItems(messages []ChatMessage) []responses.ResponseIn
 					})
 				}
 				for _, tc := range msg.ToolCalls {
-					input = append(input, responses.ResponseInputItemParamOfFunctionCall(
+					items = append(items, responses.ResponseInputItemParamOfFunctionCall(
 						tc.Function.Arguments, tc.ID, tc.Function.Name,
 					))
 				}
 			} else {
-				input = append(input, responses.ResponseInputItemUnionParam{
+				items = append(items, responses.ResponseInputItemUnionParam{
 					OfMessage: &responses.EasyInputMessageParam{
 						Role:    responses.EasyInputMessageRoleAssistant,
 						Content: responses.EasyInputMessageContentUnionParam{OfString: openai.String(msg.Content)},
 					},
 				})
 			}
+			input = append(input, items...)
 
 		case RoleTool:
 			input = append(input, responses.ResponseInputItemParamOfFunctionCallOutput(
@@ -91,6 +105,19 @@ func messagesToResponseInputItems(messages []ChatMessage) []responses.ResponseIn
 		}
 	}
 	return input
+}
+
+// reasoningReplayInputItem builds the reasoning input item for assistant
+// row rowIdx. The id is deterministic per row ("rs_dave_<row>") because a
+// non-chained full-history request rebuilds these items every turn: a
+// stable id keeps the request shape stable, and OpenAI proper never sees
+// the item on validated paths (its chains are delta-only,
+// previous_response_id; see the reasoningReplay doc block for the scope).
+func reasoningReplayInputItem(rowIdx int, text string) responses.ResponseInputItemUnionParam {
+	return responses.ResponseInputItemParamOfReasoning(
+		fmt.Sprintf("rs_dave_%d", rowIdx),
+		[]responses.ResponseReasoningItemSummaryParam{{Text: text}},
+	)
 }
 
 func toolResultMsgsToInputItems(messages []ChatMessage) []responses.ResponseInputItemUnionParam {

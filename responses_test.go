@@ -166,7 +166,7 @@ func TestMessagesToResponseInputItems(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := messagesToResponseInputItems(tt.messages)
+			result := messagesToResponseInputItems(tt.messages, ReasoningReplayOff)
 			require.Len(t, result, len(tt.wantParts), "input items count")
 			rawItems := marshalInputItems(result)
 			for i, raw := range rawItems {
@@ -192,7 +192,7 @@ func TestMessagesToResponseInputItems_ImageURLIsString(t *testing.T) {
 		},
 	}
 
-	input := messagesToResponseInputItems(msgs)
+	input := messagesToResponseInputItems(msgs, ReasoningReplayOff)
 	require.Len(t, input, 1, "input items")
 
 	rawItems := marshalInputItems(input)
@@ -229,7 +229,7 @@ func TestMessagesToResponseInputItems_TextPartIsInputText(t *testing.T) {
 		},
 	}
 
-	input := messagesToResponseInputItems(msgs)
+	input := messagesToResponseInputItems(msgs, ReasoningReplayOff)
 	rawItems := marshalInputItems(input)
 	var parsed map[string]any
 	json.Unmarshal(rawItems[0], &parsed)
@@ -450,11 +450,81 @@ func TestMessagesToResponseInputItems_NoReasoningItems(t *testing.T) {
 		{Role: RoleUser, Content: "hello"},
 		{Role: RoleAssistant, Content: "hi"},
 	}
-	input := messagesToResponseInputItems(messages)
+	input := messagesToResponseInputItems(messages, ReasoningReplayOff)
 
 	for _, item := range input {
 		assert.Nil(t, item.OfReasoning, "should not emit reasoning items")
 	}
+}
+
+// TestMessagesToResponseInputItemsReplayReasoning pins the Responses-API
+// wire shape of reasoning replay: eligible assistant rows gain a
+// {type:"reasoning", summary:[{type:"summary_text", text:<stored>}]} input
+// item placed BEFORE the message/function-call items they produced. Note
+// the row indices in the item ids (rs_dave_<row>) — full-history replay
+// rebuilds this every request, so the ids are deterministic per row to
+// keep the request shape stable.
+func TestMessagesToResponseInputItemsReplayReasoning(t *testing.T) {
+	msgs := buildReplayHistory()
+
+	reasonings := func(t *testing.T, mode string) []map[string]any {
+		t.Helper()
+		rawItems := marshalInputItems(messagesToResponseInputItems(msgs, mode))
+		var out []map[string]any
+		for _, raw := range rawItems {
+			var item map[string]any
+			require.NoError(t, json.Unmarshal(raw, &item))
+			if item["type"] == "reasoning" {
+				out = append(out, item)
+			}
+		}
+		return out
+	}
+
+	t.Run("off mode emits no reasoning items", func(t *testing.T) {
+		assert.Empty(t, reasonings(t, ReasoningReplayOff))
+	})
+
+	t.Run("tool_calls mode emits only the current-turn tool row", func(t *testing.T) {
+		items := reasonings(t, ReasoningReplayToolCalls)
+		require.Len(t, items, 1)
+		assert.Equal(t, "rs_dave_6", items[0]["id"], "deterministic row-derived id")
+		assert.Equal(t, "cur think tc", items[0]["summary"].([]any)[0].(map[string]any)["text"])
+		assert.Equal(t, "summary_text", items[0]["summary"].([]any)[0].(map[string]any)["type"])
+	})
+
+	t.Run("always mode emits one item per assistant reasoning row in history order", func(t *testing.T) {
+		items := reasonings(t, ReasoningReplayAlways)
+		require.Len(t, items, 4)
+		wantTexts := []string{"hist think tc", "hist think plain", "cur think tc", "cur think plain"}
+		for i, want := range wantTexts {
+			summary := items[i]["summary"].([]any)
+			require.Len(t, summary, 1)
+			assert.Equal(t, want, summary[0].(map[string]any)["text"], "item %d", i)
+		}
+	})
+
+	t.Run("reasoning item precedes its message/function-call items", func(t *testing.T) {
+		rawItems := marshalInputItems(messagesToResponseInputItems(msgs, ReasoningReplayToolCalls))
+		var items []map[string]any
+		for _, raw := range rawItems {
+			var item map[string]any
+			require.NoError(t, json.Unmarshal(raw, &item))
+			items = append(items, item)
+		}
+		// The current-turn assistant tool-call row (row 6, no content)
+		// serializes to [reasoning, function_call t2].
+		for i, item := range items {
+			if item["type"] == "reasoning" {
+				require.Greater(t, len(items), i+1, "reasoning item must not be last")
+				follow := items[i+1]
+				assert.Equal(t, "function_call", follow["type"])
+				assert.Equal(t, "t2", follow["call_id"])
+				return
+			}
+		}
+		t.Fatal("no reasoning item found")
+	})
 }
 
 func newAPIError(statusCode int, code string, message string) *openai.Error {

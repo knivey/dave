@@ -94,6 +94,7 @@ type sanitizedAIConfig struct {
 	NeedsUserSuffix     bool           `json:"needsusersuffix,omitempty"`
 	InjectionRole       string         `json:"injection_role,omitempty"`
 	AsyncResultDelivery string         `json:"async_result_delivery,omitempty"`
+	ReasoningReplay     string         `json:"reasoningreplay,omitempty"`
 	Timeout             string         `json:"timeout,omitempty"`
 	StreamTimeout       string         `json:"streamtimeout,omitempty"`
 	ExtraBody           map[string]any `json:"extra_body,omitempty"`
@@ -121,6 +122,7 @@ func sanitizeAIConfig(cfg AIConfig) sanitizedAIConfig {
 		NeedsUserSuffix:     needsUserSuffix(cfg),
 		InjectionRole:       guidanceRole(cfg),
 		AsyncResultDelivery: asyncResultDelivery(cfg),
+		ReasoningReplay:     reasoningReplay(cfg),
 		ExtraBody:           cfg.ExtraBody,
 		System:              cfg.System,
 	}

@@ -490,6 +490,116 @@ injection_role = "assistant"
 	assert.Contains(t, err.Error(), "localsvc")
 }
 
+// TestAIConfigApplyDefaults_ReasoningReplay pins the reasoning-replay-mode
+// cascade: command > service > "tool_calls" (the value production Verified
+// against gemma4/llama.cpp/OpenRouter contracts — see reasoningreplay.go).
+// Setting "off" at any level opts that level out of the default.
+func TestAIConfigApplyDefaults_ReasoningReplay(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  AIConfig
+		svc  Service
+		want string
+	}{
+		{
+			name: "unset everywhere defaults to tool_calls",
+			cfg:  AIConfig{},
+			svc:  Service{},
+			want: ReasoningReplayToolCalls,
+		},
+		{
+			name: "service value inherited",
+			cfg:  AIConfig{},
+			svc:  Service{ReasoningReplay: ReasoningReplayOff},
+			want: ReasoningReplayOff,
+		},
+		{
+			name: "command beats service",
+			cfg:  AIConfig{ReasoningReplay: ReasoningReplayAlways},
+			svc:  Service{ReasoningReplay: ReasoningReplayOff},
+			want: ReasoningReplayAlways,
+		},
+		{
+			name: "command off opt-out beats tool_calls service",
+			cfg:  AIConfig{ReasoningReplay: ReasoningReplayOff},
+			svc:  Service{ReasoningReplay: ReasoningReplayToolCalls},
+			want: ReasoningReplayOff,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := tt.cfg
+			cfg.ApplyDefaults(tt.svc)
+			assert.Equal(t, tt.want, cfg.ReasoningReplay, "ReasoningReplay")
+			assert.Equal(t, tt.want, reasoningReplay(cfg), "reasoningReplay resolves the materialized value")
+		})
+	}
+}
+
+// TestLoadConfigDirRejectsInvalidReasoningReplay pins load-time validation
+// of reasoningreplay on chat commands: an unknown mode fails the chats load
+// instead of silently falling back to the default.
+func TestLoadConfigDirRejectsInvalidReasoningReplay(t *testing.T) {
+	dir := createTestConfigDir(t, `
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`, map[string]string{
+		"services.toml": `
+[localsvc]
+type = "llama"
+`,
+		"chats.toml": `
+[badmode]
+service = "localsvc"
+model = "m"
+reasoningreplay = "sometimes"
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	_, err := loadConfigDir(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "reasoningreplay")
+	assert.Contains(t, err.Error(), "sometimes")
+}
+
+// TestLoadConfigDirReasoningReplayServiceValues pins the service-level
+// validation branch: every valid mode passes load in services.toml, and a
+// bad one fails even when every command is unset.
+func TestLoadConfigDirReasoningReplayServiceValues(t *testing.T) {
+	for _, mode := range []string{ReasoningReplayOff, ReasoningReplayToolCalls, ReasoningReplayAlways} {
+		t.Run("valid "+mode, func(t *testing.T) {
+			dir := createTestConfigDir(t, "", map[string]string{
+				"services.toml": `
+[localsvc]
+type = "llama"
+reasoningreplay = "` + mode + `"
+`,
+			})
+			defer os.RemoveAll(dir)
+			_, err := loadConfigDir(dir)
+			require.NoError(t, err)
+		})
+	}
+
+	t.Run("invalid mode rejected", func(t *testing.T) {
+		dir := createTestConfigDir(t, "", map[string]string{
+			"services.toml": `
+[localsvc]
+type = "llama"
+reasoningreplay = "bogus"
+`,
+		})
+		defer os.RemoveAll(dir)
+		_, err := loadConfigDir(dir)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "reasoningreplay")
+		assert.Contains(t, err.Error(), "localsvc")
+	})
+}
+
 // TestLoadConfigDirNeedsUserSuffixExplicitFalse pins the Knob 2 tri-state
 // through TOML: an explicit false decodes to a non-nil *bool (suppressing
 // even anthropic auto-detect) and stays distinguishable from unset.

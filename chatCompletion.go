@@ -7,9 +7,9 @@ import (
 	"github.com/openai/openai-go/v3/shared"
 )
 
-func messagesToChatCompletionParams(messages []ChatMessage) []openai.ChatCompletionMessageParamUnion {
+func messagesToChatCompletionParams(messages []ChatMessage, replay string) []openai.ChatCompletionMessageParamUnion {
 	params := make([]openai.ChatCompletionMessageParamUnion, 0, len(messages))
-	for _, msg := range messages {
+	for i, msg := range messages {
 		switch msg.Role {
 		case RoleSystem:
 			params = append(params, openai.SystemMessage(msg.Content))
@@ -42,6 +42,7 @@ func messagesToChatCompletionParams(messages []ChatMessage) []openai.ChatComplet
 			}
 
 		case RoleAssistant:
+			var param openai.ChatCompletionMessageParamUnion
 			if len(msg.ToolCalls) > 0 {
 				tcParams := make([]openai.ChatCompletionMessageToolCallUnionParam, 0, len(msg.ToolCalls))
 				for _, tc := range msg.ToolCalls {
@@ -55,12 +56,24 @@ func messagesToChatCompletionParams(messages []ChatMessage) []openai.ChatComplet
 						},
 					})
 				}
-				param := openai.ChatCompletionMessageParamOfAssistant(msg.Content)
+				param = openai.ChatCompletionMessageParamOfAssistant(msg.Content)
 				param.OfAssistant.ToolCalls = tcParams
-				params = append(params, param)
 			} else {
-				params = append(params, openai.AssistantMessage(msg.Content))
+				param = openai.AssistantMessage(msg.Content)
 			}
+			// Reasoning history replay (reasoningreplay.go): the stored
+			// reasoning rides the assistant row as reasoning_content — the
+			// field llama.cpp feeds the gemma4 chat template (which renders
+			// it as a thought channel per its own gate), the field
+			// DeepSeek's API defines natively, and OpenRouter's documented
+			// alias of `reasoning`. replayReasoningRow decides eligibility
+			// so the serializer and the token accounting can never drift.
+			if replayReasoningRow(messages, i, replay) {
+				param.OfAssistant.SetExtraFields(map[string]any{
+					"reasoning_content": msg.ReasoningContent,
+				})
+			}
+			params = append(params, param)
 
 		case RoleTool:
 			params = append(params, openai.ToolMessage(msg.Content, msg.ToolCallID))
@@ -93,7 +106,7 @@ func toolsToChatCompletionToolParams(tools []Tool) []openai.ChatCompletionToolUn
 func buildChatCompletionParams(cfg AIConfig, messages []ChatMessage, tools []Tool, ident apiIdentity) openai.ChatCompletionNewParams {
 	params := openai.ChatCompletionNewParams{
 		Model:    cfg.Model,
-		Messages: messagesToChatCompletionParams(messages),
+		Messages: messagesToChatCompletionParams(messages, reasoningReplay(cfg)),
 	}
 	if ident.User != "" {
 		params.User = openai.String(ident.User)

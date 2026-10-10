@@ -267,12 +267,32 @@ func summarySizeRatio(promptTokens, completionTokens int) float64 {
 //     Self-describing in logs: tool_tokens is logged alongside, so the
 //     subtraction (or its floor fallback) is one diff away.
 //
+// tokensPerMessage(...)
+// BASIS CASCADE (the returned basis string documents which path was
+// taken for logging):
+//
+//   - "usage" (PRIMARY): real API numbers for THIS provider beat any
+//     tokenizer — they already include the provider's own framing,
+//     tool-JSON and image accounting, inflated or not. A tokenizer
+//     estimate can only replace the provider's number with ours; it
+//     cannot improve on it as a measure of what that provider charges.
+//     toolTokens <= 0 keeps this path byte-identical to the legacy
+//     behavior (configs with no tool definitions).
+//
+//   - "usage-net-tools": the usage path with toolTokens > 0 — dave's
+//     tool-definition estimate subtracted before the division.
+//     Self-describing in logs: tool_tokens is logged alongside, so the
+//     subtraction (or its floor fallback) is one diff away.
+//
 //   - "tokenizer:<enc>" / "tokenizer:<enc>,approx": no usage rows yet
 //     (fresh sessions, manual compact before any turn) and a model is
 //     configured — countMessageTokens over ALL live rows (the next
 //     request sends the full live history since live-path truncation was
-//     removed, Oct 2026), averaged over the rows it contains. "approx"
-//     marks models whose real tokenizer is unknown (o200k_base stand-in).
+//     removed, Oct 2026), averaged over the rows it contains. The rows
+//     are pre-filtered through replayReasoningFilter with the session's
+//     resolved reasoningreplay mode so the estimate counts exactly the
+//     reasoning the next request would actually carry (reasoningreplay.go).
+//     "approx" marks models whose real tokenizer is unknown (o200k_base stand-in).
 //     toolTokens does not apply here: with no usage row there is no
 //     tool-inflated dividend to de-bias — this path never counted the
 //     tool prefix in the first place.
@@ -283,7 +303,7 @@ func summarySizeRatio(promptTokens, completionTokens int) float64 {
 //
 // The DECISION math (budget projection) is unchanged by which basis
 // wins: every path yields perMsg with the same 1.0 floor semantics.
-func tokensPerMessage(lastUsage *TurnUsage, liveMsgs []Message, model string, toolTokens int) (perMsg float64, basis string) {
+func tokensPerMessage(lastUsage *TurnUsage, liveMsgs []Message, model string, toolTokens int, replay string) (perMsg float64, basis string) {
 	if len(liveMsgs) == 0 {
 		// Nothing to average over; the floor below is the only sane
 		// answer so budget math can't divide to infinity.
@@ -313,7 +333,10 @@ func tokensPerMessage(lastUsage *TurnUsage, liveMsgs []Message, model string, to
 			basis = "usage"
 		}
 	} else if model != "" {
-		tc := countMessageTokens(model, messagesToChat(rowsForProjection))
+		// replayReasoningFilter keeps the estimate wire-true: stored
+		// reasoning only counts when the resolved replay mode would put
+		// it on the next request.
+		tc := countMessageTokens(model, replayReasoningFilter(messagesToChat(rowsForProjection), replay))
 		perMsg = float64(tc.Tokens) / float64(len(rowsForProjection))
 		if tc.Encoding == "chars/4-estimate" {
 			// Encoder init failed (corrupt embedded data — unreachable
@@ -786,7 +809,7 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 	toolEnc, _ := getEncoder(toolEncName) // nil on init failure → estimateTokens, same degradation as the message side
 	toolTokens := countToolTokens(toolEnc, toolDefs)
 
-	perMsg, estBasis := tokensPerMessage(lastUsage, dbMsgs, cfg.Model, toolTokens)
+	perMsg, estBasis := tokensPerMessage(lastUsage, dbMsgs, cfg.Model, toolTokens, reasoningReplay(cfg))
 	// Dave's own neutral token count of the payload the NEXT request
 	// would send: the FULL live history (live-path truncation was removed
 	// Oct 2026 — GetMessages returns everything), converted to
@@ -795,7 +818,7 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 	// the provider's accounting (or template) differs from the payload,
 	// not that the payload grew. Unconditional on model: an empty/unknown
 	// model still counts via the o200k_base approximation (Exact=false).
-	ourCount := countMessageTokens(cfg.Model, chatMsgs)
+	ourCount := countMessageTokens(cfg.Model, replayReasoningFilter(chatMsgs, reasoningReplay(cfg)))
 
 	// PROJECTION RECONCILIATION (supersedes the old "informational only"
 	// note that used to sit where the tool tokens are now counted): the
@@ -1094,7 +1117,7 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 	// (dave's neutral count of the post-compaction payload — pairs with
 	// the trigger log's pre-compaction count to bracket the event) and,
 	// when a model is configured, as LiveTokensEst.
-	postLiveCount := countMessageTokens(cfg.Model, postLiveChat)
+	postLiveCount := countMessageTokens(cfg.Model, replayReasoningFilter(postLiveChat, reasoningReplay(cfg)))
 	var liveTokensEst int
 	if cfg.Model != "" {
 		liveTokensEst = postLiveCount.Tokens

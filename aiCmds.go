@@ -776,7 +776,7 @@ func (cr *chatRunner) shouldRetryWithoutResponseID(usePrevID bool, err error, me
 	if err := sessionMgr.UpdateResponseID(cr.sessionID, nil, ""); err != nil {
 		cr.logger.Error("failed to clear response_id on retry", "session", cr.sessionID, "error", err)
 	}
-	return messagesToResponseInputItems(messages), "", true
+	return messagesToResponseInputItems(messages, reasoningReplay(cr.cfg)), "", true
 }
 
 type responsesStreamResult struct {
@@ -840,7 +840,7 @@ func (cr *chatRunner) runTurnResponsesStream(
 				emptyRetries:      emptyRetries + 1,
 				currentResponseID: "",
 				usePrevID:         false,
-				input:             messagesToResponseInputItems(turn.Messages()),
+				input:             messagesToResponseInputItems(turn.Messages(), reasoningReplay(cr.cfg)),
 			}
 		} else if newText != text {
 			text = newText
@@ -885,7 +885,7 @@ func (cr *chatRunner) runTurnResponsesStream(
 		toolResultMsgs := turn.LastN(numToolCalls)
 		newInput = toolResultMsgsToInputItems(toolResultMsgs)
 	} else {
-		newInput = messagesToResponseInputItems(turn.Messages())
+		newInput = messagesToResponseInputItems(turn.Messages(), reasoningReplay(cr.cfg))
 	}
 	return responsesStreamResult{
 		emptyRetries:      emptyRetries,
@@ -1621,10 +1621,10 @@ func (cr *chatRunner) runTurnResponses(turn *turnContext) bool {
 	var input []responses.ResponseInputItemUnionParam
 	if usePrevID {
 		if len(turn.Messages()) > 0 {
-			input = messagesToResponseInputItems(turn.LastN(1))
+			input = messagesToResponseInputItems(turn.LastN(1), reasoningReplay(cr.cfg))
 		}
 	} else {
-		input = messagesToResponseInputItems(turn.Messages())
+		input = messagesToResponseInputItems(turn.Messages(), reasoningReplay(cr.cfg))
 	}
 
 	emptyRetries := 0
@@ -1700,7 +1700,7 @@ func (cr *chatRunner) runTurnResponses(turn *turnContext) bool {
 				// old chain head alongside a full-history resend
 				// would duplicate context server-side. A successful
 				// retry starts a fresh chain.
-				input = messagesToResponseInputItems(turn.Messages())
+				input = messagesToResponseInputItems(turn.Messages(), reasoningReplay(cr.cfg))
 				currentResponseID = ""
 				usePrevID = false
 				continue
@@ -1743,7 +1743,7 @@ func (cr *chatRunner) runTurnResponses(turn *turnContext) bool {
 			// chain currentResponseID or the provider loses all context.
 			usePrevID = true
 		} else {
-			input = messagesToResponseInputItems(turn.Messages())
+			input = messagesToResponseInputItems(turn.Messages(), reasoningReplay(cr.cfg))
 			// Full-history resend: the chain id must be dropped to match.
 			usePrevID = false
 		}

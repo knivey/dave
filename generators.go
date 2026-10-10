@@ -72,6 +72,18 @@ var generatorTools = map[string]generatorToolEntry{
 	respondToolName:          {handler: handleGeneratorRespond},
 }
 
+// logCoverageRange renders the kept rows' time range for the INFO log
+// field — the bare "HH:MM to HH:MM" range, empty when either endpoint is
+// unset (a hand-built result with only one endpoint would otherwise
+// render "14:32 to 00:00"). The tool-result HEADER fragment keeps its
+// own ", covering " prefix at the call site.
+func logCoverageRange(lw *LogWindowResult) string {
+	if lw.FirstKept.IsZero() || lw.LastKept.IsZero() {
+		return ""
+	}
+	return lw.FirstKept.Format("15:04") + " to " + lw.LastKept.Format("15:04")
+}
+
 // handleGeneratorLogQuery executes query_channel_logs: resolves the
 // window (configured default when omitted), fetches via the injection
 // seam, and returns the transcript as the tool result — every failure
@@ -120,12 +132,16 @@ func handleGeneratorLogQuery(cr *chatRunner, turn *turnContext, call ToolCall) {
 	// Coverage carries the kept rows' actual time range; BOTH endpoints
 	// must be set or it stays empty (a hand-built result with only one
 	// would render "14:32 to 00:00") — same rule the v1 notice used.
+	// The log field wants the BARE range (logCoverageRange); the header
+	// fragment below gets the ", covering " prefix — sharing one string
+	// printed "coverage: , covering 01:02 to 00:41" in the log.
+	coverageRange := logCoverageRange(lw)
 	coverage := ""
-	if !lw.FirstKept.IsZero() && !lw.LastKept.IsZero() {
-		coverage = fmt.Sprintf(", covering %s to %s", lw.FirstKept.Format("15:04"), lw.LastKept.Format("15:04"))
+	if coverageRange != "" {
+		coverage = ", covering " + coverageRange
 	}
 	cr.logger.Info("generator log query",
-		"trigger", cr.logQuery.name, "window", spec.Window, "coverage", coverage,
+		"trigger", cr.logQuery.name, "window", spec.Window, "coverage", coverageRange,
 		"files", len(lw.Files), "lines", lw.TotalLines, "dropped", lw.DroppedLines,
 		"tokens", lw.Tokens, "budget", spec.MaxTokens, "truncated", lw.Truncated)
 	if lw.TotalLines == 0 {

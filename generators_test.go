@@ -453,6 +453,28 @@ func TestHandleGeneratorLogQueryFetchError(t *testing.T) {
 	assert.NotContains(t, result, "narrower window")
 }
 
+// TestLogCoverageRange pins the INFO log field's rendering: the bare
+// "HH:MM to HH:MM" range, with NO leading comma — the comma belongs to
+// the tool-result header fragment (", covering …"), and sharing one
+// string printed "coverage: , covering 01:02 to 00:41" in production
+// logs (observed 2026-10-10, post-merge).
+func TestLogCoverageRange(t *testing.T) {
+	both := &LogWindowResult{
+		FirstKept: time.Date(2026, 10, 10, 1, 2, 0, 0, time.Local),
+		LastKept:  time.Date(2026, 10, 11, 0, 41, 0, 0, time.Local),
+	}
+	assert.Equal(t, "01:02 to 00:41", logCoverageRange(both))
+	assert.NotContains(t, logCoverageRange(both), ",")
+
+	for name, lw := range map[string]*LogWindowResult{
+		"both zero":  {},
+		"last zero":  {FirstKept: both.FirstKept},
+		"first zero": {LastKept: both.LastKept},
+	} {
+		assert.Empty(t, logCoverageRange(lw), "%s: either endpoint unset → no range", name)
+	}
+}
+
 // --- respond tool ---
 
 func TestGetToolsEphemeralOffersRespondWhenEnabled(t *testing.T) {

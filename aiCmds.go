@@ -250,8 +250,11 @@ type chatRunner struct {
 	responded bool
 	// deliveryPending is per-turn state (a chatRunner lives one command
 	// dispatch): set when register_background_job succeeds in
-	// executeToolCalls, read by checkEmptyRetry — an empty final response
-	// is acceptable while a delivery is pending because the async
+	// executeToolCalls — the handler's return is success-only (an actual
+	// registration whose monitor is still running, or a benign
+	// already-registered duplicate; error results and inline-delivered
+	// results return false) — and read by checkEmptyRetry: an empty final
+	// response is acceptable while a delivery is pending because the async
 	// delivery guarantees a future user-visible interaction.
 	deliveryPending bool
 	// apiLogSessionID overrides the id the apiLogger logs this runner's
@@ -1487,7 +1490,22 @@ func truncateForLog(s string, max int) string {
 	return string([]rune(s)[:max]) + fmt.Sprintf("…[truncated, %d chars total]", total)
 }
 
-func (cr *chatRunner) handleRegisterBackgroundJob(turn *turnContext, call ToolCall) {
+// handleRegisterBackgroundJob registers an async MCP job for monitoring and
+// reports whether a background-job delivery is genuinely pending for the
+// turn. The bool is the truthful register signal executeToolCalls consumes
+// (registeredJob → cr.deliveryPending, which makes checkEmptyRetry accept an
+// empty final): true ONLY when a future user-visible delivery is guaranteed —
+// the fall-through after an actual registration (the monitor outlives the
+// 500ms inline window) and the benign "already registered" duplicate (an
+// earlier register this turn already owns the monitor; job == nil from
+// registerAsyncJob is the same case lost to a TOCTOU race). Every error path
+// returns false — a failed register leaves no monitor, so an empty final
+// after one is dead, not early, and must keep the correction machinery. The
+// inline-result branch also returns false: when the job resolves inside the
+// inline window its result text — success or failure — is already in the
+// tool message this very call adds and nothing further will arrive, so an
+// empty final afterward is dead too.
+func (cr *chatRunner) handleRegisterBackgroundJob(turn *turnContext, call ToolCall) bool {
 	var args struct {
 		JobID      string `json:"job_id"`
 		ToolName   string `json:"tool_name"`
@@ -1496,13 +1514,13 @@ func (cr *chatRunner) handleRegisterBackgroundJob(turn *turnContext, call ToolCa
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 		toolMsg := toolResultMsg(call.ID, "error: failed to parse arguments: "+err.Error())
 		turn.Add(toolMsg)
-		return
+		return false
 	}
 
 	if args.JobID == "" || args.ToolName == "" {
 		toolMsg := toolResultMsg(call.ID, "error: job_id and tool_name are required")
 		turn.Add(toolMsg)
-		return
+		return false
 	}
 
 	if args.ServerName == "" {
@@ -1511,13 +1529,16 @@ func (cr *chatRunner) handleRegisterBackgroundJob(turn *turnContext, call ToolCa
 	if args.ServerName == "" {
 		toolMsg := toolResultMsg(call.ID, "error: could not determine MCP server for tool "+args.ToolName)
 		turn.Add(toolMsg)
-		return
+		return false
 	}
 
 	if asyncJobMgr.contains(args.JobID) {
 		toolMsg := toolResultMsg(call.ID, "Job already registered and being monitored.")
 		turn.Add(toolMsg)
-		return
+		// Benign duplicate: the earlier register's monitor guarantees the
+		// delivery — the pending predicate holds even though this call
+		// registered nothing.
+		return true
 	}
 
 	cr.logger.Info("registering background job", "job_id", args.JobID, "tool", args.ToolName, "server", args.ServerName)
@@ -1525,14 +1546,14 @@ func (cr *chatRunner) handleRegisterBackgroundJob(turn *turnContext, call ToolCa
 	if cr.sessionID == 0 {
 		toolMsg := toolResultMsg(call.ID, "error: no active session to register job against")
 		turn.Add(toolMsg)
-		return
+		return false
 	}
 
 	if err := createPendingJob(cr.sessionID, args.JobID, args.ToolName, args.ServerName); err != nil {
 		cr.logger.Error("failed to create pending job", "error", err)
 		toolMsg := toolResultMsg(call.ID, "error: failed to register job: "+err.Error())
 		turn.Add(toolMsg)
-		return
+		return false
 	}
 
 	job := registerAsyncJob(args.JobID, cr.sessionID, args.ToolName, args.ServerName, cr.network.Name, cr.channel, cr.nick, cr.userID)
@@ -1541,17 +1562,18 @@ func (cr *chatRunner) handleRegisterBackgroundJob(turn *turnContext, call ToolCa
 		case resultText := <-job.payload.inlineResultCh:
 			toolMsg := toolResultMsg(call.ID, resultText)
 			turn.Add(toolMsg)
-			return
+			return false
 		case <-time.After(500 * time.Millisecond):
 		case <-cr.ctx.Done():
 			toolMsg := toolResultMsg(call.ID, "error: context cancelled while waiting for job result")
 			turn.Add(toolMsg)
-			return
+			return false
 		}
 	}
 
 	toolMsg := toolResultMsg(call.ID, "Job registered. You will receive the result when it completes.")
 	turn.Add(toolMsg)
+	return true
 }
 
 func (cr *chatRunner) handleBanUser(turn *turnContext, call ToolCall) {
@@ -2193,6 +2215,13 @@ func ExtractFinalText(text string) string {
 
 const backgroundJobToolName = "register_background_job"
 
+// builtinToolHandler runs one builtin tool call. The bool return is the
+// delivery-pending signal consumed by executeToolCalls (registeredJob →
+// cr.deliveryPending): true only while a background-job delivery is
+// genuinely pending for the turn. Today only register_background_job
+// returns true, and truthfully — an actual registration whose monitor is
+// still running, or a benign already-registered duplicate; error results
+// and inline-delivered results return false.
 type builtinToolHandler func(cr *chatRunner, turn *turnContext, call ToolCall) bool
 
 type builtinToolEntry struct {
@@ -2202,15 +2231,18 @@ type builtinToolEntry struct {
 
 var builtinTools = map[string]builtinToolEntry{
 	backgroundJobToolName: {
-		handler: func(cr *chatRunner, turn *turnContext, call ToolCall) bool {
-			cr.handleRegisterBackgroundJob(turn, call)
-			return true
-		},
+		// The method expression IS the handler: its bool return is the
+		// truthful delivery-pending signal (see handleRegisterBackgroundJob).
+		handler: (*chatRunner).handleRegisterBackgroundJob,
+		// getBuiltinToolDefs always overwrites this description for both
+		// delivery modes (guidance Knob 1); the base text below is
+		// unreachable today but must stay in sync — it is what a refactor
+		// dropping the overwrite would serve the model.
 		def: Tool{
 			Type: "function",
 			Function: &FunctionDefinition{
 				Name:        backgroundJobToolName,
-				Description: "Register a background job for monitoring. When an async tool (e.g. generate_image_async) returns a job_id, call this to have the system monitor the job. You will be notified with the result when it completes. Do not poll or wait for results. Continue the conversation normally.",
+				Description: "Register a background job for monitoring. When an async tool (e.g. generate_image_async) returns a job_id, call this to have the system monitor the job. You will be notified with the result when it completes. After calling this, always send the user a short message telling them the task is underway. Do not poll for status — the result arrives automatically.",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{

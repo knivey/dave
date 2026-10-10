@@ -1394,6 +1394,18 @@ func TestGetBuiltinToolDefsBackgroundJobRoleDescription(t *testing.T) {
 		assert.NotContains(t, d.Description, "Continue the conversation normally",
 			"the vague tail read as 'silence is fine' must be gone")
 	}
+
+	// The static base def in builtinTools is unreachable (both branches
+	// above overwrite the description), but it is what a refactor dropping
+	// the overwrite would serve — its tail must stay in sync with the live
+	// variants instead of rotting back to the old vague wording.
+	baseDef := builtinTools[backgroundJobToolName].def.Function
+	require.NotNil(t, baseDef)
+	assert.Contains(t, baseDef.Description, "always send the user a short message telling them the task is underway",
+		"the dead base def must carry the same underway instruction as the live variants")
+	assert.Contains(t, baseDef.Description, "Do not poll for status")
+	assert.NotContains(t, baseDef.Description, "Continue the conversation normally",
+		"the dead base def must not rot back to the 'silence is fine' tail")
 }
 
 // TestToolDefsForConfig pins the cfg-level tool-assembly contract that
@@ -1564,6 +1576,127 @@ func TestRegisterBackgroundJob_ServerNameAutoDetection(t *testing.T) {
 		require.NoError(t, theDB.Where("job_id = ?", "j-emptyserver").First(&pj).Error)
 		assert.Equal(t, "img-mcp-async", pj.MCPServer, "empty server_name should trigger auto-detect")
 	})
+}
+
+// TestRegisterBackgroundJobReturnSignal pins the handler's success-only
+// signal at the unit level: every error path returns false (no monitor
+// exists, nothing will ever arrive — an empty final after one must keep the
+// correction machinery) and the benign already-registered duplicate returns
+// true (the earlier register's monitor guarantees the delivery). The
+// actual-registration fall-through and the inline-result branch are
+// timing-dependent (the 500ms window vs monitor resolution) and are covered
+// by the runTurn integration tests: fall-through via the stalled-pending
+// fixture, inline delivery by its absence.
+func TestRegisterBackgroundJobReturnSignal(t *testing.T) {
+	setupTestDB(t)
+	setupTestJobManager(t)
+	setupNoticesDefaults(t)
+
+	mcpServersMu.Lock()
+	origToolMap := mcpToolToServer
+	origServers := mcpServers
+	mcpToolToServer = map[string]string{
+		"enhance_and_generate_async": "img-mcp-async",
+	}
+	mcpServers = map[string]*MCPServer{"img-mcp-async": {}}
+	mcpServersMu.Unlock()
+	t.Cleanup(func() {
+		mcpServersMu.Lock()
+		mcpToolToServer = origToolMap
+		mcpServers = origServers
+		mcpServersMu.Unlock()
+	})
+
+	verbose := false
+	sid := createTestSession(t, "testnet", "#dup", "dupnick", "testcmd", "svc", "m")
+	newRunner := func() *chatRunner {
+		logger := logxi.New("test")
+		logger.SetLevel(logxi.LevelAll)
+		return &chatRunner{
+			cfg:       AIConfig{ToolVerbose: &verbose},
+			network:   Network{Name: "testnet"},
+			channel:   "#dup",
+			nick:      "dupnick",
+			logger:    logger,
+			ctx:       context.Background(),
+			outputCh:  make(chan string, 8),
+			sessionID: sid,
+		}
+	}
+	regCall := func(id, args string) ToolCall {
+		return ToolCall{ID: id, Function: FunctionCall{Name: "register_background_job", Arguments: args}}
+	}
+
+	// The benign duplicate: seed the job exactly the way a prior
+	// successful register would have, with a monitor that never resolves
+	// (cancelled and drained by setupTestJobManager's cleanup).
+	dupEntry := &jobEntry[asyncJobPayload]{
+		jobID:   "j-seeded",
+		payload: asyncJobPayload{sessionID: sid, inlineResultCh: make(chan string)},
+	}
+	require.True(t, asyncJobMgr.register(dupEntry, func(ctx context.Context, e *jobEntry[asyncJobPayload]) {
+		<-ctx.Done()
+	}))
+
+	tests := []struct {
+		name       string
+		noSession  bool
+		call       ToolCall
+		wantSignal bool
+		wantMsg    string
+	}{
+		{
+			name:       "unparseable arguments",
+			call:       regCall("tc-bad", `{invalid`),
+			wantSignal: false,
+			wantMsg:    "error: failed to parse arguments",
+		},
+		{
+			name:       "missing job_id",
+			call:       regCall("tc-nojob", `{"tool_name":"enhance_and_generate_async"}`),
+			wantSignal: false,
+			wantMsg:    "error: job_id and tool_name are required",
+		},
+		{
+			name:       "missing tool_name",
+			call:       regCall("tc-notool", `{"job_id":"j1"}`),
+			wantSignal: false,
+			wantMsg:    "error: job_id and tool_name are required",
+		},
+		{
+			name:       "unknown tool_name — no server resolves",
+			call:       regCall("tc-unknown", `{"job_id":"j-unknown","tool_name":"nonexistent_tool"}`),
+			wantSignal: false,
+			wantMsg:    "error: could not determine MCP server",
+		},
+		{
+			name:       "no active session",
+			noSession:  true,
+			call:       regCall("tc-nosess", `{"job_id":"j-nosess","tool_name":"enhance_and_generate_async"}`),
+			wantSignal: false,
+			wantMsg:    "error: no active session",
+		},
+		{
+			name:       "already registered — benign duplicate keeps the signal true",
+			call:       regCall("tc-dup", `{"job_id":"j-seeded","tool_name":"enhance_and_generate_async"}`),
+			wantSignal: true,
+			wantMsg:    "Job already registered and being monitored",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cr := newRunner()
+			if tt.noSession {
+				cr.sessionID = 0
+			}
+			turn := newTurnContext(sid, nil)
+			got := cr.handleRegisterBackgroundJob(turn, tt.call)
+			assert.Equal(t, tt.wantSignal, got)
+			require.Len(t, turn.Messages(), 1)
+			assert.Contains(t, turn.Messages()[0].Content, tt.wantMsg)
+		})
+	}
 }
 
 func TestCheckEmptyRetry(t *testing.T) {
@@ -2004,6 +2137,31 @@ func TestRunTurnEmptyResponseExhaustedSummaryOnly(t *testing.T) {
 	assert.Equal(t, "the summarized answer", last.ReasoningSummary)
 }
 
+// stallMCPPendingWait installs a fake pending MCP retry-loop entry whose
+// attempt counter never advances, so tool-name misses (wait_for_job against
+// these fixtures) block inside waitForPendingMCPTool until their context is
+// cancelled. That pins a register's monitor goroutine in the "still waiting"
+// state past the handler's 500ms inline window: without the stall the
+// fixture's fail-fast monitor resolves within microseconds and its error
+// text is delivered INLINE — a genuinely different (and correctly false)
+// handler outcome, since the delivery already happened. Restored on
+// cleanup; the stalled monitor is unblocked by setupTestJobManager's cancel
+// (or its next poll after the restore) and drained by its wg.Wait.
+func stallMCPPendingWait(t *testing.T) {
+	t.Helper()
+	mcpRetryMu.Lock()
+	orig := mcpPending
+	mcpPending = map[string]*mcpPendingServer{
+		"img-mcp-async-connecting": {nudge: make(chan struct{}, 1)},
+	}
+	mcpRetryMu.Unlock()
+	t.Cleanup(func() {
+		mcpRetryMu.Lock()
+		mcpPending = orig
+		mcpRetryMu.Unlock()
+	})
+}
+
 // TestRunTurnEmptyAcceptedWhenDeliveryPending verifies the production
 // session-1898 shape end to end on the non-streaming chat path: the model's
 // only act is a successful register_background_job, the follow-up response
@@ -2018,9 +2176,15 @@ func TestRunTurnEmptyAcceptedWhenDeliveryPending(t *testing.T) {
 	// register_background_job auto-detects its MCP server from the tool
 	// map; seed the fixture the way TestRegisterBackgroundJob_ServerNameAutoDetection
 	// does so handleRegisterBackgroundJob succeeds against "img-mcp-async"
-	// (an empty server is enough — the register itself needs no I/O, and
-	// the monitor goroutine fails fast on the unknown wait_for_job tool
-	// and is drained by setupTestJobManager's cleanup).
+	// (an empty server is enough — the register itself needs no I/O).
+	//
+	// The stall is load-bearing: it parks the spawned monitor's wait_for_job
+	// lookup so the handler's 500ms inline window EXPIRES and the register
+	// reports the truthful "delivery pending" signal this test exercises.
+	// Without it the fail-fast monitor delivers its error text inline (a
+	// completed delivery — signal false) and the empty final would correctly
+	// keep the correction machinery.
+	stallMCPPendingWait(t)
 	mcpServersMu.Lock()
 	origToolMap := mcpToolToServer
 	origServers := mcpServers
@@ -2060,6 +2224,7 @@ func TestRunTurnEmptyAcceptedWhenDeliveryPending(t *testing.T) {
 	// and NOTHING for the empty: no retry request.
 	require.Len(t, requests, 2, "empty final must not trigger a retry request while a delivery is pending, got %d requests", len(requests))
 	assert.NotContains(t, requests[1], "EMPTY response", "no correction may be injected while a delivery is pending")
+	assert.True(t, cr.deliveryPending, "a successful register whose monitor is still waiting must set deliveryPending")
 
 	// No correction row in the stored history — the registerless D7
 	// persistence would keep teaching the parrot pattern to later turns.
@@ -2075,6 +2240,168 @@ func TestRunTurnEmptyAcceptedWhenDeliveryPending(t *testing.T) {
 
 	// Nothing reached IRC: no exhaustion notice, no reasoning dump (the
 	// register tool-call notice is silenced via ToolVerbose=false).
+	assert.Empty(t, drainOutput(t, outputCh, 1, 50*time.Millisecond),
+		"accepted empty must produce no IRC output")
+}
+
+// TestRunTurnEmptyResponseRetryAfterFailedRegister pins the truthfulness the
+// deliveryPending signal bought: a register_background_job call that FAILS
+// (unknown tool_name → error tool result; no monitor ever spawns) must NOT
+// set deliveryPending, so the empty final that follows is a dead empty and
+// the registerless correction machinery fires exactly as if no register had
+// been attempted — retry request observed, correction injected and
+// persisted, good retry answer delivered. Under the pre-fix unconditional
+// signal this shape was silently accepted: permanent silence for the turn.
+func TestRunTurnEmptyResponseRetryAfterFailedRegister(t *testing.T) {
+	setupTestDB(t)
+	setupTestJobManager(t)
+	setupNoticesDefaults(t)
+
+	// Tool map WITHOUT any entry for the register's tool_name: the
+	// register resolves its server from this map (fast lookup — no pending
+	// wait involved) and fails before any monitor or DB row exists, so no
+	// stall is needed: nothing is spawned to stall.
+	mcpServersMu.Lock()
+	origToolMap := mcpToolToServer
+	origServers := mcpServers
+	mcpToolToServer = map[string]string{
+		"enhance_and_generate_async": "img-mcp-async",
+	}
+	mcpServers = map[string]*MCPServer{"img-mcp-async": {}}
+	mcpServersMu.Unlock()
+	t.Cleanup(func() {
+		mcpServersMu.Lock()
+		mcpToolToServer = origToolMap
+		mcpServers = origServers
+		mcpServersMu.Unlock()
+	})
+
+	sid := createTestSession(t, "testnet", "#101", "shrew", "testcmd", "svc", "m")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "make me a picture"}))
+	messages, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+
+	var requests []string
+	outputCh := make(chan string, 8)
+	cr := newEmptyRetryTurnRunner(t, []string{
+		// attempt 1: a register tool call that FAILS (unknown tool_name —
+		// nothing maps it to a server)
+		`{"id":"cmpl-1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_reg_fail","type":"function","function":{"name":"register_background_job","arguments":"{\"job_id\":\"j-fail\",\"tool_name\":\"nonexistent_tool\"}"}}]},"finish_reason":"tool_calls"}]}`,
+		// attempt 2 (continuation after the error tool result): EMPTY
+		// final — dead, not early: nothing will ever arrive
+		`{"id":"cmpl-2","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning":"the register failed, what now"},"finish_reason":"stop"}]}`,
+		// attempt 3 (retry): proper answer
+		`{"id":"cmpl-3","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"here is the real answer"},"finish_reason":"stop"}]}`,
+	}, &requests, outputCh)
+	verbose := false
+	cr.cfg.ToolVerbose = &verbose
+	cr.sessionID = sid
+
+	cr.runTurn(newTurnContext(sid, messages))
+
+	// The failed register must not buy silence: the empty final triggered
+	// the correction retry, mirroring the registerless pin's assertions.
+	require.Len(t, requests, 3, "empty final after a FAILED register must trigger the correction retry, got %d requests", len(requests))
+	assert.NotContains(t, requests[1], "EMPTY response", "the empty's own request carries no correction yet")
+	assert.Contains(t, requests[2], "EMPTY response", "retry request must carry the correction")
+	assert.Contains(t, requests[2], "reasoning channel", "correction must name the reasoning-channel failure mode")
+
+	// The model saw the register's error tool result in the continuation.
+	assert.Contains(t, requests[1], "could not determine MCP server", "the register's error tool result must reach the model")
+
+	// The signal stayed false for the whole turn.
+	assert.False(t, cr.deliveryPending, "a failed register must not set deliveryPending")
+
+	// D7: exactly one correction row persists; the good retry answer is
+	// the final stored reply and reaches the user.
+	final, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	corrections := 0
+	for _, msg := range final {
+		if strings.Contains(msg.Content, "Your previous response was rejected") {
+			corrections++
+		}
+	}
+	assert.Equal(t, 1, corrections, "exactly one correction row may persist, got %d", corrections)
+	assert.Equal(t, "here is the real answer", final[len(final)-1].Content)
+
+	lines := drainOutput(t, outputCh, 4, time.Second)
+	require.NotEmpty(t, lines, "user must see the successful retry answer")
+	assert.Contains(t, strings.Join(lines, "\n"), "here is the real answer")
+}
+
+// TestRunTurnEmptyAcceptedAfterDuplicateRegister pins the benign-duplicate
+// arm of the truthful signal: when the model registers the SAME job twice in
+// one turn, the second call hits the "Job already registered"
+// short-circuit and still reports delivery pending — the FIRST register's
+// monitor guarantees the delivery — so the empty final after it is accepted
+// exactly like a fresh register's. Both register calls ride one assistant
+// message (the common multi-tool-call shape).
+func TestRunTurnEmptyAcceptedAfterDuplicateRegister(t *testing.T) {
+	setupTestDB(t)
+	setupTestJobManager(t)
+	setupNoticesDefaults(t)
+
+	// Same fixture as TestRunTurnEmptyAcceptedWhenDeliveryPending: the
+	// stall keeps the FIRST register's monitor waiting past the 500ms
+	// inline window (its fall-through is the true "delivery pending"
+	// signal); the duplicate then short-circuits on asyncJobMgr.contains.
+	stallMCPPendingWait(t)
+	mcpServersMu.Lock()
+	origToolMap := mcpToolToServer
+	origServers := mcpServers
+	mcpToolToServer = map[string]string{
+		"enhance_and_generate_async": "img-mcp-async",
+	}
+	mcpServers = map[string]*MCPServer{"img-mcp-async": {}}
+	mcpServersMu.Unlock()
+	t.Cleanup(func() {
+		mcpServersMu.Lock()
+		mcpToolToServer = origToolMap
+		mcpServers = origServers
+		mcpServersMu.Unlock()
+	})
+
+	sid := createTestSession(t, "testnet", "#101", "shrew", "testcmd", "svc", "m")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "make me a picture"}))
+	messages, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+
+	regArgs := `{"job_id":"j-dup","tool_name":"enhance_and_generate_async"}`
+	var requests []string
+	outputCh := make(chan string, 8)
+	cr := newEmptyRetryTurnRunner(t, []string{
+		// attempt 1: the SAME job registered twice in one tool-call batch
+		fmt.Sprintf(`{"id":"cmpl-1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_dup_a","type":"function","function":{"name":"register_background_job","arguments":%q}},{"id":"call_dup_b","type":"function","function":{"name":"register_background_job","arguments":%q}}]},"finish_reason":"tool_calls"}]}`, regArgs, regArgs),
+		// attempt 2 (continuation): EMPTY final — accepted, the first
+		// register's monitor guarantees the delivery
+		`{"id":"cmpl-2","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning":"image job started, will deliver when done"},"finish_reason":"stop"}]}`,
+	}, &requests, outputCh)
+	verbose := false
+	cr.cfg.ToolVerbose = &verbose
+	cr.sessionID = sid
+
+	cr.runTurn(newTurnContext(sid, messages))
+
+	// The empty final was accepted: no retry request, no correction.
+	require.Len(t, requests, 2, "empty final after a duplicate register must not trigger a retry, got %d requests", len(requests))
+	assert.NotContains(t, requests[1], "EMPTY response", "no correction may be injected while a delivery is pending")
+	assert.True(t, cr.deliveryPending, "the duplicate register must still set deliveryPending")
+
+	// Both tool results reached the model: the real registration
+	// confirmation and the benign duplicate notice.
+	assert.Contains(t, requests[1], "Job registered. You will receive the result when it completes.")
+	assert.Contains(t, requests[1], "Job already registered and being monitored.")
+
+	final, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	for _, msg := range final {
+		assert.NotContains(t, msg.Content, "Your previous response was rejected",
+			"no empty-response correction may be stored while a delivery is pending")
+	}
+	last := final[len(final)-1]
+	assert.Equal(t, RoleAssistant, last.Role)
+	assert.Equal(t, "...", last.Content, "the accepted empty stores the sentinel, never sent to IRC")
 	assert.Empty(t, drainOutput(t, outputCh, 1, 50*time.Millisecond),
 		"accepted empty must produce no IRC output")
 }
@@ -2345,9 +2672,12 @@ func TestRunTurnStreamEmptyAcceptedWhenDeliveryPending(t *testing.T) {
 
 	// Same fixture as TestRunTurnEmptyAcceptedWhenDeliveryPending: seed
 	// the tool map so register_background_job auto-detects
-	// "img-mcp-async" and the register succeeds; the monitor goroutine
-	// fails fast (unknown wait_for_job tool) and is drained by
-	// setupTestJobManager's cleanup.
+	// "img-mcp-async" and the register succeeds. The stall parks the
+	// spawned monitor's wait_for_job lookup so the handler's 500ms inline
+	// window EXPIRES (truthful "delivery pending" signal); without it the
+	// fail-fast monitor delivers inline and the empty final would
+	// correctly keep the correction machinery.
+	stallMCPPendingWait(t)
 	mcpServersMu.Lock()
 	origToolMap := mcpToolToServer
 	origServers := mcpServers
@@ -2430,6 +2760,7 @@ func TestRunTurnStreamEmptyAcceptedWhenDeliveryPending(t *testing.T) {
 	require.Len(t, requests, 2, "empty final must not trigger a retry stream while a delivery is pending, got %d requests", len(requests))
 	assert.NotContains(t, requests[1], "EMPTY response", "no correction may be injected while a delivery is pending")
 	mu.Unlock()
+	assert.True(t, cr.deliveryPending, "a successful register whose monitor is still waiting must set deliveryPending")
 
 	// Nothing reached IRC: no exhaustion notice, no reasoning dump.
 	assert.Empty(t, drainOutput(t, outputCh, 1, 50*time.Millisecond),

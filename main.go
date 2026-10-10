@@ -49,12 +49,16 @@ func copyTemplateVars() map[string]string {
 }
 
 func buildSystemPromptData(network Network, client *girc.Client, channel, userNick string) SystemPromptData {
+	// One clock read so Date and Now can never straddle a boundary
+	// (midnight would make them disagree about "today").
+	now := time.Now()
 	data := SystemPromptData{
 		Nick:    userNick,
 		BotNick: network.Nick,
 		Channel: channel,
 		Network: network.Name,
-		Date:    time.Now().Format("2006-01-02"),
+		Date:    now.Format("2006-01-02"),
+		Now:     now.Format("Monday 2006-01-02 15:04"),
 		Vars:    copyTemplateVars(),
 	}
 	if client != nil {

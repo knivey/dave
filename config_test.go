@@ -2834,6 +2834,30 @@ description = "Fake news"
 	assert.Nil(t, fn.Log, "no log block -> nil")
 }
 
+func TestLoadConfigDirRejectsLogRangeFields(t *testing.T) {
+	// from/to are TOOL ARGUMENTS (query_channel_logs range mode), never
+	// config fields — a static range in [name.log] would be a mistake
+	// (config windows are relative). Load must reject them loudly.
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": testGeneratorsServices,
+		"generators.toml": `
+[summary]
+service = "svc"
+prompt = "p"
+
+[summary.log]
+window = "24h"
+from = "2026-10-06 18:00"
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	_, err := loadConfigDir(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "commands.generators.summary log")
+	assert.Contains(t, err.Error(), "tool arguments")
+}
+
 func TestLoadConfigDirGeneratorsMissingFileOK(t *testing.T) {
 	dir := createTestConfigDir(t, "", map[string]string{
 		"services.toml": testGeneratorsServices,

@@ -28,6 +28,15 @@ type LogQuerySpec struct {
 	Window    string   `toml:"window"`     // duration string, d suffix allowed (e.g. "24h", "7d", "1d12h"); default "24h"
 	Events    []string `toml:"events"`     // default PRIVMSG, NOTICE, TOPIC, KICK
 	MaxTokens int      `toml:"max_tokens"` // default 60000
+	// From/To are the query_channel_logs RANGE-MODE TOOL ARGUMENTS, never
+	// config fields: a static range in [name.log] would be a mistake (config
+	// windows are relative) — validateLogQuerySpec rejects them at load.
+	// Format "2006-01-02 15:04" (logRangeLayout), server-local; From is
+	// inclusive, To inclusive and empty = "now". Range mode overrides the
+	// Window; window and from/to are mutually exclusive (the tool handler
+	// enforces, queryBounds resolves).
+	From string `toml:"from"` // tool argument, not config — date-time, e.g. "2026-10-06 18:00"
+	To   string `toml:"to"`   // tool argument, not config — date-time; empty = now
 }
 
 const (
@@ -66,6 +75,52 @@ func (s LogQuerySpec) windowDuration() (time.Duration, error) {
 		return 0, fmt.Errorf("invalid window duration %q (expected e.g. \"24h\", \"7d\", \"1d12h\")", s.Window)
 	}
 	return d, nil
+}
+
+// logRangeLayout is the range-mode (tool from/to arguments) date-time
+// layout, server-local — the clock the transcript itself renders.
+const logRangeLayout = "2006-01-02 15:04"
+
+// rangeBounds resolves the range-mode tool arguments into inclusive query
+// bounds. To empty → now. Errors are self-correcting tool-result material:
+// to without from, unparseable formats (message carries the layout), from
+// after to. Both empty = window mode (zero bounds, no error).
+func (s LogQuerySpec) rangeBounds(now time.Time) (time.Time, time.Time, error) {
+	if s.From == "" && s.To == "" {
+		return time.Time{}, time.Time{}, nil
+	}
+	if s.From == "" {
+		return time.Time{}, time.Time{}, fmt.Errorf("range query needs \"from\" (got only \"to\" %q)", s.To)
+	}
+	from, err := time.ParseInLocation(logRangeLayout, s.From, time.Local)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("invalid \"from\" %q (expected date-time like \"2006-01-02 15:04\")", s.From)
+	}
+	to := now
+	if s.To != "" {
+		to, err = time.ParseInLocation(logRangeLayout, s.To, time.Local)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("invalid \"to\" %q (expected date-time like \"2006-01-02 15:04\")", s.To)
+		}
+	}
+	if from.After(to) {
+		return time.Time{}, time.Time{}, fmt.Errorf("\"from\" %s is after \"to\" %s", s.From, s.To)
+	}
+	return from, to, nil
+}
+
+// queryBounds resolves the retrieval bounds for one query: range mode
+// (From/To tool arguments — To empty means now) when set, else the relative
+// Window (defaulted). Returns inclusive [from, to].
+func (s LogQuerySpec) queryBounds(now time.Time) (time.Time, time.Time, error) {
+	if s.From != "" || s.To != "" {
+		return s.rangeBounds(now)
+	}
+	window, err := s.windowDuration()
+	if err != nil {
+		return time.Time{}, time.Time{}, err
+	}
+	return now.Add(-window), now, nil
 }
 
 // renderLogLine renders one irc_logs row as a token-cheap transcript line.
@@ -302,15 +357,17 @@ func fetchChannelLog(spec LogQuerySpec, network, channelRaw, channelNorm, model 
 // normalize-at-lookup rule).
 func fetchChannelLogFrom(dir, rotation string, spec LogQuerySpec, network, channelRaw, channelNorm, model string, now time.Time) (*LogWindowResult, error) {
 	applyLogQueryDefaults(&spec)
-	window, err := spec.windowDuration()
+	// Range mode (explicit from/to tool arguments — to defaults to now)
+	// overrides the relative window; the SQL bounds, period walk, budget,
+	// and rendering below are range-agnostic.
+	from, to, err := spec.queryBounds(now)
 	if err != nil {
 		return nil, err
 	}
-	from := now.Add(-window)
 
 	var rows []ircLog
 	var files []string
-	for _, key := range logPeriodKeys(rotation, from, now) {
+	for _, key := range logPeriodKeys(rotation, from, to) {
 		path := filepath.Join(dir, key+".db")
 		if _, err := os.Stat(path); err != nil {
 			if os.IsNotExist(err) {
@@ -325,7 +382,7 @@ func fetchChannelLogFrom(dir, rotation string, spec LogQuerySpec, network, chann
 		var batch []ircLog
 		err = db.
 			Where("network = ? AND channel IN ? AND command IN ? AND created_at >= ? AND created_at <= ?",
-				network, []string{channelRaw, channelNorm}, spec.Events, from, now).
+				network, []string{channelRaw, channelNorm}, spec.Events, from, to).
 			Order("created_at asc, id asc").
 			Find(&batch).Error
 		closeLogDB(db)

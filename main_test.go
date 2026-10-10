@@ -1,12 +1,31 @@
 package main
 
 import (
+	"bytes"
 	"testing"
+	"text/template"
 
 	"github.com/lrstanley/girc"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestBuildSystemPromptDataNow pins the {{.Now}} template var: weekday +
+// date + clock, server-local, embedding today's date — the grounding the
+// model uses to resolve relative date/time language ("yesterday", "last
+// Tuesday evening") into query_channel_logs from/to ranges.
+func TestBuildSystemPromptDataNow(t *testing.T) {
+	data := buildSystemPromptData(Network{Name: "testnet"}, nil, "#chan", "shrew")
+	assert.NotEmpty(t, data.Now)
+	assert.Contains(t, data.Now, data.Date, "Now embeds today's date")
+	assert.Regexp(t, `\w+day 20\d\d-\d\d-\d\d \d\d:\d\d`, data.Now,
+		"weekday + date + clock, e.g. \"Monday 2006-01-02 15:04\"")
+
+	tmpl := template.Must(template.New("t").Parse("It is {{.Now}}."))
+	var buf bytes.Buffer
+	require.NoError(t, tmpl.Execute(&buf, data))
+	assert.Contains(t, buf.String(), data.Date)
+}
 
 func TestAccountFromEvent(t *testing.T) {
 	client := girc.New(girc.Config{Server: "localhost", Port: 6667, Nick: "testbot"})

@@ -378,6 +378,12 @@ type SystemPromptData struct {
 	Network   string
 	ChanNicks string
 	Date      string
+	// Now is the current server-local time, weekday + date + clock
+	// (e.g. "Monday 2006-01-02 15:04") — the grounding models use to
+	// resolve relative date/time language ("yesterday", "last Tuesday
+	// evening", "since this morning") into concrete times, e.g. the
+	// query_channel_logs from/to range arguments.
+	Now string
 	// AsyncResultRole is the wire role background-job results will be
 	// delivered under (guidance Knob 1: "system" default, "developer",
 	// "user") — lets system templates tell the model the truth about
@@ -392,7 +398,7 @@ type SystemPromptData struct {
 }
 
 func validateTemplate(tmpl *template.Template) error {
-	dummy := SystemPromptData{Nick: "dummy", BotNick: "dummy", Channel: "dummy", Network: "dummy", ChanNicks: `["dummy1","dummy2"]`, Date: "2025-01-01", AsyncResultRole: RoleSystem, SessionID: 42, Vars: map[string]string{"example": "test"}}
+	dummy := SystemPromptData{Nick: "dummy", BotNick: "dummy", Channel: "dummy", Network: "dummy", ChanNicks: `["dummy1","dummy2"]`, Date: "2025-01-01", Now: "Wednesday 2025-01-01 12:00", AsyncResultRole: RoleSystem, SessionID: 42, Vars: map[string]string{"example": "test"}}
 	var buf strings.Builder
 	return tmpl.Execute(&buf, dummy)
 }
@@ -1063,6 +1069,12 @@ func validateCommands(commands *Commands, config *Config) error {
 // d suffix — e.g. "-5h", "12x", "0h") is an error.
 func validateLogQuerySpec(spec *LogQuerySpec, name string) error {
 	applyLogQueryDefaults(spec)
+	// from/to are query_channel_logs TOOL ARGUMENTS (range mode), never
+	// config fields — a static range in [name.log] would be a mistake
+	// (config windows are relative). Loud rejection beats silent ignore.
+	if spec.From != "" || spec.To != "" {
+		return fmt.Errorf("commands.generators.%s log from/to are tool arguments (range mode), not config fields — config windows are relative (use window)", name)
+	}
 	if _, err := spec.windowDuration(); err != nil {
 		return fmt.Errorf("commands.generators.%s log %w", name, err)
 	}

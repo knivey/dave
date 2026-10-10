@@ -250,7 +250,10 @@ func TestGetToolsEphemeralOffersLogTool(t *testing.T) {
 	tools := cr.getTools()
 	require.Len(t, tools, 1, "no MCP servers configured → only the log tool")
 	assert.Equal(t, queryChannelLogsToolName, tools[0].Function.Name)
-	assert.Contains(t, tools[0].Function.Description, `Default: 24h.`)
+	// The configured default window AND the current time are embedded in
+	// the per-run description (the range-mode grounding).
+	assert.Contains(t, tools[0].Function.Description, `default 24h)`)
+	assert.Regexp(t, `The current time is \w+day 20\d\d-\d\d-\d\d \d\d:\d\d`, tools[0].Function.Description)
 	// FunctionDefinition.Parameters is `any` — assert the map shape, then
 	// the required list (brief's verbatim line indexed `any` directly,
 	// which does not compile).
@@ -458,6 +461,99 @@ func TestHandleGeneratorLogQueryDisabled(t *testing.T) {
 	cr.cfg.DisabledBuiltinTools = []string{queryChannelLogsToolName}
 	turn := handleLogQueryForTest(t, cr, `{}`)
 	assert.Contains(t, lastToolResultText(t, turn), "is disabled for this command")
+}
+
+func TestHandleGeneratorLogQueryRange(t *testing.T) {
+	setupNoticesDefaults(t)
+	orig := fetchChannelLogFn
+	var gotSpec LogQuerySpec
+	fetchChannelLogFn = func(spec LogQuerySpec, network, channelRaw, channelNorm, model string, now time.Time) (*LogWindowResult, error) {
+		gotSpec = spec
+		return &LogWindowResult{
+			Lines:  []string{"[18:00] <a> evening"},
+			Tokens: 4, TotalLines: 1,
+			FirstKept: time.Date(2026, 10, 6, 18, 0, 0, 0, time.Local),
+			LastKept:  time.Date(2026, 10, 6, 23, 59, 0, 0, time.Local),
+		}, nil
+	}
+	t.Cleanup(func() { fetchChannelLogFn = orig })
+
+	cr := newGeneratorToolTestRunner(true, &generatorLogQuery{
+		spec:       LogQuerySpec{Window: "24h", MaxTokens: 60000, Events: defaultLogEvents},
+		channelRaw: "#St", channel: "#st", name: "summary",
+	})
+	turn := handleLogQueryForTest(t, cr, `{"from":"2026-10-06 18:00","to":"2026-10-06 23:59"}`)
+
+	assert.Equal(t, "2026-10-06 18:00", gotSpec.From, "from rides to the fetch")
+	assert.Equal(t, "2026-10-06 23:59", gotSpec.To, "to rides to the fetch")
+	result := lastToolResultText(t, turn)
+	assert.Contains(t, result,
+		"Channel activity for #st on testnet, from 2026-10-06 18:00 to 2026-10-06 23:59 (1 lines, 4 tokens, covering 18:00 to 23:59):")
+	assert.Contains(t, result, "[18:00] <a> evening")
+}
+
+func TestHandleGeneratorLogQueryRangeToDefaultsNow(t *testing.T) {
+	setupNoticesDefaults(t)
+	orig := fetchChannelLogFn
+	var gotSpec LogQuerySpec
+	fetchChannelLogFn = func(spec LogQuerySpec, network, channelRaw, channelNorm, model string, now time.Time) (*LogWindowResult, error) {
+		gotSpec = spec
+		return &LogWindowResult{Lines: []string{"x"}, Tokens: 1, TotalLines: 1}, nil
+	}
+	t.Cleanup(func() { fetchChannelLogFn = orig })
+
+	cr := newGeneratorToolTestRunner(true, &generatorLogQuery{
+		spec:       LogQuerySpec{Window: "24h", MaxTokens: 60000, Events: defaultLogEvents},
+		channelRaw: "#St", channel: "#st", name: "summary",
+	})
+	turn := handleLogQueryForTest(t, cr, `{"from":"2026-10-06 18:00"}`)
+
+	assert.Equal(t, "2026-10-06 18:00", gotSpec.From)
+	assert.Empty(t, gotSpec.To, "omitted to stays empty — the fetch defaults it to now")
+	// The header shows the RESOLVED range; the to value is the live clock, so
+	// pin the from side and the wording, not the exact minute.
+	assert.Contains(t, lastToolResultText(t, turn), "from 2026-10-06 18:00 to 2")
+}
+
+func TestHandleGeneratorLogQueryWindowAndRangeError(t *testing.T) {
+	setupNoticesDefaults(t)
+	orig := fetchChannelLogFn
+	fetchChannelLogFn = func(spec LogQuerySpec, network, channelRaw, channelNorm, model string, now time.Time) (*LogWindowResult, error) {
+		t.Fatal("fetch must not run when window and from/to are both given")
+		return nil, nil
+	}
+	t.Cleanup(func() { fetchChannelLogFn = orig })
+
+	cr := newGeneratorToolTestRunner(true, &generatorLogQuery{
+		spec:       LogQuerySpec{Window: "24h", MaxTokens: 60000, Events: defaultLogEvents},
+		channelRaw: "#St", channel: "#st", name: "summary",
+	})
+	turn := handleLogQueryForTest(t, cr, `{"window":"12h","from":"2026-10-06 18:00","to":"2026-10-06 23:59"}`)
+	assert.Contains(t, lastToolResultText(t, turn), "either window or from/to")
+}
+
+func TestHandleGeneratorLogQueryRangeValidation(t *testing.T) {
+	setupNoticesDefaults(t)
+	orig := fetchChannelLogFn
+	fetchChannelLogFn = func(spec LogQuerySpec, network, channelRaw, channelNorm, model string, now time.Time) (*LogWindowResult, error) {
+		t.Fatal("fetch must not run for invalid range args")
+		return nil, nil
+	}
+	t.Cleanup(func() { fetchChannelLogFn = orig })
+
+	cr := newGeneratorToolTestRunner(true, &generatorLogQuery{
+		spec:       LogQuerySpec{Window: "24h", MaxTokens: 60000, Events: defaultLogEvents},
+		channelRaw: "#St", channel: "#st", name: "summary",
+	})
+
+	turn := handleLogQueryForTest(t, cr, `{"to":"2026-10-06 23:59"}`)
+	assert.Contains(t, lastToolResultText(t, turn), `"from"`)
+
+	turn = handleLogQueryForTest(t, cr, `{"from":"2026-10-06"}`)
+	assert.Contains(t, lastToolResultText(t, turn), "2006-01-02 15:04")
+
+	turn = handleLogQueryForTest(t, cr, `{"from":"2026-10-07 18:00","to":"2026-10-06 23:59"}`)
+	assert.Contains(t, lastToolResultText(t, turn), "after")
 }
 
 // TestHandleGeneratorLogQueryFetchError pins the generic fetch-failure

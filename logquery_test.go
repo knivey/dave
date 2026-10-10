@@ -205,6 +205,86 @@ func TestFetchChannelLogInvalidWindow(t *testing.T) {
 	assert.Contains(t, err.Error(), "bogus")
 }
 
+// TestRangeBounds pins the range-mode (tool from/to args) resolution: the
+// "2006-01-02 15:04" server-local layout, to-defaults-to-now, and the three
+// self-correcting errors.
+func TestRangeBounds(t *testing.T) {
+	now := time.Date(2026, 10, 12, 14, 0, 0, 0, time.Local)
+
+	t.Run("from and to parse server-local", func(t *testing.T) {
+		spec := LogQuerySpec{From: "2026-10-06 18:00", To: "2026-10-06 23:59"}
+		from, to, err := spec.rangeBounds(now)
+		require.NoError(t, err)
+		assert.True(t, from.Equal(time.Date(2026, 10, 6, 18, 0, 0, 0, time.Local)), "got %v", from)
+		assert.True(t, to.Equal(time.Date(2026, 10, 6, 23, 59, 0, 0, time.Local)), "got %v", to)
+	})
+
+	t.Run("to defaults to now", func(t *testing.T) {
+		_, to, err := LogQuerySpec{From: "2026-10-06 18:00"}.rangeBounds(now)
+		require.NoError(t, err)
+		assert.True(t, to.Equal(now), "got %v", to)
+	})
+
+	t.Run("to without from errors", func(t *testing.T) {
+		_, _, err := LogQuerySpec{To: "2026-10-06 23:59"}.rangeBounds(now)
+		assert.ErrorContains(t, err, `"from"`)
+	})
+
+	t.Run("invalid formats error with the layout in the message", func(t *testing.T) {
+		_, _, err := LogQuerySpec{From: "2026-10-06"}.rangeBounds(now)
+		assert.ErrorContains(t, err, "2006-01-02 15:04")
+		_, _, err = LogQuerySpec{From: "2026-10-06 18:00", To: "10/06 11pm"}.rangeBounds(now)
+		assert.ErrorContains(t, err, "2006-01-02 15:04")
+	})
+
+	t.Run("from after to errors", func(t *testing.T) {
+		_, _, err := LogQuerySpec{From: "2026-10-07 18:00", To: "2026-10-06 23:59"}.rangeBounds(now)
+		assert.ErrorContains(t, err, "after")
+	})
+
+	t.Run("empty is window mode (no bounds, no error)", func(t *testing.T) {
+		from, to, err := LogQuerySpec{}.rangeBounds(now)
+		require.NoError(t, err)
+		assert.True(t, from.IsZero() && to.IsZero())
+	})
+}
+
+// TestFetchChannelLogFromRange pins range mode end to end: inclusive bounds
+// filter rows, and an omitted to defaults to now.
+func TestFetchChannelLogFromRange(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 10, 12, 14, 0, 0, 0, time.Local)
+	rows := []ircLog{
+		mkRow("PRIVMSG", "before", "#chan", "too early", now.AddDate(0, 0, -6)),
+		mkRow("PRIVMSG", "start", "#chan", "at from (inclusive)", time.Date(2026, 10, 6, 18, 0, 0, 0, time.Local)),
+		mkRow("PRIVMSG", "mid", "#chan", "inside", time.Date(2026, 10, 6, 20, 0, 0, 0, time.Local)),
+		mkRow("PRIVMSG", "end", "#chan", "at to (inclusive)", time.Date(2026, 10, 6, 23, 59, 0, 0, time.Local)),
+		mkRow("PRIVMSG", "after", "#chan", "today", now.Add(-time.Hour)),
+	}
+	writeLogRows(t, dir, "2026-10", rows)
+
+	res, err := fetchChannelLogFrom(dir, "monthly",
+		LogQuerySpec{From: "2026-10-06 18:00", To: "2026-10-06 23:59"},
+		"testnet", "#chan", "#chan", "qwen3", now)
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"--- 2026-10-06 ---",
+		"[18:00] <start> at from (inclusive)",
+		"[20:00] <mid> inside",
+		"[23:59] <end> at to (inclusive)",
+	}, res.Lines)
+
+	// to omitted → defaults to now: the today row comes back in.
+	resOpen, err := fetchChannelLogFrom(dir, "monthly",
+		LogQuerySpec{From: "2026-10-12 10:00"},
+		"testnet", "#chan", "#chan", "qwen3", now)
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"--- 2026-10-12 ---",
+		"[13:00] <after> today",
+	}, resOpen.Lines)
+}
+
 func writeLogRows(t *testing.T, dir, key string, rows []ircLog) {
 	t.Helper()
 	lw := &LogWriter{cfg: LoggingConfig{Dir: dir}, log: newTestLogger()}

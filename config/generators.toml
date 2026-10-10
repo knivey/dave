@@ -49,7 +49,7 @@
 #   responses_api        (bool, default: false)      Use POST /v1/responses instead of Chat Completions (response ids are never persisted for generators — only the endpoint shape changes)
 #   injection_role       (string, default: "system") Guidance Knob 1: wire role for injected guidance payload rows ("system" | "developer" | "user"); on generator turns this is the empty-response correction. "developer" maps to system server-side on llama.cpp; "user" is for models whose templates cannot render mid-chain system at all. Cascade: command > service > "system".
 #   needsusersuffix      (*bool, default: auto)       Guidance Knob 2: append a short user message after injected guidance when it would be the last message of the request (empty-response corrections — the only guidance site on generator turns). Auto (unset) appends it for anthropic/ models; true forces it, false suppresses it. Cascade: command > service > auto. Fix for: "This model does not support assistant message prefill. The conversation must end with a user message."
-#   api_user             (string, cascades from service)  Go template for the end-user identifier field. Variables: {{.Nick}}, {{.BotNick}}, {{.Channel}}, {{.Network}}, {{.Date}}. Empty = not sent.
+#   api_user             (string, cascades from service)  Go template for the end-user identifier field. Variables: {{.Nick}}, {{.BotNick}}, {{.Channel}}, {{.Network}}, {{.Date}}, {{.Now}} (current time, e.g. "Monday 2006-01-02 15:04"). Empty = not sent.
 #   retry_on_empty       (int, default: 1)           Number of retries when API returns empty response (0 = disabled); retry corrections are injected per injection_role/needsusersuffix and never persisted
 #   prompt               (string)                    Default instruction when the caller gives no focus text.
 #                                               Fallback chain: focus text > prompt > built-in default.
@@ -60,7 +60,7 @@
 # call the tool multiple times with different windows; caps are host-enforced.
 # (A [section.log] also makes the command's args optional — bare "^name"
 # dispatches too; the model maps any time range in the request to the tool's
-# window argument. Without it, args are required.)
+# window or from/to arguments. Without it, args are required.)
 #   [section.log]
 #   window               (duration string, default: "24h") The tool's DEFAULT window — how far back the
 #                                               transcript reaches when the model omits the window
@@ -77,6 +77,17 @@
 #                                               prepended (instruct the model to disclose it). Every
 #                                               call gets the full budget; multi-call is bounded only
 #                                               by the 20-iteration tool-loop cap.
+#
+# query_channel_logs range mode (TOOL arguments — from/to are NOT config
+# fields and are rejected at load inside [section.log]; config windows are
+# relative): besides the relative window argument, the model can pass
+#   from                 (tool arg) "YYYY-MM-DD HH:MM" server-local, inclusive range start
+#   to                   (tool arg) same format, inclusive range end; omit for "now"
+# so day/date requests ("yesterday", "last Tuesday evening", "the 3rd")
+# resolve to explicit ranges. window and from/to are mutually exclusive
+# (both → error tool result); the current time (weekday + date + clock) is
+# embedded in the tool description and available as {{.Now}} in system
+# templates for grounding the resolution.
 #
 # Both generator tools (query_channel_logs, respond) are hidden by default —
 # the root hidden_tools default is ["register_background_job",
@@ -123,13 +134,16 @@ respond_tool = true
 prompt = "Summarize recent channel activity."
 system = """\
 You are {{.BotNick}}, summarizing recent activity in {{.Channel}} on {{.Network}}.
-First call query_channel_logs to retrieve the channel transcript — map any
-time range in the request (e.g. "7d", "since yesterday", "the last 12 hours")
-to the window argument, defaulting to the tool's default when none is given.
-Then summarize: cover the main topics, notable events, and who participated;
-be concise but specific. If the result reports truncated or dropped lines
-(header or marker), tell the user that coverage starts mid-window and how
-much was dropped. Deliver your complete summary with the
+The current time is {{.Now}}. First call query_channel_logs to retrieve the
+channel transcript — resolve whatever time range the request names into the
+tool's arguments, computing dates from the current time: a recent span
+("7d", "the last 12 hours") maps to the window argument; a specific day,
+date, or range ("yesterday", "last Tuesday evening", "the 3rd", "since this
+morning") maps to explicit from/to date-times; omit both for the tool's
+default window. Then summarize: cover the main topics, notable events, and
+who participated; be concise but specific. If the result reports truncated
+or dropped lines (header or marker), tell the user that coverage starts
+mid-range and how much was dropped. Deliver your complete summary with the
 respond tool.\
 """
 [summary.log]

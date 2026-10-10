@@ -31,24 +31,36 @@ type generatorLogQuery struct {
 }
 
 // generatorLogToolDef builds the per-run tool definition. The default
-// window is embedded in the description so the model knows what it gets
-// when it omits the argument. DESIGN NOTE: this is NOT a static
-// builtinTools entry — the definition is per-run (default window) and
-// the handler needs the runner's generator context.
+// window AND the current time are embedded in the description so the
+// model knows what it gets when it omits the window and can resolve
+// relative date/time language ("yesterday", "last Tuesday evening") into
+// concrete from/to times without guessing the clock. DESIGN NOTE: this
+// is NOT a static builtinTools entry — the definition is per-run
+// (default window, current time) and the handler needs the runner's
+// generator context.
 func generatorLogToolDef(lq *generatorLogQuery) Tool {
+	now := time.Now()
 	return Tool{
 		Type: "function",
 		Function: &FunctionDefinition{
 			Name: queryChannelLogsToolName,
 			Description: fmt.Sprintf(
-				"Retrieve the transcript of this IRC channel's recent activity. Returns timestamped lines (newest last) with a header giving the covered time range and line/token counts; a keep-newest token budget is applied and any truncation is disclosed in the result. Call this before summarizing or referencing channel history. window: how far back to look — a duration string of <number><unit> groups with units s, m, h, d (e.g. \"90m\", \"12h\", \"7d\", \"1d12h\"). Default: %s.",
-				lq.spec.Window),
+				"Retrieve the transcript of this IRC channel's activity. Returns timestamped lines (newest last) with a header giving the covered time range and line/token counts; a keep-newest token budget is applied and any truncation is disclosed in the result. Call this before summarizing or referencing channel history. The current time is %s. Retrieve a recent span with window (a duration string of <number><unit> groups with units s, m, h, d, e.g. \"90m\", \"12h\", \"7d\"; default %s), or retrieve an explicit range with from and to (date-times \"2006-01-02 15:04\", server-local, inclusive; from is required, to defaults to now; provide either window or from/to, not both). Resolve any time range the user names — \"yesterday\", \"last Tuesday evening\", \"since this morning\", \"the 3rd\" — into whichever form fits, computing the dates from the current time.",
+				now.Format("Monday 2006-01-02 15:04"), lq.spec.Window),
 			Parameters: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"window": map[string]any{
 						"type":        "string",
 						"description": "How far back to retrieve (e.g. \"12h\", \"7d\"). Defaults to the configured window.",
+					},
+					"from": map[string]any{
+						"type":        "string",
+						"description": "Range start, inclusive (date-time \"2006-01-02 15:04\", e.g. \"2026-10-06 18:00\"). Resolve day names from the current time in the tool description.",
+					},
+					"to": map[string]any{
+						"type":        "string",
+						"description": "Range end, inclusive (same date-time format). Omit for \"now\".",
 					},
 				},
 				"required": []string{},
@@ -98,9 +110,18 @@ func handleGeneratorLogQuery(cr *chatRunner, turn *turnContext, call ToolCall) {
 	}
 	var args struct {
 		Window string `json:"window"`
+		From   string `json:"from"`
+		To     string `json:"to"`
 	}
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
 		turn.Add(toolResultMsg(call.ID, "error: failed to parse tool arguments: "+err.Error()))
+		return
+	}
+	if args.Window != "" && (args.From != "" || args.To != "") {
+		// Genuinely ambiguous: a relative and an absolute range at once.
+		// Error (self-correcting) rather than silent precedence — a
+		// wrong-range summary is worse than one retry.
+		turn.Add(toolResultMsg(call.ID, "error: provide either window or from/to, not both"))
 		return
 	}
 	spec := cr.logQuery.spec
@@ -109,11 +130,17 @@ func handleGeneratorLogQuery(cr *chatRunner, turn *turnContext, call ToolCall) {
 	applyLogQueryDefaults(&spec)
 	if args.Window != "" {
 		// The token IS the duration string (same grammar as the config
-		// field); windowDuration below rejects anything else with a
+		// field); queryBounds below rejects anything else with a
 		// clear message.
 		spec.Window = args.Window
 	}
-	window, werr := spec.windowDuration()
+	spec.From, spec.To = args.From, args.To
+	// Resolve the requested bounds once — the header and no-activity
+	// wording below use them, and fetchChannelLogFrom re-derives
+	// identically from the same spec (sub-second clock drift between
+	// the two reads cannot cross a minute boundary in practice; display
+	// is minute-precision).
+	fromT, toT, werr := spec.queryBounds(time.Now())
 	if werr != nil {
 		turn.Add(toolResultMsg(call.ID, "error: "+werr.Error()))
 		return
@@ -141,11 +168,18 @@ func handleGeneratorLogQuery(cr *chatRunner, turn *turnContext, call ToolCall) {
 		coverage = ", covering " + coverageRange
 	}
 	cr.logger.Info("generator log query",
-		"trigger", cr.logQuery.name, "window", spec.Window, "coverage", coverageRange,
+		"trigger", cr.logQuery.name, "window", spec.Window, "from", spec.From, "to", spec.To,
+		"coverage", coverageRange,
 		"files", len(lw.Files), "lines", lw.TotalLines, "dropped", lw.DroppedLines,
 		"tokens", lw.Tokens, "budget", spec.MaxTokens, "truncated", lw.Truncated)
 	if lw.TotalLines == 0 {
-		turn.Add(toolResultMsg(call.ID, fmt.Sprintf("No channel activity found in the last %s.", formatDuration(window))))
+		if spec.From != "" || spec.To != "" {
+			turn.Add(toolResultMsg(call.ID, fmt.Sprintf("No channel activity found from %s to %s.",
+				fromT.Format(logRangeLayout), toT.Format(logRangeLayout))))
+		} else {
+			turn.Add(toolResultMsg(call.ID, fmt.Sprintf("No channel activity found in the last %s.",
+				formatDuration(toT.Sub(fromT)))))
+		}
 		return
 	}
 	var b strings.Builder
@@ -159,8 +193,14 @@ func handleGeneratorLogQuery(cr *chatRunner, turn *turnContext, call ToolCall) {
 		counts = fmt.Sprintf("%d of %d lines (%d dropped to fit the %d-token budget), %d tokens",
 			lw.TotalLines-lw.DroppedLines, lw.TotalLines, lw.DroppedLines, spec.MaxTokens, lw.Tokens)
 	}
-	fmt.Fprintf(&b, "Channel activity for %s on %s, last %s (%s%s):\n",
-		cr.logQuery.channel, cr.network.Name, formatDuration(window), counts, coverage)
+	// Range mode shows the RESOLVED range (to defaulted to now); window
+	// mode keeps the historical "last <duration>" shape.
+	span := "last " + formatDuration(toT.Sub(fromT))
+	if spec.From != "" || spec.To != "" {
+		span = fmt.Sprintf("from %s to %s", fromT.Format(logRangeLayout), toT.Format(logRangeLayout))
+	}
+	fmt.Fprintf(&b, "Channel activity for %s on %s, %s (%s%s):\n",
+		cr.logQuery.channel, cr.network.Name, span, counts, coverage)
 	b.WriteString(strings.Join(lw.Lines, "\n"))
 	turn.Add(toolResultMsg(call.ID, b.String()))
 }

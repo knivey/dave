@@ -23,6 +23,8 @@
 #                                               When false (or the model finishes with plain text),
 #                                               the final no-tool-call reply is sent automatically.
 #                                               Intermediate model text is never sent to IRC either way.
+#                                               The query_channel_logs and respond tools are offered
+#                                               ONLY on generator turns — chat commands never see them.
 #   maxtokens            (int, cascades from service)     Max tokens per response (legacy, prefer maxcompletiontokens)
 #   maxcompletiontokens  (int, cascades from service)     Max completion tokens per response
 #   temperature          (float, cascades from service)   Sampling temperature

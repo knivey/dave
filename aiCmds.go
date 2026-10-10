@@ -248,6 +248,12 @@ type chatRunner struct {
 	// checks it after executeToolCalls and ends the turn without
 	// another API round-trip.
 	responded bool
+	// deliveryPending is per-turn state (a chatRunner lives one command
+	// dispatch): set when register_background_job succeeds in
+	// executeToolCalls, read by checkEmptyRetry — an empty final response
+	// is acceptable while a delivery is pending because the async
+	// delivery guarantees a future user-visible interaction.
+	deliveryPending bool
 	// apiLogSessionID overrides the id the apiLogger logs this runner's
 	// traffic under. Zero (the default) means "log under sessionID" —
 	// normal turns never touch it. Ephemeral (generator) runs set it to
@@ -629,6 +635,19 @@ func (cr *chatRunner) addEmptyResponseCorrection(turn *turnContext, parts reason
 func (cr *chatRunner) checkEmptyRetry(content string, parts reasoningParts, emptyRetries, maxEmptyRetries int) (bool, string) {
 	if content != "" {
 		return false, content
+	}
+	if cr.deliveryPending {
+		// DESIGN NOTE: a registered background job guarantees a future
+		// user-visible interaction (the async delivery is the answer
+		// vehicle) — an empty final here is early, not dead. Accept it:
+		// no correction injection (production session 1898 showed the
+		// "Respond again now" correction producing verbatim parroting,
+		// and the persisted correction row keeps teaching it), no
+		// exhaustion notice, no reasoning dump. Registerless empty turns
+		// keep the full correction machinery — for them nothing will
+		// ever arrive.
+		cr.logger.Info("empty response accepted: background job delivery pending")
+		return false, "..."
 	}
 	if emptyRetries < maxEmptyRetries {
 		cr.logger.Warn("empty response from API, retrying", "attempt", emptyRetries+1, "max", maxEmptyRetries)
@@ -1399,6 +1418,7 @@ func (cr *chatRunner) executeToolCalls(turn *turnContext, toolCalls []ToolCall) 
 			cr.logger.Info("builtin tool call", "tool", tc.Function.Name)
 			if entry.handler(cr, turn, tc) {
 				registeredJob = true
+				cr.deliveryPending = true
 			}
 			continue
 		}
@@ -2316,10 +2336,12 @@ disabledLoop:
 				// Tool-delivery mode (spec addendum): state the delivery
 				// fact passively — meta-instructions ("respond to it as
 				// you would any tool result") invite tool-call reasoning.
-				jobDef.Description = "Register a background job for monitoring. When an async tool (e.g. generate_image_async) returns a job_id, call this to have the system monitor the job. The result will be delivered as a tool response when it completes. Do not poll or wait for results. Continue the conversation normally."
+				// The underway instruction below is behavioral (act:
+				// tell the user), not meta-reasoning about the response.
+				jobDef.Description = "Register a background job for monitoring. When an async tool (e.g. generate_image_async) returns a job_id, call this to have the system monitor the job. The result will be delivered as a tool response when it completes. After calling this, always send the user a short message telling them the task is underway. Do not poll for status — the result arrives automatically."
 			} else {
 				jobDef.Description = fmt.Sprintf(
-					"Register a background job for monitoring. When an async tool (e.g. generate_image_async) returns a job_id, call this to have the system monitor the job. You will be notified with the result in a %s message when it completes. Do not poll or wait for results. Continue the conversation normally.",
+					"Register a background job for monitoring. When an async tool (e.g. generate_image_async) returns a job_id, call this to have the system monitor the job. You will be notified with the result in a %s message when it completes. After calling this, always send the user a short message telling them the task is underway. Do not poll for status — the result arrives automatically.",
 					guidanceRole(cfg))
 			}
 			t.Function = &jobDef

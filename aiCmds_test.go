@@ -1377,6 +1377,23 @@ func TestGetBuiltinToolDefsBackgroundJobRoleDescription(t *testing.T) {
 	assert.Contains(t, def.Description, "delivered as a tool response")
 	assert.NotContains(t, def.Description, "in a system message")
 	assert.NotContains(t, def.Description, "as you would any tool result")
+
+	// Both delivery modes now carry the explicit underway instruction
+	// (production session 1898: the old "Continue the conversation
+	// normally" tail was read as "silence is fine" — the registered job
+	// needs a user-visible underway message) plus the no-poll clause;
+	// neither carries the old vague tail.
+	messageDef := find(getBuiltinToolDefs(AIConfig{}, nil))
+	require.NotNil(t, messageDef)
+	toolDef := find(getBuiltinToolDefs(AIConfig{AsyncResultDelivery: asyncDeliveryTool}, nil))
+	require.NotNil(t, toolDef)
+	for _, d := range []*FunctionDefinition{messageDef, toolDef} {
+		assert.Contains(t, d.Description, "always send the user a short message telling them the task is underway",
+			"the underway instruction is the model's contract, read fresh each turn")
+		assert.Contains(t, d.Description, "Do not poll for status")
+		assert.NotContains(t, d.Description, "Continue the conversation normally",
+			"the vague tail read as 'silence is fine' must be gone")
+	}
 }
 
 // TestToolDefsForConfig pins the cfg-level tool-assembly contract that
@@ -1692,6 +1709,93 @@ func TestCheckEmptyRetry(t *testing.T) {
 	}
 }
 
+// TestCheckEmptyRetryDeliveryPending pins the accepted-silent branch of
+// checkEmptyRetry: while a background-job delivery is pending
+// (register_background_job succeeded this turn), an empty final response is
+// EARLY, not dead — the async delivery is the answer vehicle — so the empty is
+// accepted with the "..." sentinel and none of the registerless correction
+// machinery fires: no retry, no exhaustion notice, no reasoning dump, no
+// turn rows. Production session 1898 showed the "Respond again now"
+// correction producing verbatim parroting on exactly this shape.
+func TestCheckEmptyRetryDeliveryPending(t *testing.T) {
+	setupNoticesDefaults(t)
+
+	tests := []struct {
+		name            string
+		deliveryPending bool
+		content         string
+		parts           reasoningParts
+		emptyRetries    int
+		maxEmptyRetries int
+		wantRetry       bool
+		wantContent     string
+	}{
+		{
+			name:            "delivery pending, empty content — accepted",
+			deliveryPending: true,
+			maxEmptyRetries: 3,
+			wantRetry:       false,
+			wantContent:     "...",
+		},
+		{
+			name:            "no delivery pending, empty content, retries remaining — correction machinery intact",
+			deliveryPending: false,
+			emptyRetries:    0,
+			maxEmptyRetries: 3,
+			wantRetry:       true,
+			wantContent:     "",
+		},
+		{
+			name:            "delivery pending, content present — gate never fires",
+			deliveryPending: true,
+			content:         "the task is underway",
+			maxEmptyRetries: 3,
+			wantRetry:       false,
+			wantContent:     "the task is underway",
+		},
+		{
+			name:            "delivery pending, empty, retries exhausted position — still accepted, gate precedes exhaustion",
+			deliveryPending: true,
+			parts:           reasoningParts{Content: "the stranded answer"},
+			emptyRetries:    3,
+			maxEmptyRetries: 3,
+			wantRetry:       false,
+			wantContent:     "...",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			outputCh := make(chan string, 8)
+			cr := &chatRunner{
+				logger:          logxi.New("test"),
+				ctx:             context.Background(),
+				outputCh:        outputCh,
+				network:         Network{Name: "testnet"},
+				channel:         "#test",
+				deliveryPending: tt.deliveryPending,
+			}
+			cr.logger.SetLevel(logxi.LevelAll)
+
+			turn := newTurnContext(0, []ChatMessage{{Role: RoleUser, Content: "make me an image"}})
+			rowsBefore := len(turn.Messages())
+
+			retry, content := cr.checkEmptyRetry(tt.content, tt.parts, tt.emptyRetries, tt.maxEmptyRetries)
+			assert.Equal(t, tt.wantRetry, retry)
+			assert.Equal(t, tt.wantContent, content)
+			assert.Len(t, turn.Messages(), rowsBefore,
+				"checkEmptyRetry must add no turn rows; a false retry return means the caller never injects the correction")
+
+			// No notice, no reasoning dump — including on the exhausted
+			// row, where the registerless path would have sent both, and
+			// on the reasoning-bearing row, where the reasoning would
+			// have been displayed.
+			assert.Empty(t, drainOutput(t, outputCh, 1, 50*time.Millisecond),
+				"no IRC output expected while a delivery is pending")
+		})
+	}
+}
+
 // newEmptyRetryTurnRunner builds a chatRunner against a stub chat-completions
 // server that replies with the given bodies in order (repeating the last one
 // when exhausted), recording every request body it received.
@@ -1898,6 +2002,81 @@ func TestRunTurnEmptyResponseExhaustedSummaryOnly(t *testing.T) {
 	assert.Equal(t, "...", last.Content)
 	assert.Empty(t, last.ReasoningContent, "no reasoning.text detail means no content captured")
 	assert.Equal(t, "the summarized answer", last.ReasoningSummary)
+}
+
+// TestRunTurnEmptyAcceptedWhenDeliveryPending verifies the production
+// session-1898 shape end to end on the non-streaming chat path: the model's
+// only act is a successful register_background_job, the follow-up response
+// comes back EMPTY (answer stranded in reasoning), and the turn accepts the
+// empty — the async delivery is the answer vehicle — instead of injecting
+// the correction that taught the model to parrot itself verbatim.
+func TestRunTurnEmptyAcceptedWhenDeliveryPending(t *testing.T) {
+	setupTestDB(t)
+	setupTestJobManager(t)
+	setupNoticesDefaults(t)
+
+	// register_background_job auto-detects its MCP server from the tool
+	// map; seed the fixture the way TestRegisterBackgroundJob_ServerNameAutoDetection
+	// does so handleRegisterBackgroundJob succeeds against "img-mcp-async"
+	// (an empty server is enough — the register itself needs no I/O, and
+	// the monitor goroutine fails fast on the unknown wait_for_job tool
+	// and is drained by setupTestJobManager's cleanup).
+	mcpServersMu.Lock()
+	origToolMap := mcpToolToServer
+	origServers := mcpServers
+	mcpToolToServer = map[string]string{
+		"enhance_and_generate_async": "img-mcp-async",
+	}
+	mcpServers = map[string]*MCPServer{"img-mcp-async": {}}
+	mcpServersMu.Unlock()
+	t.Cleanup(func() {
+		mcpServersMu.Lock()
+		mcpToolToServer = origToolMap
+		mcpServers = origServers
+		mcpServersMu.Unlock()
+	})
+
+	sid := createTestSession(t, "testnet", "#101", "shrew", "testcmd", "svc", "m")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "make me a picture"}))
+	messages, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+
+	var requests []string
+	outputCh := make(chan string, 8)
+	cr := newEmptyRetryTurnRunner(t, []string{
+		// attempt 1: the register tool call (empty content alongside it)
+		`{"id":"cmpl-1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"","tool_calls":[{"id":"call_reg","type":"function","function":{"name":"register_background_job","arguments":"{\"job_id\":\"j-pending\",\"tool_name\":\"enhance_and_generate_async\"}"}}]},"finish_reason":"tool_calls"}]}`,
+		// attempt 2 (tool-result continuation): EMPTY final, answer
+		// stranded in the reasoning field — accepted, no retry
+		`{"id":"cmpl-2","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning":"image job started, will deliver when done"},"finish_reason":"stop"}]}`,
+	}, &requests, outputCh)
+	verbose := false
+	cr.cfg.ToolVerbose = &verbose
+	cr.sessionID = sid
+
+	cr.runTurn(newTurnContext(sid, messages))
+
+	// The fake server saw the register iteration and the empty final —
+	// and NOTHING for the empty: no retry request.
+	require.Len(t, requests, 2, "empty final must not trigger a retry request while a delivery is pending, got %d requests", len(requests))
+	assert.NotContains(t, requests[1], "EMPTY response", "no correction may be injected while a delivery is pending")
+
+	// No correction row in the stored history — the registerless D7
+	// persistence would keep teaching the parrot pattern to later turns.
+	final, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	for _, msg := range final {
+		assert.NotContains(t, msg.Content, "Your previous response was rejected",
+			"no empty-response correction may be stored while a delivery is pending")
+	}
+	last := final[len(final)-1]
+	assert.Equal(t, RoleAssistant, last.Role)
+	assert.Equal(t, "...", last.Content, "the accepted empty stores the sentinel, never sent to IRC")
+
+	// Nothing reached IRC: no exhaustion notice, no reasoning dump (the
+	// register tool-call notice is silenced via ToolVerbose=false).
+	assert.Empty(t, drainOutput(t, outputCh, 1, 50*time.Millisecond),
+		"accepted empty must produce no IRC output")
 }
 
 // TestAddEmptyResponseCorrection pins the correction shape (guidance
@@ -2151,6 +2330,120 @@ func TestRunTurnStreamEmptyResponseExhausted(t *testing.T) {
 	last := final[len(final)-1]
 	assert.Equal(t, RoleAssistant, last.Role)
 	assert.Equal(t, "...", last.Content, "reasoning is not accepted as the reply; the sentinel stays")
+}
+
+// TestRunTurnStreamEmptyAcceptedWhenDeliveryPending mirrors
+// TestRunTurnEmptyAcceptedWhenDeliveryPending on the streaming chat path:
+// the model registers a background job, the follow-up stream is
+// reasoning-only (empty content), and the empty final is accepted — no
+// retry stream, no correction row, and crucially NO exhaustion notice or
+// reasoning dump (the registerless streaming path would show both).
+func TestRunTurnStreamEmptyAcceptedWhenDeliveryPending(t *testing.T) {
+	setupTestDB(t)
+	setupTestJobManager(t)
+	setupNoticesDefaults(t)
+
+	// Same fixture as TestRunTurnEmptyAcceptedWhenDeliveryPending: seed
+	// the tool map so register_background_job auto-detects
+	// "img-mcp-async" and the register succeeds; the monitor goroutine
+	// fails fast (unknown wait_for_job tool) and is drained by
+	// setupTestJobManager's cleanup.
+	mcpServersMu.Lock()
+	origToolMap := mcpToolToServer
+	origServers := mcpServers
+	mcpToolToServer = map[string]string{
+		"enhance_and_generate_async": "img-mcp-async",
+	}
+	mcpServers = map[string]*MCPServer{"img-mcp-async": {}}
+	mcpServersMu.Unlock()
+	t.Cleanup(func() {
+		mcpServersMu.Lock()
+		mcpToolToServer = origToolMap
+		mcpServers = origServers
+		mcpServersMu.Unlock()
+	})
+
+	sid := createTestSession(t, "testnet", "#101", "shrew", "testcmd", "svc", "m")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "make me a picture"}))
+	messages, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+
+	chunk := func(delta string, finish any) string {
+		return fmt.Sprintf(`data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":%s,"finish_reason":%s}]}`+"\n\n", delta, finish)
+	}
+	registerStream := chunk(`{"role":"assistant","content":"","tool_calls":[{"index":0,"id":"call_reg","type":"function","function":{"name":"register_background_job","arguments":"{\"job_id\":\"j-pending-s\",\"tool_name\":\"enhance_and_generate_async\"}"}}]}`, `null`) +
+		chunk(`{}`, `"tool_calls"`) + "data: [DONE]\n\n"
+	reasoningOnlyStream := chunk(`{"role":"assistant","reasoning_content":"image job started, will deliver when done"}`, `null`) +
+		chunk(`{}`, `"stop"`) + "data: [DONE]\n\n"
+
+	var requests []string
+	var mu sync.Mutex
+	seq := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		idx := seq
+		if idx > 1 {
+			idx = 1
+		}
+		seq++
+		requests = append(requests, string(body))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		if idx == 0 {
+			fmt.Fprint(w, registerStream)
+			return
+		}
+		fmt.Fprint(w, reasoningOnlyStream)
+	}))
+	defer server.Close()
+
+	transport := newDaveTransport(nil, nil)
+	client := openai.NewClient(
+		option.WithAPIKey("test-key"),
+		option.WithBaseURL(server.URL+"/v1"),
+		option.WithHTTPClient(&http.Client{Transport: transport}),
+	)
+	outputCh := make(chan string, 8)
+	logger := logxi.New("test")
+	logger.SetLevel(logxi.LevelAll)
+	verbose := false
+	cr := &chatRunner{
+		openaiClient: &client,
+		transport:    transport,
+		httpClient:   &http.Client{Transport: transport},
+		baseURL:      server.URL + "/v1",
+		apiKey:       "test-key",
+		cfg:          AIConfig{Model: "m", Timeout: 10 * time.Second, RetryOnEmpty: intPtr(1), Streaming: true, StreamTimeout: 5 * time.Second, ToolVerbose: &verbose},
+		network:      Network{Name: "testnet"},
+		channel:      "#101",
+		nick:         "shrew",
+		logger:       logger,
+		ctx:          context.Background(),
+		outputCh:     outputCh,
+	}
+	cr.sessionID = sid
+
+	cr.runTurn(newTurnContext(sid, messages))
+
+	mu.Lock()
+	require.Len(t, requests, 2, "empty final must not trigger a retry stream while a delivery is pending, got %d requests", len(requests))
+	assert.NotContains(t, requests[1], "EMPTY response", "no correction may be injected while a delivery is pending")
+	mu.Unlock()
+
+	// Nothing reached IRC: no exhaustion notice, no reasoning dump.
+	assert.Empty(t, drainOutput(t, outputCh, 1, 50*time.Millisecond),
+		"accepted empty must produce no IRC output")
+
+	final, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	for _, msg := range final {
+		assert.NotContains(t, msg.Content, "Your previous response was rejected",
+			"no empty-response correction may be stored while a delivery is pending")
+	}
+	last := final[len(final)-1]
+	assert.Equal(t, RoleAssistant, last.Role)
+	assert.Equal(t, "...", last.Content, "the accepted empty stores the sentinel, never sent to IRC")
 }
 
 // TestRunTurnStreamSplitReasoningCapture pins the streaming split capture:

@@ -2,7 +2,8 @@ package main
 
 // Reasoning history replay ("reasoningreplay") — attaches stored assistant
 // reasoning back onto the wire so thinking models keep their chain of thought
-// across tool loops and, on "always", across turns.
+// on tool-call rows — within the current turn's tool loop and across past
+// tool-call turns — with "always" extending to every reasoning row.
 //
 // Semantics are pinned to the gemma4 chat template contract (the prompt-
 // formatting model card's "Managing Thought Context Between Turns" rules,

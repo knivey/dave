@@ -39,6 +39,7 @@
 #   paralleltoolcalls    (bool, default: true)       Enable parallel MCP tool calls (cascades from service)
 #   reasoningeffort      (string)                    For o1/o3 models: "low", "medium", "high"
 #   reasoningsummary     (string)                    Responses API only: request reasoning summaries back. "auto", "concise", or "detailed". Empty = not requested (no summaries returned).
+#   reasoningreplay      (string, default: "tool_calls") Replay stored assistant reasoning back onto the wire: "off" = never (pre-replay behavior); "tool_calls" = only assistant rows with tool calls in the CURRENT turn (the agentic loop keeps its thought context; past turns are stripped, matching gemma4's thought-context rule); "always" = every assistant row with reasoning, historical turns included. Wire: reasoning_content on assistant messages (llama.cpp chat templates / DeepSeek native / OpenRouter reasoning alias). Responses API: reasoning items (summary-only — needs reasoningsummary to have captured anything; no-op on within-turn previous_response_id chains, which replay server-side). Cascade: command > service > "tool_calls".
 #   servicetier          (string)                    Processing tier: "auto", "default", "flex", "priority"
 #   verbosity            (string)                    Output token count for gpt-5: "low", "medium", "high"
 #   mcps                 (string array)              Opt-in MCP server names for tool access
@@ -119,6 +120,7 @@
 # hidden_mcp_tools = ["generate_image_async", "enhance_and_generate_async", "wait_for_job", "job_status", "list_jobs", "cancel_job"]
 # prompt = "Write a satirical article about the given topic."
 # system = "You are {{.BotNick}}, a tabloid hack for {{.Channel}} on {{.Network}}. Mine query_channel_logs for material; deliver the finished article with the respond tool."
+# reasoningreplay = "tool_calls"
 # [example.log]
 # window = "24h"
 # events = ["PRIVMSG", "NOTICE", "TOPIC", "KICK"]

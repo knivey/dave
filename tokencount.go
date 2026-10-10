@@ -266,17 +266,17 @@ var daveExtraModelPrefixes = map[string]string{
 //	+ tokens(ToolCallID) + 1 for RoleTool rows
 //	+ tokens(ReasoningContent) when set
 //
-// Callers that need a wire-true count pass the messages through
-// replayReasoningFilter first (reasoningreplay.go) so this function sees
-// exactly the reasoning the resolved replay mode would actually send — the
-// "exactly the payload it sends" contract holds in both directions of the
-// knob without this function knowing the mode.
 // plus replyPrimingTokens (3) once for the final assistant reply. The
 // wire format sends MultiContent INSTEAD of Content for user messages,
 // so normally only one of the two contributes; counting both when both
 // are set is belt-and-suspenders for hand-built messages and can only
 // overestimate, never understate, a payload.
 //
+// Callers that need a wire-true count pass the messages through
+// replayReasoningFilter first (reasoningreplay.go) so this function sees
+// exactly the reasoning the resolved replay mode would actually send — the
+// "exactly the payload it sends" contract holds in both directions of the
+// knob without this function knowing the mode.
 // EncodeOrdinary is used everywhere — tiktoken.Encode PANICS when text
 // matches a disallowed special token (e.g. literal "<|endoftext|" in a
 // user message), and a counting helper must never take down the bot.

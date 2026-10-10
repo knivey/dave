@@ -20,6 +20,7 @@
 #   needsusersuffix      (*bool, default: auto)      Guidance Knob 2 (cascades to commands): append a short user message after injected guidance when it would be the last message of the request. Auto (unset) appends it for anthropic/ models; true forces it, false suppresses it.
 #   injection_role       (string, default: "system") Guidance Knob 1 (cascades to commands): wire role for injected guidance payload rows ("system" | "developer" | "user"). "developer" maps to system server-side on llama.cpp; "user" is for models whose templates cannot render mid-chain system at all.
 #   async_result_delivery (string, default: "message") (cascades to commands) How completed background jobs are delivered: "message" = guidance row per the knobs above; "tool" = synthetic assistant tool-call + tool-result round-trip, for smaller models that handle mid-chain guidance poorly.
+#   reasoningreplay      (string, default: "tool_calls") (cascades to commands) Replay stored assistant reasoning back onto the wire: "off" = never; "tool_calls" = only assistant rows with tool calls in the CURRENT turn (agentic loop keeps its thought context; past turns stripped, matching gemma4's thought-context rule); "always" = every assistant row with reasoning. Wire: reasoning_content on assistant messages (llama.cpp chat templates / DeepSeek native / OpenRouter reasoning alias). See chats.toml reasoningreplay entry for the full description.
 #   paralleltoolcalls    (bool, default: true)       Enable parallel MCP tool calls
 #   parallel             (int, default: 1)           Max concurrent requests per command
 #   api_user             (string)                    Go template for the end-user identifier field (cascades to commands). Sent as safety_identifier + prompt_cache_key on OpenAI/xAI (prompt_cache_key on xAI chat completions rides the x-grok-conv-id header), user on OpenRouter chat completions and unknown providers. Variables: {{.Nick}}, {{.BotNick}}, {{.Channel}}, {{.Network}}, {{.Date}}, {{.Now}} (current time, e.g. "Monday 2006-01-02 15:04"), {{.SessionID}}, {{.AsyncResultRole}}, {{.Vars.*}}. Empty = not sent.
@@ -47,6 +48,7 @@
 # needsusersuffix = true
 # injection_role = "system"
 # async_result_delivery = "message"
+# reasoningreplay = "tool_calls"
 # toolverbose = true
 # paralleltoolcalls = true
 # parallel = 1

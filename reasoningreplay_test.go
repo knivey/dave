@@ -112,10 +112,16 @@ func TestReplayReasoningRow(t *testing.T) {
 	}
 
 	// Unknown defensive mode behaves like tool_calls (the resolver maps
-	// unknowns there, but the row predicate must agree on the raw value).
+	// unknowns there, but the row predicate must agree on the raw value —
+	// including the empty raw string, which the predicate arm matches
+	// directly).
 	t.Run("unknown raw mode falls back to tool_calls semantics", func(t *testing.T) {
 		assert.True(t, replayReasoningRow(msgs, 6, "bogus"))
 		assert.False(t, replayReasoningRow(msgs, 8, "bogus"))
+	})
+	t.Run("empty raw mode falls back to tool_calls semantics", func(t *testing.T) {
+		assert.True(t, replayReasoningRow(msgs, 6, ""))
+		assert.False(t, replayReasoningRow(msgs, 8, ""))
 	})
 
 	// Empty reasoning never qualifies in any mode, even eligible positions.

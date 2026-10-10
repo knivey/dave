@@ -15,6 +15,7 @@ import (
 	"testing"
 	"text/template"
 	"time"
+	"unicode/utf8"
 
 	logxi "github.com/mgutz/logxi/v1"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -1269,6 +1270,49 @@ func TestIsToolHidden(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, isToolHidden(tt.tool, tt.hidden))
+		})
+	}
+}
+
+func TestTruncateForLog(t *testing.T) {
+	const max = 512
+	emojiBoundary := strings.Repeat("a", 511) + "😀" + "b"              // rune 512 is the emoji, rune 513 exists
+	cjkEmojiMix := strings.Repeat("汉", 256) + strings.Repeat("😀", 344) // 600 runes; the cut at 512 falls between two emoji
+
+	tests := []struct {
+		name       string
+		input      string
+		max        int
+		unchanged  bool   // input must come back exactly as-is, no marker
+		total      int    // total rune count the marker must carry (0 = no marker expected)
+		wantPrefix string // expected prefix before the marker; empty = derive from input's first max runes
+	}{
+		{name: "short string unchanged", input: "tool result: 42", max: max, unchanged: true},
+		{name: "empty string unchanged", input: "", max: max, unchanged: true},
+		{name: "exactly max runes unchanged", input: strings.Repeat("a", max), max: max, unchanged: true},
+		{name: "max plus one rune truncates", input: strings.Repeat("b", max+1), max: max, total: max + 1, wantPrefix: strings.Repeat("b", max)},
+		{name: "long string marker carries total", input: strings.Repeat("x", 5000), max: max, total: 5000, wantPrefix: strings.Repeat("x", max)},
+		{name: "multi-byte cut never splits runes", input: cjkEmojiMix, max: max, total: 600},
+		{name: "boundary rune kept whole", input: emojiBoundary, max: max, total: 513, wantPrefix: strings.Repeat("a", 511) + "😀"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateForLog(tt.input, tt.max)
+			assert.True(t, utf8.ValidString(got), "output must be valid UTF-8")
+			if tt.unchanged {
+				assert.Equal(t, tt.input, got)
+				return
+			}
+			marker := fmt.Sprintf("…[truncated, %d chars total]", tt.total)
+			require.True(t, strings.HasSuffix(got, marker), "result must end with %q, got %q", marker, got)
+			prefix := strings.TrimSuffix(got, marker)
+			assert.Equal(t, tt.max, utf8.RuneCountInString(prefix), "prefix must be exactly %d runes", tt.max)
+			if tt.wantPrefix != "" {
+				assert.Equal(t, tt.wantPrefix, prefix)
+			} else {
+				// No expected literal: the prefix must be exactly the input's first max runes.
+				assert.Equal(t, []rune(tt.input)[:tt.max], []rune(prefix))
+			}
 		})
 	}
 }

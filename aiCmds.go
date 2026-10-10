@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	markdowntoirc "github.com/knivey/dave/MarkdownToIRC"
 	"github.com/lrstanley/girc"
@@ -1438,11 +1439,32 @@ func (cr *chatRunner) executeToolCalls(turn *turnContext, toolCalls []ToolCall) 
 			continue
 		}
 		toolText := mcpToolResultToText(result)
-		cr.logger.Info("MCP tool result", "tool", tc.Function.Name, "result", toolText)
+		// The INFO log (and thus the TUI scrollback) gets a bounded preview:
+		// tool results (search output etc.) run pages long and flood the
+		// scrollback (owner request, Oct 2026). The FULL text still rides the
+		// tool message to the model (toolResultMsg below) and lands in the
+		// api_logs.
+		cr.logger.Info("MCP tool result", "tool", tc.Function.Name, "result", truncateForLog(toolText, toolResultLogLimit))
 		toolMsg := toolResultMsg(tc.ID, toolText)
 		turn.Add(toolMsg)
 	}
 	return registeredJob
+}
+
+// toolResultLogLimit bounds the MCP tool-result preview written to the INFO
+// log. It is a log-verbosity bound, not a data bound: the full text still
+// reaches the model and the api_logs.
+const toolResultLogLimit = 512
+
+// truncateForLog returns a bounded preview of s for INFO-log lines: full
+// text when it fits, otherwise the first max runes plus a marker carrying
+// the total size. Rune-safe — never splits a multi-byte character.
+func truncateForLog(s string, max int) string {
+	total := utf8.RuneCountInString(s)
+	if total <= max {
+		return s
+	}
+	return string([]rune(s)[:max]) + fmt.Sprintf("…[truncated, %d chars total]", total)
 }
 
 func (cr *chatRunner) handleRegisterBackgroundJob(turn *turnContext, call ToolCall) {

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -652,4 +653,126 @@ func TestRunTurnResponsesStreamSplitReasoningCapture(t *testing.T) {
 		"the reasoning item's content parts are the stored REAL content")
 	assert.Equal(t, "the summarized thinking", last.ReasoningSummary,
 		"the reasoning item's summary entries land in the separate summary slot")
+}
+
+// TestRunTurnResponsesStreamDeltaBuffersFeedAPILog pins the delta-case
+// wiring of callResponsesStream DIRECTLY. The two reasoning event cases
+// feed LOGGING ONLY (the stored row comes from the authoritative
+// parseSDKResponseOutput over response.completed — the sibling test
+// above), so the delta buffers are only observable through
+// logStreamCompletion's reconstructed api-log JSON. The streamed deltas
+// deliberately DIFFER from the completed response's items: a swapped or
+// dead delta case, or a log fed by re-parsing the completed response
+// instead of accumulating the delta buffers, each produces a different
+// api-log JSON than what is asserted below.
+func TestRunTurnResponsesStreamDeltaBuffersFeedAPILog(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	sid := createTestSession(t, "testnet", "#r", "shrew", "testcmd", "svc", "test-model")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "hi"}))
+	messages, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+
+	// Swap in a real api logger (the
+	// TestLogStreamCompletionEmitsBothReasoningFidelities pattern) so the
+	// reconstructed stream response is observable.
+	dir := t.TempDir()
+	l, err := NewAPILogger(APILogConfig{Dir: dir}, "")
+	require.NoError(t, err)
+	defer l.CloseAll()
+	prevLogger := apiLogger
+	apiLogger = l
+	t.Cleanup(func() { apiLogger = prevLogger })
+	l.RestoreSession(sid, "testnet", "#r", 7)
+
+	// The completed payload's items carry DIFFERENT texts than the deltas
+	// below, so the assertions can tell the two sources apart.
+	completedPayload := map[string]any{
+		"id":     "resp-r",
+		"object": "response",
+		"model":  "test-model",
+		"output": []any{
+			map[string]any{
+				"type": "reasoning", "id": "rs_1", "status": "completed",
+				"content": []any{map[string]any{"type": "reasoning_text", "text": "completed real thinking"}},
+				"summary": []any{map[string]any{"type": "summary_text", "text": "completed summarized thinking"}},
+			},
+			map[string]any{
+				"type": "message", "role": "assistant", "id": "msg_1", "status": "completed",
+				"content": []any{map[string]any{"type": "output_text", "text": "completed answer"}},
+			},
+		},
+	}
+	completed, err := json.Marshal(map[string]any{"type": "response.completed", "response": completedPayload})
+	require.NoError(t, err)
+	stream := streamChunk(`{"type":"response.reasoning_text.delta","sequence_number":1,"item_id":"rs_1","output_index":0,"content_index":0,"logprobs":[],"delta":"delta real thinking"}`) +
+		streamChunk(`{"type":"response.reasoning_summary_text.delta","sequence_number":2,"item_id":"rs_1","summary_index":0,"delta":"delta summarized thinking"}`) +
+		streamChunk(`{"type":"response.output_text.delta","sequence_number":3,"item_id":"msg_1","output_index":1,"content_index":0,"logprobs":[],"delta":"delta answer"}`) +
+		"data: " + string(completed) + "\n\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, stream)
+	}))
+	defer server.Close()
+
+	outputCh := make(chan string, 16)
+	cr := newStreamTestRunner(t, server, AIConfig{
+		Model: "test-model", ResponsesAPI: true, Streaming: true,
+		Timeout: 10 * time.Second, StreamTimeout: 5 * time.Second,
+	}, sid, outputCh)
+	cr.ctx = context.Background()
+	// The runner helper only sets cr.sessionID; wire the transport's
+	// api-log identity the way the production chat path does
+	// (setChannel/setSessionInfo both funnel into syncAPISessionID).
+	cr.syncAPISessionID()
+
+	done := make(chan struct{})
+	go func() {
+		cr.runTurn(newTurnContext(sid, messages))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("runTurn did not finish")
+	}
+
+	// The reconstructed stream response must carry the DELTA texts —
+	// each reasoning fidelity only its own delta kind, never the
+	// completed response's items.
+	data, err := os.ReadFile(l.GetSessionFilePath(sid))
+	require.NoError(t, err)
+	var respLine string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if strings.Contains(line, `"type":"response"`) {
+			respLine = line
+			break
+		}
+	}
+	require.NotEmpty(t, respLine, "api log must carry the reconstructed stream response")
+	assert.Contains(t, respLine, `"reasoning_content":"delta real thinking"`,
+		"response.reasoning_text.delta events feed the Content buffer")
+	assert.Contains(t, respLine, `"reasoning_summary":"delta summarized thinking"`,
+		"response.reasoning_summary_text.delta events feed the Summary buffer")
+	assert.Contains(t, respLine, `"content":"delta answer"`,
+		"response.output_text.delta events feed the streamed text buffer")
+	assert.NotContains(t, respLine, "completed real thinking",
+		"the Content slot must not fall back to re-parsing the completed response")
+	assert.NotContains(t, respLine, "completed summarized thinking",
+		"the Summary slot must not fall back to re-parsing the completed response")
+	assert.NotContains(t, respLine, "completed answer",
+		"the streamed text must not fall back to re-parsing the completed response")
+
+	// The STORED row keeps the authoritative parse of the completed
+	// response — the delta buffers are logging-only by design (pinned
+	// from the other side: the delta texts never reach the session).
+	final, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	last := final[len(final)-1]
+	assert.Equal(t, RoleAssistant, last.Role)
+	assert.Equal(t, "completed answer", last.Content)
+	assert.Equal(t, "completed real thinking", last.ReasoningContent)
+	assert.Equal(t, "completed summarized thinking", last.ReasoningSummary)
 }

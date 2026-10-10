@@ -2168,9 +2168,14 @@ func TestRunTurnStreamSplitReasoningCapture(t *testing.T) {
 	last := final[len(final)-1]
 	assert.Equal(t, RoleAssistant, last.Role)
 	assert.Equal(t, "the answer", last.Content)
-	// Chunk 1 details: "real think " + chunk 2 reasoning_content fills the
-	// Content slot (details' text parts do not overwrite the higher-priority
-	// reasoning_content yield).
+	// Chunk 1's reasoning.text detail fills the empty Content slot; chunk
+	// 2's reasoning_content yield extends it. Chunk 2 carries no
+	// reasoning.text detail, so the no-overwrite rule (details' text parts
+	// only fill an EMPTY Content slot — the `if chunkParts.Content == ""`
+	// guard in the per-chunk capture, structural in the code) is NOT
+	// exercised by this chunk; what chunk 2 pins is the still-empty
+	// Summary slot: the same chunk's reasoning.summary yield lands in
+	// Summary alongside the reasoning_content-filled Content slot.
 	assert.Equal(t, "real think more real think", last.ReasoningContent,
 		"reasoning.text deltas + reasoning_content deltas accumulate into the Content buffer")
 	// The details summaries land in Summary even though Content was filled

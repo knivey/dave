@@ -37,6 +37,11 @@ per cell.
   replacement description (`toolvariants/waitinstr.json` ships one).
   Validated loudly at startup: unknown tool names, empty descriptions,
   malformed JSON, the reserved name `default`, `/`/`+`/`\` in names.
+- `toolvariants/waitinstr.json` is the experiment that shipped into prod
+  (the s4 cell: 0/10 delivery-marker forgeries); the prod port equals it
+  modulo genericizing `image link` → `link` (register_background_job
+  serves any async tool), and the file stays byte-stable so the s4 cell
+  remains reproducible.
 - `-delivery-role` is the wire role of the imageflow delivery-marker
   injections (dave's `injection_role` knob); the marker TEXT is the prod
   format regardless of role.

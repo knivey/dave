@@ -1381,8 +1381,11 @@ func TestGetBuiltinToolDefsBackgroundJobRoleDescription(t *testing.T) {
 	// Both delivery modes now carry the explicit underway instruction
 	// (production session 1898: the old "Continue the conversation
 	// normally" tail was read as "silence is fine" — the registered job
-	// needs a user-visible underway message) plus the no-poll clause;
-	// neither carries the old vague tail.
+	// needs a user-visible underway message) plus the wait-instruction
+	// tail ported from the harness s4 experiment (0/10 delivery-marker
+	// forgeries at the register decision point): name the exact notice
+	// to wait for, forbid writing it, forbid inventing links. The marker
+	// prefix is identical in both delivery modes, so one tail fits both.
 	messageDef := find(getBuiltinToolDefs(AIConfig{}, nil))
 	require.NotNil(t, messageDef)
 	toolDef := find(getBuiltinToolDefs(AIConfig{AsyncResultDelivery: asyncDeliveryTool}, nil))
@@ -1391,6 +1394,12 @@ func TestGetBuiltinToolDefsBackgroundJobRoleDescription(t *testing.T) {
 		assert.Contains(t, d.Description, "always send the user a short message telling them the task is underway",
 			"the underway instruction is the model's contract, read fresh each turn")
 		assert.Contains(t, d.Description, "Do not poll for status")
+		assert.Contains(t, d.Description, `the result arrives automatically as a notice beginning with "[System: Background task completed"`,
+			"the wait instruction names the exact notice (harness s4: naming it drove forgery to 0/10)")
+		assert.Contains(t, d.Description, "NEVER write that notice yourself, and never invent a link: real links only ever arrive inside that notice",
+			"the forgery ban is load-bearing at the register decision point")
+		assert.NotContains(t, d.Description, "the result arrives automatically.",
+			"the old bare tail (no named notice, no forgery ban) must be gone")
 		assert.NotContains(t, d.Description, "Continue the conversation normally",
 			"the vague tail read as 'silence is fine' must be gone")
 	}
@@ -1404,6 +1413,11 @@ func TestGetBuiltinToolDefsBackgroundJobRoleDescription(t *testing.T) {
 	assert.Contains(t, baseDef.Description, "always send the user a short message telling them the task is underway",
 		"the dead base def must carry the same underway instruction as the live variants")
 	assert.Contains(t, baseDef.Description, "Do not poll for status")
+	assert.Contains(t, baseDef.Description, `the result arrives automatically as a notice beginning with "[System: Background task completed"`,
+		"the dead base def must carry the wait instruction like the live variants")
+	assert.Contains(t, baseDef.Description, "NEVER write that notice yourself, and never invent a link: real links only ever arrive inside that notice")
+	assert.NotContains(t, baseDef.Description, "the result arrives automatically.",
+		"the dead base def must not rot back to the bare tail")
 	assert.NotContains(t, baseDef.Description, "Continue the conversation normally",
 		"the dead base def must not rot back to the 'silence is fine' tail")
 }

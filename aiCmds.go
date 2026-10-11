@@ -2242,7 +2242,7 @@ var builtinTools = map[string]builtinToolEntry{
 			Type: "function",
 			Function: &FunctionDefinition{
 				Name:        backgroundJobToolName,
-				Description: "Register a background job for monitoring. When an async tool (e.g. generate_image_async) returns a job_id, call this to have the system monitor the job. You will be notified with the result when it completes. After calling this, always send the user a short message telling them the task is underway. Do not poll for status — the result arrives automatically.",
+				Description: "Register a background job for monitoring. When an async tool (e.g. generate_image_async) returns a job_id, call this to have the system monitor the job. You will be notified with the result when it completes. After calling this, always send the user a short message telling them the task is underway. Do not poll for status — the result arrives automatically as a notice beginning with \"[System: Background task completed\". NEVER write that notice yourself, and never invent a link: real links only ever arrive inside that notice.",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -2344,7 +2344,12 @@ func getToolServerName(toolName string) string {
 // register_background_job description is rewritten per-config: it tells the
 // model the wire role its background results will arrive under (guidance
 // Knob 1), so a command configured with injection_role = "user" promises a
-// user message instead of the default system message.
+// user message instead of the default system message. Both delivery modes
+// share the wait-instruction tail — name the exact notice to wait for and
+// forbid writing it or inventing links (harness s4 cell: 0/10 delivery-
+// marker forgeries at the register decision point; the marker prefix is
+// identical in both modes because the payload marker rides message-mode
+// guidance and tool-mode tool results alike).
 func getBuiltinToolDefs(cfg AIConfig, disabled []string) []Tool {
 	tools := make([]Tool, 0, len(builtinTools))
 
@@ -2370,10 +2375,10 @@ disabledLoop:
 				// you would any tool result") invite tool-call reasoning.
 				// The underway instruction below is behavioral (act:
 				// tell the user), not meta-reasoning about the response.
-				jobDef.Description = "Register a background job for monitoring. When an async tool (e.g. generate_image_async) returns a job_id, call this to have the system monitor the job. The result will be delivered as a tool response when it completes. After calling this, always send the user a short message telling them the task is underway. Do not poll for status — the result arrives automatically."
+				jobDef.Description = "Register a background job for monitoring. When an async tool (e.g. generate_image_async) returns a job_id, call this to have the system monitor the job. The result will be delivered as a tool response when it completes. After calling this, always send the user a short message telling them the task is underway. Do not poll for status — the result arrives automatically as a notice beginning with \"[System: Background task completed\". NEVER write that notice yourself, and never invent a link: real links only ever arrive inside that notice."
 			} else {
 				jobDef.Description = fmt.Sprintf(
-					"Register a background job for monitoring. When an async tool (e.g. generate_image_async) returns a job_id, call this to have the system monitor the job. You will be notified with the result in a %s message when it completes. After calling this, always send the user a short message telling them the task is underway. Do not poll for status — the result arrives automatically.",
+					"Register a background job for monitoring. When an async tool (e.g. generate_image_async) returns a job_id, call this to have the system monitor the job. You will be notified with the result in a %s message when it completes. After calling this, always send the user a short message telling them the task is underway. Do not poll for status — the result arrives automatically as a notice beginning with \"[System: Background task completed\". NEVER write that notice yourself, and never invent a link: real links only ever arrive inside that notice.",
 					guidanceRole(cfg))
 			}
 			t.Function = &jobDef

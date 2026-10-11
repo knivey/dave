@@ -30,8 +30,11 @@ func stub(name, description string) toolDef {
 // register_background_job description (message-delivery mode, system role —
 // aiCmds.go's guidanceRole template rendered with "system"), pinned verbatim
 // so the harness baseline advertises exactly what the model sees in
-// production. toolvariants/waitinstr.json overrides precisely this text.
-const registerBackgroundJobDescription = "Register a background job for monitoring. When an async tool (e.g. generate_image_async) returns a job_id, call this to have the system monitor the job. You will be notified with the result in a system message when it completes. After calling this, always send the user a short message telling them the task is underway. Do not poll for status — the result arrives automatically."
+// production. It carries the wait instruction itself (the waitinstr
+// experiment shipped into prod Oct 2026, with "image link" genericized to
+// "link"); toolvariants/waitinstr.json stays byte-stable as the shipped
+// experiment so the s4 cell remains reproducible.
+const registerBackgroundJobDescription = "Register a background job for monitoring. When an async tool (e.g. generate_image_async) returns a job_id, call this to have the system monitor the job. You will be notified with the result in a system message when it completes. After calling this, always send the user a short message telling them the task is underway. Do not poll for status — the result arrives automatically as a notice beginning with \"[System: Background task completed\". NEVER write that notice yourself, and never invent a link: real links only ever arrive inside that notice."
 
 // advertisedTools mirrors the current prod eunuch advertisement: one-line
 // stub descriptions with object params (register_background_job carries the

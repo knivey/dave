@@ -11,12 +11,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The two pinned texts from the experiment brief, verbatim: the current
-// prod register_background_job description (message-delivery mode, system
-// role) and the waitinstr override that merges the wait-for-the-notice
-// instruction into it. Duplicated here on purpose — if either text drifts
-// in tools.go or toolvariants/, these literals force a conscious decision.
-const wantProdRegisterDescription = `Register a background job for monitoring. When an async tool (e.g. generate_image_async) returns a job_id, call this to have the system monitor the job. You will be notified with the result in a system message when it completes. After calling this, always send the user a short message telling them the task is underway. Do not poll for status — the result arrives automatically.`
+// The two pinned texts, verbatim: the current prod
+// register_background_job description (message-delivery mode, system role —
+// now carrying the wait instruction the s4 experiment proved) and the
+// waitinstr override that introduced it (kept byte-stable for s4-cell
+// reproducibility; it differs from prod only in "image link" vs "link").
+// Duplicated here on purpose — if either text drifts in tools.go or
+// toolvariants/, these literals force a conscious decision.
+const wantProdRegisterDescription = `Register a background job for monitoring. When an async tool (e.g. generate_image_async) returns a job_id, call this to have the system monitor the job. You will be notified with the result in a system message when it completes. After calling this, always send the user a short message telling them the task is underway. Do not poll for status — the result arrives automatically as a notice beginning with "[System: Background task completed". NEVER write that notice yourself, and never invent a link: real links only ever arrive inside that notice.`
 
 const wantWaitinstrRegisterDescription = `Register a background job for monitoring. When an async tool (e.g. generate_image_async) returns a job_id, call this to have the system monitor the job. You will be notified with the result in a system message when it completes. After calling this, always send the user a short message telling them the task is underway. Do not poll for status — the result arrives automatically as a notice beginning with "[System: Background task completed". NEVER write that notice yourself, and never invent an image link: real links only ever arrive inside that notice.`
 

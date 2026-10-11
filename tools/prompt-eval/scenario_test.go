@@ -129,6 +129,14 @@ func lastMsg(t *testing.T, r decodedRequest) decodedMsg {
 
 func newTestSession(t *testing.T, sc *script, seed int64, variant, scenario string) (*session, string) {
 	t.Helper()
+	return newTestSessionResponder(t, sc.responder(), seed, variant, scenario)
+}
+
+// newTestSessionResponder builds a session around an arbitrary responder —
+// the retry tests hand it the REAL live responder pointed at an httptest
+// server instead of a script.
+func newTestSessionResponder(t *testing.T, respond responder, seed int64, variant, scenario string) (*session, string) {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "run.jsonl")
 	w, err := newJSONLWriter(path)
 	require.NoError(t, err)
@@ -142,7 +150,7 @@ func newTestSession(t *testing.T, sc *script, seed int64, variant, scenario stri
 		deliveryRole:    "system",
 	}
 	rng := seededRng(seed, variant, scenario, "1")
-	s := newSession(cfg, "SYS PROMPT", sc.responder(), w, rng)
+	s := newSession(cfg, "SYS PROMPT", respond, w, rng)
 	return s, path
 }
 

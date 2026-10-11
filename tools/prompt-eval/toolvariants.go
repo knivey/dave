@@ -136,13 +136,19 @@ func applyToolVariant(base []toolDef, overrides map[string]string) []toolDef {
 
 // variantDirName builds the output-directory component for one sweep cell:
 // the bare prompt-variant name normally, "<prompt>+<tool>" when a
-// tool-description variant is active — separate cells must never collide on
-// run-NN.jsonl.
-func variantDirName(promptVariant, toolVariant string) string {
-	if toolVariant == "" {
-		return promptVariant
+// tool-description variant is active, "@<temp>" appended when the
+// temperature axis is set — separate cells must never collide on
+// run-NN.jsonl, and the unsuffixed name must stay exactly what a default
+// invocation produces.
+func variantDirName(promptVariant, toolVariant string, temperature float64) string {
+	name := promptVariant
+	if toolVariant != "" {
+		name += "+" + toolVariant
 	}
-	return promptVariant + "+" + toolVariant
+	if temperature > 0 {
+		name += "@" + temperatureValue(temperature)
+	}
+	return name
 }
 
 // toolVariantLabel maps a cell's internal tool-variant name to its

@@ -56,6 +56,22 @@ type runConfig struct {
 	// variant, the baseline advertisement). Validated by loadToolVariants
 	// before anything runs; labeled "default" in run-index.csv.
 	toolVariantName string
+
+	// temperature is the -temperature axis: sent on every request when
+	// > 0 (dave's convention — 0 omits the field and samples at the
+	// server default). Negative values are rejected at startup. The axis
+	// also suffixes the variant directory ("@0.7") so temperature cells
+	// never collide with default-invocation output.
+	temperature float64
+
+	// retries / retryWait shape the transient-failure policy: a request
+	// that fails with HTTP >= 500 or a transport-level error is re-sent
+	// (identical body) up to retries times — the router in front of the
+	// server intermittently drops connections, and one lost request used
+	// to kill a whole scripted session. retryWait is the exponential
+	// backoff base, doubled per attempt.
+	retries   int
+	retryWait time.Duration
 }
 
 func main() {
@@ -68,17 +84,19 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, "usage: prompt-eval [-baseurl URL] [-model NAME] [-variant name=path] [-tool-variant name=path]")
-	fmt.Fprintln(os.Stderr, "                  [-runs N] [-delay D] [-outdir DIR] [-scenarios imageflow,prompts[,research]]")
-	fmt.Fprintln(os.Stderr, "                  [-reasoning-effort low] [-chat-template-kwargs JSON] [-api-key KEY] [-seed N]")
-	fmt.Fprintln(os.Stderr, "                  [-delivery-role system|user|developer]")
+	fmt.Fprintln(os.Stderr, "                  [-temperature F] [-delivery-role system|user|developer] [-runs N] [-delay D]")
+	fmt.Fprintln(os.Stderr, "                  [-outdir DIR] [-scenarios imageflow,prompts[,research]] [-reasoning-effort low]")
+	fmt.Fprintln(os.Stderr, "                  [-chat-template-kwargs JSON] [-api-key KEY] [-seed N] [-retries N] [-retry-wait D]")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Runs scripted bot sessions against a live llama-server with different system-prompt")
 	fmt.Fprintln(os.Stderr, "variants and tool-description variants, fabricates every tool result, and writes")
 	fmt.Fprintln(os.Stderr, "api-log-shaped JSONL under")
-	fmt.Fprintln(os.Stderr, "<outdir>/<variant>[+<tool-variant>]/<scenario>-<delivery-role>/run-NN.jsonl plus a")
+	fmt.Fprintln(os.Stderr, "<outdir>/<variant>[+<tool-variant>][@<temp>]/<scenario>-<delivery-role>/run-NN.jsonl plus a")
 	fmt.Fprintln(os.Stderr, "<outdir>/run-index.csv summary.")
 	fmt.Fprintln(os.Stderr, "All requests are sequential with -delay between them (the server is shared with a")
-	fmt.Fprintln(os.Stderr, "live bot). The tool never touches anything outside -outdir.")
+	fmt.Fprintln(os.Stderr, "live bot). Transient failures (HTTP >= 500 or transport errors) are retried")
+	fmt.Fprintln(os.Stderr, "-retries times per request with exponential backoff. The tool never touches")
+	fmt.Fprintln(os.Stderr, "anything outside -outdir.")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Flags:")
 	flag.PrintDefaults()
@@ -100,6 +118,9 @@ func run() error {
 	apiKey := flag.String("api-key", "", "optional Authorization: Bearer key")
 	seed := flag.Int64("seed", 1, "determinism seed for fabricated ids/urls and phrase rotation")
 	deliveryRole := flag.String("delivery-role", "system", "wire role of the imageflow async-delivery injections (system, user, or developer)")
+	temperature := flag.Float64("temperature", 0, "sampling temperature sent on every request; 0 omits the field (server default), negative is invalid")
+	retries := flag.Int("retries", 3, "per-request retries on transient failures (HTTP >= 500 or transport errors); 0 disables")
+	retryWait := flag.Duration("retry-wait", 2*time.Second, "base backoff between retries, doubled per attempt (2s, 4s, 8s, ...)")
 	flag.Parse() // after registration; main only installs the usage hook
 
 	if *runs < 1 {
@@ -107,6 +128,15 @@ func run() error {
 	}
 	if err := validateDeliveryRole(*deliveryRole); err != nil {
 		return err
+	}
+	if err := validateTemperature(*temperature); err != nil {
+		return err
+	}
+	if *retries < 0 {
+		return fmt.Errorf("-retries must be >= 0, got %d", *retries)
+	}
+	if *retryWait < 0 {
+		return fmt.Errorf("-retry-wait must be >= 0, got %s", *retryWait)
 	}
 	var kwargs map[string]any
 	if s := strings.TrimSpace(*kwargsFlag); s != "" {
@@ -139,6 +169,9 @@ func run() error {
 		delay:           *delay,
 		seed:            *seed,
 		deliveryRole:    *deliveryRole,
+		temperature:     *temperature,
+		retries:         *retries,
+		retryWait:       *retryWait,
 	}
 
 	if err := os.MkdirAll(*outdir, 0o755); err != nil {
@@ -167,7 +200,7 @@ func run() error {
 					row, err := runOne(v, sc, run, cellCfg, respond, *outdir)
 					if err != nil {
 						fmt.Fprintf(os.Stderr, "prompt-eval: %s/%s-%s run %d: %v\n",
-							variantDirName(v.name, tv.name), sc, cellCfg.deliveryRole, run, err)
+							variantDirName(v.name, tv.name, cfg.temperature), sc, cellCfg.deliveryRole, run, err)
 						failures++
 					}
 					if row != nil {
@@ -236,7 +269,7 @@ func runOne(v loadedVariant, scenario string, run int, cfg runConfig, respond re
 	// runs with the same seed fabricate identical job ids and phrasings, so
 	// the only variable between cells is the axis itself.
 	scenDirName := scenario + "-" + cfg.deliveryRole
-	varDir := variantDirName(v.name, cfg.toolVariantName)
+	varDir := variantDirName(v.name, cfg.toolVariantName, cfg.temperature)
 	scenDir := filepath.Join(outdir, varDir, scenDirName)
 	if err := os.MkdirAll(scenDir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating %s: %w", scenDir, err)
@@ -267,6 +300,8 @@ func runOne(v loadedVariant, scenario string, run int, cfg runConfig, respond re
 	row := &indexRow{
 		Variant:        v.name,
 		ToolVariant:    toolVariantLabel(cfg.toolVariantName),
+		Temperature:    temperatureLabel(cfg.temperature),
+		Retries:        s.retryCount,
 		Scenario:       scenario,
 		DeliveryRole:   cfg.deliveryRole,
 		Run:            run,

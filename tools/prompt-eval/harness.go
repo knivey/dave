@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -48,6 +51,11 @@ type chatRequest struct {
 	ToolChoice         string         `json:"tool_choice,omitempty"`
 	ReasoningEffort    string         `json:"reasoning_effort,omitempty"`
 	ChatTemplateKwargs map[string]any `json:"chat_template_kwargs,omitempty"`
+
+	// Temperature is the -temperature axis. Zero omits the field (the
+	// server-default sampling prod also uses) — dave's own convention:
+	// only a value > 0 is ever sent.
+	Temperature float64 `json:"temperature,omitempty"`
 }
 
 // flexString accepts a JSON string (the spec shape llama-server emits for
@@ -163,6 +171,12 @@ type session struct {
 	respCount      int
 	reasoningChars int
 	fabricated     bool
+
+	// retryCount tallies retry re-sends (the CSV retries column —
+	// server-flakiness bookkeeping per cell); reqCount above stays
+	// one-per-logical-request, so a request that flaked twice and then
+	// succeeded still reads requests=1, retries=2.
+	retryCount int
 }
 
 func newSession(cfg runConfig, sysPrompt string, respond responder, w *jsonlWriter, rng *rand.Rand) *session {
@@ -190,6 +204,10 @@ func (s *session) buildRequest(forceFinal bool) chatRequest {
 		req.Tools = s.cfg.tools
 		req.ToolChoice = "auto"
 	}
+	// dave's convention: the field rides only when set (> 0).
+	if s.cfg.temperature > 0 {
+		req.Temperature = s.cfg.temperature
+	}
 	return req
 }
 
@@ -197,6 +215,20 @@ func (s *session) buildRequest(forceFinal bool) chatRequest {
 // appends the assistant row to the history. A non-nil body returned
 // alongside an error (an HTTP error status, say) is still logged before
 // the error aborts the session.
+//
+// Transient-failure retries live HERE rather than deeper inside the
+// responder because the failed-attempt error records need the session's
+// JSONL writer: a retryable failure — HTTP >= 500 (the router in front of
+// the llama-server intermittently answers "proxy error: Failed to read
+// connection", which killed ~5.5% of sessions in the 70-session sweep) or
+// a transport-level error, never a 4xx (our fault) — re-sends the
+// IDENTICAL marshaled body up to cfg.retries times with exponential
+// backoff, so the session continues when a request eventually succeeds.
+// Each failed attempt leaves one response-type, choices-less error record
+// in the JSONL (the shape the analysis scripts already skip) plus one
+// stdout line; the request record itself is logged once, unchanged. The
+// body is marshaled once above precisely so a retry cannot drift from the
+// original request — the seeded determinism streams stay untouched.
 func (s *session) request(forceFinal bool) (parsedResp, error) {
 	var pr parsedResp
 	body, err := json.Marshal(s.buildRequest(forceFinal))
@@ -208,6 +240,15 @@ func (s *session) request(forceFinal bool) (parsedResp, error) {
 		return pr, fmt.Errorf("logging request: %w", err)
 	}
 	raw, callErr := s.respond(body)
+	for attempt := 0; callErr != nil && attempt < s.cfg.retries && retryableCallErr(callErr); attempt++ {
+		if err := s.logFailedAttempt(raw, callErr); err != nil {
+			return pr, fmt.Errorf("logging failed attempt: %w", err)
+		}
+		s.retryCount++
+		fmt.Printf("retry %d/%d after %s: %v\n", attempt+1, s.cfg.retries, failureLabel(callErr), callErr)
+		time.Sleep(retryBackoff(s.cfg.retryWait, attempt))
+		raw, callErr = s.respond(body)
+	}
 	if len(raw) > 0 {
 		s.respCount++
 		if err := s.log.logExchange("response", raw); err != nil {
@@ -236,6 +277,23 @@ func (s *session) request(forceFinal bool) (parsedResp, error) {
 	}
 	s.msgs = append(s.msgs, am)
 	return pr, nil
+}
+
+// logFailedAttempt writes one JSONL error record for a failed exchange
+// that is about to be retried: the server's error body when it sent one
+// (the same response-type, choices-less record the final-failure path
+// writes — the analysis scripts already skip those), or a synthesized
+// error object for transport-level failures that produced no body at all.
+func (s *session) logFailedAttempt(raw []byte, callErr error) error {
+	body := raw
+	if len(body) == 0 {
+		b, err := json.Marshal(map[string]string{"error": callErr.Error()})
+		if err != nil {
+			return fmt.Errorf("marshaling retry error record: %w", err)
+		}
+		body = b
+	}
+	return s.log.logExchange("response", body)
 }
 
 // answerToolCalls appends one fabricated tool result per call, exactly how
@@ -295,11 +353,75 @@ func (s *session) resetHistory() {
 	s.msgs = []wireMsg{{Role: "system", Content: s.sysPrompt}}
 }
 
+// httpError marks an HTTP-level failure (non-200) so the retry path can
+// tell transient 5xx (the router's proxy drops) from permanent 4xx (the
+// request's own fault) without string matching. It carries the raw body so
+// the existing log-and-abort behavior is unchanged.
+type httpError struct {
+	status int
+	url    string
+	raw    []byte
+}
+
+func (e *httpError) Error() string {
+	return fmt.Sprintf("HTTP %d from %s: %.400s", e.status, e.url, e.raw)
+}
+
+// retryableCallErr reports whether a failed exchange is worth re-sending:
+// HTTP >= 500 or a transport-level error (connection reset, EOF). A 4xx is
+// the caller's fault and deliberate cancellation is deliberate — neither
+// is retried.
+func retryableCallErr(err error) bool {
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	var he *httpError
+	if errors.As(err, &he) {
+		return he.status >= 500
+	}
+	return true
+}
+
+// failureLabel names what went wrong for the retry stdout line ("500",
+// "transport error").
+func failureLabel(err error) string {
+	var he *httpError
+	if errors.As(err, &he) {
+		return strconv.Itoa(he.status)
+	}
+	return "transport error"
+}
+
+// maxRetryBackoff caps the exponential curve: a large -retries value must
+// never overflow the duration or park the sweep for days — the server is
+// shared with a live bot.
+const maxRetryBackoff = 5 * time.Minute
+
+// retryBackoff returns the sleep after the (attempt+1)-th failed exchange:
+// the base doubled per attempt — 2s, 4s, 8s with the default base.
+func retryBackoff(base time.Duration, attempt int) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+	d := base
+	for i := 0; i < attempt; i++ {
+		next := d * 2
+		if next < d || next > maxRetryBackoff {
+			return maxRetryBackoff
+		}
+		d = next
+	}
+	return d
+}
+
 // newLiveResponder returns the real HTTP responder: POST
 // {baseurl}/chat/completions, non-streaming, sleeping cfg.delay between
 // consecutive requests. The server is shared with a live bot, so the
-// harness stays sequential and polite. Error-status bodies are returned
-// alongside the error so they still land in the JSONL.
+// harness stays sequential and polite — retry re-sends (one layer up, in
+// session.request) pass through here too and therefore also wait the
+// politeness delay on top of their backoff. Error-status bodies are
+// returned alongside a typed *httpError so they still land in the JSONL
+// and the retry path can classify them.
 func newLiveResponder(cfg runConfig) responder {
 	client := &http.Client{Timeout: 5 * time.Minute}
 	url := strings.TrimSuffix(cfg.baseURL, "/") + "/chat/completions"
@@ -327,7 +449,7 @@ func newLiveResponder(cfg runConfig) responder {
 			return raw, err
 		}
 		if resp.StatusCode != http.StatusOK {
-			return raw, fmt.Errorf("HTTP %d from %s: %.400s", resp.StatusCode, url, raw)
+			return raw, &httpError{status: resp.StatusCode, url: url, raw: raw}
 		}
 		return raw, nil
 	}

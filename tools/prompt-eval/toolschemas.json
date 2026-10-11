@@ -19,18 +19,6 @@
         "output_format": {
           "type": "string",
           "description": "output format: url (default), base64, or both"
-        },
-        "_dave_inject_network": {
-          "type": "string"
-        },
-        "_dave_inject_channel": {
-          "type": "string"
-        },
-        "_dave_inject_nick": {
-          "type": "string"
-        },
-        "_dave_inject_llm_generated": {
-          "type": "boolean"
         }
       },
       "required": [
@@ -66,18 +54,6 @@
         "output_format": {
           "type": "string",
           "description": "output format: url (default), base64, or both"
-        },
-        "_dave_inject_network": {
-          "type": "string"
-        },
-        "_dave_inject_channel": {
-          "type": "string"
-        },
-        "_dave_inject_nick": {
-          "type": "string"
-        },
-        "_dave_inject_llm_generated": {
-          "type": "boolean"
         }
       },
       "required": [

@@ -31,10 +31,13 @@ type toolFuncDef struct {
 //     from the *Input structs in tools.go (jsonschema-go reflection over the
 //     json/jsonschema struct tags: omitempty fields are NOT required,
 //     additionalProperties:false, pointer fields become ["null", <type>]
-//     unions). The _dave_inject_* properties are kept exactly as declared —
-//     host-injected provenance fields the MCP server accepts (omitempty, so
-//     never in required; that omission is load-bearing, see the AGENTS.md
-//     img-mcp gotcha).
+//     unions). The _dave_inject_* properties are deliberately ABSENT:
+//     dave's getMCPTools strips them from the model-facing schema
+//     (stripInjectFieldsFromSchema in mcpClient.go — host-injected
+//     provenance the model never sees), so the harness transcribes the
+//     POST-STRIP advertisement. On the MCP server side their struct fields
+//     must stay omitempty (never required — see the AGENTS.md img-mcp
+//     gotcha), but that is a server concern, not an advertisement one.
 //   - brave_* — mcps/brave-mcp/tools.go (registerTools defs + *Input
 //     structs). Note brave_place_search declares NO required property
 //     (query is omitempty there).

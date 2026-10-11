@@ -101,9 +101,11 @@ func TestRegisterSchemaSpotPin(t *testing.T) {
 }
 
 // TestEnhanceAndGenerateAsyncSpotPin pins the img-mcp async transcription:
-// the prompt fields the model needs, and the _dave_inject_* properties kept
-// exactly as declared — present, but NEVER in required (the omitempty is
-// load-bearing: the MCP server must accept callers that omit them).
+// the prompt fields the model needs, and the _dave_inject_* properties
+// ABSENT — dave's getMCPTools strips them from the model-facing schema
+// (stripInjectFieldsFromSchema), so the harness matches the POST-STRIP
+// advertisement exactly (controller ruling on the schema-fidelity report's
+// concern 1: prod models never see these properties).
 func TestEnhanceAndGenerateAsyncSpotPin(t *testing.T) {
 	var params map[string]any
 	found := false
@@ -116,14 +118,18 @@ func TestEnhanceAndGenerateAsyncSpotPin(t *testing.T) {
 	require.True(t, found)
 
 	props := propertiesOf(t, params)
-	for _, name := range []string{
-		"prompt", "enhancement", "workflow", "output_format",
-		"_dave_inject_network", "_dave_inject_channel", "_dave_inject_nick", "_dave_inject_llm_generated",
-	} {
+	for _, name := range []string{"prompt", "enhancement", "workflow", "output_format"} {
 		assert.Containsf(t, props, name, "property %q must be declared", name)
 	}
+	for _, name := range []string{
+		"_dave_inject_network", "_dave_inject_channel", "_dave_inject_nick", "_dave_inject_llm_generated",
+	} {
+		assert.NotContainsf(t, props, name,
+			"property %q must be absent — dave strips the inject fields from the advertised schema", name)
+	}
+	assert.NotContains(t, params, "_dave_inject", "no inject-prefixed key may appear anywhere in the schema")
 	assert.Equal(t, []string{"prompt"}, requiredOf(t, params),
-		"only prompt is required; the _dave_inject_* fields are omitempty-optional")
+		"only prompt is required")
 }
 
 // TestBraveWebSearchSpotPin pins the diagnosed brave artifact's fix: the
@@ -167,6 +173,24 @@ func TestQueueStatusSpotPin(t *testing.T) {
 	assert.Equal(t, false, params["additionalProperties"])
 	assert.NotContains(t, params, "properties", "the declared input struct is empty")
 	assert.NotContains(t, params, "required")
+}
+
+// TestNoAdvertisedToolCarriesInjectProperties pins the post-strip invariant
+// across the WHOLE advertisement: dave's getMCPTools strips every
+// _dave_inject_* property from every MCP tool's model-facing schema, so no
+// advertised tool may carry one — not just the two img tools that declare
+// them server-side.
+func TestNoAdvertisedToolCarriesInjectProperties(t *testing.T) {
+	for _, td := range advertisedTools {
+		props, ok := td.Function.Parameters["properties"].(map[string]any)
+		if !ok {
+			continue
+		}
+		for name := range props {
+			assert.NotContainsf(t, name, "_dave_inject_",
+				"tool %q: inject properties are host-side only and must be stripped from the advertisement", td.Function.Name)
+		}
+	}
 }
 
 // TestWireCarriesEmbeddedSchemas pins the wire: every request the harness

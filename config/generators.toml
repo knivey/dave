@@ -111,6 +111,7 @@
 #
 # Example with all generator-only options:
 # [example]
+# preset = "gen-base"
 # service = "local"
 # model = "qwen3-32b"
 # streaming = true

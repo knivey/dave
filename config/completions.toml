@@ -29,6 +29,7 @@
 #
 # Example with all options:
 # [example-completion]
+# preset = "completion-base"
 # service = "openai"
 # model = "gpt-3.5-turbo-instruct"
 # aliases = ["alt-name", "another-name"]

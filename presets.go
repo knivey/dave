@@ -30,7 +30,14 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	logxi "github.com/mgutz/logxi/v1"
 )
+
+var loggerPresets = logxi.New("presets")
+
+func init() {
+	loggerPresets.SetLevel(logxi.LevelAll)
+}
 
 // loadPresetsFile reads config-dir presets.toml into raw tables. A
 // missing file is not an error (empty map), matching the other optional
@@ -48,8 +55,8 @@ func loadPresetsFile(dir string) (map[string]map[string]any, error) {
 		return presets, fmt.Errorf("loading %s: %w", path, err)
 	}
 	for name := range presets {
-		if _, err := resolvePresetChain(name, presets); err != nil {
-			return presets, fmt.Errorf("presets.toml: %w", err)
+		if _, _, err := resolvePresetChain(name, presets); err != nil {
+			return presets, fmt.Errorf("%s: %w", path, err)
 		}
 	}
 	return presets, nil
@@ -57,24 +64,25 @@ func loadPresetsFile(dir string) (map[string]map[string]any, error) {
 
 // resolvePresetChain walks a preset's `preset` references and returns
 // the tables to merge, BASE-FIRST (the most derived table last, so
-// merging in order yields correct override precedence). The loop guard
-// is membership in the walked chain: any revisit — including a preset
-// referencing itself — is a cycle and errors naming the whole chain, so
-// no configuration can make expansion recurse forever.
-func resolvePresetChain(name string, presets map[string]map[string]any) ([]map[string]any, error) {
+// merging in order yields correct override precedence), plus the walked
+// chain of names (base-last, for error messages and debug logs). The
+// loop guard is membership in the walked chain: any revisit — including
+// a preset referencing itself — is a cycle and errors naming the whole
+// chain, so no configuration can make expansion recurse forever.
+func resolvePresetChain(name string, presets map[string]map[string]any) ([]map[string]any, []string, error) {
 	var chain []string
 	cur := name
 	for {
 		table, ok := presets[cur]
 		if !ok {
 			if len(chain) == 0 {
-				return nil, fmt.Errorf("preset %q is undefined", name)
+				return nil, nil, fmt.Errorf("preset %q is undefined", name)
 			}
-			return nil, fmt.Errorf("preset %q is undefined (chain: %s)", cur, strings.Join(chain, " -> "))
+			return nil, nil, fmt.Errorf("preset %q is undefined (chain: %s)", cur, strings.Join(chain, " -> "))
 		}
 		for _, walked := range chain {
 			if walked == cur {
-				return nil, fmt.Errorf("preset cycle detected: %s -> %s", strings.Join(chain, " -> "), cur)
+				return nil, nil, fmt.Errorf("preset cycle detected: %s -> %s", strings.Join(chain, " -> "), cur)
 			}
 		}
 		chain = append(chain, cur)
@@ -84,7 +92,7 @@ func resolvePresetChain(name string, presets map[string]map[string]any) ([]map[s
 		}
 		refName, ok := ref.(string)
 		if !ok || refName == "" {
-			return nil, fmt.Errorf("preset %q: preset must be a non-empty string", cur)
+			return nil, nil, fmt.Errorf("preset %q: preset must be a non-empty string", cur)
 		}
 		cur = refName
 	}
@@ -92,7 +100,7 @@ func resolvePresetChain(name string, presets map[string]map[string]any) ([]map[s
 	for i := len(chain) - 1; i >= 0; i-- {
 		tables = append(tables, presets[chain[i]])
 	}
-	return tables, nil
+	return tables, chain, nil
 }
 
 // mergeTables returns a NEW map with overlay's keys layered over base
@@ -119,12 +127,33 @@ func mergeTables(base, overlay map[string]any) map[string]any {
 // command maps (chats, completions, generators): decode the file into
 // raw tables, expand each command's `preset` reference, then decode the
 // merged tables into dest.
+//
+// PARITY NOTE — the fast path: when no command in the file carries a
+// preset key, the file decodes DIRECTLY into dest. That keeps error
+// reporting byte-identical to the old loadCommandFile for every
+// preset-free deployment — a type mismatch (maxtokens = "500") names
+// the admin's original line, whereas the round-trip path's second decode
+// sees regenerated (key-sorted) content and would name a generated line.
+// Files that do use presets accept regenerated line numbers in their
+// type errors; syntax errors always keep original positions (first
+// decode).
 func loadCommandFileWithPresets(path string, presets map[string]map[string]any, dest any) error {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return nil
 	}
 	raw := make(map[string]map[string]any)
 	if _, err := toml.DecodeFile(path, &raw); err != nil {
+		return err
+	}
+	usesPresets := false
+	for _, table := range raw {
+		if _, ok := table["preset"]; ok {
+			usesPresets = true
+			break
+		}
+	}
+	if !usesPresets {
+		_, err := toml.DecodeFile(path, dest)
 		return err
 	}
 	for name, table := range raw {
@@ -136,17 +165,31 @@ func loadCommandFileWithPresets(path string, presets map[string]map[string]any, 
 		if !ok || refName == "" {
 			return fmt.Errorf("%s: command %q: preset must be a non-empty string", filepath.Base(path), name)
 		}
-		tables, err := resolvePresetChain(refName, presets)
+		tables, chain, err := resolvePresetChain(refName, presets)
 		if err != nil {
 			return fmt.Errorf("%s: command %q: %w", filepath.Base(path), name, err)
 		}
 		delete(table, "preset") // consumed; never decode into dest
 		merged := map[string]any{}
 		for _, t := range tables {
-			merged = mergeTables(merged, t)
+			// Fold each chain layer WITHOUT its own preset key: the
+			// reference is consumed by the expansion, never inherited
+			// into the merged table.
+			layer := make(map[string]any, len(t))
+			for k, v := range t {
+				if k == "preset" {
+					continue
+				}
+				layer[k] = v
+			}
+			merged = mergeTables(merged, layer)
 		}
 		merged = mergeTables(merged, table) // command's own keys win last
 		raw[name] = merged
+		// The chain (command-first, base-last) is what debugged merge
+		// surprises need; the merged document itself can be huge.
+		loggerPresets.Debug("applied preset chain",
+			"file", filepath.Base(path), "command", name, "chain", strings.Join(chain, " -> "))
 	}
 	var buf bytes.Buffer
 	if err := toml.NewEncoder(&buf).Encode(raw); err != nil {

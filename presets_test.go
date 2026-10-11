@@ -302,3 +302,158 @@ system = "no presets file at all"
 	_, ok := cfg.Commands.Chats["plain"]
 	assert.True(t, ok, "loads fine without presets.toml")
 }
+
+// TestLoadConfigDirPresetsFreeFileKeepsErrorPositions pins the fast path:
+// a command file where NO command uses preset must load through the plain
+// direct decode, so type-mismatch errors report the ADMIN'S line numbers.
+// (The round-trip path re-encodes alphabetically-sorted content; a type
+// error caught against regenerated TOML would name a generated line.)
+func TestLoadConfigDirPresetsFreeFileKeepsErrorPositions(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": presetTestServices,
+		"chats.toml": `
+[standalone]
+service = "localsvc"
+system = "x"
+maxtokens = "500"
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	_, err := loadConfigDir(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "line 5", "error must point at the original file's line for maxtokens (the raw string's leading newline makes it line 5)")
+	assert.Contains(t, err.Error(), "maxtokens")
+}
+
+// TestLoadCommandFileWithPresetsStripsLayeredPresetKeys pins that a
+// layered preset's own preset reference is CONSUMED by the expansion,
+// never inherited into the merged command table.
+func TestLoadCommandFileWithPresetsStripsLayeredPresetKeys(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/chats.toml"
+	require.NoError(t, os.WriteFile(path, []byte(`
+[cmd]
+preset = "turbo"
+service = "localsvc"
+`), 0644))
+	presets := map[string]map[string]any{
+		"base":  {"timeout": "2m"},
+		"turbo": {"preset": "base", "model": "m1"},
+	}
+	dest := map[string]map[string]any{}
+	require.NoError(t, loadCommandFileWithPresets(path, presets, &dest))
+	require.NotContains(t, dest["cmd"], "preset", "layered preset references are consumed, never inherited")
+	assert.Equal(t, "m1", dest["cmd"]["model"], "derived preset fields land")
+	assert.Equal(t, "2m", dest["cmd"]["timeout"], "base preset fields land through the layer")
+	assert.Equal(t, "localsvc", dest["cmd"]["service"], "command fields land")
+}
+
+func TestLoadConfigDirPresetsNonStringPresetValueRejected(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": presetTestServices,
+		"presets.toml": `
+[base]
+service = "localsvc"
+`,
+		"chats.toml": `
+[badref]
+preset = 5
+service = "localsvc"
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	_, err := loadConfigDir(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "preset")
+	assert.Contains(t, err.Error(), "badref")
+}
+
+func TestLoadConfigDirPresetsNonStringPresetInsidePresetRejected(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": presetTestServices,
+		"presets.toml": `
+[broken]
+preset = 7
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	_, err := loadConfigDir(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "preset")
+	assert.Contains(t, err.Error(), "broken")
+}
+
+// TestLoadConfigDirPresetsDeepChain pins three-layer inheritance.
+func TestLoadConfigDirPresetsDeepChain(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": presetTestServices,
+		"presets.toml": `
+[base]
+service = "localsvc"
+streaming = true
+timeout = "4m"
+
+[mid]
+preset = "base"
+model = "m2"
+temperature = 0.8
+
+[top]
+preset = "mid"
+rendermarkdown = true
+`,
+		"chats.toml": `
+[deep]
+preset = "top"
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg, err := loadConfigDir(dir)
+	require.NoError(t, err)
+	deep, ok := cfg.Commands.Chats["deep"]
+	require.True(t, ok, "deep command loaded")
+	assert.Equal(t, "localsvc", deep.Service, "layer 1 fields inherit through two layers")
+	assert.True(t, deep.Streaming, "layer 1 bools inherit through two layers")
+	assert.Equal(t, 4*time.Minute, deep.Timeout, "layer 1 timeout inherits through two layers")
+	assert.Equal(t, "m2", deep.Model, "layer 2 fields inherit through one layer")
+	assert.InDelta(t, 0.8, float64(deep.Temperature), 0.0001, "layer 2 temperature inherits")
+	assert.True(t, deep.RenderMarkdown, "layer 3 fields land")
+}
+
+// TestLoadConfigDirPresetsTypeChangeErrors pins that replacing a preset's
+// map with a scalar (mergeTables replaces wholesale) matches what typing
+// the scalar directly in chats.toml does today: BurntSushi silently drops
+// it into a map field (verified: direct decode of extra_body = 5 yields
+// err=nil and an empty map) — never a silent half-merge of the preset's
+// map with the scalar override.
+func TestLoadConfigDirPresetsTypeChangeErrors(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": presetTestServices,
+		"presets.toml": `
+[base]
+service = "localsvc"
+extra_body = {top_k = 20}
+`,
+		"chats.toml": `
+[typeflip]
+preset = "base"
+extra_body = 5
+
+[direct]
+service = "localsvc"
+extra_body = 5
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg, err := loadConfigDir(dir)
+	require.NoError(t, err, "type-flip replacement must load like the directly-typed equivalent")
+	flipped := cfg.Commands.Chats["typeflip"]
+	assert.Empty(t, flipped.ExtraBody, "scalar replacement of a preset map drops it wholesale — no preset keys survive")
+	direct := cfg.Commands.Chats["direct"]
+	assert.Empty(t, direct.ExtraBody, "the directly-typed control behaves the same (parity baseline)")
+}

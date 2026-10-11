@@ -922,17 +922,22 @@ func loadCommandsDir(dir string, config *Config) (Commands, error) {
 	commands.Chats = make(map[string]AIConfig)
 	commands.Tools = make(map[string]MCPCommandConfig)
 
-	if err := loadCommandFile(filepath.Join(dir, "completions.toml"), &commands.Completions); err != nil {
+	presets, err := loadPresetsFile(dir)
+	if err != nil {
+		return commands, err
+	}
+
+	if err := loadCommandFileWithPresets(filepath.Join(dir, "completions.toml"), presets, &commands.Completions); err != nil {
 		return commands, fmt.Errorf("loading completions: %w", err)
 	}
-	if err := loadCommandFile(filepath.Join(dir, "chats.toml"), &commands.Chats); err != nil {
+	if err := loadCommandFileWithPresets(filepath.Join(dir, "chats.toml"), presets, &commands.Chats); err != nil {
 		return commands, fmt.Errorf("loading chats: %w", err)
 	}
 	if err := loadCommandFile(filepath.Join(dir, "tools.toml"), &commands.Tools); err != nil {
 		return commands, fmt.Errorf("loading tools: %w", err)
 	}
 	commands.Generators = make(map[string]GeneratorConfig)
-	if err := loadCommandFile(filepath.Join(dir, "generators.toml"), &commands.Generators); err != nil {
+	if err := loadCommandFileWithPresets(filepath.Join(dir, "generators.toml"), presets, &commands.Generators); err != nil {
 		return commands, fmt.Errorf("loading generators: %w", err)
 	}
 

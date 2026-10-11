@@ -2,6 +2,7 @@
 # Each section name becomes the command trigger. Use `aliases` for additional triggers.
 #
 # Available options (per [section]):
+#   preset               (string)                    Preset name from presets.toml — inherit every field the preset sets; fields written here override. See presets.toml.
 #   service              (string, required)              Service name from services.toml
 #   model                (string)                        Model name (e.g. "gpt-3.5-turbo-instruct")
 #   aliases               (string array, default: [])    Additional trigger names for this command

@@ -7,6 +7,7 @@
 # for additional triggers.
 #
 # Available options (per [section]):
+#   preset               (string)                    Preset name from presets.toml — inherit every field the preset sets; fields written here override (arrays replace wholesale, nested maps deep-merge; the [name.log] table is the command's own). See presets.toml.
 #   service              (string, required)         Service name from services.toml
 #   model                (string)                    Model name (e.g. "qwen3-32b")
 #   aliases              (string array, default: []) Additional trigger names for this command

@@ -170,5 +170,6 @@ Diagnostics are shell commands — opencode v2 runs NO LSP server (the `lsp` con
 - Ban durations are parsed by `parseBanDuration` in `bans.go` which converts `d` suffix to hours. TUI `/ban` and LLM `ban_user` both enforce `max_duration` from config.
 - Keep all existing live config sections untouched below the documentation blocks.
 - The `ignores.txt.example` file should document the wildcard pattern format.
+- Cascade summaries in services.toml for options fully described in chats.toml use the deferral pattern (a one-phrase purpose + "See chats.toml <option> entry for the full description") instead of duplicating the description — single source of truth, no drift (owner convention, Oct 2026).
 
 Preserve this file. Update only verified facts.

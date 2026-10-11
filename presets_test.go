@@ -424,13 +424,13 @@ preset = "top"
 	assert.True(t, deep.RenderMarkdown, "layer 3 fields land")
 }
 
-// TestLoadConfigDirPresetsTypeChangeErrors pins that replacing a preset's
-// map with a scalar (mergeTables replaces wholesale) matches what typing
-// the scalar directly in chats.toml does today: BurntSushi silently drops
-// it into a map field (verified: direct decode of extra_body = 5 yields
-// err=nil and an empty map) — never a silent half-merge of the preset's
-// map with the scalar override.
-func TestLoadConfigDirPresetsTypeChangeErrors(t *testing.T) {
+// TestLoadConfigDirPresetsTypeFlipMatchesDirectDecode pins that replacing
+// a preset's map with a scalar (mergeTables replaces wholesale) matches
+// what typing the scalar directly in chats.toml does today: BurntSushi
+// silently drops it into a map field (verified: direct decode of
+// extra_body = 5 yields err=nil and an empty map) — never a silent
+// half-merge of the preset's map with the scalar override.
+func TestLoadConfigDirPresetsTypeFlipMatchesDirectDecode(t *testing.T) {
 	dir := createTestConfigDir(t, "", map[string]string{
 		"services.toml": presetTestServices,
 		"presets.toml": `

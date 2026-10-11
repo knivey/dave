@@ -186,8 +186,9 @@ func loadCommandFileWithPresets(path string, presets map[string]map[string]any, 
 		}
 		merged = mergeTables(merged, table) // command's own keys win last
 		raw[name] = merged
-		// The chain (command-first, base-last) is what debugged merge
-		// surprises need; the merged document itself can be huge.
+		// The chain (derived preset first, base last — the command
+		// itself is not in it) is what debugged merge surprises need;
+		// the merged document itself can be huge.
 		loggerPresets.Debug("applied preset chain",
 			"file", filepath.Base(path), "command", name, "chain", strings.Join(chain, " -> "))
 	}

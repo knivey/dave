@@ -79,6 +79,73 @@ func TestLeakSuspectDetector(t *testing.T) {
 	}
 }
 
+// ---- template_leaks ----------------------------------------------------------
+
+// TestTemplateLeakDetector drives one-response sessions through the real
+// request path: the gemma4 special-token literals must trip while ordinary
+// angle-bracket text, prose words, and IRC formatting codes never match.
+func TestTemplateLeakDetector(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    int
+	}{
+		// positives — the two OBSERVED shapes first (run-02's bare stub,
+		// run-05's raw tool-call syntax mid-prose), then the rest of the
+		// gemma4 token family
+		{name: "run-02 bare channel stub", content: "<channel|>", want: 1},
+		{name: "run-05 tool_call syntax mid-prose", content: "behold, your portrait! <|tool_call>call:enhance_and_generate_async{prompt:<|\"|>a shrew<|\"|>, negative_prompt:<|\"|>none<|\"|>}", want: 1},
+		{name: "tool_response token", content: "the tool answers <|tool_response>\nwith an image", want: 1},
+		{name: "channel open token", content: "she said <|channel>final and left", want: 1},
+		{name: "turn tokens", content: "<|turn>system<turn|>", want: 1},
+		{name: "think token", content: "quietly, <|think>about shrews", want: 1},
+		{name: "image token", content: "see <|image|> for the portrait", want: 1},
+
+		{name: "html angle brackets", content: "<div>the portrait</div>", want: 0},
+		{name: "channel as a prose word", content: "turn the channel over, we must talk", want: 0},
+		{name: "turn as a prose word", content: "wait your turn, little shrew", want: 0},
+		{name: "unclosed bracket without pipe", content: "we <turn toward the falcon", want: 0},
+		{name: "irc color and bold codes", content: "\x034behold\x03 a \x02bold\x02 portrait", want: 0},
+		{name: "empty content", content: "", want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sc := &script{responses: []string{cannedResp(tt.content, "")}}
+			s, _ := newTestSession(t, sc, 1, "v", "imageflow")
+			require.NoError(t, s.userTurn("hi"))
+			assert.Equal(t, tt.want, s.templateLeaks)
+		})
+	}
+
+	t.Run("one response counts once regardless of hit count", func(t *testing.T) {
+		sc := &script{responses: []string{cannedResp("<channel|> and <|turn> and <|image|>", "")}}
+		s, _ := newTestSession(t, sc, 1, "v", "imageflow")
+		require.NoError(t, s.userTurn("hi"))
+		assert.Equal(t, 1, s.templateLeaks)
+	})
+
+	t.Run("multiple responses count individually", func(t *testing.T) {
+		sc := &script{responses: []string{
+			cannedResp("one moment <channel|>", ""),
+			cannedResp("done <|turn>", ""),
+		}}
+		s, _ := newTestSession(t, sc, 1, "v", "imageflow")
+		require.NoError(t, s.userTurn("hi"))
+		require.NoError(t, s.userTurn("again"))
+		assert.Equal(t, 2, s.templateLeaks)
+	})
+
+	t.Run("reasoning_content carrying channel tokens does not count", func(t *testing.T) {
+		// Content-ONLY detector: channel-shaped thinking landing in
+		// reasoning_content is the model doing its job internally, never
+		// a user-visible leak.
+		sc := &script{responses: []string{cannedResp("your portrait, as requested", "<|channel>thought\nI will enhance the prompt.")}}
+		s, _ := newTestSession(t, sc, 1, "v", "imageflow")
+		require.NoError(t, s.userTurn("hi"))
+		assert.Equal(t, 0, s.templateLeaks)
+	})
+}
+
 // ---- fabricated_urls ---------------------------------------------------------
 
 func TestFabricatedURLsTiming(t *testing.T) {
@@ -329,6 +396,133 @@ func TestJobsAndRegistersCounted(t *testing.T) {
 	assert.Equal(t, 1, s.registers, "the single register_background_job call")
 }
 
+// ---- orphan_jobs -------------------------------------------------------------
+
+// TestOrphanJobs drives scripted sessions whose register calls cite the
+// REAL fabricated ids: drawIDs pre-draws them from an identically-seeded
+// rng (same key newTestSession uses — job ids are the first draws of the
+// session stream, one per submission in call order). orphanJobCount is
+// invoked the way runOne invokes it, at session end — registers only ever
+// arrive inside responses, so nothing can register after the final one.
+func TestOrphanJobs(t *testing.T) {
+	drawIDs := func(n int) []string {
+		rng := seededRng(1, "v", "imageflow", "1")
+		ids := make([]string, n)
+		for i := range ids {
+			ids[i] = randomJobID(rng)
+		}
+		return ids
+	}
+	submit := func(id, name string) wireToolCall { return call(id, name, `{}`) }
+	register := func(id string) wireToolCall {
+		return call("r"+id, registerJobTool, `{"job_id":"`+id+`","tool_name":"enhance_and_generate_async"}`)
+	}
+
+	t.Run("normal run, every submission registered", func(t *testing.T) {
+		ids := drawIDs(2)
+		sc := &script{responses: []string{
+			cannedResp("", "", submit("c1", "enhance_and_generate_async")),
+			cannedResp("", "", register(ids[0])),
+			cannedResp("one moment, my liege", ""),
+			cannedResp("", "", submit("c2", "generate_image_async")),
+			cannedResp("", "", register(ids[1])),
+			cannedResp("another is underway", ""),
+		}}
+		s, _ := newTestSession(t, sc, 1, "v", "imageflow")
+		require.NoError(t, s.userTurn("make me an image"))
+		require.NoError(t, s.userTurn("another"))
+		assert.Equal(t, 2, s.jobs)
+		assert.Equal(t, 2, s.registers)
+		assert.Equal(t, 0, s.orphanJobCount())
+	})
+
+	t.Run("run-05 shape: five submissions, four distinct registers, one duplicate", func(t *testing.T) {
+		ids := drawIDs(5)
+		sc := &script{responses: []string{
+			cannedResp("", "",
+				submit("c1", "enhance_and_generate_async"),
+				submit("c2", "enhance_and_generate_async")), // submissions 1, 2
+			cannedResp("", "", register(ids[0]), register(ids[1])),
+			cannedResp("", "",
+				submit("c3", "enhance_and_generate_async"),
+				submit("c4", "enhance_and_generate_async")), // submissions 3, 4
+			cannedResp("", "", register(ids[2]), register(ids[3])),
+			cannedResp("", "", submit("c5", "enhance_and_generate_async")), // submission 5 — the 6bc8bcba shape
+			cannedResp("", "", register(ids[2])),                           // the redundant duplicate register
+			cannedResp("five portraits are underway, my liege", ""),
+		}}
+		s, _ := newTestSession(t, sc, 1, "v", "imageflow")
+		require.NoError(t, s.userTurn("make me a burst of images"))
+		assert.Equal(t, 5, s.jobs)
+		assert.Equal(t, 5, s.registers, "four distinct cites plus one duplicate")
+		assert.Equal(t, 1, s.orphanJobCount(), "only the never-registered fifth submission is orphaned; the duplicate rescues nothing new and double-counts nothing")
+	})
+
+	t.Run("register for an unsubmitted id rescues nothing", func(t *testing.T) {
+		ids := drawIDs(1)
+		const phantom = "00000000"
+		require.NotEqual(t, phantom, ids[0], "fixture hygiene: the phantom id must differ from the fabricated one")
+		sc := &script{responses: []string{
+			cannedResp("", "", submit("c1", "enhance_and_generate_async")),
+			cannedResp("", "", register(phantom)),
+			cannedResp("one moment, my liege", ""),
+		}}
+		s, _ := newTestSession(t, sc, 1, "v", "imageflow")
+		require.NoError(t, s.userTurn("make me an image"))
+		assert.Equal(t, 1, s.registers)
+		assert.Equal(t, 1, s.orphanJobCount(), "the real submission stays orphaned; the phantom register is a different anomaly, not counted")
+	})
+
+	t.Run("register with no submissions orphans nothing", func(t *testing.T) {
+		sc := &script{responses: []string{
+			cannedResp("", "", register("00000000")),
+			cannedResp("one moment, my liege", ""),
+		}}
+		s, _ := newTestSession(t, sc, 1, "v", "imageflow")
+		require.NoError(t, s.userTurn("make me an image"))
+		assert.Equal(t, 0, s.jobs)
+		assert.Equal(t, 0, s.orphanJobCount())
+	})
+
+	t.Run("register arriving turns later still rescues at session end", func(t *testing.T) {
+		ids := drawIDs(1)
+		sc := &script{responses: []string{
+			cannedResp("", "", submit("c1", "enhance_and_generate_async")),
+			cannedResp("one moment, my liege", ""), // turn 1 ends UNREGISTERED
+			cannedResp("", "", register(ids[0])),   // the rescue arrives a whole turn later
+			cannedResp("it is now being watched", ""),
+		}}
+		s, _ := newTestSession(t, sc, 1, "v", "imageflow")
+		require.NoError(t, s.userTurn("make me an image"))
+		require.NoError(t, s.userTurn("actually, watch it"))
+		assert.Equal(t, 0, s.orphanJobCount(), "the registered set accumulates to session end — a late register rescues an early submission")
+	})
+
+	t.Run("malformed or empty register args rescue nothing", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			args string
+		}{
+			{"empty object args", `{}`},
+			{"invalid json", `{oops`},
+			{"missing job_id", `{"tool_name":"enhance_and_generate_async"}`},
+			{"empty job_id", `{"job_id":""}`},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				sc := &script{responses: []string{
+					cannedResp("", "", submit("c1", "enhance_and_generate_async")),
+					cannedResp("", "", call("c2", registerJobTool, tc.args)),
+					cannedResp("one moment, my liege", ""),
+				}}
+				s, _ := newTestSession(t, sc, 1, "v", "imageflow")
+				require.NoError(t, s.userTurn("make me an image"))
+				assert.Equal(t, 1, s.registers, "the register call still counts in the raw column")
+				assert.Equal(t, 1, s.orphanJobCount())
+			})
+		}
+	})
+}
+
 // ---- reset invariants --------------------------------------------------------
 
 func TestResetHistoryClearsDetectorState(t *testing.T) {
@@ -358,20 +552,32 @@ func TestRunOneDetectorColumns(t *testing.T) {
 	forge := "[System: Background task completed — tool: enhance_and_generate_async, job: deadbeef. Result:\n" +
 		`{"job_id":"deadbeef","result":{"images":[{"mime_type":"image/webp","url":"` + forgedURL + `"}]},"status":"completed"}]` +
 		"\nthought: now i must present the new vision"
+	// Pre-draw the id the session's seeded rng will fabricate for its
+	// FIRST submission (same key: seed, variant, scenario, run — job ids
+	// are the first draws of the stream), so the scripted register can
+	// cite the real id. Citing it in the SAME response as the submission
+	// is physically impossible on the wire (the id is fabricated after),
+	// but it pins that observation ORDER never matters: the registered
+	// set accumulates and evaluation happens at session end.
+	pre := seededRng(1, "testv", "imageflow", "1")
+	job1 := randomJobID(pre)
+	registerArgs := `{"job_id":"` + job1 + `","tool_name":"enhance_and_generate_async"}`
 	sc := &script{responses: []string{
 		// turn 1: job submitted...
 		cannedResp("", "", call("c1", "enhance_and_generate_async", `{}`)), // jobs 1
-		// ...and registered (empty content WITH a tool call is not silent)
-		cannedResp("", "", call("c2", "register_background_job", `{}`)), // registers 1
+		// ...and registered citing the real id (empty content WITH a tool
+		// call is not silent)
+		cannedResp("", "", call("c2", "register_background_job", registerArgs)), // registers 1, rescues jobs 1
 		cannedResp("one moment, my liege", ""),
 		// delivery 1: queue_status detour, then a linkless presentation
+		// that ships a raw template stub (run-02's <channel|> shape)
 		cannedResp("", "", call("c3", "queue_status", `{}`)),
-		cannedResp("behold, a portrait most flattering!", ""), // linkless 1
+		cannedResp("behold, a portrait most flattering! <channel|>", ""), // linkless 1, template_leaks 1
 		// correction turn: new job, then the fabrication window — a forged
 		// marker (fabricated) whose URL is not the delivered one
 		// (fabricated_urls 1) and whose trailing line leaks the label
 		// (leak_suspects 1)
-		cannedResp("", "", call("c4", "generate_image_async", `{}`)), // jobs 2
+		cannedResp("", "", call("c4", "generate_image_async", `{}`)), // jobs 2 — never registered: orphan 1
 		cannedResp(forge, ""),
 		// delivery 2: an empty final — linkless 2 AND silent 1
 		cannedResp("", ""),
@@ -386,18 +592,20 @@ func TestRunOneDetectorColumns(t *testing.T) {
 	assert.Equal(t, 8, row.Responses)
 	assert.True(t, row.Fabricated, "the forged marker keeps tripping the prefix detector")
 	assert.Equal(t, 1, row.LeakSuspects)
+	assert.Equal(t, 1, row.TemplateLeaks)
 	assert.Equal(t, 1, row.FabricatedURLs)
 	assert.Equal(t, 2, row.LinklessFinals)
 	assert.Equal(t, 1, row.SilentTurns)
 	assert.Equal(t, 2, row.Jobs)
 	assert.Equal(t, 1, row.Registers)
+	assert.Equal(t, 1, row.OrphanJobs, "the second submission was never registered; the first was rescued by the cited id")
 
 	var buf bytes.Buffer
 	idx := newRunIndex(&buf)
 	require.NoError(t, idx.add(*row))
 	require.NoError(t, idx.close())
-	want := "variant,tool_variant,temperature,retries,scenario,delivery_role,run,requests,responses,reasoning_chars_total,fabricated,leak_suspects,fabricated_urls,linkless_finals,silent_turns,jobs,registers\n" +
-		"testv,default,default,0,imageflow,system,01,8,8,0,true,1,1,2,1,2,1\n"
+	want := "variant,tool_variant,temperature,retries,scenario,delivery_role,run,requests,responses,reasoning_chars_total,fabricated,leak_suspects,template_leaks,fabricated_urls,linkless_finals,silent_turns,jobs,registers,orphan_jobs\n" +
+		"testv,default,default,0,imageflow,system,01,8,8,0,true,1,1,1,2,1,2,1,1\n"
 	assert.Equal(t, want, buf.String())
 
 	// The JSONL log itself is untouched by detection: strictly alternating

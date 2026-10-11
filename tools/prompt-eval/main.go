@@ -297,6 +297,9 @@ func runOne(v loadedVariant, scenario string, run int, cfg runConfig, respond re
 		runErr = fmt.Errorf("unknown scenario %q", scenario)
 	}
 
+	// Session end: orphan_jobs is evaluated exactly once, here, after the
+	// scenario (or its failure) — the registered set only ever grows, and
+	// a partial session's row still reports what its own end state was.
 	row := &indexRow{
 		Variant:        v.name,
 		ToolVariant:    toolVariantLabel(cfg.toolVariantName),
@@ -310,15 +313,17 @@ func runOne(v loadedVariant, scenario string, run int, cfg runConfig, respond re
 		ReasoningChars: s.reasoningChars,
 		Fabricated:     s.fabricated,
 		LeakSuspects:   s.leakSuspects,
+		TemplateLeaks:  s.templateLeaks,
 		FabricatedURLs: s.fabricatedURLs,
 		LinklessFinals: s.linklessFinals,
 		SilentTurns:    s.silentTurns,
 		Jobs:           s.jobs,
 		Registers:      s.registers,
+		OrphanJobs:     s.orphanJobCount(),
 	}
-	fmt.Printf("%s/%s run %d done: %d requests, reasoning %d chars, fabricated %v | leaks %d fake_urls %d linkless %d silent %d jobs %d regs %d\n",
+	fmt.Printf("%s/%s run %d done: %d requests, reasoning %d chars, fabricated %v | leaks %d tmpl %d fake_urls %d linkless %d silent %d jobs %d regs %d orphans %d\n",
 		varDir, scenDirName, run, s.reqCount, s.reasoningChars, s.fabricated,
-		s.leakSuspects, s.fabricatedURLs, s.linklessFinals, s.silentTurns, s.jobs, s.registers)
+		s.leakSuspects, s.templateLeaks, s.fabricatedURLs, s.linklessFinals, s.silentTurns, s.jobs, s.registers, row.OrphanJobs)
 	return row, runErr
 }
 

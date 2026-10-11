@@ -195,11 +195,19 @@ type session struct {
 	// notes"). Fed by observeResponse/foldDeliveries at logging time —
 	// the detectors never touch the wire.
 	leakSuspects   int
+	templateLeaks  int
 	fabricatedURLs int
 	linklessFinals int
 	silentTurns    int
 	jobs           int
 	registers      int
+
+	// registeredJobIDs is the set of job ids cited by
+	// register_background_job calls' arguments, accumulated across the
+	// WHOLE session (never reset — orphan evaluation happens once at
+	// session end, so a later-turn register rescues an earlier
+	// submission). Feeds orphanJobCount.
+	registeredJobIDs map[string]bool
 
 	// deliveredURLs is the LATEST delivery's image-URL set (a new
 	// delivery replaces it); scannedMsgs is how far into msgs has been
@@ -212,13 +220,14 @@ type session struct {
 
 func newSession(cfg runConfig, sysPrompt string, respond responder, w *jsonlWriter, rng *rand.Rand) *session {
 	return &session{
-		cfg:           cfg,
-		sysPrompt:     sysPrompt,
-		msgs:          []wireMsg{{Role: "system", Content: sysPrompt}},
-		respond:       respond,
-		log:           w,
-		rng:           rng,
-		deliveredURLs: map[string]bool{},
+		cfg:              cfg,
+		sysPrompt:        sysPrompt,
+		msgs:             []wireMsg{{Role: "system", Content: sysPrompt}},
+		respond:          respond,
+		log:              w,
+		rng:              rng,
+		deliveredURLs:    map[string]bool{},
+		registeredJobIDs: map[string]bool{},
 	}
 }
 

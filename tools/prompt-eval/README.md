@@ -156,11 +156,12 @@ sampling at temperature 1.0 because nobody had checked.
 
 ### Tripwire detector columns
 
-The six int columns after `fabricated` (`leak_suspects`, `fabricated_urls`,
-`linkless_finals`, `silent_turns`, `jobs`, `registers`) are TRIPWIRES:
-known-false-positive-prone mechanical heuristics whose job is to flag runs
-for deeper inspection (pilot reads of the JSONL), never to verdict. A
-non-zero count is a "look closer" signal, not a failure rate.
+The eight int columns after `fabricated` (`leak_suspects`,
+`template_leaks`, `fabricated_urls`, `linkless_finals`, `silent_turns`,
+`jobs`, `registers`, `orphan_jobs`) are TRIPWIRES: known-false-positive-
+prone mechanical heuristics whose job is to flag runs for deeper
+inspection (pilot reads of the JSONL), never to verdict. A non-zero count
+is a "look closer" signal, not a failure rate.
 
 - **`leak_suspects`** — responses whose content has a line starting
   (modulo leading whitespace) with `thought:`/`thinking:`/`reasoning:`
@@ -169,6 +170,21 @@ non-zero count is a "look closer" signal, not a failure rate.
   does not match — but genuine in-character monologue that happens to
   open a line with the label DOES. Known false-positive class; read the
   flagged responses.
+- **`template_leaks`** — responses whose content contains a gemma4
+  template/special-token literal (`<|tool_call`, `<|tool_response`,
+  `<|channel>`, `<channel|>`, `<|turn>`, `<turn|>`, `<|think`,
+  `<|image|>`): the chat-template channel structure leaking into the
+  visible reply as raw text. The motivating s10 instances: run-02 shipped
+  a bare `<channel|>` stub as content; run-05 leaked ~536 chars of raw
+  `<|tool_call>call:enhance_and_generate_async{prompt:<|"|>…` syntax
+  (~10% of sessions at temp 0.8 — mojibake on IRC). The patterns are
+  shape-anchored, so ordinary angle-bracket text (`<div>`) and the words
+  "channel"/"turn" in prose cannot match, and IRC color codes (0x03 etc.)
+  are a different class that never collides. CONTENT-only:
+  `reasoning_content` legitimately carries channel-shaped thinking and is
+  never scanned. A response counts once regardless of hit count. Known
+  false-positive class: a reply deliberately quoting template syntax —
+  vanishingly rare; read the flagged responses.
 - **`fabricated_urls`** — responses citing an `i.shrews.xyz` URL that is
   NOT in the delivered set at that point. The set is rebuilt from
   DELIVERY messages (role system/user/developer carrying the
@@ -191,10 +207,19 @@ non-zero count is a "look closer" signal, not a failure rate.
   the sibling shape is NOT counted here: empty content WITH a tool call
   (the silent job submission) is normal agentic behavior.
 - **`jobs` / `registers`** — raw counts of `enhance_and_generate_async` /
-  `generate_image_async` calls and `register_background_job` calls. No
-  derived omission column: analysis computes `registers` vs `jobs` (the
-  log review found 136/137 jobs unregistered — the raw counts carry the
-  evidence).
+  `generate_image_async` calls and `register_background_job` calls.
+- **`orphan_jobs`** — submissions (fabricated async image-tool results)
+  whose job id was never cited by any `register_background_job` call's
+  `job_id` argument by session end. In prod an unregistered job means
+  the async monitor never attaches — the image silently never arrives
+  even though the submission succeeded. The motivating s10 instance:
+  run-05's five-job burst included job `6bc8bcba` submitted but never
+  registered (plus one redundant duplicate register) — register coverage
+  was 43/44, not the 100% the raw call counts suggested. Duplicate
+  registers collapse (set semantics); a register citing an id that was
+  never submitted rescues nothing (a different anomaly, not this
+  column); evaluation happens once at session end, so a register in any
+  later turn still rescues an earlier submission.
 
 ### Testing a new model (e.g. qwen3.6/3.8): pilot before batch
 
@@ -230,10 +255,10 @@ pages are wrapped as `{"non_json_body":...}` instead of corrupting the file),
 so ad-hoc python parses harness output and production api_logs identically.
 `run-index.csv` columns: `variant, tool_variant, temperature, retries,
 scenario, delivery_role, run, requests, responses, reasoning_chars_total,
-fabricated, leak_suspects, fabricated_urls, linkless_finals, silent_turns,
-jobs, registers` — unset axes read `default` for tool_variant/temperature;
-the six columns after `fabricated` are the tripwire detectors documented
-above.
+fabricated, leak_suspects, template_leaks, fabricated_urls, linkless_finals,
+silent_turns, jobs, registers, orphan_jobs` — unset axes read `default` for
+tool_variant/temperature; the eight columns after `fabricated` are the
+tripwire detectors documented above.
 `retries` counts retry re-sends (flakiness bookkeeping); `requests` stays
 one-per-logical-request. Failed retryable attempts land in the JSONL as
 response-type, choices-less error records — the shape analysis scripts

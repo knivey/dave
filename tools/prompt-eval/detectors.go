@@ -14,6 +14,7 @@ package main
 // existing columns.
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 )
@@ -23,6 +24,41 @@ import (
 // Line-anchored only — "My thought:" mid-sentence is in-character
 // monologue, not a leak, and must not match.
 var leakSuspectRe = regexp.MustCompile(`(?im)^\s*(thought|thinking|reasoning)\s*:`)
+
+// templateLeakPatterns is the gemma4 special-token family whose literals
+// must NEVER appear in visible response content: the template renders
+// them, the model emits them as raw text only when the channel structure
+// leaked (run-02 shipped a bare `<channel|>` stub; run-05 leaked a long
+// `<|tool_call>call:enhance_and_generate_async{prompt:<|"|>…` span —
+// mojibake on IRC). Every pattern is prefix-anchored by its own shape
+// (`<|…` or the stub forms `<x|>`): ordinary angle-bracket text like
+// `<div>` and the words "channel"/"turn" in prose cannot match, and IRC
+// color codes (0x03 etc.) are a DIFFERENT class that never collides with
+// any of these literals. `<|think` is deliberately open-ended (any
+// thinking-token variant); the rest are exact.
+var templateLeakPatterns = []string{
+	"<|tool_call",
+	"<|tool_response",
+	"<|channel>",
+	"<channel|>",
+	"<|turn>",
+	"<turn|>",
+	"<|think",
+	"<|image|>",
+}
+
+// containsTemplateLeak reports whether content carries any template-token
+// literal. Content-only by design: reasoning_content legitimately holds
+// channel-shaped thinking (`<|channel>thought` is the model doing its job
+// internally), so only pr.content is ever passed here.
+func containsTemplateLeak(content string) bool {
+	for _, p := range templateLeakPatterns {
+		if strings.Contains(content, p) {
+			return true
+		}
+	}
+	return false
+}
 
 // imageSiteRe matches image-site URLs with a word-char slug: the harness's
 // fabricated host plus whatever the model conjures (6-char base62 from the
@@ -41,6 +77,20 @@ const deliveryMarkerPrefix = "[System: Background task completed"
 // 136/137 jobs were never registered — the raw count lets analysis derive
 // omissions per run).
 const registerJobTool = "register_background_job"
+
+// registerCallJobID extracts the job_id argument from a
+// register_background_job call's arguments JSON. Malformed JSON or a
+// missing/empty job_id yields "" — a register citing no id rescues
+// nothing (the orphan-jobs detector ignores it, like the server would).
+func registerCallJobID(args string) string {
+	var v struct {
+		JobID string `json:"job_id"`
+	}
+	if err := json.Unmarshal([]byte(args), &v); err != nil {
+		return ""
+	}
+	return v.JobID
+}
 
 // isDeliveryMsg reports whether a history row is an async-result delivery
 // injection: wire role system/user/developer (dave's injection_role axis)
@@ -74,6 +124,9 @@ func citesUndeliveredImageURL(content string, delivered map[string]bool) bool {
 //
 //   - leak_suspects: content matches the line-anchored reasoning-label
 //     regex (false positives: in-character monologue).
+//   - template_leaks: content contains a gemma4 template-token literal
+//     (`<|tool_call`, `<channel|>`, ...). False positives: a reply
+//     deliberately quoting template syntax.
 //   - fabricated_urls: content cites an image-site URL absent from the
 //     delivered set AT THAT POINT (false positives: stale-but-real links
 //     from before a reset are indistinguishable from inventions at this
@@ -84,10 +137,15 @@ func citesUndeliveredImageURL(content string, delivered map[string]bool) bool {
 //     after a delivery — cites no image-site URL at all (the temp-0.7
 //     review's lost-link failure). Tool-call responses (queue_status
 //     detours) do not consume the slot.
-//   - jobs / registers: raw per-call counts from the response's tool_calls.
+//   - jobs / registers: raw per-call counts from the response's tool_calls;
+//     register calls also fold their job_id argument into the registered
+//     set for the session-end orphan_jobs evaluation.
 func (s *session) observeResponse(pr parsedResp) {
 	if leakSuspectRe.MatchString(pr.content) {
 		s.leakSuspects++
+	}
+	if containsTemplateLeak(pr.content) {
+		s.templateLeaks++
 	}
 	if citesUndeliveredImageURL(pr.content, s.deliveredURLs) {
 		s.fabricatedURLs++
@@ -109,8 +167,32 @@ func (s *session) observeResponse(pr parsedResp) {
 			s.jobs++
 		case tc.Function.Name == registerJobTool:
 			s.registers++
+			if id := registerCallJobID(tc.Function.Arguments); id != "" {
+				s.registeredJobIDs[id] = true
+			}
 		}
 	}
+}
+
+// orphanJobCount is the session-end evaluation behind the `orphan_jobs`
+// column: how many fabricated submissions were never cited by ANY
+// register_background_job call's arguments. In prod an unregistered job
+// means the async monitor never attaches — the image silently never
+// arrives (run-05: job 6bc8bcba submitted, never registered, while the
+// call counts read almost-perfect). Duplicate registers collapse via the
+// set, and a register citing an id that was never submitted rescues
+// nothing (a different anomaly, not this column). Evaluated ONCE at
+// session end precisely because the registered set only ever grows: a
+// register in a later turn rescues an earlier submission, and no register
+// can arrive after the final response.
+func (s *session) orphanJobCount() int {
+	orphans := 0
+	for _, id := range s.jobSubmissions {
+		if !s.registeredJobIDs[id] {
+			orphans++
+		}
+	}
+	return orphans
 }
 
 // foldDeliveries folds history rows that are new since the last request

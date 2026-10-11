@@ -22,6 +22,13 @@ const wantProdRegisterDescription = `Register a background job for monitoring. W
 
 const wantWaitinstrRegisterDescription = `Register a background job for monitoring. When an async tool (e.g. generate_image_async) returns a job_id, call this to have the system monitor the job. You will be notified with the result in a system message when it completes. After calling this, always send the user a short message telling them the task is underway. Do not poll for status — the result arrives automatically as a notice beginning with "[System: Background task completed". NEVER write that notice yourself, and never invent an image link: real links only ever arrive inside that notice.`
 
+// wantSelfinterceptClause is the self-interception clause appended to the
+// prod register description (with its leading space): it names the s6
+// "reasoned forgery" move — quoting the wait rule, then hallucinating a
+// tool output and self-authorizing ("I must use exactly what was
+// returned").
+const wantSelfinterceptClause = ` If you ever catch yourself writing or quoting that notice, or remembering a tool result you never received, stop — that is hallucination; the real notice has not arrived yet.`
+
 func TestToolVariantFlagSet(t *testing.T) {
 	var v toolVariantList
 	require.NoError(t, v.Set("waitinstr=/tmp/waitinstr.json"))
@@ -279,5 +286,23 @@ func TestShippedWaitinstrToolVariant(t *testing.T) {
 	assert.Equal(t, map[string]string{"register_background_job": wantWaitinstrRegisterDescription},
 		tvs[0].overrides, "the shipped file must carry the exact brief text")
 	assert.NotEqual(t, wantProdRegisterDescription, wantWaitinstrRegisterDescription,
+		"the experiment must actually differ from the baseline")
+}
+
+// TestShippedSelfinterceptToolVariant pins the shipped self-interception
+// experiment file: it must load cleanly through the real loader and equal
+// the CURRENT prod register description plus the clause, byte-exact — the
+// baseline it extends is live prod text, not the byte-stable waitinstr
+// experiment (which differs from prod by "image link").
+func TestShippedSelfinterceptToolVariant(t *testing.T) {
+	p := filepath.Join("toolvariants", "selfintercept.json")
+	require.FileExists(t, p)
+	tvs, err := loadToolVariants([]toolVariantSpec{{name: "selfintercept", path: p}})
+	require.NoError(t, err, "the shipped experiment file must load cleanly")
+	require.Len(t, tvs, 1)
+	want := wantProdRegisterDescription + wantSelfinterceptClause
+	assert.Equal(t, map[string]string{"register_background_job": want},
+		tvs[0].overrides, "the shipped file must equal baseline + clause exactly")
+	assert.NotEqual(t, wantProdRegisterDescription, want,
 		"the experiment must actually differ from the baseline")
 }

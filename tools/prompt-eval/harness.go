@@ -164,9 +164,21 @@ type session struct {
 	log       *jsonlWriter
 	rng       *rand.Rand
 
-	// curJobID tracks the async image job id fabricated during the
-	// current turn so the delivery marker can reference the right job.
-	curJobID string
+	// jobSubmissions records, in submission order, every async image job
+	// id the harness handed out in a fabricated tool result — the model's
+	// OWN enhance/generate calls, never a pre-scripted id. Deliveries
+	// couple to this list (coupledDeliveryTurn): each firing delivery
+	// carries the oldest not-yet-delivered submission, and a submission
+	// that never happened means nothing arrives — matching prod, where no
+	// job ever exists (the s6 user run-07 ghost-delivery artifact).
+	jobSubmissions []string
+
+	// jobsDelivered counts how many submissions coupledDeliveryTurn has
+	// already carried out in a delivery — the FIFO consume cursor over
+	// jobSubmissions. A SKIPPED delivery does not advance it: the late
+	// submission still belongs to a later slot, exactly like a real job
+	// that completes after an earlier one never existed.
+	jobsDelivered int
 
 	reqCount       int
 	respCount      int
@@ -328,7 +340,7 @@ func (s *session) answerToolCalls(calls []wireToolCall) {
 	for _, tc := range calls {
 		result, jobID := fabricateToolResult(tc.Function.Name, s.rng)
 		if jobID != "" {
-			s.curJobID = jobID
+			s.jobSubmissions = append(s.jobSubmissions, jobID)
 		}
 		s.msgs = append(s.msgs, wireMsg{Role: "tool", ToolCallID: tc.ID, Content: result})
 	}
@@ -357,7 +369,6 @@ func (s *session) toolLoop() error {
 
 // userTurn appends a user message and runs the tool loop to a final.
 func (s *session) userTurn(content string) error {
-	s.curJobID = ""
 	s.msgs = append(s.msgs, wireMsg{Role: "user", Content: content})
 	return s.toolLoop()
 }
@@ -368,7 +379,6 @@ func (s *session) userTurn(content string) error {
 // the A/B axis (does a user-role delivery stop the model forging the
 // marker itself?). The marker TEXT is the prod format regardless of role.
 func (s *session) deliveryTurn(marker string) error {
-	s.curJobID = ""
 	s.msgs = append(s.msgs, wireMsg{Role: s.cfg.deliveryRole, Content: marker})
 	return s.toolLoop()
 }

@@ -1,5 +1,9 @@
 package main
 
+import (
+	"fmt"
+)
+
 // imageRequestPool rotates the ornate image-request phrasing; entry 0 is
 // production session 1910's exact text.
 var imageRequestPool = []string{
@@ -55,32 +59,62 @@ func phraseOffset(seed int64, variant, scenario string) int {
 // runImageflow replicates production session 1910:
 //
 //  1. ornate image request → fabricated async tool rounds → final
-//  2. the system-role delivery for the job just fabricated → response
+//  2. the delivery for the job the model just submitted → response
 //  3. shrew correction → new fabricated job → FABRICATION WINDOW final —
 //     deliberately NO delivery precedes it (1910's failure was the model
 //     forging the delivery marker itself right here)
 //  4. the real delivery for the new job → final response
+//
+// Deliveries are COUPLED to actual submissions (coupledDeliveryTurn): a
+// delivery only ever references a job id the harness really handed out in
+// a tool result, and a missing submission means nothing arrives at all —
+// the prod semantics the pre-coupling harness violated when it injected a
+// ghost delivery for the s6 user run-07 glitch (the model's first response
+// planned the enhance call but emitted none; the scripted delivery carried
+// another cell's job id and the model presented it credulously).
 func (s *session) runImageflow(run, phraseOff int) error {
 	if err := s.userTurn(rotate(imageRequestPool, phraseOff, run)); err != nil {
 		return err
 	}
-	if err := s.deliveryTurn(s.deliveryMarkerFor(s.curJobID)); err != nil {
+	if err := s.coupledDeliveryTurn(run, 1); err != nil {
 		return err
 	}
 	if err := s.userTurn(rotate(correctionPool, phraseOff, run)); err != nil {
 		return err
 	}
-	return s.deliveryTurn(s.deliveryMarkerFor(s.curJobID))
+	return s.coupledDeliveryTurn(run, 2)
 }
 
-// deliveryMarkerFor builds the prod delivery marker for a job. A missing
-// job id (the model never called an image tool this turn) gets a freshly
-// fabricated one so the scenario shape survives unexpected model behavior.
-func (s *session) deliveryMarkerFor(jobID string) string {
-	if jobID == "" {
-		jobID = randomJobID(s.rng)
+// coupledDeliveryTurn injects delivery n: the oldest not-yet-delivered
+// submission's job id (in submission order — see session.jobSubmissions)
+// plus a URL freshly drawn from the session rng — or NOTHING AT ALL when
+// no unconsumed submission exists at this point: no marker row, no
+// request, one stdout note. In prod no submission means no job, and a job
+// that does not exist never delivers; the harness must not fabricate
+// arrivals the model can present as real.
+//
+// Skipped deliveries consume nothing: a submission that happens LATE (the
+// s6 run-07 glitch shape — turn 1 emitted no tool call, the correction
+// turn submitted the run's only job) is still carried by the next delivery
+// slot, exactly like the real job completing and delivering then. In the
+// normal flow (one submission per image turn) delivery 1 ← submission 1
+// and delivery 2 ← submission 2.
+//
+// COMPARABILITY INVARIANT: in a normal run the carried id is the same
+// seeded draw the pre-coupling per-turn marker already referenced, and the
+// URL is drawn here exactly where that marker drew it — the rng stream and
+// therefore the transcript are byte-identical to the pre-change shape.
+// Only glitch runs differ (delivery skipped instead of ghost-injected).
+// Extra submissions beyond the scenario's two delivery slots (the
+// double-submit edge) are ignored.
+func (s *session) coupledDeliveryTurn(run, n int) error {
+	if s.jobsDelivered >= len(s.jobSubmissions) {
+		fmt.Printf("run %d: no submission for delivery %d, skipped\n", run, n)
+		return nil
 	}
-	return deliveryMarker(jobID, randomImageURL(s.rng))
+	jobID := s.jobSubmissions[s.jobsDelivered]
+	s.jobsDelivered++
+	return s.deliveryTurn(deliveryMarker(jobID, randomImageURL(s.rng)))
 }
 
 // runPrompts is the thinking-depth modulation sweep: six one-shot prompts,
@@ -88,7 +122,6 @@ func (s *session) deliveryMarkerFor(jobID string) string {
 func (s *session) runPrompts() error {
 	for _, p := range oneShotPrompts {
 		s.resetHistory()
-		s.curJobID = ""
 		s.msgs = append(s.msgs, wireMsg{Role: "user", Content: p})
 		if _, err := s.request(false); err != nil {
 			return err

@@ -277,11 +277,16 @@ func TestSessionDoesNotRetryClientTimeout(t *testing.T) {
 // count, and the full row renders through the index with the new columns
 // in order.
 func TestRunOneRetriesColumn(t *testing.T) {
-	responses := []string{ // minimal no-tool imageflow shape
-		cannedResp("i shall simply describe it...", ""),
-		cannedResp("as delivered", ""),
-		cannedResp("hmm, no tool again", ""),
-		cannedResp("very well", ""),
+	// Submitting imageflow shape: both turns hand out a job, so both
+	// deliveries fire (deliveries couple to actual submissions — a no-tool
+	// script would skip them and shrink the session).
+	responses := []string{
+		cannedResp("", "", call("c1", "enhance_and_generate_async", `{}`)),
+		cannedResp("one moment...", ""),
+		cannedResp("behold!", ""),
+		cannedResp("", "", call("c2", "enhance_and_generate_async", `{}`)),
+		cannedResp("redoing it...", ""),
+		cannedResp("done!", ""),
 	}
 	var hits, ok atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -302,14 +307,14 @@ func TestRunOneRetriesColumn(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, row)
 
-	assert.Equal(t, 4, row.Requests, "logical request count is unaffected by retries")
-	assert.Equal(t, 4, row.Responses)
+	assert.Equal(t, 6, row.Requests, "logical request count is unaffected by retries")
+	assert.Equal(t, 6, row.Responses)
 	assert.Equal(t, 2, row.Retries, "both dropped requests were retried")
-	require.Equal(t, int32(6), hits.Load(), "4 logical requests + 2 retries")
-	require.Equal(t, int32(4), ok.Load(), "every logical request eventually succeeded")
+	require.Equal(t, int32(8), hits.Load(), "6 logical requests + 2 retries")
+	require.Equal(t, int32(6), ok.Load(), "every logical request eventually succeeded")
 
 	lines := mustReadLines(t, filepath.Join(outdir, "testv", "imageflow-system", "run-01.jsonl"))
-	require.Len(t, lines, 10, "4 requests + 2 error records + 4 responses")
+	require.Len(t, lines, 14, "6 requests + 2 error records + 6 responses")
 	var e apiLogEntry
 	require.NoError(t, json.Unmarshal([]byte(lines[1]), &e))
 	assert.Equal(t, "response", e.Type, "the first error record sits right after its request")
@@ -326,6 +331,6 @@ func TestRunOneRetriesColumn(t *testing.T) {
 	require.NoError(t, idx.close())
 	assert.Equal(t,
 		"variant,tool_variant,temperature,retries,scenario,delivery_role,run,requests,responses,reasoning_chars_total,fabricated,leak_suspects,fabricated_urls,linkless_finals,silent_turns,jobs,registers\n"+
-			"testv,default,default,2,imageflow,system,01,4,4,0,false,0,0,2,0,0,0\n",
-		buf.String(), "the row renders with temperature, retries, and the detector columns in order; both linkless presentation slots (no-tool responses after each delivery, no URLs cited) trip")
+			"testv,default,default,2,imageflow,system,01,6,6,0,false,0,0,2,0,2,0\n",
+		buf.String(), "the row renders with temperature, retries, and the detector columns in order; both linkless presentation slots (no-tool responses after each delivery, no URLs cited) trip, and both submissions count as jobs")
 }

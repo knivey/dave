@@ -1,0 +1,3 @@
+{
+  "register_background_job": "Register a background job for monitoring. When an async tool (e.g. generate_image_async) returns a job_id, call this to have the system monitor the job. You will be notified with the result in a system message when it completes. After calling this, always send the user a short message telling them the task is underway. Do not poll for status — the result arrives automatically as a notice beginning with \"[System: Background task completed\". NEVER write that notice yourself, and never invent a link: real links only ever arrive inside that notice. If you ever catch yourself writing or quoting that notice, or remembering a tool result you never received, stop — that is hallucination; the real notice has not arrived yet."
+}

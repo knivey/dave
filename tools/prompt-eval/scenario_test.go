@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -331,27 +332,235 @@ func TestImageflowForgedMarkerDetected(t *testing.T) {
 	assert.True(t, s.fabricated, "a response whose content starts with [System: must trip the forgery detector")
 }
 
-func TestImageflowMissingJobFabrFallback(t *testing.T) {
-	// The model never calls an image tool; both deliveries must still be
-	// well-formed markers (fresh fabricated job ids).
-	sc := &script{responses: []string{
-		cannedResp("i shall simply describe it...", ""),
-		cannedResp("as delivered", ""),
-		cannedResp("hmm, no tool again", ""),
-		cannedResp("very well", ""),
-	}}
-	s, _ := newTestSession(t, sc, 3, "testv", "imageflow")
-	require.NoError(t, s.runImageflow(1, phraseOffset(3, "testv", "imageflow")))
-	require.Len(t, sc.requests, 4)
-	reqs := decodeRequests(t, sc.requests)
-	for _, i := range []int{1, 3} {
-		m := lastMsg(t, reqs[i])
-		assert.Equal(t, "system", m.Role)
-		assert.Contains(t, m.Content, "[System: Background task completed — tool: enhance_and_generate_async, job: ")
-		assert.Regexp(t, `"job_id":"[0-9a-f]{8}"`, m.Content)
+// ---- delivery coupling --------------------------------------------------------
+
+// captureStdout swaps os.Stdout for a pipe around fn and returns what fn
+// printed — used to pin the skip note's presence without guessing formats.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = w
+	defer func() { os.Stdout = old }()
+	done := make(chan string, 1)
+	go func() { b, _ := io.ReadAll(r); done <- string(b) }()
+	fn()
+	require.NoError(t, w.Close())
+	return <-done
+}
+
+// lastSubmittedJobID recovers the PRE-coupling curJobID semantics from
+// history: the id of the most recent submission (the last tool row
+// carrying a job_id) — what the old delivery marker referenced.
+func lastSubmittedJobID(t *testing.T, s *session) string {
+	t.Helper()
+	for i := len(s.msgs) - 1; i >= 0; i-- {
+		m := s.msgs[i]
+		if m.Role != "tool" {
+			continue
+		}
+		var v struct {
+			JobID string `json:"job_id"`
+		}
+		if err := json.Unmarshal([]byte(m.Content), &v); err == nil && v.JobID != "" {
+			return v.JobID
+		}
 	}
-	// The two fallback ids differ (rng advances).
-	assert.NotEqual(t, lastMsg(t, reqs[1]).Content, lastMsg(t, reqs[3]).Content)
+	return ""
+}
+
+// legacyDeliveryMarkerFor re-implements the PRE-coupling marker builder
+// for the normal flow: the id of the last submission, and a URL drawn from
+// the session rng at marker time. The fresh-id fallback for a missing
+// submission is deliberately absent — the ghost it produced is the bug
+// coupling removed, and the byte-identity comparison covers only the
+// normal flow, where a submission always exists.
+func legacyDeliveryMarkerFor(t *testing.T, s *session) string {
+	jobID := lastSubmittedJobID(t, s)
+	require.NotEmpty(t, jobID, "normal-flow fixture: every image turn submits")
+	return deliveryMarker(jobID, randomImageURL(s.rng))
+}
+
+// TestImageflowDeliveryCouplingNormalFlowByteIdentical pins the
+// comparability invariant: on a normal-flow fixture the coupled path must
+// produce byte-identical request bodies to the pre-change delivery shape
+// (re-implemented here — legacy per-turn marker against an identically
+// seeded session). Coupling is a no-op for normal runs; only glitch runs
+// change (see TestImageflowNoSubmissionSkipsDelivery).
+func TestImageflowDeliveryCouplingNormalFlowByteIdentical(t *testing.T) {
+	// The full normal shape, queue_status detour included.
+	newScript := func() *script {
+		return &script{responses: []string{
+			cannedResp("", "planning the group portrait", call("call_1", "enhance_and_generate_async", `{"prompt":"group portrait"}`)),
+			cannedResp("but of course, one moment while i conjure it...", ""),
+			cannedResp("", "checking the queue", call("call_q", "queue_status", `{}`)),
+			cannedResp("behold, our visages immortalized!", "brief thought"),
+			cannedResp("", "the user is a shrew, not a woman", call("call_2", "generate_image_async", `{"prompt":"corrected portrait"}`)),
+			cannedResp("a thousand pardons! a corrected likeness is being prepared", ""),
+			cannedResp("the corrected portrait, at last!", ""),
+		}}
+	}
+	const seed = int64(1)
+	off := phraseOffset(seed, "testv", "imageflow")
+
+	// The coupled path (production code).
+	coupled := newScript()
+	cs, _ := newTestSession(t, coupled, seed, "testv", "imageflow")
+	require.NoError(t, cs.runImageflow(1, off))
+
+	// The pre-change shape: per-turn marker referencing the turn's last
+	// submission, URL drawn at marker-build time — against a session with
+	// the identical seed, so the rng streams run in lockstep.
+	legacy := newScript()
+	ls, _ := newTestSession(t, legacy, seed, "testv", "imageflow")
+	require.NoError(t, ls.userTurn(rotate(imageRequestPool, off, 1)))
+	require.NoError(t, ls.deliveryTurn(legacyDeliveryMarkerFor(t, ls)))
+	require.NoError(t, ls.userTurn(rotate(correctionPool, off, 1)))
+	require.NoError(t, ls.deliveryTurn(legacyDeliveryMarkerFor(t, ls)))
+
+	require.Len(t, coupled.requests, 7, "the normal flow keeps its 7-request shape")
+	require.Len(t, legacy.requests, 7)
+	assert.Equal(t, legacy.requests, coupled.requests,
+		"normal flow: coupling must be a byte-level no-op vs the pre-change delivery shape")
+}
+
+// TestImageflowNoSubmissionSkipsDelivery pins the glitch semantics
+// discovered in s6 user run-07: when the model's first response plans the
+// enhance call but emits no tool call (no submission), NO delivery is
+// injected — nothing arrives, like prod, where no job ever exists. The
+// pre-coupling harness fabricated a ghost marker carrying a job id from
+// the seeded draw (another cell's run), which the model presented
+// credulously.
+func TestImageflowNoSubmissionSkipsDelivery(t *testing.T) {
+	sc := &script{responses: []string{
+		// Turn 1 glitch: reasoning plans the call, finish_reason stop, no
+		// tool call — and the content cites a URL with no basis.
+		cannedResp("at once! behold: https://i.shrews.xyz/A1b2C3", "i will call enhance_and_generate_async now"),
+		// Correction turn: the one real submission.
+		cannedResp("", "redoing it correctly", call("call_2", "enhance_and_generate_async", `{"prompt":"corrected portrait"}`)),
+		cannedResp("a corrected likeness is being prepared", ""),
+		// Delivery 2 (for submission 1 = the correction job) final.
+		cannedResp("the corrected portrait, at last!", ""),
+	}}
+
+	var s *session
+	out := captureStdout(t, func() {
+		s, _ = newTestSession(t, sc, 7, "testv", "imageflow")
+		require.NoError(t, s.runImageflow(1, phraseOffset(7, "testv", "imageflow")))
+	})
+
+	// Shape: turn 1 + correction (tool round + final) + delivery 2 — the
+	// delivery-1 request never happens.
+	require.Len(t, sc.requests, 4, "turn 1 + correction(tool+final) + delivery 2; delivery 1 was skipped")
+	reqs := decodeRequests(t, sc.requests)
+
+	// No marker MESSAGE anywhere before the coupled delivery 2: the ghost
+	// is gone. (The raw bodies always mention the marker prefix inside the
+	// register tool description — the check is on message rows.)
+	for i := 0; i < 3; i++ {
+		for _, m := range reqs[i].Messages {
+			assert.NotContainsf(t, m.Content, "[System: Background task completed",
+				"request %d must carry no delivery-marker message — delivery 1 had no submission", i+1)
+		}
+	}
+
+	// The correction turn proceeded normally right after the glitch: its
+	// first request carries the correction user row, its second the
+	// answered tool call.
+	cm := lastMsg(t, reqs[1])
+	assert.Equal(t, "user", cm.Role)
+	assert.Equal(t, rotate(correctionPool, phraseOffset(7, "testv", "imageflow"), 1), cm.Content)
+	tm := lastMsg(t, reqs[2])
+	assert.Equal(t, "tool", tm.Role)
+	assert.Equal(t, "call_2", tm.ToolCallID)
+	jc := jobIDOf(t, tm.Content)
+
+	// Delivery 2 fires for submission 1 — the correction job.
+	d2 := lastMsg(t, reqs[3])
+	assert.Equal(t, "system", d2.Role)
+	assert.Contains(t, d2.Content, `"job_id":"`+jc+`"`)
+
+	// Detector interplay: the glitch citation counts as fabricated (no
+	// delivery ever seeded the delivered set before it), the skipped
+	// delivery armed NO presentation slot (only delivery 2's exists —
+	// pre-change the ghost would have armed a second, consumed by the
+	// linkless correction final), and jobs/registers are unaffected.
+	require.NotNil(t, s)
+	assert.Equal(t, 1, s.jobs)
+	assert.Equal(t, 0, s.registers)
+	assert.Equal(t, 1, s.fabricatedURLs, "the glitch citation counts as fake: the delivered set was empty")
+	assert.Equal(t, 1, s.linklessFinals, "only delivery 2's slot exists")
+	assert.False(t, s.fabricated)
+
+	// One stdout note for the skip.
+	assert.Contains(t, out, "run 1: no submission for delivery 1, skipped")
+}
+
+// TestImageflowDoubleSubmitMapsInOrder pins the double-submit edge:
+// submissions map to deliveries IN ORDER (delivery 1 ← submission 1,
+// delivery 2 ← submission 2), and extra submissions beyond the scenario's
+// two delivery slots are ignored.
+func TestImageflowDoubleSubmitMapsInOrder(t *testing.T) {
+	sc := &script{responses: []string{
+		// Turn 1: two image calls in one round → submissions [ja, jb].
+		cannedResp("", "", call("call_a", "enhance_and_generate_async", `{"prompt":"a"}`),
+			call("call_b", "generate_image_async", `{"prompt":"b"}`)),
+		cannedResp("two visions underway...", ""),
+		// Delivery 1 ← ja.
+		cannedResp("first vision delivered", ""),
+		// Correction turn: third submission jc (beyond the delivery count).
+		cannedResp("", "", call("call_c", "enhance_and_generate_async", `{"prompt":"c"}`)),
+		cannedResp("corrected underway", ""),
+		// Delivery 2 ← jb; jc ignored.
+		cannedResp("second vision delivered", ""),
+	}}
+	s, _ := newTestSession(t, sc, 11, "testv", "imageflow")
+	require.NoError(t, s.runImageflow(1, phraseOffset(11, "testv", "imageflow")))
+	require.Len(t, sc.requests, 6)
+
+	reqs := decodeRequests(t, sc.requests)
+	// The two tool answers of request 2, keyed by tool_call id.
+	jobByCall := map[string]string{}
+	for _, m := range reqs[1].Messages {
+		if m.Role == "tool" {
+			jobByCall[m.ToolCallID] = jobIDOf(t, m.Content)
+		}
+	}
+	ja, jb := jobByCall["call_a"], jobByCall["call_b"]
+	jc := jobIDOf(t, lastMsg(t, reqs[4]).Content) // request 5's last row = call_c's tool answer
+
+	d1 := lastMsg(t, reqs[2])
+	assert.Contains(t, d1.Content, `"job_id":"`+ja+`"`, "delivery 1 references submission 1 (call_a's job)")
+	assert.NotContains(t, d1.Content, jb)
+	d2 := lastMsg(t, reqs[5])
+	assert.Contains(t, d2.Content, `"job_id":"`+jb+`"`, "delivery 2 references submission 2 (call_b's job)")
+	assert.NotContains(t, d2.Content, ja)
+	assert.NotContains(t, d2.Content, jc, "submission 3 is beyond the delivery count — never delivered")
+	assert.Equal(t, 3, s.jobs)
+}
+
+// TestImageflowDeterministicSameSeed pins the determinism contract after
+// coupling: same seed + same model behavior → byte-identical request
+// bodies (fabricated job ids and delivery URLs included) across
+// invocations.
+func TestImageflowDeterministicSameSeed(t *testing.T) {
+	build := func() []string {
+		sc := &script{responses: []string{
+			cannedResp("", "planning", call("call_1", "enhance_and_generate_async", `{"prompt":"group portrait"}`)),
+			cannedResp("one moment...", ""),
+			cannedResp("behold!", ""),
+			cannedResp("", "redoing it", call("call_2", "enhance_and_generate_async", `{"prompt":"corrected"}`)),
+			cannedResp("corrected underway", ""),
+			cannedResp("done", ""),
+		}}
+		s, _ := newTestSession(t, sc, 42, "det", "imageflow")
+		require.NoError(t, s.runImageflow(3, phraseOffset(42, "det", "imageflow")))
+		return sc.requests
+	}
+	a, b := build(), build()
+	require.Len(t, a, 6)
+	assert.Equal(t, a, b, "same seed + same model behavior → identical request bodies")
 }
 
 func TestToolLoopCapForcesFinal(t *testing.T) {

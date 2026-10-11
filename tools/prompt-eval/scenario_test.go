@@ -138,6 +138,7 @@ func newTestSession(t *testing.T, sc *script, seed int64, variant, scenario stri
 		reasoningEffort: "low",
 		kwargs:          map[string]any{"preserve_thinking": true},
 		seed:            seed,
+		deliveryRole:    "system",
 	}
 	rng := seededRng(seed, variant, scenario, "1")
 	s := newSession(cfg, "SYS PROMPT", sc.responder(), w, rng)
@@ -164,135 +165,144 @@ func jobIDOf(t *testing.T, toolResult string) string {
 // ---- scenarios -------------------------------------------------------------
 
 func TestImageflowSteps(t *testing.T) {
-	sc := &script{responses: []string{
-		// turn 1: image request → tool round → final
-		cannedResp("", "planning the group portrait", call("call_1", "enhance_and_generate_async", `{"prompt":"group portrait"}`)),
-		cannedResp("but of course, one moment while i conjure it...", ""),
-		// delivery turn 1 (with a stray queue_status round)
-		cannedResp("", "checking the queue", call("call_q", "queue_status", `{}`)),
-		cannedResp("behold, our visages immortalized!", "brief thought"),
-		// correction turn: new job → fabrication-window final (no delivery!)
-		cannedResp("", "the user is a shrew, not a woman", call("call_2", "generate_image_async", `{"prompt":"corrected portrait"}`)),
-		cannedResp("a thousand pardons! a corrected likeness is being prepared", ""),
-		// delivery turn 2: final response
-		cannedResp("the corrected portrait, at last!", ""),
-	}}
+	// The -delivery-role axis: every subtest runs the IDENTICAL script —
+	// only the two delivery-marker rows change wire role.
+	for _, role := range []string{"system", "user", "developer"} {
+		t.Run("delivery role "+role, func(t *testing.T) {
+			sc := &script{responses: []string{
+				// turn 1: image request → tool round → final
+				cannedResp("", "planning the group portrait", call("call_1", "enhance_and_generate_async", `{"prompt":"group portrait"}`)),
+				cannedResp("but of course, one moment while i conjure it...", ""),
+				// delivery turn 1 (with a stray queue_status round)
+				cannedResp("", "checking the queue", call("call_q", "queue_status", `{}`)),
+				cannedResp("behold, our visages immortalized!", "brief thought"),
+				// correction turn: new job → fabrication-window final (no delivery!)
+				cannedResp("", "the user is a shrew, not a woman", call("call_2", "generate_image_async", `{"prompt":"corrected portrait"}`)),
+				cannedResp("a thousand pardons! a corrected likeness is being prepared", ""),
+				// delivery turn 2: final response
+				cannedResp("the corrected portrait, at last!", ""),
+			}}
 
-	s, logPath := newTestSession(t, sc, 1, "testv", "imageflow")
-	off := phraseOffset(1, "testv", "imageflow")
-	require.NoError(t, s.runImageflow(1, off))
-	require.Len(t, sc.requests, 7, "user → tool round → final → delivery(+stray round) → correction → tool round → window final → delivery")
+			s, logPath := newTestSession(t, sc, 1, "testv", "imageflow")
+			s.cfg.deliveryRole = role
+			off := phraseOffset(1, "testv", "imageflow")
+			require.NoError(t, s.runImageflow(1, off))
+			require.Len(t, sc.requests, 7, "user → tool round → final → delivery(+stray round) → correction → tool round → window final → delivery")
 
-	reqs := decodeRequests(t, sc.requests)
+			reqs := decodeRequests(t, sc.requests)
 
-	// Every request carries the prod body shape.
-	for i, r := range reqs {
-		assert.Equal(t, "test-model", r.Model, "request %d", i+1)
-		assert.Len(t, r.Tools, 16, "request %d must advertise the prod tool set", i+1)
-		assert.Equal(t, "auto", r.ToolChoice, "request %d", i+1)
-		assert.Equal(t, "low", r.ReasoningEffort, "request %d", i+1)
-		assert.Equal(t, map[string]any{"preserve_thinking": true}, r.ChatTemplateKwargs, "request %d", i+1)
-		require.NotEmpty(t, r.Messages, "request %d", i+1)
-		assert.Equal(t, "system", r.Messages[0].Role, "request %d", i+1)
-		assert.Equal(t, "SYS PROMPT", r.Messages[0].Content, "request %d", i+1)
+			// Every request carries the prod body shape.
+			for i, r := range reqs {
+				assert.Equal(t, "test-model", r.Model, "request %d", i+1)
+				assert.Len(t, r.Tools, 16, "request %d must advertise the prod tool set", i+1)
+				assert.Equal(t, "auto", r.ToolChoice, "request %d", i+1)
+				assert.Equal(t, "low", r.ReasoningEffort, "request %d", i+1)
+				assert.Equal(t, map[string]any{"preserve_thinking": true}, r.ChatTemplateKwargs, "request %d", i+1)
+				require.NotEmpty(t, r.Messages, "request %d", i+1)
+				assert.Equal(t, "system", r.Messages[0].Role, "request %d", i+1)
+				assert.Equal(t, "SYS PROMPT", r.Messages[0].Content, "request %d", i+1)
+			}
+
+			// Request 1: [system, user(phrase for run 1)]
+			assert.Len(t, reqs[0].Messages, 2)
+			um := lastMsg(t, reqs[0])
+			assert.Equal(t, "user", um.Role)
+			assert.Equal(t, rotate(imageRequestPool, off, 1), um.Content)
+
+			// Request 2: assistant replays reasoning on the tool-call row; the
+			// answer is a fabricated job id keyed to call_1.
+			require.Len(t, reqs[1].Messages, 4)
+			asst := reqs[1].Messages[2]
+			assert.Equal(t, "assistant", asst.Role)
+			require.Len(t, asst.ToolCalls, 1)
+			assert.Equal(t, "enhance_and_generate_async", asst.ToolCalls[0].Function.Name)
+			assert.Equal(t, "planning the group portrait", asst.ReasoningContent,
+				"assistant tool-call rows must replay reasoning_content like prod's tool_calls mode")
+			toolMsg := lastMsg(t, reqs[1])
+			assert.Equal(t, "tool", toolMsg.Role)
+			assert.Equal(t, "call_1", toolMsg.ToolCallID)
+			j1 := jobIDOf(t, toolMsg.Content)
+
+			// Request 3: the delivery marker arrives in the configured role,
+			// referencing j1, with the exact prod marker TEXT either way.
+			d1 := lastMsg(t, reqs[2])
+			assert.Equal(t, role, d1.Role, "the delivery row must carry the -delivery-role axis")
+			marker1 := d1.Content
+			prefix := "[System: Background task completed — tool: enhance_and_generate_async, job: " + j1 + ". Result:\n"
+			require.True(t, strings.HasPrefix(marker1, prefix), "marker must open with the exact prod format, got %q", marker1)
+			require.Equal(t, "]", marker1[len(marker1)-1:])
+			assert.Contains(t, marker1, `"job_id":"`+j1+`"`)
+			assert.Contains(t, marker1, `"status":"completed"`)
+			assert.Regexp(t, `https://i\.shrews\.xyz/[0-9A-Za-z]{6}`, marker1)
+
+			// Request 4: stray queue_status answered from the default row.
+			qm := lastMsg(t, reqs[3])
+			assert.Equal(t, "tool", qm.Role)
+			assert.Equal(t, "call_q", qm.ToolCallID)
+			assert.Equal(t, `{"ok":true}`, qm.Content)
+
+			// Request 5: the correction phrase stays a real user message.
+			cm := lastMsg(t, reqs[4])
+			assert.Equal(t, "user", cm.Role)
+			assert.Equal(t, rotate(correctionPool, off, 1), cm.Content)
+
+			// Request 6: new fabricated job id for call_2, distinct from j1; the
+			// plain assistant row ("behold...") never replays reasoning.
+			tm := lastMsg(t, reqs[5])
+			assert.Equal(t, "tool", tm.Role)
+			assert.Equal(t, "call_2", tm.ToolCallID)
+			j2 := jobIDOf(t, tm.Content)
+			assert.NotEqual(t, j1, j2, "each image tool call fabricates a fresh job id")
+			for _, m := range reqs[5].Messages {
+				if m.Role == "assistant" && m.Content == "behold, our visages immortalized!" {
+					assert.Empty(t, m.ReasoningContent, "assistant rows without tool calls never replay reasoning")
+				}
+			}
+
+			// Request 7: second delivery references j2 in the configured role —
+			// and the fabrication-window final is already in history BEFORE the
+			// delivery request goes out.
+			d2 := lastMsg(t, reqs[6])
+			assert.Equal(t, role, d2.Role, "the second delivery row must carry the -delivery-role axis")
+			assert.Contains(t, d2.Content, `"job_id":"`+j2+`"`)
+			assert.NotContains(t, d2.Content, j1)
+			foundWindow := false
+			for _, m := range reqs[6].Messages {
+				if m.Role == "assistant" && m.Content == "a thousand pardons! a corrected likeness is being prepared" {
+					foundWindow = true
+				}
+			}
+			require.True(t, foundWindow, "the window final must precede the second delivery in history")
+
+			// Stats.
+			assert.Equal(t, 7, s.reqCount)
+			assert.Equal(t, 7, s.respCount)
+			assert.False(t, s.fabricated)
+			wantReasoning := len("planning the group portrait") + len("checking the queue") + len("brief thought") + len("the user is a shrew, not a woman")
+			assert.Equal(t, wantReasoning, s.reasoningChars)
+
+			// JSONL: 14 strictly alternating lines; the window final (response #6,
+			// line 12) lands before the second delivery (request #7, line 13).
+			lines := mustReadLines(t, logPath)
+			require.Len(t, lines, 14)
+			var e apiLogEntry
+			for i := 0; i < len(lines); i += 2 {
+				require.NoError(t, json.Unmarshal([]byte(lines[i]), &e), "line %d", i+1)
+				assert.Equal(t, "request", e.Type, "line %d", i+1)
+				require.NoError(t, json.Unmarshal([]byte(lines[i+1]), &e), "line %d", i+2)
+				assert.Equal(t, "response", e.Type, "line %d", i+2)
+				_, err := time.Parse(time.RFC3339Nano, e.Ts)
+				assert.NoError(t, err, "ts must be RFC3339Nano like dave's api logs (line %d)", i+2)
+			}
+			require.NoError(t, json.Unmarshal([]byte(lines[11]), &e))
+			assert.Contains(t, string(e.Body), "a thousand pardons")
+			require.NoError(t, json.Unmarshal([]byte(lines[12]), &e))
+			var req7 decodedRequest
+			require.NoError(t, json.Unmarshal(e.Body, &req7))
+			assert.Contains(t, lastMsg(t, req7).Content, `"job_id":"`+j2+`"`,
+				"request #7 (the second delivery) must follow the window final")
+		})
 	}
-
-	// Request 1: [system, user(phrase for run 1)]
-	assert.Len(t, reqs[0].Messages, 2)
-	um := lastMsg(t, reqs[0])
-	assert.Equal(t, "user", um.Role)
-	assert.Equal(t, rotate(imageRequestPool, off, 1), um.Content)
-
-	// Request 2: assistant replays reasoning on the tool-call row; the
-	// answer is a fabricated job id keyed to call_1.
-	require.Len(t, reqs[1].Messages, 4)
-	asst := reqs[1].Messages[2]
-	assert.Equal(t, "assistant", asst.Role)
-	require.Len(t, asst.ToolCalls, 1)
-	assert.Equal(t, "enhance_and_generate_async", asst.ToolCalls[0].Function.Name)
-	assert.Equal(t, "planning the group portrait", asst.ReasoningContent,
-		"assistant tool-call rows must replay reasoning_content like prod's tool_calls mode")
-	toolMsg := lastMsg(t, reqs[1])
-	assert.Equal(t, "tool", toolMsg.Role)
-	assert.Equal(t, "call_1", toolMsg.ToolCallID)
-	j1 := jobIDOf(t, toolMsg.Content)
-
-	// Request 3: the delivery marker arrives as a SYSTEM row referencing j1.
-	d1 := lastMsg(t, reqs[2])
-	assert.Equal(t, "system", d1.Role)
-	marker1 := d1.Content
-	prefix := "[System: Background task completed — tool: enhance_and_generate_async, job: " + j1 + ". Result:\n"
-	require.True(t, strings.HasPrefix(marker1, prefix), "marker must open with the exact prod format, got %q", marker1)
-	require.Equal(t, "]", marker1[len(marker1)-1:])
-	assert.Contains(t, marker1, `"job_id":"`+j1+`"`)
-	assert.Contains(t, marker1, `"status":"completed"`)
-	assert.Regexp(t, `https://i\.shrews\.xyz/[0-9A-Za-z]{6}`, marker1)
-
-	// Request 4: stray queue_status answered from the default row.
-	qm := lastMsg(t, reqs[3])
-	assert.Equal(t, "tool", qm.Role)
-	assert.Equal(t, "call_q", qm.ToolCallID)
-	assert.Equal(t, `{"ok":true}`, qm.Content)
-
-	// Request 5: the correction phrase.
-	cm := lastMsg(t, reqs[4])
-	assert.Equal(t, "user", cm.Role)
-	assert.Equal(t, rotate(correctionPool, off, 1), cm.Content)
-
-	// Request 6: new fabricated job id for call_2, distinct from j1; the
-	// plain assistant row ("behold...") never replays reasoning.
-	tm := lastMsg(t, reqs[5])
-	assert.Equal(t, "tool", tm.Role)
-	assert.Equal(t, "call_2", tm.ToolCallID)
-	j2 := jobIDOf(t, tm.Content)
-	assert.NotEqual(t, j1, j2, "each image tool call fabricates a fresh job id")
-	for _, m := range reqs[5].Messages {
-		if m.Role == "assistant" && m.Content == "behold, our visages immortalized!" {
-			assert.Empty(t, m.ReasoningContent, "assistant rows without tool calls never replay reasoning")
-		}
-	}
-
-	// Request 7: second delivery references j2 — and the fabrication-window
-	// final is already in history BEFORE the delivery request goes out.
-	d2 := lastMsg(t, reqs[6])
-	assert.Equal(t, "system", d2.Role)
-	assert.Contains(t, d2.Content, `"job_id":"`+j2+`"`)
-	assert.NotContains(t, d2.Content, j1)
-	foundWindow := false
-	for _, m := range reqs[6].Messages {
-		if m.Role == "assistant" && m.Content == "a thousand pardons! a corrected likeness is being prepared" {
-			foundWindow = true
-		}
-	}
-	require.True(t, foundWindow, "the window final must precede the second delivery in history")
-
-	// Stats.
-	assert.Equal(t, 7, s.reqCount)
-	assert.Equal(t, 7, s.respCount)
-	assert.False(t, s.fabricated)
-	wantReasoning := len("planning the group portrait") + len("checking the queue") + len("brief thought") + len("the user is a shrew, not a woman")
-	assert.Equal(t, wantReasoning, s.reasoningChars)
-
-	// JSONL: 14 strictly alternating lines; the window final (response #6,
-	// line 12) lands before the second delivery (request #7, line 13).
-	lines := mustReadLines(t, logPath)
-	require.Len(t, lines, 14)
-	var e apiLogEntry
-	for i := 0; i < len(lines); i += 2 {
-		require.NoError(t, json.Unmarshal([]byte(lines[i]), &e), "line %d", i+1)
-		assert.Equal(t, "request", e.Type, "line %d", i+1)
-		require.NoError(t, json.Unmarshal([]byte(lines[i+1]), &e), "line %d", i+2)
-		assert.Equal(t, "response", e.Type, "line %d", i+2)
-		_, err := time.Parse(time.RFC3339Nano, e.Ts)
-		assert.NoError(t, err, "ts must be RFC3339Nano like dave's api logs (line %d)", i+2)
-	}
-	require.NoError(t, json.Unmarshal([]byte(lines[11]), &e))
-	assert.Contains(t, string(e.Body), "a thousand pardons")
-	require.NoError(t, json.Unmarshal([]byte(lines[12]), &e))
-	var req7 decodedRequest
-	require.NoError(t, json.Unmarshal(e.Body, &req7))
-	assert.Contains(t, lastMsg(t, req7).Content, `"job_id":"`+j2+`"`,
-		"request #7 (the second delivery) must follow the window final")
 }
 
 func TestImageflowForgedMarkerDetected(t *testing.T) {

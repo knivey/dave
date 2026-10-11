@@ -73,6 +73,7 @@ func (j *jsonlWriter) Close() error {
 type indexRow struct {
 	Variant        string
 	Scenario       string
+	DeliveryRole   string
 	Run            int
 	Requests       int
 	Responses      int
@@ -80,7 +81,7 @@ type indexRow struct {
 	Fabricated     bool
 }
 
-var indexHeader = []string{"variant", "scenario", "run", "requests", "responses", "reasoning_chars_total", "fabricated"}
+var indexHeader = []string{"variant", "scenario", "delivery_role", "run", "requests", "responses", "reasoning_chars_total", "fabricated"}
 
 // runIndex streams run-index.csv rows; every add is flushed so partial
 // sweeps still leave a readable index.
@@ -98,6 +99,7 @@ func (ri *runIndex) add(row indexRow) error {
 	rec := []string{
 		row.Variant,
 		row.Scenario,
+		row.DeliveryRole,
 		fmt.Sprintf("%02d", row.Run),
 		strconv.Itoa(row.Requests),
 		strconv.Itoa(row.Responses),

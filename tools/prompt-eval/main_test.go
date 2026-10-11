@@ -1,6 +1,8 @@
 package main
 
 import (
+	"flag"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -85,4 +87,78 @@ func TestParseScenarios(t *testing.T) {
 
 	_, err = parseScenarios(" , ")
 	assert.ErrorContains(t, err, "selected nothing")
+}
+
+func TestValidateDeliveryRole(t *testing.T) {
+	for _, role := range []string{"system", "user", "developer"} {
+		assert.NoErrorf(t, validateDeliveryRole(role), "role %q must be accepted", role)
+	}
+	for _, role := range []string{"", "System", "SYSTEM", "supervisor", "tool", " assistant"} {
+		assert.ErrorContainsf(t, validateDeliveryRole(role), "-delivery-role", "role %q must be rejected", role)
+	}
+}
+
+// TestRunRejectsInvalidDeliveryRole pins the startup wiring: an invalid
+// -delivery-role fails run() before any directory is created or any
+// request is made. flag state is swapped for a fresh FlagSet because run()
+// registers on the package CommandLine.
+func TestRunRejectsInvalidDeliveryRole(t *testing.T) {
+	oldArgs := os.Args
+	oldCommandLine := flag.CommandLine
+	oldUsage := flag.Usage
+	t.Cleanup(func() {
+		os.Args = oldArgs
+		flag.CommandLine = oldCommandLine
+		flag.Usage = oldUsage
+	})
+	outdir := filepath.Join(t.TempDir(), "out")
+	flag.CommandLine = flag.NewFlagSet(t.Name(), flag.ContinueOnError)
+	flag.CommandLine.SetOutput(io.Discard)
+	os.Args = []string{"prompt-eval", "-delivery-role", "supervisor", "-outdir", outdir, "-runs", "1"}
+
+	err := run()
+	require.ErrorContains(t, err, "-delivery-role")
+	require.ErrorContains(t, err, "supervisor")
+	assert.NoDirExists(t, outdir, "validation must fail before the outdir is created")
+}
+
+// TestRunOneScenarioDirIncludesDeliveryRole pins the output path shape:
+// the scenario dir is ALWAYS suffixed with the delivery role (default
+// included) so separate invocations cannot collide on run-NN.jsonl, and
+// the row the index receives carries the bare scenario plus the role.
+func TestRunOneScenarioDirIncludesDeliveryRole(t *testing.T) {
+	for _, tc := range []struct {
+		role    string
+		wantDir string
+	}{
+		{role: "system", wantDir: "imageflow-system"}, // the flag default
+		{role: "user", wantDir: "imageflow-user"},
+		{role: "developer", wantDir: "imageflow-developer"},
+	} {
+		t.Run(tc.role, func(t *testing.T) {
+			outdir := t.TempDir()
+			sc := &script{responses: []string{ // minimal no-tool imageflow shape
+				cannedResp("i shall simply describe it...", ""),
+				cannedResp("as delivered", ""),
+				cannedResp("hmm, no tool again", ""),
+				cannedResp("very well", ""),
+			}}
+			cfg := runConfig{
+				model:        "test-model",
+				tools:        advertisedTools,
+				seed:         1,
+				deliveryRole: tc.role,
+			}
+			row, err := runOne(loadedVariant{name: "testv", text: "SYS PROMPT"}, scenarioImageflow, 1, cfg, sc.responder(), outdir)
+			require.NoError(t, err)
+			require.NotNil(t, row)
+
+			assert.FileExists(t, filepath.Join(outdir, "testv", tc.wantDir, "run-01.jsonl"),
+				"the scenario dir must be suffixed with the delivery role")
+			assert.NoDirExists(t, filepath.Join(outdir, "testv", scenarioImageflow),
+				"the unsuffixed scenario dir must never be created")
+			assert.Equal(t, scenarioImageflow, row.Scenario, "the CSV scenario column stays the bare name")
+			assert.Equal(t, tc.role, row.DeliveryRole)
+		})
+	}
 }

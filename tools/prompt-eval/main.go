@@ -45,6 +45,11 @@ type runConfig struct {
 	kwargs          map[string]any
 	delay           time.Duration
 	seed            int64
+
+	// deliveryRole is the -delivery-role axis: the wire role of the
+	// imageflow delivery-marker injections (dave's injection_role knob).
+	// Validated by validateDeliveryRole before anything runs.
+	deliveryRole string
 }
 
 func main() {
@@ -59,10 +64,12 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "usage: prompt-eval [-baseurl URL] [-model NAME] [-variant name=path] [-runs N] [-delay D]")
 	fmt.Fprintln(os.Stderr, "                  [-outdir DIR] [-scenarios imageflow,prompts[,research]] [-reasoning-effort low]")
 	fmt.Fprintln(os.Stderr, "                  [-chat-template-kwargs JSON] [-api-key KEY] [-seed N]")
+	fmt.Fprintln(os.Stderr, "                  [-delivery-role system|user|developer]")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Runs scripted bot sessions against a live llama-server with different system-prompt")
 	fmt.Fprintln(os.Stderr, "variants, fabricates every tool result, and writes api-log-shaped JSONL under")
-	fmt.Fprintln(os.Stderr, "<outdir>/<variant>/<scenario>/run-NN.jsonl plus a <outdir>/run-index.csv summary.")
+	fmt.Fprintln(os.Stderr, "<outdir>/<variant>/<scenario>-<delivery-role>/run-NN.jsonl plus a")
+	fmt.Fprintln(os.Stderr, "<outdir>/run-index.csv summary.")
 	fmt.Fprintln(os.Stderr, "All requests are sequential with -delay between them (the server is shared with a")
 	fmt.Fprintln(os.Stderr, "live bot). The tool never touches anything outside -outdir.")
 	fmt.Fprintln(os.Stderr, "")
@@ -83,10 +90,14 @@ func run() error {
 	kwargsFlag := flag.String("chat-template-kwargs", `{"preserve_thinking":true}`, "JSON object sent as chat_template_kwargs (empty omits)")
 	apiKey := flag.String("api-key", "", "optional Authorization: Bearer key")
 	seed := flag.Int64("seed", 1, "determinism seed for fabricated ids/urls and phrase rotation")
+	deliveryRole := flag.String("delivery-role", "system", "wire role of the imageflow async-delivery injections (system, user, or developer)")
 	flag.Parse() // after registration; main only installs the usage hook
 
 	if *runs < 1 {
 		return fmt.Errorf("-runs must be at least 1, got %d", *runs)
+	}
+	if err := validateDeliveryRole(*deliveryRole); err != nil {
+		return err
 	}
 	var kwargs map[string]any
 	if s := strings.TrimSpace(*kwargsFlag); s != "" {
@@ -111,6 +122,7 @@ func run() error {
 		kwargs:          kwargs,
 		delay:           *delay,
 		seed:            *seed,
+		deliveryRole:    *deliveryRole,
 	}
 
 	if err := os.MkdirAll(*outdir, 0o755); err != nil {
@@ -131,7 +143,7 @@ func run() error {
 			for run := 1; run <= *runs; run++ {
 				row, err := runOne(v, sc, run, cfg, respond, *outdir)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "prompt-eval: %s/%s run %d: %v\n", v.name, sc, run, err)
+					fmt.Fprintf(os.Stderr, "prompt-eval: %s/%s-%s run %d: %v\n", v.name, sc, cfg.deliveryRole, run, err)
 					failures++
 				}
 				if row != nil {
@@ -175,12 +187,29 @@ func parseScenarios(flagVal string) ([]string, error) {
 	return out, nil
 }
 
+// validateDeliveryRole enforces the -delivery-role axis at startup: the
+// three roles dave's injection_role knob accepts, nothing else (exact
+// match; -delivery-role "" is as invalid as a typo).
+func validateDeliveryRole(role string) error {
+	switch role {
+	case "system", "user", "developer":
+		return nil
+	}
+	return fmt.Errorf("-delivery-role must be system, user, or developer, got %q", role)
+}
+
 // runOne executes one scripted session and writes its JSONL log. A nil row
 // means the session never started (its counts are meaningless); a non-nil
 // row is returned even when the session failed mid-run so partial data
 // still lands in run-index.csv.
 func runOne(v loadedVariant, scenario string, run int, cfg runConfig, respond responder, outdir string) (*indexRow, error) {
-	scenDir := filepath.Join(outdir, v.name, scenario)
+	// The scenario dir always carries the -delivery-role suffix (even the
+	// default) so separate invocations can never collide on run-NN.jsonl.
+	// The rng/phrase keys below deliberately stay on the BARE scenario:
+	// role A/B runs with the same seed fabricate identical job ids and
+	// phrasings, so the only variable between them is the role itself.
+	scenDirName := scenario + "-" + cfg.deliveryRole
+	scenDir := filepath.Join(outdir, v.name, scenDirName)
 	if err := os.MkdirAll(scenDir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating %s: %w", scenDir, err)
 	}
@@ -210,6 +239,7 @@ func runOne(v loadedVariant, scenario string, run int, cfg runConfig, respond re
 	row := &indexRow{
 		Variant:        v.name,
 		Scenario:       scenario,
+		DeliveryRole:   cfg.deliveryRole,
 		Run:            run,
 		Requests:       s.reqCount,
 		Responses:      s.respCount,
@@ -217,7 +247,7 @@ func runOne(v loadedVariant, scenario string, run int, cfg runConfig, respond re
 		Fabricated:     s.fabricated,
 	}
 	fmt.Printf("%s/%s run %d done: %d requests, reasoning %d chars, fabricated %v\n",
-		v.name, scenario, run, s.reqCount, s.reasoningChars, s.fabricated)
+		v.name, scenDirName, run, s.reqCount, s.reasoningChars, s.fabricated)
 	return row, runErr
 }
 

@@ -278,12 +278,14 @@ func (s *session) userTurn(content string) error {
 	return s.toolLoop()
 }
 
-// deliveryTurn injects the async delivery marker as a system-role message —
-// the exact prod guidance mechanism (message mode, injection_role system) —
-// and runs to a final.
+// deliveryTurn injects the async delivery marker as a message whose wire
+// role comes from -delivery-role — "system" is the exact prod guidance
+// mechanism (message mode, injection_role system); "user"/"developer" are
+// the A/B axis (does a user-role delivery stop the model forging the
+// marker itself?). The marker TEXT is the prod format regardless of role.
 func (s *session) deliveryTurn(marker string) error {
 	s.curJobID = ""
-	s.msgs = append(s.msgs, wireMsg{Role: "system", Content: marker})
+	s.msgs = append(s.msgs, wireMsg{Role: s.cfg.deliveryRole, Content: marker})
 	return s.toolLoop()
 }
 

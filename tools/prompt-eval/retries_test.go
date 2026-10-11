@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -27,6 +28,12 @@ func TestRetryableCallErr(t *testing.T) {
 	assert.True(t, retryableCallErr(fmt.Errorf("read tcp 127.0.0.1:1->127.0.0.1:2: connection reset by peer")))
 	assert.False(t, retryableCallErr(context.Canceled), "deliberate cancellation never retries")
 	assert.False(t, retryableCallErr(fmt.Errorf("wrapped: %w", context.Canceled)))
+	assert.False(t, retryableCallErr(timeoutError{}), "a bare net.Error client timeout never retries")
+	assert.False(t, retryableCallErr(&url.Error{Op: "Post", URL: "http://x", Err: timeoutError{}}),
+		"the *url.Error client.Do wraps around a timeout never retries")
+	assert.False(t, retryableCallErr(context.DeadlineExceeded), "context deadlines (Timeout()=true) never retry")
+	assert.True(t, retryableCallErr(&url.Error{Op: "Post", URL: "http://x", Err: fmt.Errorf("EOF")}),
+		"a non-timeout *url.Error still retries — the exclusion is Timeout(), not the wrapper")
 }
 
 func TestRetryBackoff(t *testing.T) {
@@ -215,6 +222,54 @@ func TestSessionRetriesTransportEOF(t *testing.T) {
 	assert.Contains(t, string(e.Body), `"error"`, "a bodyless transport failure gets a synthesized error object")
 	require.NoError(t, json.Unmarshal([]byte(lines[2]), &e))
 	assert.Contains(t, string(e.Body), "recovered")
+}
+
+// timeoutError is a fabricated net.Error with Timeout()=true — the error
+// family http.Client.Timeout surfaces: bare from a transport, or wrapped
+// in the *url.Error that client.Do returns (url.Error satisfies net.Error
+// itself and delegates Timeout to the cause, so both shapes must hit the
+// exclusion).
+type timeoutError struct{}
+
+func (timeoutError) Error() string {
+	return "net/http: request canceled (Client.Timeout exceeded while awaiting headers)"
+}
+func (timeoutError) Timeout() bool   { return true }
+func (timeoutError) Temporary() bool { return true }
+
+// TestSessionDoesNotRetryClientTimeout pins the controller ruling: a
+// timed-out request performs exactly ONE attempt — the retry budget exists
+// for the router's instant drops, not for requests that already burned
+// their full client time budget. The session fails through the normal
+// bodyless-transport path (request record only; error records exist solely
+// for attempts that get retried). No sleeps: nothing retries.
+func TestSessionDoesNotRetryClientTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"bare net.Error", timeoutError{}},
+		{"url.Error-wrapped", &url.Error{Op: "Post", URL: "http://127.0.0.1:1/v1/chat/completions", Err: timeoutError{}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			respond := func([]byte) ([]byte, error) {
+				calls++
+				return nil, tc.err
+			}
+			s, logPath := newTestSessionResponder(t, respond, 1, "testv", "imageflow")
+			s.cfg.retries, s.cfg.retryWait = 3, time.Millisecond
+
+			err := s.userTurn("hi")
+			require.ErrorContains(t, err, "Client.Timeout exceeded")
+			assert.Equal(t, 1, calls, "a client timeout performs exactly one attempt, no retries")
+			assert.Equal(t, 0, s.retryCount)
+			assert.Equal(t, 0, s.respCount, "a bodyless failure logs no response")
+			assert.Equal(t, 1, s.reqCount)
+			lines := mustReadLines(t, logPath)
+			assert.Len(t, lines, 1, "only the request record — no retry error records")
+		})
+	}
 }
 
 // TestRunOneRetriesColumn pins the CSV wiring end-to-end: the retries

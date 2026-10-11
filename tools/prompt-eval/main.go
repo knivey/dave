@@ -119,7 +119,7 @@ func run() error {
 	seed := flag.Int64("seed", 1, "determinism seed for fabricated ids/urls and phrase rotation")
 	deliveryRole := flag.String("delivery-role", "system", "wire role of the imageflow async-delivery injections (system, user, or developer)")
 	temperature := flag.Float64("temperature", 0, "sampling temperature sent on every request; 0 omits the field (server default), negative is invalid")
-	retries := flag.Int("retries", 3, "per-request retries on transient failures (HTTP >= 500 or transport errors); 0 disables")
+	retries := flag.Int("retries", 3, "per-request retries on transient failures (HTTP >= 500 or transport errors, excluding client timeouts); 0 disables")
 	retryWait := flag.Duration("retry-wait", 2*time.Second, "base backoff between retries, doubled per attempt (2s, 4s, 8s, ...)")
 	flag.Parse() // after registration; main only installs the usage hook
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -221,7 +222,8 @@ func (s *session) buildRequest(forceFinal bool) chatRequest {
 // JSONL writer: a retryable failure — HTTP >= 500 (the router in front of
 // the llama-server intermittently answers "proxy error: Failed to read
 // connection", which killed ~5.5% of sessions in the 70-session sweep) or
-// a transport-level error, never a 4xx (our fault) — re-sends the
+// a transport-level error, never a 4xx (our fault) or a client timeout
+// (see retryableCallErr) — re-sends the
 // IDENTICAL marshaled body up to cfg.retries times with exponential
 // backoff, so the session continues when a request eventually succeeds.
 // Each failed attempt leaves one response-type, choices-less error record
@@ -369,10 +371,26 @@ func (e *httpError) Error() string {
 
 // retryableCallErr reports whether a failed exchange is worth re-sending:
 // HTTP >= 500 or a transport-level error (connection reset, EOF). A 4xx is
-// the caller's fault and deliberate cancellation is deliberate — neither
-// is retried.
+// the caller's fault, deliberate cancellation is deliberate, and a client
+// timeout has already burned the request's full time budget — none of
+// those are retried.
 func retryableCallErr(err error) bool {
 	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	// Client timeouts never retry, in either shape they surface: a bare
+	// net.Error with Timeout()=true, or the *url.Error that
+	// http.Client.Do wraps around one (it satisfies net.Error itself and
+	// delegates Timeout to the cause, so a single errors.As covers both).
+	// Retries target the observed failure class — instant 5xx and
+	// connection resets, the router's "Failed to read connection" drops —
+	// where a re-send is cheap and usually lands. A 5-minute timeout
+	// retried N times instead stalls the sweep ~20 minutes on a single
+	// request, queues duplicate generations behind the server's
+	// parallel=1, and a generation that outlives the 5-minute budget is a
+	// degenerate sample anyway.
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
 		return false
 	}
 	var he *httpError

@@ -309,9 +309,16 @@ func runOne(v loadedVariant, scenario string, run int, cfg runConfig, respond re
 		Responses:      s.respCount,
 		ReasoningChars: s.reasoningChars,
 		Fabricated:     s.fabricated,
+		LeakSuspects:   s.leakSuspects,
+		FabricatedURLs: s.fabricatedURLs,
+		LinklessFinals: s.linklessFinals,
+		SilentTurns:    s.silentTurns,
+		Jobs:           s.jobs,
+		Registers:      s.registers,
 	}
-	fmt.Printf("%s/%s run %d done: %d requests, reasoning %d chars, fabricated %v\n",
-		varDir, scenDirName, run, s.reqCount, s.reasoningChars, s.fabricated)
+	fmt.Printf("%s/%s run %d done: %d requests, reasoning %d chars, fabricated %v | leaks %d fake_urls %d linkless %d silent %d jobs %d regs %d\n",
+		varDir, scenDirName, run, s.reqCount, s.reasoningChars, s.fabricated,
+		s.leakSuspects, s.fabricatedURLs, s.linklessFinals, s.silentTurns, s.jobs, s.registers)
 	return row, runErr
 }
 

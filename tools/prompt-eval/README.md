@@ -116,6 +116,48 @@ sampling at temperature 1.0 because nobody had checked.
 - **Sequential + `-delay` (default 750ms) between HTTP requests** — the
   server is shared with a live bot. Retry re-sends pay the delay too.
 
+### Tripwire detector columns
+
+The six int columns after `fabricated` (`leak_suspects`, `fabricated_urls`,
+`linkless_finals`, `silent_turns`, `jobs`, `registers`) are TRIPWIRES:
+known-false-positive-prone mechanical heuristics whose job is to flag runs
+for deeper inspection (pilot reads of the JSONL), never to verdict. A
+non-zero count is a "look closer" signal, not a failure rate.
+
+- **`leak_suspects`** — responses whose content has a line starting
+  (modulo leading whitespace) with `thought:`/`thinking:`/`reasoning:`
+  (case-insensitive): reasoning leaking into the visible reply. Line-
+  anchored ONLY, so `"My thought:"` mid-prose (in-character monologue)
+  does not match — but genuine in-character monologue that happens to
+  open a line with the label DOES. Known false-positive class; read the
+  flagged responses.
+- **`fabricated_urls`** — responses citing an `i.shrews.xyz` URL that is
+  NOT in the delivered set at that point. The set is rebuilt from
+  DELIVERY messages (role system/user/developer carrying the
+  `[System: Background task completed` marker) as they appear in request
+  history — each new delivery REPLACES the set, so both invented links
+  and stale links from an earlier delivery (reused after a newer one)
+  count. URLs inside assistant content (forged markers included) never
+  seed the set. False positives: a citation of an older-but-real link is
+  counted identically to an invention.
+- **`linkless_finals`** — for each delivery, the FIRST no-tool-call
+  response after it (the presentation slot) counted when it cites NO
+  `i.shrews.xyz` URL at all — the model lost/omitted the delivered link
+  (observed at temp 0.7: a run that replaced BOTH links with confabulated
+  descriptions). Tool-call responses (the queue_status detour shape) do
+  not consume the slot; later unrelated no-tool responses don't count.
+  False positives: a legitimate answer that deliberately references the
+  image without linking.
+- **`silent_turns`** — responses with no tool calls and blank content —
+  on the real bot these are turns where the channel sees nothing. Note
+  the sibling shape is NOT counted here: empty content WITH a tool call
+  (the silent job submission) is normal agentic behavior.
+- **`jobs` / `registers`** — raw counts of `enhance_and_generate_async` /
+  `generate_image_async` calls and `register_background_job` calls. No
+  derived omission column: analysis computes `registers` vs `jobs` (the
+  log review found 136/137 jobs unregistered — the raw counts carry the
+  evidence).
+
 ### Testing a new model (e.g. qwen3.6/3.8): pilot before batch
 
 The forgery/parrot/thinking detectors and this whole methodology were
@@ -150,7 +192,10 @@ pages are wrapped as `{"non_json_body":...}` instead of corrupting the file),
 so ad-hoc python parses harness output and production api_logs identically.
 `run-index.csv` columns: `variant, tool_variant, temperature, retries,
 scenario, delivery_role, run, requests, responses, reasoning_chars_total,
-fabricated` — unset axes read `default` for tool_variant/temperature.
+fabricated, leak_suspects, fabricated_urls, linkless_finals, silent_turns,
+jobs, registers` — unset axes read `default` for tool_variant/temperature;
+the six columns after `fabricated` are the tripwire detectors documented
+above.
 `retries` counts retry re-sends (flakiness bookkeeping); `requests` stays
 one-per-logical-request. Failed retryable attempts land in the JSONL as
 response-type, choices-less error records — the shape analysis scripts

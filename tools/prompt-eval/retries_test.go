@@ -325,7 +325,7 @@ func TestRunOneRetriesColumn(t *testing.T) {
 	require.NoError(t, idx.add(*row))
 	require.NoError(t, idx.close())
 	assert.Equal(t,
-		"variant,tool_variant,temperature,retries,scenario,delivery_role,run,requests,responses,reasoning_chars_total,fabricated\n"+
-			"testv,default,default,2,imageflow,system,01,4,4,0,false\n",
-		buf.String(), "the row renders with temperature and retries in column order")
+		"variant,tool_variant,temperature,retries,scenario,delivery_role,run,requests,responses,reasoning_chars_total,fabricated,leak_suspects,fabricated_urls,linkless_finals,silent_turns,jobs,registers\n"+
+			"testv,default,default,2,imageflow,system,01,4,4,0,false,0,0,2,0,0,0\n",
+		buf.String(), "the row renders with temperature, retries, and the detector columns in order; both linkless presentation slots (no-tool responses after each delivery, no URLs cited) trip")
 }

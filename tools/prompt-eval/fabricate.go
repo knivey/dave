@@ -64,7 +64,7 @@ func fabricateToolResult(name string, rng *rand.Rand) (result, jobID string) {
 	case isImageJobTool(name):
 		jobID = randomJobID(rng)
 		return `{"job_id":"` + jobID + `"}`, jobID
-	case name == "register_background_job":
+	case name == registerJobTool:
 		return registerJobResult, ""
 	case strings.HasPrefix(name, "brave_"):
 		return cannedSearchJSON, ""

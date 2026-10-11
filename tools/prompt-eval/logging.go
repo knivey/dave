@@ -69,7 +69,9 @@ func (j *jsonlWriter) Close() error {
 }
 
 // indexRow is one run-index.csv record: the per-session summary the
-// controller's comparison scripts consume.
+// controller's comparison scripts consume. The six int columns after
+// `fabricated` are TRIPWIRE detectors (detectors.go) — known-false-
+// positive-prone flags for deeper inspection, not verdicts.
 type indexRow struct {
 	Variant        string
 	ToolVariant    string
@@ -82,9 +84,15 @@ type indexRow struct {
 	Responses      int
 	ReasoningChars int
 	Fabricated     bool
+	LeakSuspects   int
+	FabricatedURLs int
+	LinklessFinals int
+	SilentTurns    int
+	Jobs           int
+	Registers      int
 }
 
-var indexHeader = []string{"variant", "tool_variant", "temperature", "retries", "scenario", "delivery_role", "run", "requests", "responses", "reasoning_chars_total", "fabricated"}
+var indexHeader = []string{"variant", "tool_variant", "temperature", "retries", "scenario", "delivery_role", "run", "requests", "responses", "reasoning_chars_total", "fabricated", "leak_suspects", "fabricated_urls", "linkless_finals", "silent_turns", "jobs", "registers"}
 
 // runIndex streams run-index.csv rows; every add is flushed so partial
 // sweeps still leave a readable index.
@@ -111,6 +119,12 @@ func (ri *runIndex) add(row indexRow) error {
 		strconv.Itoa(row.Responses),
 		strconv.Itoa(row.ReasoningChars),
 		strconv.FormatBool(row.Fabricated),
+		strconv.Itoa(row.LeakSuspects),
+		strconv.Itoa(row.FabricatedURLs),
+		strconv.Itoa(row.LinklessFinals),
+		strconv.Itoa(row.SilentTurns),
+		strconv.Itoa(row.Jobs),
+		strconv.Itoa(row.Registers),
 	}
 	if err := ri.cw.Write(rec); err != nil {
 		return err

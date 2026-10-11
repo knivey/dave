@@ -178,16 +178,35 @@ type session struct {
 	// one-per-logical-request, so a request that flaked twice and then
 	// succeeded still reads requests=1, retries=2.
 	retryCount int
+
+	// Tripwire detector counters (detectors.go; README "Methodology
+	// notes"). Fed by observeResponse/foldDeliveries at logging time —
+	// the detectors never touch the wire.
+	leakSuspects   int
+	fabricatedURLs int
+	linklessFinals int
+	silentTurns    int
+	jobs           int
+	registers      int
+
+	// deliveredURLs is the LATEST delivery's image-URL set (a new
+	// delivery replaces it); scannedMsgs is how far into msgs has been
+	// folded; presentationPending arms the linkless_finals slot from a
+	// delivery until the first no-tool response consumes it.
+	deliveredURLs       map[string]bool
+	scannedMsgs         int
+	presentationPending bool
 }
 
 func newSession(cfg runConfig, sysPrompt string, respond responder, w *jsonlWriter, rng *rand.Rand) *session {
 	return &session{
-		cfg:       cfg,
-		sysPrompt: sysPrompt,
-		msgs:      []wireMsg{{Role: "system", Content: sysPrompt}},
-		respond:   respond,
-		log:       w,
-		rng:       rng,
+		cfg:           cfg,
+		sysPrompt:     sysPrompt,
+		msgs:          []wireMsg{{Role: "system", Content: sysPrompt}},
+		respond:       respond,
+		log:           w,
+		rng:           rng,
+		deliveredURLs: map[string]bool{},
 	}
 }
 
@@ -233,6 +252,10 @@ func (s *session) buildRequest(forceFinal bool) chatRequest {
 // original request — the seeded determinism streams stay untouched.
 func (s *session) request(forceFinal bool) (parsedResp, error) {
 	var pr parsedResp
+	// Fold new history rows into the detector state BEFORE marshaling, so
+	// the delivered set describes exactly the request that produces the
+	// response being observed below.
+	s.foldDeliveries()
 	body, err := json.Marshal(s.buildRequest(forceFinal))
 	if err != nil {
 		return pr, err
@@ -270,6 +293,7 @@ func (s *session) request(forceFinal bool) (parsedResp, error) {
 	if fabricationDetected(pr.content) {
 		s.fabricated = true
 	}
+	s.observeResponse(pr)
 	am := wireMsg{Role: "assistant", Content: pr.content}
 	if len(pr.toolCalls) > 0 {
 		am.ToolCalls = pr.toolCalls
@@ -350,9 +374,15 @@ func (s *session) deliveryTurn(marker string) error {
 }
 
 // resetHistory drops the conversation back to the bare system prompt (the
-// prompts scenario is a fresh one-shot exchange per prompt).
+// prompts scenario is a fresh one-shot exchange per prompt). Detector
+// state derives from the live history, so it resets with it: a delivered
+// set or pending presentation slot from the dropped exchange must not
+// leak into the fresh one's counts.
 func (s *session) resetHistory() {
 	s.msgs = []wireMsg{{Role: "system", Content: s.sysPrompt}}
+	s.scannedMsgs = len(s.msgs)
+	s.deliveredURLs = map[string]bool{}
+	s.presentationPending = false
 }
 
 // httpError marks an HTTP-level failure (non-200) so the retry path can

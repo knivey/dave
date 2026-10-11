@@ -43,12 +43,14 @@ per cell.
 - `-temperature`: 0 (default) omits the field and samples at the server
   default — dave's convention; only values > 0 are sent.
 
-**Determinism**: fabricated job ids/urls and phrase rotation derive from
-`-seed` (default 1) keyed on the BARE variant and scenario only — the
-delivery-role and tool-variant axes are deliberately excluded from the rng
-keys. Two invocations with the same `-seed` and different axis values
-fabricate identical job ids, urls, and phrasings, so the axis is the only
-variable between cells.
+**Determinism**: the fabrication rng keys on `-seed` (default 1), the BARE
+variant, the scenario, AND the run number (runs within a sweep fabricate
+different job ids/urls), while the phrase rotation keys on seed, bare
+variant, and scenario only (phrasing steps through the pool per run from a
+per-sweep offset) — the delivery-role, tool-variant, and temperature axes
+are deliberately excluded from both keys. Two invocations with the same
+`-seed` and different axis values fabricate identical job ids, urls, and
+phrasings run-for-run, so the axis is the only variable between cells.
 
 ## Scenarios
 

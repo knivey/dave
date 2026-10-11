@@ -116,6 +116,32 @@ sampling at temperature 1.0 because nobody had checked.
 - **Sequential + `-delay` (default 750ms) between HTTP requests** — the
   server is shared with a live bot. Retry re-sends pay the delay too.
 
+### Testing a new model (e.g. qwen3.6/3.8): pilot before batch
+
+The forgery/parrot/thinking detectors and this whole methodology were
+calibrated on ONE model's observed failure shapes (gemma-4 heretic). A
+different model family may fail DIFFERENTLY — do not trust batch metrics on
+a new model until its failure shapes are confirmed the same. Pilot first:
+2-3 sessions per scenario, then READ THE RAW JSONL end-to-end (not the CSV,
+not the summary metrics) and catalog what failure actually looks like —
+where reasoning lands, what degenerate outputs look like, how tool calls
+malform or don't. Qwen-specific watch items:
+
+- Thinking rides the template's `enable_thinking` kwarg
+  (`-chat-template-kwargs`), not gemma's `preserve_thinking`. Verify
+  `reasoning_content` actually populates — llama.cpp parses qwen's
+  `<think>` into `reasoning_content`; if a variant routes thinking into
+  content instead, the thinking-depth metric reads zero and the
+  empty-content metric lies.
+- Check `/props?model=<id>` chat_template_caps (supports_reasoning_effort
+  etc.) before setting `-reasoning-effort`.
+- Watch for family-specific degenerate modes: thinking loops, malformed
+  tool-call JSON, language drift on uncensored finetunes.
+
+If the pilot reveals failure shapes the CSV columns don't capture, extend
+the analysis scripts FIRST — the batch numbers are only as good as the
+detectors.
+
 ## Analysis
 
 The JSONL envelope is `{"type":...,"ts":...,"body":{...}}` — exactly dave's

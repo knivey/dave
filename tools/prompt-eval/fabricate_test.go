@@ -153,7 +153,11 @@ func TestAdvertisedTools(t *testing.T) {
 		seen[td.Function.Name] = true
 		assert.Equal(t, "function", td.Type)
 		assert.NotEmpty(t, td.Function.Description)
-		assert.Equal(t, map[string]any{"type": "object"}, td.Function.Parameters)
+		// The prod-faithful parameter schemas live in toolschemas.json
+		// (pinned per-tool in tools_test.go); here only the shape rule
+		// matters — every advertised tool carries an object schema.
+		typ, _ := td.Function.Parameters["type"].(string)
+		assert.Equal(t, "object", typ)
 	}
 	assert.Equal(t, want, got)
 	assert.NotContains(t, seen, "job_status", "job_status is hidden in prod and must not be advertised")

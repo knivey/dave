@@ -103,6 +103,17 @@ sampling at temperature 1.0 because nobody had checked.
 
 ## Methodology notes (hard-won)
 
+- **The advertised tools are prod-faithful.** Descriptions and parameter
+  schemas are transcribed verbatim from this repo's own sources into
+  `toolschemas.json` (embedded at build time): the img/brave/fetch/yt tool
+  defs and SDK-inferred input schemas from `mcps/*`, and dave's
+  `register_background_job` builtin from `aiCmds.go`. The stub schemas the
+  harness originally shipped (one-line descriptions, empty object params)
+  were themselves an experimental variable — models called
+  `brave_web_search` with empty args and never registered background jobs
+  because they could not see the required arguments. Re-sync
+  `toolschemas.json` when the sources change: the register fidelity test is
+  the only automated drift guard, the rest is transcription discipline.
 - **The CSV `fabricated` column is PREFIX-based and UNDERCOUNTS.** Detection
   is a leading `"[System:"` on response content — a forgery wrapped in
   markdown emphasis (`**[System:` …) escapes it. Always re-scan the JSONL

@@ -1,0 +1,425 @@
+{
+  "enhance_and_generate_async": {
+    "description": "Enhance a prompt via LLM and queue a ComfyUI image generation job in one step. Returns a job_id immediately without waiting. Uses the 'default' enhancement profile unless a different one is specified. Uses the default workflow if workflow is empty or 'default'.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "prompt": {
+          "type": "string",
+          "description": "the raw prompt to enhance and generate"
+        },
+        "enhancement": {
+          "type": "string",
+          "description": "name of enhancement config (default: from workflow or 'default')"
+        },
+        "workflow": {
+          "type": "string",
+          "description": "name of the workflow config to use (empty or 'default' uses the default workflow)"
+        },
+        "output_format": {
+          "type": "string",
+          "description": "output format: url (default), base64, or both"
+        },
+        "_dave_inject_network": {
+          "type": "string"
+        },
+        "_dave_inject_channel": {
+          "type": "string"
+        },
+        "_dave_inject_nick": {
+          "type": "string"
+        },
+        "_dave_inject_llm_generated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "prompt"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "generate_image_async": {
+    "description": "Queue a ComfyUI image generation job and return a job_id immediately without waiting. Uses the default workflow if workflow is empty or 'default'.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "prompt": {
+          "type": "string",
+          "description": "the image generation prompt"
+        },
+        "negative_prompt": {
+          "type": "string",
+          "description": "optional negative prompt"
+        },
+        "workflow": {
+          "type": "string",
+          "description": "name of the workflow config to use (empty or 'default' uses the default workflow)"
+        },
+        "seed": {
+          "type": [
+            "null",
+            "integer"
+          ],
+          "description": "optional fixed seed for reproducibility"
+        },
+        "output_format": {
+          "type": "string",
+          "description": "output format: url (default), base64, or both"
+        },
+        "_dave_inject_network": {
+          "type": "string"
+        },
+        "_dave_inject_channel": {
+          "type": "string"
+        },
+        "_dave_inject_nick": {
+          "type": "string"
+        },
+        "_dave_inject_llm_generated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "prompt"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "list_workflows": {
+    "description": "List available ComfyUI workflows with descriptions and typical generation times. Use the workflow name in generate_image or enhance_and_generate.",
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false
+    }
+  },
+  "queue_status": {
+    "description": "Overview of the image generation queue: counts of queued, running, completed, failed jobs, plus per-job ETA estimates.",
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false
+    }
+  },
+  "brave_answers": {
+    "description": "Get an AI-generated answer to a question using Brave's chat completions API. Returns a direct answer with citations.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Question to get an AI-generated answer for"
+        },
+        "safesearch": {
+          "type": "string",
+          "description": "Filter: off, moderate, or strict"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "brave_image_search": {
+    "description": "Search for images using Brave Search.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Search query"
+        },
+        "count": {
+          "type": "integer",
+          "description": "Number of results (1-200, default 20)"
+        },
+        "safesearch": {
+          "type": "string",
+          "description": "Filter: off or strict"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "brave_llm_context": {
+    "description": "Get pre-extracted web content optimized for RAG and AI reasoning. Returns actual page text, not just links.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Search query"
+        },
+        "count": {
+          "type": "integer",
+          "description": "Number of results (1-50)"
+        },
+        "freshness": {
+          "type": "string",
+          "description": "Age filter: pd, pw, pm, py"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "brave_local_search": {
+    "description": "Search for local businesses and places. Falls back to web results if no locations found.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Search query"
+        },
+        "count": {
+          "type": "integer",
+          "description": "Number of results"
+        },
+        "safesearch": {
+          "type": "string",
+          "description": "Filter: off, moderate, or strict"
+        },
+        "freshness": {
+          "type": "string",
+          "description": "Age filter: pd, pw, pm, py"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "brave_news_search": {
+    "description": "Search for news articles using Brave Search. Returns recent news with source and age.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Search query"
+        },
+        "count": {
+          "type": "integer",
+          "description": "Number of results (1-50, default 20)"
+        },
+        "offset": {
+          "type": "integer",
+          "description": "Pagination offset (0-9)"
+        },
+        "safesearch": {
+          "type": "string",
+          "description": "Filter: off, moderate, or strict"
+        },
+        "freshness": {
+          "type": "string",
+          "description": "Age filter: pd, pw, pm, py"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "brave_place_search": {
+    "description": "Search for geographic places and POIs. Supports coordinate-based and named-location queries.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Search query"
+        },
+        "latitude": {
+          "type": [
+            "null",
+            "number"
+          ],
+          "description": "Latitude (-90 to 90)"
+        },
+        "longitude": {
+          "type": [
+            "null",
+            "number"
+          ],
+          "description": "Longitude (-180 to 180)"
+        },
+        "location": {
+          "type": "string",
+          "description": "Location string (e.g. 'san francisco ca united states')"
+        },
+        "radius": {
+          "type": [
+            "null",
+            "number"
+          ],
+          "description": "Search radius bias in meters"
+        },
+        "count": {
+          "type": "integer",
+          "description": "Number of results (1-50, default 20)"
+        },
+        "safesearch": {
+          "type": "string",
+          "description": "Filter: off, moderate, or strict"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "brave_video_search": {
+    "description": "Search for videos using Brave Search. Returns video results with duration and metadata.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Search query"
+        },
+        "count": {
+          "type": "integer",
+          "description": "Number of results (1-50, default 20)"
+        },
+        "offset": {
+          "type": "integer",
+          "description": "Pagination offset (0-9)"
+        },
+        "safesearch": {
+          "type": "string",
+          "description": "Filter: off, moderate, or strict"
+        },
+        "freshness": {
+          "type": "string",
+          "description": "Age filter: pd, pw, pm, py"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "brave_web_search": {
+    "description": "Search the web using Brave Search. Returns web pages, FAQ, discussions, news, and video results.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Search query"
+        },
+        "count": {
+          "type": "integer",
+          "description": "Number of results (1-20, default 10)"
+        },
+        "offset": {
+          "type": "integer",
+          "description": "Pagination offset (0-9)"
+        },
+        "safesearch": {
+          "type": "string",
+          "description": "Filter: off, moderate, or strict"
+        },
+        "freshness": {
+          "type": "string",
+          "description": "Age filter: pd, pw, pm, py, or YYYY-MM-DDtoYYYY-MM-DD"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "fetch": {
+    "description": "Fetch a URL and convert its content to markdown. Returns the page content as clean markdown text. For large pages, use start_index to paginate through the content. Non-HTML pages (JSON, plain text, etc.) are returned as-is.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "The URL to fetch and convert to markdown"
+        },
+        "max_length": {
+          "type": "integer",
+          "description": "Maximum number of characters to return. Default 20000."
+        },
+        "start_index": {
+          "type": "integer",
+          "description": "On return output documenting where to start the next page. Start from 0 on the first call."
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "get_transcript": {
+    "description": "Fetch the transcript (spoken text) from a YouTube video. Returns plain text of what is said in the video. Only works with YouTube URLs (youtube.com or youtu.be). Uses auto-generated captions by default.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "YouTube video URL (e.g. https://www.youtube.com/watch?v=...)"
+        },
+        "language": {
+          "type": "string",
+          "description": "language code for subtitles (e.g. en, es, fr). Defaults to configured language."
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "get_video_info": {
+    "description": "Fetch metadata for a YouTube video: title, channel name, duration, description, upload date, and view count. Only works with YouTube URLs (youtube.com or youtu.be). Useful to get context about a video before or alongside its transcript.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "YouTube video URL (e.g. https://www.youtube.com/watch?v=...)"
+        }
+      },
+      "required": [
+        "url"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "register_background_job": {
+    "description": "Register a background job for monitoring. When an async tool (e.g. generate_image_async) returns a job_id, call this to have the system monitor the job. You will be notified with the result in a system message when it completes. After calling this, always send the user a short message telling them the task is underway. Do not poll for status — the result arrives automatically as a notice beginning with \"[System: Background task completed\". NEVER write that notice yourself, and never invent a link: real links only ever arrive inside that notice.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "type": "string",
+          "description": "The job_id returned by the async tool"
+        },
+        "tool_name": {
+          "type": "string",
+          "description": "Name of the async tool that started the job (e.g. 'generate_image_async')"
+        },
+        "server_name": {
+          "type": "string",
+          "description": "Name of the MCP server running the job (auto-detected from tool_name if omitted)"
+        }
+      },
+      "required": [
+        "job_id",
+        "tool_name"
+      ]
+    }
+  }
+}

@@ -101,8 +101,9 @@ type decodedRequest struct {
 	Messages []decodedMsg `json:"messages"`
 	Tools    []struct {
 		Function struct {
-			Name        string `json:"name"`
-			Description string `json:"description"`
+			Name        string         `json:"name"`
+			Description string         `json:"description"`
+			Parameters  map[string]any `json:"parameters"`
 		} `json:"function"`
 	} `json:"tools"`
 	ToolChoice         string         `json:"tool_choice"`

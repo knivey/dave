@@ -21,6 +21,7 @@ data/*
 logs/
 tools/backfill-session-meta/backfill-session-meta
 tools/migrate-sqlite-to-pgsql/migrate-sqlite-to-pgsql
+tools/prompt-eval/prompt-eval
 todo.md
 mcps/brave-mcp/brave-mcp
 mcps/fetch-mcp/fetch-mcp

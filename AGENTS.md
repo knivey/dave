@@ -22,6 +22,7 @@ go build -o mcps/img-mcp/img-mcp ./mcps/img-mcp
 go build -o mcps/yt-mcp/yt-mcp ./mcps/yt-mcp
 go build -o imgsite/imgsite ./imgsite
 go build -o tools/migrate-sqlite-to-pgsql/migrate-sqlite-to-pgsql ./tools/migrate-sqlite-to-pgsql
+go build -o tools/prompt-eval/prompt-eval ./tools/prompt-eval
 
 ./dave              # config/ directory
 ./dave prod         # prod/ directory

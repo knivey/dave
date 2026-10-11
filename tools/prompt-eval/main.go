@@ -50,6 +50,12 @@ type runConfig struct {
 	// imageflow delivery-marker injections (dave's injection_role knob).
 	// Validated by validateDeliveryRole before anything runs.
 	deliveryRole string
+
+	// toolVariantName is the -tool-variant axis: the sweep name of the
+	// tool-description overrides already applied to cfg.tools ("" = no
+	// variant, the baseline advertisement). Validated by loadToolVariants
+	// before anything runs; labeled "default" in run-index.csv.
+	toolVariantName string
 }
 
 func main() {
@@ -61,14 +67,15 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: prompt-eval [-baseurl URL] [-model NAME] [-variant name=path] [-runs N] [-delay D]")
-	fmt.Fprintln(os.Stderr, "                  [-outdir DIR] [-scenarios imageflow,prompts[,research]] [-reasoning-effort low]")
-	fmt.Fprintln(os.Stderr, "                  [-chat-template-kwargs JSON] [-api-key KEY] [-seed N]")
+	fmt.Fprintln(os.Stderr, "usage: prompt-eval [-baseurl URL] [-model NAME] [-variant name=path] [-tool-variant name=path]")
+	fmt.Fprintln(os.Stderr, "                  [-runs N] [-delay D] [-outdir DIR] [-scenarios imageflow,prompts[,research]]")
+	fmt.Fprintln(os.Stderr, "                  [-reasoning-effort low] [-chat-template-kwargs JSON] [-api-key KEY] [-seed N]")
 	fmt.Fprintln(os.Stderr, "                  [-delivery-role system|user|developer]")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Runs scripted bot sessions against a live llama-server with different system-prompt")
-	fmt.Fprintln(os.Stderr, "variants, fabricates every tool result, and writes api-log-shaped JSONL under")
-	fmt.Fprintln(os.Stderr, "<outdir>/<variant>/<scenario>-<delivery-role>/run-NN.jsonl plus a")
+	fmt.Fprintln(os.Stderr, "variants and tool-description variants, fabricates every tool result, and writes")
+	fmt.Fprintln(os.Stderr, "api-log-shaped JSONL under")
+	fmt.Fprintln(os.Stderr, "<outdir>/<variant>[+<tool-variant>]/<scenario>-<delivery-role>/run-NN.jsonl plus a")
 	fmt.Fprintln(os.Stderr, "<outdir>/run-index.csv summary.")
 	fmt.Fprintln(os.Stderr, "All requests are sequential with -delay between them (the server is shared with a")
 	fmt.Fprintln(os.Stderr, "live bot). The tool never touches anything outside -outdir.")
@@ -79,9 +86,11 @@ func usage() {
 
 func run() error {
 	var variantFlags variantList
+	var toolVariantFlags toolVariantList
 	baseURL := flag.String("baseurl", defaultBaseURL, "llama-server base URL (OpenAI-compatible, up to and including /v1)")
 	model := flag.String("model", defaultModel, "model name as the router knows it")
 	flag.Var(&variantFlags, "variant", "variant as name=path to a FINAL rendered system prompt (repeatable; default: bundled none/dial/broken)")
+	flag.Var(&toolVariantFlags, "tool-variant", "tool-description variant as name=path to a JSON object of advertised tool name → replacement description (repeatable; default: none)")
 	runs := flag.Int("runs", 10, "sessions per scenario per variant")
 	delay := flag.Duration("delay", 750*time.Millisecond, "sleep between HTTP requests (the server is shared with a live bot)")
 	outdir := flag.String("outdir", defaultOutdir, "output directory for JSONL runs and run-index.csv")
@@ -113,6 +122,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// Validated (unknown tool names, empty descriptions, malformed JSON)
+	// before the outdir is created — a typo'd experiment must fail loudly
+	// at startup, never silently no-op into the sweep.
+	toolVariants, err := loadToolVariants(toolVariantFlags)
+	if err != nil {
+		return err
+	}
 	cfg := runConfig{
 		baseURL:         *baseURL,
 		model:           *model,
@@ -137,18 +153,27 @@ func run() error {
 
 	respond := newLiveResponder(cfg)
 	failures := 0
-	total := len(variants) * len(scenarios) * *runs
+	total := len(variants) * len(toolVariants) * len(scenarios) * *runs
 	for _, v := range variants {
-		for _, sc := range scenarios {
-			for run := 1; run <= *runs; run++ {
-				row, err := runOne(v, sc, run, cfg, respond, *outdir)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "prompt-eval: %s/%s-%s run %d: %v\n", v.name, sc, cfg.deliveryRole, run, err)
-					failures++
-				}
-				if row != nil {
-					if err := idx.add(*row); err != nil {
-						return fmt.Errorf("writing run-index.csv: %w", err)
+		for _, tv := range toolVariants {
+			// One config per cell: the tools field carries this cell's
+			// overridden advertisement; toolVariantName rides along for
+			// the output path and the CSV row.
+			cellCfg := cfg
+			cellCfg.toolVariantName = tv.name
+			cellCfg.tools = applyToolVariant(advertisedTools, tv.overrides)
+			for _, sc := range scenarios {
+				for run := 1; run <= *runs; run++ {
+					row, err := runOne(v, sc, run, cellCfg, respond, *outdir)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "prompt-eval: %s/%s-%s run %d: %v\n",
+							variantDirName(v.name, tv.name), sc, cellCfg.deliveryRole, run, err)
+						failures++
+					}
+					if row != nil {
+						if err := idx.add(*row); err != nil {
+							return fmt.Errorf("writing run-index.csv: %w", err)
+						}
 					}
 				}
 			}
@@ -205,11 +230,14 @@ func validateDeliveryRole(role string) error {
 func runOne(v loadedVariant, scenario string, run int, cfg runConfig, respond responder, outdir string) (*indexRow, error) {
 	// The scenario dir always carries the -delivery-role suffix (even the
 	// default) so separate invocations can never collide on run-NN.jsonl.
-	// The rng/phrase keys below deliberately stay on the BARE scenario:
-	// role A/B runs with the same seed fabricate identical job ids and
-	// phrasings, so the only variable between them is the role itself.
+	// The variant dir carries the -tool-variant axis the same way ("+name"
+	// when active, bare when not). The rng/phrase keys below deliberately
+	// stay on the BARE scenario and variant: role A/B and description A/B
+	// runs with the same seed fabricate identical job ids and phrasings, so
+	// the only variable between cells is the axis itself.
 	scenDirName := scenario + "-" + cfg.deliveryRole
-	scenDir := filepath.Join(outdir, v.name, scenDirName)
+	varDir := variantDirName(v.name, cfg.toolVariantName)
+	scenDir := filepath.Join(outdir, varDir, scenDirName)
 	if err := os.MkdirAll(scenDir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating %s: %w", scenDir, err)
 	}
@@ -238,6 +266,7 @@ func runOne(v loadedVariant, scenario string, run int, cfg runConfig, respond re
 
 	row := &indexRow{
 		Variant:        v.name,
+		ToolVariant:    toolVariantLabel(cfg.toolVariantName),
 		Scenario:       scenario,
 		DeliveryRole:   cfg.deliveryRole,
 		Run:            run,
@@ -247,7 +276,7 @@ func runOne(v loadedVariant, scenario string, run int, cfg runConfig, respond re
 		Fabricated:     s.fabricated,
 	}
 	fmt.Printf("%s/%s run %d done: %d requests, reasoning %d chars, fabricated %v\n",
-		v.name, scenDirName, run, s.reqCount, s.reasoningChars, s.fabricated)
+		varDir, scenDirName, run, s.reqCount, s.reasoningChars, s.fabricated)
 	return row, runErr
 }
 

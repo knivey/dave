@@ -61,22 +61,22 @@ func TestRunIndexCSV(t *testing.T) {
 	var buf bytes.Buffer
 	idx := newRunIndex(&buf)
 	require.NoError(t, idx.add(indexRow{
-		Variant: "none", Scenario: "imageflow", DeliveryRole: "system", Run: 1,
+		Variant: "none", ToolVariant: "default", Scenario: "imageflow", DeliveryRole: "system", Run: 1,
 		Requests: 7, Responses: 7, ReasoningChars: 4321, Fabricated: false,
 	}))
 	require.NoError(t, idx.add(indexRow{
-		Variant: "broken", Scenario: "imageflow", DeliveryRole: "user", Run: 2,
+		Variant: "broken", ToolVariant: "default", Scenario: "imageflow", DeliveryRole: "user", Run: 2,
 		Requests: 7, Responses: 7, ReasoningChars: 2100, Fabricated: true,
 	}))
 	require.NoError(t, idx.add(indexRow{
-		Variant: "broken", Scenario: "prompts", DeliveryRole: "developer", Run: 12,
+		Variant: "dial", ToolVariant: "waitinstr", Scenario: "prompts", DeliveryRole: "developer", Run: 12,
 		Requests: 6, Responses: 6, ReasoningChars: 987, Fabricated: true,
 	}))
 	require.NoError(t, idx.close())
 
-	want := "variant,scenario,delivery_role,run,requests,responses,reasoning_chars_total,fabricated\n" +
-		"none,imageflow,system,01,7,7,4321,false\n" +
-		"broken,imageflow,user,02,7,7,2100,true\n" +
-		"broken,prompts,developer,12,6,6,987,true\n"
+	want := "variant,tool_variant,scenario,delivery_role,run,requests,responses,reasoning_chars_total,fabricated\n" +
+		"none,default,imageflow,system,01,7,7,4321,false\n" +
+		"broken,default,imageflow,user,02,7,7,2100,true\n" +
+		"dial,waitinstr,prompts,developer,12,6,6,987,true\n"
 	assert.Equal(t, want, buf.String())
 }

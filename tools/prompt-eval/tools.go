@@ -26,10 +26,19 @@ func stub(name, description string) toolDef {
 	}
 }
 
+// registerBackgroundJobDescription is the CURRENT prod
+// register_background_job description (message-delivery mode, system role —
+// aiCmds.go's guidanceRole template rendered with "system"), pinned verbatim
+// so the harness baseline advertises exactly what the model sees in
+// production. toolvariants/waitinstr.json overrides precisely this text.
+const registerBackgroundJobDescription = "Register a background job for monitoring. When an async tool (e.g. generate_image_async) returns a job_id, call this to have the system monitor the job. You will be notified with the result in a system message when it completes. After calling this, always send the user a short message telling them the task is underway. Do not poll for status — the result arrives automatically."
+
 // advertisedTools mirrors the current prod eunuch advertisement: one-line
-// stub descriptions with object params. job_status is deliberately absent —
-// it has been hidden in prod since the polling incident (session 1898), and
-// the 1910 reproduction must not teach the model that call exists.
+// stub descriptions with object params (register_background_job carries the
+// full prod text — see registerBackgroundJobDescription). job_status is
+// deliberately absent — it has been hidden in prod since the polling
+// incident (session 1898), and the 1910 reproduction must not teach the
+// model that call exists.
 var advertisedTools = []toolDef{
 	stub("enhance_and_generate_async", "Enhance a prompt and queue an asynchronous image generation job"),
 	stub("generate_image_async", "Queue an asynchronous image generation job"),
@@ -46,5 +55,5 @@ var advertisedTools = []toolDef{
 	stub("fetch", "Fetch a URL and return the page body as text"),
 	stub("get_transcript", "Get the transcript of a YouTube video"),
 	stub("get_video_info", "Get metadata about a YouTube video"),
-	stub("register_background_job", "Register a background job whose result is delivered when it completes"),
+	stub("register_background_job", registerBackgroundJobDescription),
 }

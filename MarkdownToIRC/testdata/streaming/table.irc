@@ -1,0 +1,10 @@
+leading paragraph
+┌──────────┬───────────────────────────────────────────────────────────────────────────────────────┐
+│ cmd      │ what it does                                                                          │
+├──────────┼───────────────────────────────────────────────────────────────────────────────────────┤
+│ [COLOR]0,90go build[COLOR] │ compiles dave                                                                         │
+│ [COLOR]0,90go test[COLOR]  │ runs all tests                                                                        │
+│ x        │ a cell whose text is deliberately long enough to exceed the available column budget   │
+│          │ so the renderer must wrap it across multiple lines inside the box                     │
+└──────────┴───────────────────────────────────────────────────────────────────────────────────────┘
+after paragraph

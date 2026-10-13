@@ -14,9 +14,9 @@ Streaming markdown goes through `StreamingRenderer`
 (`MarkdownToIRC/MarkdownToIRC.go`): a hand-rolled **line state machine** that
 buffers deltas and only emits at "safe" boundaries, plus per-chunk
 `MarkdownToIRCStream` (goldmark, streaming mode: fixed 80-col code padding,
-no tables, no Chroma) for everything else. The two paths disagree about
-markdown structure whenever constructs nest — that disagreement is what this
-investigation chased.
+no tables at the time, no Chroma) for everything else. The two paths disagree
+about markdown structure whenever constructs nest — that disagreement is what
+this investigation chased.
 
 Live config (`config/chats.toml`) never combines the two flags today:
 `[chat]` has `renderMarkdown = true` (no streaming), `[yo]` has
@@ -94,10 +94,10 @@ per-chunk but wrong across chunk boundaries:
 - **HTML blocks / `<br>`** — newline placement differs between chunked and
   whole-doc render because HTML blocks are `TrimSpace`d with no separating
   newline. Cosmetic.
-- **Tables** — `MarkdownToIRCStream` omits the Table extension entirely
-  (pipes render as prose). The `renderNode` streaming-table branch
-  (`[table omitted in streaming mode]`) is dead code — no streaming
-  configuration ever registers the Table extension.
+- **Tables** — at the time, `MarkdownToIRCStream` omitted the Table
+  extension entirely (pipes render as prose) and the `renderNode`
+  streaming-table branch (`[table omitted in streaming mode]`) was dead
+  code. Tables were later enabled safely — see "Streaming tables" below.
 
 ### D. aiCmds.go wiring bugs (proven by a scratch SSE test, since removed)
 
@@ -216,7 +216,41 @@ blocks (final-text paths do, via ExtractFinalText) — pre-existing
 behavior, previously masked by the double-send's duplicate copy.
 
 **Enabling in production:** set `streaming = true` alongside
-`rendermarkdown = true` on a command in `chats.toml`. Tables still render
-as pipe-text in streaming mode (the streaming parser deliberately omits
-the Table extension) — same as before, now documented.
+`rendermarkdown = true` on a command in `chats.toml`. Tables render as
+box-drawing tables in streaming mode (same render as the non-streaming
+path) — enabled Oct 2026; see "Streaming tables" below.
+
+## Streaming tables (Oct 2026)
+
+Tables were originally omitted from `MarkdownToIRCStream` out of caution:
+`RenderTable` computes column widths from ALL rows, and the streaming
+architecture's core invariant is prefix monotonicity (a longer settled
+prefix must render with the previous output as a byte-for-byte prefix —
+width instability would break it).
+
+The spike that enabled `extension.Table` proved the fear unfounded:
+**GFM tables cannot span blank lines**, and settle points only fire at
+blank-line boundaries (or top-level fence closers, which land on fence
+lines) — so a table is always held as a unit and settles complete, every
+row present when widths are computed. No settle point can fall between
+a table's header row and its delimiter row. Two 20k-document surveys
+(table-heavy generator: wide cells, ragged rows, escaped pipes, inline
+styles, missing outer pipes, tables nested in list items and
+blockquotes) found 0 parity and 0 chunk-invariance
+failures. Latency semantics pinned by `TestStreamingLatencyTable*`:
+a table is emitted complete at its settle point (the blank + next
+block's first line after it); a trailing table is delivered whole by
+the flush; the paragraph BEFORE a table is released by the table's own
+first line, like any next-block start. Byte-parity with the
+non-streaming render pinned by `TestStreamingTableParityWithNonStreaming`
+and the golden pair `testdata/streaming/table.md/.irc`.
+
+Known accepted hazard (owner decision): the tool-call branch in
+`runTurnStream` performs the only non-terminal flush. A model that
+streams a table header, fires a tool call, and then appends more rows
+of that SAME table in the continuation would re-render the table wider
+and trip the invariant-break fallback (degraded-mode re-send from a
+line boundary — duplicated partial lines, never dropped data). Requires
+prose/table interleaving across a tool call that essentially never
+happens.
 

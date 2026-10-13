@@ -11,6 +11,10 @@ package markdowntoirc
 //     without waiting for the blank line after it;
 //   - a tight list is held until the list ends (no blank lines interior) —
 //     rendering items individually would break list structure;
+//   - a table is held as a unit and emitted complete at its settle point
+//     (column widths depend on every row, and GFM tables cannot span
+//     blank lines, so the settle never lands mid-table); a trailing table
+//     is delivered whole by the flush;
 //   - the final block of a stream is emitted by the flush.
 
 import (
@@ -67,6 +71,52 @@ func TestStreamingLatencyListHeldUntilListEnds(t *testing.T) {
 	assert.Contains(t, got[0], "a")
 	assert.Contains(t, got[0], "b")
 	assert.Equal(t, "after", joinEntries(r.Process("")))
+}
+
+func TestStreamingLatencyTableHeldUntilSettle(t *testing.T) {
+	// A GFM table cannot span blank lines, so the settle scanner holds it
+	// as a unit: every row must be present when column widths are computed
+	// (widths come from ALL rows — a partial table would render with
+	// columns that later rows would change, breaking prefix monotonicity).
+	// Released complete at the settle point, like every other block; a
+	// trailing table (no blank after) is delivered whole by the flush.
+	r := NewStreamingRenderer()
+	assert.Empty(t, r.Process("intro\n\n"), "blank unclassified: nothing yet")
+	// the table's first line classifies the blank as a boundary → the
+	// preceding paragraph goes out NOW (same as any next-block start)
+	got := r.Process("| A | B |\n")
+	require.Len(t, got, 1, "intro released when the table's first line arrives")
+	assert.Equal(t, "intro", got[0])
+	assert.Empty(t, r.Process("|---|---|\n"), "table still open: nothing")
+	assert.Empty(t, r.Process("| 1 | 2 |\n"), "table may gain rows: nothing")
+	assert.Empty(t, r.Process("\n"), "blank after table unclassified: nothing")
+	// the next block's first line classifies the blank → the WHOLE table
+	// goes out NOW, rendered complete (box table, not pipe text)
+	got = r.Process("after\n")
+	require.Len(t, got, 1, "table must be emitted complete at the settle point")
+	assert.Contains(t, got[0], "┌───┬───┐")
+	assert.Contains(t, got[0], "│ A │ B │")
+	assert.Contains(t, got[0], "│ 1 │ 2 │")
+	assert.Contains(t, got[0], "└───┴───┘")
+	assert.NotContains(t, got[0], "| A |", "must not render as raw pipe text")
+	assert.Equal(t, "after", joinEntries(r.Process("")))
+}
+
+func TestStreamingLatencyTrailingTableReleasedByFlush(t *testing.T) {
+	r := NewStreamingRenderer()
+	assert.Empty(t, r.Process("para\n\n"), "blank unclassified: nothing yet")
+	// the table's first line releases the preceding paragraph
+	got := r.Process("| X |\n")
+	require.Len(t, got, 1)
+	assert.Equal(t, "para", got[0])
+	assert.Empty(t, r.Process("|---|\n"), "table open: nothing")
+	assert.Empty(t, r.Process("| 1 |\n"), "table may gain rows: nothing")
+	// no blank after the table → the flush delivers it whole
+	got = r.Process("")
+	require.Len(t, got, 1, "trailing table delivered whole by the flush")
+	assert.Contains(t, got[0], "┌───┐")
+	assert.Contains(t, got[0], "│ X │")
+	assert.Contains(t, got[0], "│ 1 │")
 }
 
 func TestStreamingLatencyMarkerLineFence(t *testing.T) {

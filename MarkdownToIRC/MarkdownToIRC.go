@@ -307,11 +307,13 @@ func (r *Renderer) renderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 		}
 	case extast.KindTable:
 		if entering {
-			if r.streaming {
-				// Tables not supported in streaming mode
-				writes(w, node, "[table omitted in streaming mode]\n")
-				return ast.WalkSkipChildren
-			}
+			// Tables render identically in both modes: a GFM table can't
+			// span blank lines, so the streaming renderer's settle points
+			// (blank-line boundaries, top-level fence closers) always fall
+			// OUTSIDE a table — it is held as a unit and every row is
+			// present when RenderTable computes column widths, so the
+			// prefix-monotonicity invariant holds (pinned by the latency
+			// tests + the fuzz survey's table generator).
 			data := extractTableData(node, r)
 			formatted := tables.RenderTable(data)
 			writes(w, node, formatted)
@@ -507,7 +509,8 @@ func MarkdownToIRCStream(response string) string {
 	r := &Renderer{streaming: true}
 	md := goldmark.New(
 		goldmark.WithExtensions(
-			extension.TaskList, // no tables in streaming
+			extension.TaskList,
+			extension.Table,
 		),
 		goldmark.WithRenderer(r),
 	)

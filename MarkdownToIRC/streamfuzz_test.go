@@ -10,10 +10,10 @@ package markdowntoirc
 //	   sendIRC skips empty lines anyway.
 //	P2 (parity): the incremental output must equal MarkdownToIRCStream()
 //	   rendered over the whole document — the intended streaming-mode
-//	   semantics (fixed code padding, no tables, no highlighting). Any
-//	   divergence means the hand-rolled line state machine in Process()
-//	   disagrees with the real markdown parser about structure — the class
-//	   of nested-construct bugs that got streaming markdown disabled.
+//	   semantics (fixed code padding, box-drawing tables, no
+//	   highlighting). Any divergence means the settle scanner disagrees
+//	   with the real markdown parser about structure — the class of
+//	   nested-construct bugs that got streaming markdown disabled.
 //
 // Test entry points:
 //
@@ -132,7 +132,7 @@ func (g *docGen) inline() string {
 // block returns the LINES of a single block, unprefixed.
 func (g *docGen) block(depth int) []string {
 	kinds := []string{"para", "para", "para", "heading", "setext", "fence", "fence",
-		"indentedCode", "list", "list", "list", "quote", "quote", "table", "hr", "html", "taskList"}
+		"indentedCode", "list", "list", "list", "quote", "quote", "table", "table", "hr", "html", "taskList"}
 	// containers get more nesting weight when already deep enough to matter
 	if depth < 3 {
 		kinds = append(kinds, "list", "quote")
@@ -262,7 +262,7 @@ func (g *docGen) list(depth int) []string {
 		if depth < 2 && g.chance(0.4) {
 			ind := strings.Repeat(" ", 2+g.intn(3))
 			var child []string
-			switch g.intn(3) {
+			switch g.intn(4) {
 			case 0:
 				child = g.list(depth + 1)
 			case 1:
@@ -276,6 +276,10 @@ func (g *docGen) list(depth int) []string {
 					lines[markerLineIdx] = marker + " " + child[0]
 					child = child[1:]
 				}
+			case 2:
+				// table inside a list item (4-space indent degrades to
+				// indented code in goldmark — still valid oracle input)
+				child = g.table()
 			default:
 				child = g.para()
 			}
@@ -293,11 +297,13 @@ func (g *docGen) list(depth int) []string {
 func (g *docGen) quote(depth int) []string {
 	var inner []string
 	if depth < 2 && g.chance(0.5) {
-		switch g.intn(3) {
+		switch g.intn(4) {
 		case 0:
 			inner = g.quote(depth + 1)
 		case 1:
 			inner = g.list(depth + 1)
+		case 2:
+			inner = g.table() // "> | a | b |" — quoted table, plausible LLM shape
 		default:
 			inner = g.fence()
 		}
@@ -318,25 +324,58 @@ func (g *docGen) quote(depth int) []string {
 	return lines
 }
 
+// table generates pipe tables with the shapes that stress the renderer:
+// wide cells (column-width changes per row → wrap/fit), ragged rows
+// (fewer/more cells than the header), escaped pipes, inline styles in
+// cells, and occasionally missing outer pipes (legal GFM).
 func (g *docGen) table() []string {
 	cols := 2 + g.intn(3)
-	rows := 1 + g.intn(3)
-	var lines []string
-	cellRow := func() string {
-		cells := make([]string, cols)
-		for i := range cells {
-			cells[i] = g.words(1)
+	rows := 1 + g.intn(4)
+	cell := func() string {
+		switch g.intn(8) {
+		case 0:
+			return "`" + g.words(1) + "`"
+		case 1:
+			return "*" + g.words(1) + "*"
+		case 2:
+			return g.words(1) + ` \| ` + g.words(1) // escaped pipe
+		case 3:
+			return g.words(4 + g.intn(8)) // wide: triggers wrap/fit
+		default:
+			return g.words(1 + g.intn(2))
 		}
-		return "| " + strings.Join(cells, " | ") + " |"
 	}
-	lines = append(lines, cellRow())
+	row := func(n int, pipes bool) string {
+		cells := make([]string, n)
+		for i := range cells {
+			cells[i] = cell()
+		}
+		joined := strings.Join(cells, " | ")
+		if pipes {
+			return "| " + joined + " |"
+		}
+		return joined
+	}
+	outerPipes := g.chance(0.8)
+	lines := []string{row(cols, outerPipes)}
 	aligns := make([]string, cols)
 	for i := range aligns {
 		aligns[i] = g.pick([]string{"---", ":--", "--:", ":-:"})
 	}
-	lines = append(lines, "| "+strings.Join(aligns, " | ")+" |")
+	delim := strings.Join(aligns, " | ")
+	if outerPipes {
+		delim = "| " + delim + " |"
+	}
+	lines = append(lines, delim)
 	for i := 0; i < rows; i++ {
-		lines = append(lines, cellRow())
+		n := cols
+		switch g.intn(6) {
+		case 0:
+			n = max(1, cols-1) // ragged: fewer cells
+		case 1:
+			n = cols + 1 // ragged: extra cell
+		}
+		lines = append(lines, row(n, outerPipes))
 	}
 	return lines
 }

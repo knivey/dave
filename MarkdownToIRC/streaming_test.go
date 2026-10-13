@@ -238,6 +238,25 @@ func streamingRender(input string) string {
 	return output.String()
 }
 
+// TestStreamingTableParityWithNonStreaming: tables render identically in
+// streaming and non-streaming mode — the same box-drawing render, the same
+// column widths. For a table-bearing document without code blocks the two
+// whole-document renderings must be identical in IRC-visible form
+// (normalizeIRC: empty lines dropped — sendIRC skips them — outer newlines
+// trimmed; streamingRender appends "\n" per entry, the non-streaming path
+// does not).
+func TestStreamingTableParityWithNonStreaming(t *testing.T) {
+	docs := []string{
+		"intro\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\nafter\n",
+		"| left | right |\n|----:|:-----|\n| 1 | 2 |\n| 333 | 4444 |\n",
+		"wide cells wrap:\n\n| short | a very much longer cell indeed |\n|-------|----------------------------------|\n| x | y |\n",
+	}
+	for _, doc := range docs {
+		assert.Equal(t, normalizeIRC(MarkdownToIRC(doc)), normalizeIRC(streamingRender(doc)),
+			"streaming and non-streaming table renders diverged for %q", doc)
+	}
+}
+
 func TestStreamingFromTestData(t *testing.T) {
 	// Test data in testdata/streaming/ should contain:
 	// - .md file with markdown input

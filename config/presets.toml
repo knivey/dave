@@ -1,0 +1,45 @@
+# Presets: shared base configs that commands in chats.toml, completions.toml,
+# and generators.toml inherit from via preset = "name". Every command accepts
+# the same fields as a preset (see the reference lists in those files), so a
+# preset is just a named partial command table.
+#
+# This file is optional — missing = no presets (commands without preset are
+# unaffected). Presets are never commands themselves: never registered,
+# never triggerable, never shown in help.
+#
+# Inheritance and override rules:
+#   - Any field a command writes overrides the preset; absent fields inherit.
+#     Explicit zero values override too (streaming = false on a command whose
+#     preset sets streaming = true stays false — merging happens before the
+#     config structs are built, so "set to false" and "not set" are distinct).
+#   - Scalars and arrays are replaced wholesale (mcps, aliases, stop never
+#     concatenate — writing the field means "this value").
+#   - Nested maps (extra_body, chat_template_kwargs, [name.log]) deep-merge
+#     per key: a command can tweak one sub-key without re-declaring the rest.
+#   - A preset may itself carry preset = "other" (layered, base-first:
+#     most derived wins). Cycles and unknown preset names are load errors
+#     naming the chain — fatal at startup, error-returning on /reload.
+#   - Preset names share one namespace across chats/completions/generators.
+#   - After merging, the normal service cascade still applies for fields the
+#     merged command leaves unset (command > preset > service > defaults).
+#   - Reload note: presets.toml is re-read by /reload together with the
+#     command files, so preset edits hot-apply like any other config change.
+#
+# Example:
+# [irc-base]
+# service = "openai"
+# model = "gpt-4o"
+# rendermarkdown = true
+# streaming = true
+# timeout = "2m"
+#
+# [irc-images]
+# preset = "irc-base"
+# detectimages = true
+# maximages = 2
+#
+# ...then in chats.toml:
+# [grumpy]
+# preset = "irc-base"
+# description = "grumpy variant"
+# system = "You are grumpy..."      # everything else inherited

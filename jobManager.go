@@ -348,8 +348,10 @@ func deliverAsyncResult(entry *jobEntry[asyncJobPayload], ctx context.Context, o
 	// must wait for any in-flight user turn on this session instead of
 	// interleaving injected rows and turn output with it. Acquired after
 	// the (possible) session switch, before any rows are written; a
-	// cancelled or valve-expired delivery leaves the completed job pending
-	// for a later delivery path.
+	// cancelled or valve-expired delivery leaves the completed job
+	// pending — recoverable by the session's next turn (inline delivery
+	// loop), a later switch-back delivery, or restart recovery
+	// (recoverPendingJobs).
 	releaseTurn, gateOK := acquireSessionTurn(ctx, entry.payload.sessionID, sessionGateWaitLimitFor(currentCfg.Timeout))
 	if !gateOK {
 		loggerJM.Warn("async delivery skipped at the session gate (cancelled or wait-limit valve)",

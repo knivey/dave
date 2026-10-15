@@ -67,13 +67,19 @@ func loadSessionTurnGate(sessionID int64) *sessionTurnGate {
 var sessionTurnWaitLimit = 10 * time.Minute
 
 // sessionGateWaitLimitFor derives the effective valve limit for a command
-// with the given turn timeout. A holder's legitimate hold is bounded by its
-// turn timeout (which wraps the whole tool loop) plus inline-delivery
-// continuation turns, each also bounded by the same timeout — so 3×
-// timeout covers a turn plus continuations with room, and the floor keeps
-// zero/unset/small timeouts sensible. Without this derivation an admin
-// running long timeouts for slow local models (timeout = "15m") would get
-// waiters dropped mid-legitimate-turn once the floor passed.
+// with the given turn timeout. A holder's hold is NOT one timeout budget:
+// each inline-delivery continuation turn mints a fresh cfg.Timeout
+// (aiCmds.go chat() post-turn loop), and tool phases run on cr.ctx with
+// per-call MCP timeouts outside the turn budget — so a multi-batch hold
+// legitimately reaches (1+N)×timeout and CAN exceed 3×. That overflow is
+// ACCEPTED: the valve firing mid-legitimate-hold costs the waiter a
+// visible resend notice and nothing else (nothing was persisted, nothing
+// corrupted), while a WEDGED holder never finishes at all — the valve
+// firing late-but-eventually is what breaks wedges, so calibration
+// erring small is safe. The floor keeps zero/unset/small timeouts
+// sensible; without the derived arm an admin running long timeouts for
+// slow local models (timeout = "15m") would get waiters dropped
+// mid-legitimate-turn once the 10m floor passed.
 func sessionGateWaitLimitFor(timeout time.Duration) time.Duration {
 	if derived := 3 * timeout; derived > sessionTurnWaitLimit {
 		return derived

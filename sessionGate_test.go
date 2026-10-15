@@ -666,14 +666,31 @@ func TestChatSessionGateCancelledWaiterDoesNotPersistOrRun(t *testing.T) {
 		chat(network, client, chatGateEvent("canceluser", "#cancel"), cfg, bCtx, outB, resolved, "second question")
 	}()
 
-	time.Sleep(150 * time.Millisecond)
+	// Park until the waiter has actually signaled (its turn_wait notice
+	// flowing through outB) before cancelling — a fixed sleep could fire
+	// before the goroutine reached sendWarning on loaded CI.
+	var bLines []string
+	sawWaitEarly := false
+	for !sawWaitEarly {
+		select {
+		case line, ok := <-outB:
+			if !ok {
+				t.Fatalf("waiter output closed before the turn_wait notice; got %v", bLines)
+			}
+			bLines = append(bLines, line)
+			if strings.Contains(line, "still working on your previous message") {
+				sawWaitEarly = true
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("waiter never sent the turn_wait notice; got %v", bLines)
+		}
+	}
 	cancel()
 	<-bDone
 
 	// Cancel path is SILENT beyond the initial turn_wait warning: the queue
 	// already told the user (stop notice), and no resend-notice may fire —
 	// the turn_wait_timeout notice is reserved for the wait-limit valve.
-	var bLines []string
 	for l := range outB {
 		bLines = append(bLines, l)
 	}
@@ -797,4 +814,78 @@ func TestDeliverAsyncResultWaitsForInFlightTurn(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "delivery turn did not receive the injected async result")
+}
+
+// TestDeliverAsyncResultGateAbort pins the abort branch: when the valve
+// fires (or the ctx cancels) while the delivery waits for the gate, it
+// returns BEFORE injecting any rows or running a turn, and the completed
+// job stays pending for a later recovery path.
+func TestDeliverAsyncResultGateAbort(t *testing.T) {
+	setupTestDB(t)
+	setupTestJobManager(t)
+	_ = setupMockDeps(t)
+	setupNoticesDefaults(t)
+
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
+	insertTestMessage(t, sid, "system", "sys")
+	require.NoError(t, createPendingJob(sid, "job-1", "generate_image_async", "img-mcp"))
+	require.NoError(t, completePendingJob("job-1", "image url: http://example.com/img.png"))
+
+	// The session's chat command config drives the derived valve limit.
+	// Shrink the FLOOR below the derived arm (3×60ms=180ms) so the valve
+	// fires quickly — max() keeps the floor for small timeouts otherwise.
+	origLimit := sessionTurnWaitLimit
+	sessionTurnWaitLimit = 40 * time.Millisecond
+	t.Cleanup(func() { sessionTurnWaitLimit = origLimit })
+
+	tinyCfg := makeTestAIConfig()
+	tinyCfg.Timeout = 60 * time.Millisecond // derived limit: 180ms
+	configMu.Lock()
+	old := config
+	c := config
+	c.Commands.Chats = map[string]AIConfig{"testchat": tinyCfg}
+	config = c
+	configMu.Unlock()
+	t.Cleanup(func() {
+		configMu.Lock()
+		config = old
+		configMu.Unlock()
+	})
+
+	userID := ensureTestUser(t, "testnet", "testuser")
+	entry := &jobEntry[asyncJobPayload]{
+		jobID:     "job-1",
+		payload:   asyncJobPayload{sessionID: sid},
+		toolName:  "generate_image_async",
+		mcpServer: "img-mcp",
+		network:   "testnet",
+		channel:   "#test",
+		nick:      "testuser",
+		userID:    userID,
+	}
+
+	release, ok := acquireSessionTurn(context.Background(), sid, sessionTurnWaitLimit)
+	require.True(t, ok, "test should hold the gate")
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		deliverAsyncResult(entry, context.Background(), make(chan string, 50))
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(6 * time.Second):
+		t.Fatal("deliverAsyncResult never returned from the gate wait")
+	}
+	release()
+
+	msgs, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	require.Len(t, msgs, 1, "aborted delivery must not inject rows")
+	assert.NotContains(t, msgs[0].Content, "Background task completed")
+
+	jobs, err := getCompletedPendingJobs(sid)
+	require.NoError(t, err)
+	assert.Len(t, jobs, 1, "completed job must stay pending for a later recovery path")
 }

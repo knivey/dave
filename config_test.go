@@ -2412,6 +2412,85 @@ service = "svc"
 	assert.True(t, cfg.Commands.Disabled["deadalias"])
 }
 
+// TestLoadConfigDirNetworkDisabledCommandsGenerators pins that LIVE
+// generator names are valid in a network's disabled_commands: the
+// runtime dispatcher has always honored the flag for generators (the
+// config-command match path applies isNetworkCommandDisabled to every
+// command kind), but the load-time known set omitted them — an admin
+// could not express a per-network generator disable without killing
+// startup. Generator aliases behave like chat aliases: rejected with
+// the "use the canonical name" error, not "not a known command".
+func TestLoadConfigDirNetworkDisabledCommandsGenerators(t *testing.T) {
+	base := func(disabledCommands string) string {
+		return `
+[networks.testnet]
+nick = "bot"
+disabled_commands = [` + disabledCommands + `]
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+	}
+	files := func(mainTOML string) string {
+		return createTestConfigDir(t, mainTOML, map[string]string{
+			"services.toml": testGeneratorsServices,
+			"generators.toml": `
+[summary]
+service = "svc"
+prompt = "p"
+aliases = ["sum"]
+`,
+		})
+	}
+
+	t.Run("live generator name loads", func(t *testing.T) {
+		dir := files(base(`"summary"`))
+		defer os.RemoveAll(dir)
+
+		_, err := loadConfigDir(dir)
+		require.NoError(t, err, "a live generator canonical name must be valid in disabled_commands")
+	})
+
+	t.Run("generator alias rejected with canonical-name error", func(t *testing.T) {
+		dir := files(base(`"sum"`))
+		defer os.RemoveAll(dir)
+
+		_, err := loadConfigDir(dir)
+		require.Error(t, err, "a generator alias must error like chat aliases do")
+		assert.Contains(t, err.Error(), `"sum" is an alias of "summary"`)
+		assert.Contains(t, err.Error(), "use the canonical name")
+	})
+
+	// Cross-commit interaction with the `disabled = true` switch: a
+	// globally-disabled generator's names must be exempt via
+	// Commands.Disabled (the exemption runs before the known check), even
+	// though a LIVE generator is now known. Pins the ordering — the drop
+	// happens in validateCommands, which runs before this validator on
+	// both the startup and reload paths.
+	t.Run("disabled generator names stay exempt", func(t *testing.T) {
+		mainTOML := `
+[networks.testnet]
+nick = "bot"
+disabled_commands = ["deadgen", "deadgenalias"]
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+		dir := createTestConfigDir(t, mainTOML, map[string]string{
+			"services.toml": testGeneratorsServices,
+			"generators.toml": `
+[deadgen]
+service = "svc"
+disabled = true
+aliases = ["deadgenalias"]
+prompt = "p"
+`,
+		})
+		defer os.RemoveAll(dir)
+
+		_, err := loadConfigDir(dir)
+		require.NoError(t, err, "names of a globally-disabled generator must not error in disabled_commands")
+	})
+}
+
 // TestDisabledCommandNotRegistered pins the user-visible end of the
 // switch: after load + registration, a disabled command's trigger and its
 // aliases are not dispatchable while siblings are.

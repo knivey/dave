@@ -617,6 +617,17 @@ func validateNetworkDisabledCommands(config *Config) error {
 			aliasToCanonical[alias] = name
 		}
 	}
+	// Generators belong here too: the runtime dispatcher applies
+	// isNetworkCommandDisabled to every config command kind, so a live
+	// generator name in disabled_commands is meaningful config, not a
+	// mistake — the validator's known set must match what dispatch
+	// honors (this was missing when generators landed).
+	for name, c := range config.Commands.Generators {
+		known[name] = true
+		for _, alias := range c.AIConfig.Aliases {
+			aliasToCanonical[alias] = name
+		}
+	}
 	for name := range config.Commands.Tools {
 		known[name] = true
 	}

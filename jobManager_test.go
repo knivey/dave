@@ -1214,6 +1214,124 @@ func TestRecoverPendingJobsSkipsStaleCompleted(t *testing.T) {
 	}
 }
 
+// TestDeliverAsyncResultNoJobsNoSwitch: when nothing is left to deliver
+// (a racing inline loop or another delivery already took the completed
+// jobs), deliverAsyncResult must return WITHOUT switching the user's
+// active session — the switch-back notice and active-session yank are
+// pure noise with no content behind them. Boot recovery widens this
+// window (recovery items can execute after the user has moved on), so the
+// peek must happen before switchToSession.
+func TestDeliverAsyncResultNoJobsNoSwitch(t *testing.T) {
+	setupTestDB(t)
+	setupTestJobManager(t)
+	_ = setupMockDeps(t)
+
+	// Session S: the job's session, with NO completed jobs pending.
+	sidS := createTestSession(t, "testnet", "#peek", "peekuser", "testchat", "", "")
+	insertTestMessage(t, sidS, "system", "sys")
+
+	// Session T: a newer active session (the user moved on).
+	sidT := createTestSession(t, "testnet", "#peek", "peekuser", "testchat", "", "")
+	insertTestMessage(t, sidT, "system", "sys")
+
+	userID := ensureTestUser(t, "testnet", "peekuser")
+	entry := &jobEntry[asyncJobPayload]{
+		jobID:     "peek-job",
+		payload:   asyncJobPayload{sessionID: sidS},
+		toolName:  "generate_image_async",
+		mcpServer: "img-mcp",
+		network:   "testnet",
+		channel:   "#peek",
+		nick:      "peekuser",
+		userID:    userID,
+	}
+
+	output := make(chan string, 50)
+	deliverAsyncResult(entry, context.Background(), output)
+
+	// The active session must still be T, and no switch notice sent.
+	active, err := sessionMgr.GetActiveSession("testnet", "#peek", userID)
+	require.NoError(t, err)
+	require.NotNil(t, active)
+	assert.Equal(t, sidT, active.ID, "deliverAsyncResult switched the active session with nothing to deliver")
+
+	select {
+	case msg := <-output:
+		t.Fatalf("deliverAsyncResult sent output with nothing to deliver: %q", msg)
+	default:
+	}
+}
+
+// TestRecoverPendingJobsQueueDepthDefersToNextBoot pins the depth-cap
+// semantics: with the channel queue at maxDepth, recovery's Enqueue is
+// refused and the completed job STAYS completed — deferred to the next
+// boot (or later session activity), never lost or marked failed.
+func TestRecoverPendingJobsQueueDepthDefersToNextBoot(t *testing.T) {
+	setupTestDB(t)
+	setupTestJobManager(t)
+	mb := setupMockDeps(t)
+
+	// A depth-1 queue: one item admitted, the next refused. The swap keeps
+	// the mock bot hooks (asyncJobMgr's are untouched by the swap).
+	oldQM := queueMgr
+	queueMgr = NewQueueManager(NoticesConfig{Queue: QueueNotices{Msg: "queued", Started: "started"}}, 1)
+	queueMgr.botReady = func(network, channel string) bool { return network == "testnet" }
+	queueMgr.getBot = func(network string) *Bot {
+		if network != "testnet" {
+			return nil
+		}
+		return &Bot{Client: mb.client, Network: mb.network}
+	}
+	queueMgr.UpdateServiceLimits(map[string]Service{"testsvc": {Parallel: 1}})
+	queueMgr.Start()
+	t.Cleanup(func() {
+		queueMgr.Stop()
+		queueMgr = oldQM
+	})
+
+	sidA := createTestSession(t, "testnet", "#depth", "depthuser1", "testchat", "", "")
+	insertTestMessage(t, sidA, "system", "sys")
+	sidB := createTestSession(t, "testnet", "#depth", "depthuser2", "testchat", "", "")
+	insertTestMessage(t, sidB, "system", "sys")
+
+	// Two jobs on DIFFERENT sessions in the same channel: a single
+	// delivery drains only its own session (getCompletedPendingJobs is
+	// per-session), so the depth refusal is actually observable — with
+	// both jobs on one session the first delivery would drain the second
+	// as a passenger.
+	require.NoError(t, createPendingJob(sidA, "depth-job-1", "generate_image_async", "img-mcp"))
+	require.NoError(t, completePendingJob("depth-job-1", "image url: http://example.com/1.png"))
+	require.NoError(t, createPendingJob(sidB, "depth-job-2", "generate_image_async", "img-mcp"))
+	require.NoError(t, completePendingJob("depth-job-2", "image url: http://example.com/2.png"))
+
+	recoverPendingJobs()
+
+	// Exactly one delivery is admitted; poll until it settles, then the
+	// other job must remain completed-undelivered (nothing will ever
+	// deliver it in this process).
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		jobsA, err := getCompletedPendingJobs(sidA)
+		require.NoError(t, err)
+		jobsB, err := getCompletedPendingJobs(sidB)
+		require.NoError(t, err)
+		if len(jobsA) == 0 && len(jobsB) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected session A delivered and session B deferred, got A=%d B=%d", len(jobsA), len(jobsB))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Steady state: the deferred job stays completed.
+	time.Sleep(300 * time.Millisecond)
+	jobs, err := getCompletedPendingJobs(sidB)
+	require.NoError(t, err)
+	require.Len(t, jobs, 1, "deferred job must stay completed for the next boot")
+	assert.Equal(t, "depth-job-2", jobs[0].JobID, "the second job is the one refused at depth")
+}
+
 func TestRegisterAsyncJob_Duplicate(t *testing.T) {
 	setupTestJobManager(t)
 	// Park the job goroutine inside wait_for_job. Without this the wait fails

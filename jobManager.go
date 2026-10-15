@@ -304,6 +304,15 @@ func onAsyncJobCompletedWithMgr(mgr *genericJobMgr[asyncJobPayload], qm *QueueMa
 }
 
 func deliverAsyncResult(entry *jobEntry[asyncJobPayload], ctx context.Context, output chan<- string) {
+	// Peek BEFORE switching: if nothing is left to deliver (a racing
+	// inline loop or another delivery already took the completed jobs),
+	// switchToSession would yank the user's active session back and emit
+	// a switch notice with no content behind it. Boot recovery widens
+	// this window — recovery items can execute after the user moved on.
+	if jobs, err := getCompletedPendingJobs(entry.payload.sessionID); err != nil || len(jobs) == 0 {
+		return
+	}
+
 	activeSession, _ := sessionMgr.GetActiveSession(entry.network, entry.channel, entry.userID)
 
 	if activeSession == nil || activeSession.ID != entry.payload.sessionID {
@@ -528,6 +537,11 @@ func recoverPendingJobs() {
 		// later session activity — a restart between completePendingJob
 		// and delivery drops the in-memory queue and silently loses the
 		// result if the user never returns.
+		//
+		// Nil CompletedAt is treated as fresh: completePendingJob always
+		// sets it, so nil means a hand-edited/legacy row — and delivery
+		// marks the row delivered, removing it from future recovery, so
+		// treating nil as deliver-once is self-limiting.
 		if j.Status == StatusCompleted {
 			if j.CompletedAt != nil && time.Since(*j.CompletedAt) > completedJobRecoveryMaxAge {
 				loggerJM.Info("skipping stale completed job in recovery",
@@ -544,10 +558,20 @@ func recoverPendingJobs() {
 				nick:      nick,
 				userID:    userID,
 			}
-			queueMgr.Enqueue(session.Network, session.Channel, userID, nick, "", j.ToolName,
+			position := queueMgr.Enqueue(session.Network, session.Channel, userID, nick, "", j.ToolName,
 				func(ctx context.Context, output chan<- string) {
 					deliverAsyncResult(entry, ctx, output)
 				})
+			if position < 0 {
+				// Queue at maxDepth or not running — boot recovery is
+				// exactly when depth fills (items run before IRC connects,
+				// each counting toward the cap). The row stays completed
+				// and the NEXT boot retries it (until the age cap passes).
+				// Do not claim the re-enqueue in logs or the counter.
+				loggerJM.Warn("queue at depth, deferring completed-job re-delivery to next boot",
+					"job_id", j.JobID, "session", *j.SessionID)
+				continue
+			}
 			delivered++
 			loggerJM.Info("re-enqueued delivery for completed job", "job_id", j.JobID)
 			continue

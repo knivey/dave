@@ -571,10 +571,14 @@ var builtinHelpEntries = map[string]struct {
 func findCommandHelp(network Network, cmdName string) (helpEntry, bool) {
 	var completions map[string]AIConfig
 	var chats map[string]AIConfig
+	var generators map[string]GeneratorConfig
 	var tools map[string]MCPCommandConfig
+	// One snapshot under one lock acquisition so a /reload landing
+	// mid-call cannot hand this request a torn cross-generation view.
 	readConfig(func() {
 		completions = config.Commands.Completions
 		chats = config.Commands.Chats
+		generators = config.Commands.Generators
 		tools = config.Commands.Tools
 	})
 	for _, c := range completions {
@@ -591,6 +595,19 @@ func findCommandHelp(network Network, cmdName string) (helpEntry, bool) {
 				return helpEntry{}, false
 			}
 			return buildAIConfigEntry(network.Trigger, c), true
+		}
+	}
+	// Generators: the config-command match path dispatches them like any
+	// other kind, so single-command help must find them too (this loop
+	// was missing — `.help <generator>` answered "not found" for a
+	// command that appeared in the full listing). Entries build from the
+	// embedded AIConfig, same as sortedGeneratorEntries.
+	for _, c := range generators {
+		if matchesCommand(cmdName, c.AIConfig.Name, c.AIConfig.Aliases) {
+			if isNetworkCommandDisabled(network, c.AIConfig.Name) {
+				return helpEntry{}, false
+			}
+			return buildAIConfigEntry(network.Trigger, c.AIConfig), true
 		}
 	}
 	for _, c := range tools {

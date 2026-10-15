@@ -549,9 +549,9 @@ func reloadAll() error {
 		r.QueuePrint()
 		return err
 	}
-	r.AddSuccess(fmt.Sprintf("config: %d services, %d chats, %d completions, %d tools, %d template vars, notices ok",
+	r.AddSuccess(fmt.Sprintf("config: %d services, %d chats, %d completions, %d generators, %d tools, %d template vars, notices ok",
 		len(config.Services), len(config.Commands.Chats), len(config.Commands.Completions),
-		len(config.Commands.Tools), len(config.TemplateVars)))
+		len(config.Commands.Generators), len(config.Commands.Tools), len(config.TemplateVars)))
 
 	for name, bot := range snapshotBots() {
 		bot.mu.Lock()
@@ -595,9 +595,9 @@ func main() {
 	}
 	config = loadConfigDirOrDie(configDir)
 	r := NewReloadReport("startup")
-	r.AddSuccess(fmt.Sprintf("config: %d networks, %d services, %d chats, %d completions, %d tools, %d MCPs, %d template vars",
+	r.AddSuccess(fmt.Sprintf("config: %d networks, %d services, %d chats, %d completions, %d generators, %d tools, %d MCPs, %d template vars",
 		len(config.Networks), len(config.Services), len(config.Commands.Chats),
-		len(config.Commands.Completions), len(config.Commands.Tools),
+		len(config.Commands.Completions), len(config.Commands.Generators), len(config.Commands.Tools),
 		len(config.MCPs), len(config.TemplateVars)))
 
 	noTUI := os.Getenv("DAVE_NO_TUI") != ""

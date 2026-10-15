@@ -547,3 +547,37 @@ func TestFindCommandHelpByAlias(t *testing.T) {
 	entry, found = findCommandHelp(Network{}, "nonexistent")
 	assert.False(t, found)
 }
+
+// TestFindCommandHelpGenerators pins the single-command help path for
+// generators: lookup by canonical name AND alias, and the
+// network-disabled guard. findCommandHelp once hand-listed
+// completions/chats/tools/builtins and omitted generators entirely —
+// `.help <generator>` said "not found" for a command that dispatches
+// fine and appears in the full listing.
+func TestFindCommandHelpGenerators(t *testing.T) {
+	config.Commands.Generators = map[string]GeneratorConfig{
+		"summary": {AIConfig: AIConfig{
+			Name:        "summary",
+			Aliases:     []string{"sum"},
+			Service:     "local",
+			Model:       "qwen3",
+			Description: "Summarize recent channel activity",
+		}},
+	}
+	defer func() { config.Commands.Generators = nil }()
+
+	entry, found := findCommandHelp(Network{}, "summary")
+	require.True(t, found, "should find generator by canonical name")
+	assert.Contains(t, entry.cmds[0], "summary")
+
+	entry, found = findCommandHelp(Network{}, "sum")
+	require.True(t, found, "should find generator via alias 'sum'")
+	assert.Contains(t, entry.cmds[0], "summary", "alias lookup returns the canonical entry")
+
+	entry, found = findCommandHelp(Network{}, "nonexistent")
+	assert.False(t, found)
+
+	net := Network{Name: "n", DisabledCommands: []string{"summary"}}
+	_, found = findCommandHelp(net, "summary")
+	assert.False(t, found, "network-disabled generator must not get single-command help")
+}

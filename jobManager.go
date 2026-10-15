@@ -349,14 +349,13 @@ func deliverAsyncResult(entry *jobEntry[asyncJobPayload], ctx context.Context, o
 	// interleaving injected rows and turn output with it. Acquired after
 	// the (possible) session switch, before any rows are written; a
 	// cancelled or valve-expired delivery leaves the completed job
-	// pending — recoverable only by LATER SESSION ACTIVITY: any next turn
-	// on the session (chat()'s inline delivery loop) or a later async
-	// delivery on the same session (its loop drains all completed jobs);
-	// both read the DB's completed status so they survive restarts. Note
-	// recoverPendingJobs does NOT cover this state — it re-attaches
-	// monitors for pending/running jobs only (getPendingJobsForRecovery),
-	// and this job is already `completed`. An abandoned session holds the
-	// result until MaxAgeDays cleanup.
+	// pending — recoverable by LATER SESSION ACTIVITY (any next turn on
+	// the session via chat()'s inline delivery loop, or a later async
+	// delivery on the same session; both read the DB's completed status
+	// so they survive restarts) or by BOOT RECOVERY: recoverPendingJobs
+	// re-enqueues completed-undelivered jobs younger than
+	// completedJobRecoveryMaxAge (1h). An abandoned session with a result
+	// older than that holds it until MaxAgeDays cleanup.
 	releaseTurn, gateOK := acquireSessionTurn(ctx, entry.payload.sessionID, sessionGateWaitLimitFor(currentCfg.Timeout))
 	if !gateOK {
 		loggerJM.Warn("async delivery skipped at the session gate (cancelled or wait-limit valve)",
@@ -481,6 +480,14 @@ func injectAsyncResultFromDB(sessionID int64, cfg AIConfig, job PendingJob, netw
 	}
 }
 
+// completedJobRecoveryMaxAge caps how old a completed-undelivered job may
+// be for boot recovery to re-deliver it. Delivering a long-stale result
+// into a dead conversation (session switch-back notice and all) is worse
+// than leaving it undelivered; the cap bounds the weirdness to results
+// the user plausibly still wants. Package var so tests can reason about
+// the default.
+var completedJobRecoveryMaxAge = time.Hour
+
 func recoverPendingJobs() {
 	if theDB == nil {
 		return
@@ -492,6 +499,7 @@ func recoverPendingJobs() {
 		return
 	}
 
+	delivered := 0
 	for _, j := range jobs {
 		if j.SessionID == nil {
 			loggerJM.Warn("skipping tool job in session recovery", "job_id", j.JobID)
@@ -510,12 +518,47 @@ func recoverPendingJobs() {
 				nick = displayNick(u)
 			}
 		}
+
+		// Completed-undelivered: the result is already stored in the row
+		// — there is nothing to monitor on the MCP server (which may not
+		// even remember the job anymore). Re-enqueue the DELIVERY path,
+		// exactly like onAsyncJobCompleted does; deliverAsyncResult handles
+		// the session switch-back, injection, the AI turn, and the
+		// delivered marking. Without this, delivery depends entirely on
+		// later session activity — a restart between completePendingJob
+		// and delivery drops the in-memory queue and silently loses the
+		// result if the user never returns.
+		if j.Status == StatusCompleted {
+			if j.CompletedAt != nil && time.Since(*j.CompletedAt) > completedJobRecoveryMaxAge {
+				loggerJM.Info("skipping stale completed job in recovery",
+					"job_id", j.JobID, "completed_at", *j.CompletedAt)
+				continue
+			}
+			entry := &jobEntry[asyncJobPayload]{
+				jobID:     j.JobID,
+				payload:   asyncJobPayload{sessionID: *j.SessionID},
+				toolName:  j.ToolName,
+				mcpServer: j.MCPServer,
+				network:   session.Network,
+				channel:   session.Channel,
+				nick:      nick,
+				userID:    userID,
+			}
+			queueMgr.Enqueue(session.Network, session.Channel, userID, nick, "", j.ToolName,
+				func(ctx context.Context, output chan<- string) {
+					deliverAsyncResult(entry, ctx, output)
+				})
+			delivered++
+			loggerJM.Info("re-enqueued delivery for completed job", "job_id", j.JobID)
+			continue
+		}
+
 		registerAsyncJob(j.JobID, *j.SessionID, j.ToolName, j.MCPServer, session.Network, session.Channel, nick, userID)
 		loggerJM.Info("recovered pending job", "job_id", j.JobID)
 	}
 
 	if len(jobs) > 0 {
-		loggerJM.Info("recovered pending jobs", "count", len(jobs))
+		loggerJM.Info("recovered pending jobs", "count", len(jobs), "redelivered_completed", delivered)
 	}
 }
 

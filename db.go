@@ -670,7 +670,16 @@ func getPendingJobsForUser(network, channel string, userID int64) ([]PendingJob,
 
 func getPendingJobsForRecovery(requireSessionID bool) ([]PendingJob, error) {
 	var jobs []PendingJob
-	q := theDB.Where("status IN ?", []string{StatusPending, StatusRunning})
+	statuses := []string{StatusPending, StatusRunning}
+	if requireSessionID {
+		// Session jobs also recover their completed-undelivered tail: the
+		// result is already stored in the row — recovery re-enqueues the
+		// delivery instead of re-attaching a monitor (recoverPendingJobs).
+		// Session-less tool jobs (the false branch) keep their own
+		// pending/running recovery semantics.
+		statuses = append(statuses, StatusCompleted)
+	}
+	q := theDB.Where("status IN ?", statuses)
 	if requireSessionID {
 		q = q.Where("session_id IS NOT NULL")
 	} else {

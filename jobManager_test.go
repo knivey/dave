@@ -1127,6 +1127,93 @@ func TestRecoverPendingJobs_NoDB(t *testing.T) {
 	recoverPendingJobs()
 }
 
+// TestRecoverPendingJobsDeliversCompletedUndelivered: boot recovery must
+// also flush COMPLETED-undelivered session jobs — the result is already in
+// the row (there is nothing to monitor), and without this the delivery
+// depends entirely on later session activity (next turn's inline loop or a
+// later async delivery), silently losing the result if the user never
+// returns — e.g. a restart between completePendingJob and delivery drops
+// the in-memory queue with the row stuck at `completed`.
+func TestRecoverPendingJobsDeliversCompletedUndelivered(t *testing.T) {
+	setupTestDB(t)
+	setupTestJobManager(t)
+	_ = setupMockDeps(t)
+
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
+	insertTestMessage(t, sid, "system", "sys")
+
+	require.NoError(t, createPendingJob(sid, "recovery-delivery-1", "generate_image_async", "img-mcp"))
+	require.NoError(t, completePendingJob("recovery-delivery-1", "image url: http://example.com/recovered.png"))
+
+	recoverPendingJobs()
+
+	// The delivery runs asynchronously through the queue; poll until the
+	// job is marked delivered.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		jobs, err := getCompletedPendingJobs(sid)
+		require.NoError(t, err)
+		if len(jobs) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("completed-undelivered job was never delivered by recovery")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	msgs, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	found := false
+	for _, m := range msgs {
+		if strings.Contains(m.Content, "Background task completed") &&
+			strings.Contains(m.Content, "http://example.com/recovered.png") {
+			found = true
+		}
+	}
+	assert.True(t, found, "recovery delivery did not inject the stored result")
+}
+
+// TestRecoverPendingJobsSkipsStaleCompleted is the paired negative of
+// TestRecoverPendingJobsDeliversCompletedUndelivered: a completed job
+// older than completedJobRecoveryMaxAge must NOT be re-delivered — pushing
+// a days-old image link into a long-dead conversation (with a switch-back
+// notice) is worse than leaving it. It only means anything alongside the
+// fresh test: without recovery delivering anything, this passes vacuously.
+func TestRecoverPendingJobsSkipsStaleCompleted(t *testing.T) {
+	setupTestDB(t)
+	setupTestJobManager(t)
+	_ = setupMockDeps(t)
+
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
+	insertTestMessage(t, sid, "system", "sys")
+
+	require.NoError(t, createPendingJob(sid, "recovery-delivery-stale", "generate_image_async", "img-mcp"))
+	require.NoError(t, completePendingJob("recovery-delivery-stale", "image url: http://example.com/stale.png"))
+
+	// Backdate completion beyond the recovery age cap.
+	stale := time.Now().Add(-2 * time.Hour).UTC()
+	require.NoError(t, theDB.Model(&PendingJob{}).
+		Where("job_id = ?", "recovery-delivery-stale").
+		Update("completed_at", stale).Error)
+
+	recoverPendingJobs()
+
+	// Give a wrongly-enqueued delivery time to run before asserting.
+	time.Sleep(300 * time.Millisecond)
+
+	jobs, err := getCompletedPendingJobs(sid)
+	require.NoError(t, err)
+	require.Len(t, jobs, 1, "stale completed job must not be re-delivered")
+
+	msgs, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	for _, m := range msgs {
+		assert.NotContains(t, m.Content, "Background task completed",
+			"stale job's result must not be injected")
+	}
+}
+
 func TestRegisterAsyncJob_Duplicate(t *testing.T) {
 	setupTestJobManager(t)
 	// Park the job goroutine inside wait_for_job. Without this the wait fails

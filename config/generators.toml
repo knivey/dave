@@ -11,6 +11,7 @@
 #   service              (string, required)         Service name from services.toml
 #   model                (string)                    Model name (e.g. "qwen3-32b")
 #   aliases              (string array, default: []) Additional trigger names for this command
+#   disabled             (bool, default: false)      Drop this command at load time: not registered, not validated, hidden from help — the config block stays but is inert (an undefined service or broken template on a disabled command does not block startup). Canonical name and aliases stay valid in networks' disabled_commands lists.
 #   description          (string)                    Short description for help listings
 #   system               (string)                    System prompt (supports Go templates)
 #   streaming            (bool, default: false)      Stream responses from the API. On generators text
@@ -114,6 +115,7 @@
 # preset = "gen-base"
 # service = "local"
 # model = "qwen3-32b"
+# disabled = false
 # streaming = true
 # rendermarkdown = true
 # respond_tool = true

@@ -1,5 +1,8 @@
 # Tool commands call a single MCP tool and return the result directly (no LLM involved).
 # Each section name becomes the command trigger.
+# NOTE: the `disabled = true` switch from chats/completions/generators does NOT
+# apply here — tools have no such field. Comment out the section to mothball a
+# tool command.
 #
 # Available options (per [section]):
 #   mcp          (string, required)  MCP server name from mcps.toml

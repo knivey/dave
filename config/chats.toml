@@ -15,6 +15,7 @@
 #   service              (string, required)         Service name from services.toml
 #   model                (string)                    Model name (e.g. "gpt-4o")
 #   aliases               (string array, default: [])     Additional trigger names for this command
+#   disabled             (bool, default: false)      Drop this command at load time: not registered, not validated, hidden from help — the config block stays but is inert (an undefined service or broken template on a disabled command does not block startup). Canonical name and aliases stay valid in networks' disabled_commands lists.
 #   system               (string)                    System prompt (supports Go templates)
 #   description          (string)                    Short description for help listings
 #   streaming            (bool, default: false)      Stream responses to IRC as they generate
@@ -68,6 +69,7 @@
 # service = "openai"
 # model = "gpt-4o"
 # aliases = ["alt-name"]
+# disabled = false
 # description = "Example chat with all options"
 # system = "You are {{.BotNick}} chatting with {{.Nick}} in {{.Channel}} on {{.Network}}.\n{{.Vars.IRCActionNote}}"
 # streaming = true

@@ -16,6 +16,8 @@ import (
 
 var globalRand = rand.New(rand.NewSource(uint64(time.Now().UnixNano())))
 
+var loggerCfg = newLogger("config")
+
 type Config struct {
 	Trigger              string
 	Quitmsg              string
@@ -229,6 +231,12 @@ type Commands struct {
 	Chats       map[string]AIConfig
 	Tools       map[string]MCPCommandConfig
 	Generators  map[string]GeneratorConfig
+	// Disabled records the canonical names AND aliases of every command
+	// dropped at load time via `disabled = true`. It exists so
+	// validateNetworkDisabledCommands can exempt those names: a network's
+	// disabled_commands entry naming a globally-disabled command is
+	// redundant, not a mistake, and must not fail the load.
+	Disabled map[string]bool
 }
 
 type MCPCommandConfig struct {
@@ -325,10 +333,16 @@ type AIConfig struct {
 	// 0 = unset; resolved command > service > [compaction] context_window
 	// by effectiveContextWindow (no ApplyDefaults cascade, so the source
 	// stays attributable in logs).
-	ContextWindow        int                `toml:"context_window"`
-	APIUser              string             `toml:"api_user"`
-	RetryOnEmpty         *int               `toml:"retry_on_empty"`
-	LoadNotice           *bool              `toml:"load_notice"`
+	ContextWindow int    `toml:"context_window"`
+	APIUser       string `toml:"api_user"`
+	RetryOnEmpty  *int   `toml:"retry_on_empty"`
+	LoadNotice    *bool  `toml:"load_notice"`
+	// Disabled drops the command at load time (default false): the entry
+	// is removed before validation and registration, so it never
+	// dispatches, never appears in help, and may reference a removed
+	// service or carry a broken template without blocking startup —
+	// keeping the config block around while inert is the point.
+	Disabled             bool               `toml:"disabled"`
 	DisabledBuiltinTools []string           `toml:"disabled_builtin_tools"`
 	HiddenMCPTools       []string           `toml:"hidden_mcp_tools"`
 	HiddenMCPToolSets    []string           `toml:"hidden_mcp_tool_sets"`
@@ -609,6 +623,13 @@ func validateNetworkDisabledCommands(config *Config) error {
 
 	for netName, network := range config.Networks {
 		for _, cmd := range network.DisabledCommands {
+			// A globally-disabled command (`disabled = true`) was dropped
+			// from the maps above, so neither `known` nor the alias map
+			// contains it. A network entry naming it is redundant, not a
+			// mistake — exempt (canonical or alias) instead of erroring.
+			if config.Commands.Disabled[cmd] {
+				continue
+			}
 			if canonical, isAlias := aliasToCanonical[cmd]; isAlias {
 				return fmt.Errorf("networks.%s disabled_commands: %q is an alias of %q, use the canonical name %q instead", netName, cmd, canonical, canonical)
 			}
@@ -940,6 +961,9 @@ func loadCommandsDir(dir string, config *Config) (Commands, error) {
 	if err := loadCommandFileWithPresets(filepath.Join(dir, "generators.toml"), presets, &commands.Generators); err != nil {
 		return commands, fmt.Errorf("loading generators: %w", err)
 	}
+	// Always non-nil so consumers can consult it without a guard (entries
+	// are recorded by dropDisabled during validation below).
+	commands.Disabled = make(map[string]bool)
 
 	if err := validateCommands(&commands, config); err != nil {
 		return commands, err
@@ -956,8 +980,30 @@ func loadCommandFile(path string, dest any) error {
 	return err
 }
 
+// dropDisabled removes a `disabled = true` command from its section map
+// BEFORE any validation runs (a mothballed command may reference a
+// removed service or carry a broken template without blocking startup —
+// keeping the config block around while inert is the point of the
+// switch), and records the canonical name and aliases in
+// Commands.Disabled so validateNetworkDisabledCommands can exempt them.
+func dropDisabled[T any](commands *Commands, m map[string]T, section, name string, aliases []string) {
+	loggerCfg.Info("command disabled, skipping", "section", section, "name", name, "aliases", aliases)
+	delete(m, name)
+	if commands.Disabled == nil {
+		commands.Disabled = make(map[string]bool)
+	}
+	commands.Disabled[name] = true
+	for _, alias := range aliases {
+		commands.Disabled[alias] = true
+	}
+}
+
 func validateCommands(commands *Commands, config *Config) error {
 	for name, cfg := range commands.Completions {
+		if cfg.Disabled {
+			dropDisabled(commands, commands.Completions, "completions", name, cfg.Aliases)
+			continue
+		}
 		cfg, err := validateAIConfig(cfg, name, "completions", config)
 		if err != nil {
 			return err
@@ -972,6 +1018,10 @@ func validateCommands(commands *Commands, config *Config) error {
 	}
 
 	for name, cfg := range commands.Chats {
+		if cfg.Disabled {
+			dropDisabled(commands, commands.Chats, "chats", name, cfg.Aliases)
+			continue
+		}
 		cfg, err := validateAIConfig(cfg, name, "chats", config)
 		if err != nil {
 			return err
@@ -1053,6 +1103,10 @@ func validateCommands(commands *Commands, config *Config) error {
 	}
 
 	for name, cfg := range commands.Generators {
+		if cfg.AIConfig.Disabled {
+			dropDisabled(commands, commands.Generators, "generators", name, cfg.Aliases)
+			continue
+		}
 		ai, err := validateAIConfig(cfg.AIConfig, name, "generators", config)
 		if err != nil {
 			return err

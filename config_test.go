@@ -2297,6 +2297,155 @@ host = "irc.example.com"
 	})
 }
 
+// TestLoadConfigDirCommandDisabledFlag pins the `disabled = true` command
+// switch: the entry is dropped at load time from its section map while
+// siblings load untouched, and the dropped names — canonical AND aliases —
+// are recorded in Commands.Disabled for validateNetworkDisabledCommands'
+// exemption.
+func TestLoadConfigDirCommandDisabledFlag(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": testGeneratorsServices,
+		"chats.toml": `
+[deadchat]
+service = "svc"
+disabled = true
+aliases = ["deadalias"]
+
+[livechat]
+service = "svc"
+`,
+		"completions.toml": `
+[deadcomp]
+service = "svc"
+disabled = true
+
+[livecomp]
+service = "svc"
+`,
+		"generators.toml": `
+[deadgen]
+service = "svc"
+disabled = true
+prompt = "p"
+
+[livegen]
+service = "svc"
+prompt = "p"
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg, err := loadConfigDir(dir)
+	require.NoError(t, err)
+
+	assert.NotContains(t, cfg.Commands.Chats, "deadchat", "disabled chat must be dropped at load")
+	assert.Contains(t, cfg.Commands.Chats, "livechat")
+	assert.NotContains(t, cfg.Commands.Completions, "deadcomp", "disabled completion must be dropped at load")
+	assert.Contains(t, cfg.Commands.Completions, "livecomp")
+	assert.NotContains(t, cfg.Commands.Generators, "deadgen", "disabled generator must be dropped at load")
+	assert.Contains(t, cfg.Commands.Generators, "livegen")
+
+	for _, name := range []string{"deadchat", "deadalias", "deadcomp", "deadgen"} {
+		assert.True(t, cfg.Commands.Disabled[name], "Commands.Disabled must record %q", name)
+	}
+}
+
+// TestLoadConfigDirCommandDisabledSkipsValidation pins that a disabled
+// command skips validation entirely: an undefined service or a broken
+// system template on a mothballed command must not block startup (keeping
+// the block around while inert is the point of the switch), while the
+// identical command enabled fails loudly.
+func TestLoadConfigDirCommandDisabledSkipsValidation(t *testing.T) {
+	newDir := func(disabled string) string {
+		return createTestConfigDir(t, "", map[string]string{
+			"services.toml": testGeneratorsServices,
+			"chats.toml": `
+[deadchat]
+service = "undefined-service"
+system = "{{.Broken"
+disabled = ` + disabled + `
+`,
+		})
+	}
+
+	dir := newDir("true")
+	defer os.RemoveAll(dir)
+	cfg, err := loadConfigDir(dir)
+	require.NoError(t, err, "disabled command must skip validation")
+	assert.NotContains(t, cfg.Commands.Chats, "deadchat")
+
+	liveDir := newDir("false")
+	defer os.RemoveAll(liveDir)
+	_, err = loadConfigDir(liveDir)
+	require.Error(t, err, "enabled command with undefined service must fail the load")
+}
+
+// TestLoadConfigDirCommandDisabledSilencesNetworkEntry pins the exemption:
+// a network's disabled_commands naming a globally-disabled command — by
+// canonical name OR alias — loads cleanly (redundant, not a mistake), the
+// same entry naming a live command keeps working as before.
+func TestLoadConfigDirCommandDisabledSilencesNetworkEntry(t *testing.T) {
+	mainTOML := `
+[networks.testnet]
+nick = "bot"
+disabled_commands = ["deadchat", "deadalias", "livechat"]
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+	dir := createTestConfigDir(t, mainTOML, map[string]string{
+		"services.toml": testGeneratorsServices,
+		"chats.toml": `
+[deadchat]
+service = "svc"
+disabled = true
+aliases = ["deadalias"]
+
+[livechat]
+service = "svc"
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg, err := loadConfigDir(dir)
+	require.NoError(t, err, "network disabled_commands entries naming disabled commands must not error")
+	assert.True(t, cfg.Commands.Disabled["deadchat"])
+	assert.True(t, cfg.Commands.Disabled["deadalias"])
+}
+
+// TestDisabledCommandNotRegistered pins the user-visible end of the
+// switch: after load + registration, a disabled command's trigger and its
+// aliases are not dispatchable while siblings are.
+func TestDisabledCommandNotRegistered(t *testing.T) {
+	if logger == nil {
+		logger = logxi.New("test")
+		logger.SetLevel(logxi.LevelAll)
+	}
+
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": testGeneratorsServices,
+		"chats.toml": `
+[deadchat]
+service = "svc"
+disabled = true
+aliases = ["deadalias"]
+
+[livechat]
+service = "svc"
+aliases = ["livealias"]
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg, err := loadConfigDir(dir)
+	require.NoError(t, err)
+	require.NoError(t, registerCommandsLocked(cfg.Commands))
+
+	assert.NotContains(t, configCmds, "deadchat")
+	assert.NotContains(t, configCmds, "deadalias")
+	assert.Contains(t, configCmds, "livechat")
+	assert.Contains(t, configCmds, "livealias")
+}
+
 func TestRegisterCommandsLocked_PopulatesConfigCmdNames(t *testing.T) {
 	if logger == nil {
 		logger = logxi.New("test")

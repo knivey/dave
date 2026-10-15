@@ -89,6 +89,44 @@ description = "no preset involved"
 	assert.False(t, ok, "a preset is never itself a command")
 }
 
+// TestLoadConfigDirPresetsDisabledInherits pins that `disabled` rides the
+// raw-TOML merge like any scalar: a preset carrying disabled = true drops
+// every otherwise-valid inheritor at load, and an explicit disabled = false
+// on the command re-enables it (the whole point of merging before decoding
+// — explicit false must beat inherited true).
+func TestLoadConfigDirPresetsDisabledInherits(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": presetTestServices,
+		"presets.toml": `
+[mothballed]
+service = "localsvc"
+model = "gpt-4o"
+disabled = true
+`,
+		"chats.toml": `
+[inherits-disabled]
+preset = "mothballed"
+description = "dropped via the preset"
+
+[re-enabled]
+preset = "mothballed"
+disabled = false
+description = "explicit false overrides preset true"
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg, err := loadConfigDir(dir)
+	require.NoError(t, err)
+
+	assert.NotContains(t, cfg.Commands.Chats, "inherits-disabled",
+		"disabled = true inherited from a preset must drop the command")
+	assert.True(t, cfg.Commands.Disabled["inherits-disabled"],
+		"the dropped inheritor's name must be recorded for the network exemption")
+	assert.Contains(t, cfg.Commands.Chats, "re-enabled",
+		"explicit disabled = false must override the preset's true")
+}
+
 func TestLoadConfigDirPresetsLayered(t *testing.T) {
 	dir := createTestConfigDir(t, "", map[string]string{
 		"services.toml": presetTestServices,

@@ -344,6 +344,20 @@ func deliverAsyncResult(entry *jobEntry[asyncJobPayload], ctx context.Context, o
 	}
 	runner.setSessionInfo(entry.payload.sessionID, convID)
 
+	// Session turn gate (sessionGate.go DESIGN NOTE): the delivery turn
+	// must wait for any in-flight user turn on this session instead of
+	// interleaving injected rows and turn output with it. Acquired after
+	// the (possible) session switch, before any rows are written; a
+	// cancelled delivery leaves the completed job pending for a later
+	// delivery path.
+	releaseTurn, gateOK := acquireSessionTurn(ctx, entry.payload.sessionID)
+	if !gateOK {
+		loggerJM.Info("async delivery skipped: cancelled while waiting for the session's in-flight turn",
+			"session", entry.payload.sessionID, "job_id", entry.jobID)
+		return
+	}
+	defer releaseTurn()
+
 	for {
 		if ctx.Err() != nil {
 			return

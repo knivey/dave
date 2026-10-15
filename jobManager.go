@@ -349,9 +349,14 @@ func deliverAsyncResult(entry *jobEntry[asyncJobPayload], ctx context.Context, o
 	// interleaving injected rows and turn output with it. Acquired after
 	// the (possible) session switch, before any rows are written; a
 	// cancelled or valve-expired delivery leaves the completed job
-	// pending — recoverable by the session's next turn (inline delivery
-	// loop), a later switch-back delivery, or restart recovery
-	// (recoverPendingJobs).
+	// pending — recoverable only by LATER SESSION ACTIVITY: any next turn
+	// on the session (chat()'s inline delivery loop) or a later async
+	// delivery on the same session (its loop drains all completed jobs);
+	// both read the DB's completed status so they survive restarts. Note
+	// recoverPendingJobs does NOT cover this state — it re-attaches
+	// monitors for pending/running jobs only (getPendingJobsForRecovery),
+	// and this job is already `completed`. An abandoned session holds the
+	// result until MaxAgeDays cleanup.
 	releaseTurn, gateOK := acquireSessionTurn(ctx, entry.payload.sessionID, sessionGateWaitLimitFor(currentCfg.Timeout))
 	if !gateOK {
 		loggerJM.Warn("async delivery skipped at the session gate (cancelled or wait-limit valve)",

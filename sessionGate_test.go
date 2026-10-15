@@ -867,6 +867,7 @@ func TestDeliverAsyncResultGateAbort(t *testing.T) {
 	release, ok := acquireSessionTurn(context.Background(), sid, sessionTurnWaitLimit)
 	require.True(t, ok, "test should hold the gate")
 
+	started := time.Now()
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -875,6 +876,12 @@ func TestDeliverAsyncResultGateAbort(t *testing.T) {
 
 	select {
 	case <-done:
+		// The abort must have come from the VALVE (~180ms after the
+		// pre-gate path runs), not an early pre-gate return (bot nil,
+		// session/config lookup miss) which would finish in <10ms and
+		// pass the assertions below vacuously.
+		require.GreaterOrEqual(t, time.Since(started), 100*time.Millisecond,
+			"deliverAsyncResult returned too fast to have waited at the gate — pre-gate early return?")
 	case <-time.After(6 * time.Second):
 		t.Fatal("deliverAsyncResult never returned from the gate wait")
 	}

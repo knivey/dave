@@ -48,34 +48,50 @@ func loadSessionTurnGate(sessionID int64) *sessionTurnGate {
 	return v.(*sessionTurnGate)
 }
 
-// sessionTurnWaitLimit bounds how long a waiter may block on the gate.
-// It is a LIVENESS VALVE, not a policy: the gate wait can deadlock against
-// the queue's per-channel delivery FIFO when enqueue order inverts gate
-// order (waiter W enqueued first becomes the delivery head while blocked
-// here; holder H streams into its 200-message output buffer that only
-// W's completed delivery can drain — H blocks on the full channel, never
-// releases the gate, W never runs). The valve fires far later than any
-// legitimate turn (each API call is bounded by the command's timeout, and
-// tool loops by iteration caps), so in normal operation it never trips;
-// when it does, the waiter aborts with a resend notice instead of wedging
-// the channel's whole delivery queue until an operator runs ^stop.
+// sessionTurnWaitLimit is the FLOOR of the wait-limit liveness valve; the
+// effective limit per waiter is max(floor, 3× the command's turn timeout)
+// via sessionGateWaitLimitFor. The valve is a LIVENESS VALVE, not a policy:
+// the gate wait can deadlock against the queue's per-channel delivery FIFO
+// when enqueue order inverts gate order (waiter W enqueued first becomes
+// the delivery head while blocked here; holder H streams into its
+// 200-message output buffer that only W's completed delivery can drain — H
+// blocks on the full channel, never releases the gate, W never runs). The
+// valve fires far later than any legitimate turn, so in normal operation
+// it never trips; when it does, the waiter aborts with a resend notice
+// instead of wedging the channel's whole delivery queue until an operator
+// runs ^stop.
 // Per-wake-cycle bound: the timer restarts after each release/re-contend,
 // so continuous churn can extend the total wait — but churn means the gate
 // IS being released, i.e. progress, not a wedge.
-// Package var so tests can shrink it.
+// Package var (not const) so tests can reference the floor.
 var sessionTurnWaitLimit = 10 * time.Minute
+
+// sessionGateWaitLimitFor derives the effective valve limit for a command
+// with the given turn timeout. A holder's legitimate hold is bounded by its
+// turn timeout (which wraps the whole tool loop) plus inline-delivery
+// continuation turns, each also bounded by the same timeout — so 3×
+// timeout covers a turn plus continuations with room, and the floor keeps
+// zero/unset/small timeouts sensible. Without this derivation an admin
+// running long timeouts for slow local models (timeout = "15m") would get
+// waiters dropped mid-legitimate-turn once the floor passed.
+func sessionGateWaitLimitFor(timeout time.Duration) time.Duration {
+	if derived := 3 * timeout; derived > sessionTurnWaitLimit {
+		return derived
+	}
+	return sessionTurnWaitLimit
+}
 
 // noopRelease is returned for ungated (session 0) acquires.
 func noopRelease() {}
 
 // acquireSessionTurn blocks until the session's turn gate is free, the
-// caller's context is cancelled, sessionTurnWaitLimit elapses, or
-// sessionID <= 0 (ephemeral turns never gate). On success it returns the
-// release func; the caller MUST call it (typically via defer) — release is
-// idempotent and panic-safe through normal deferral. On cancellation or
-// wait-limit expiry it returns ok=false and the caller must abort the turn
-// without persisting anything.
-func acquireSessionTurn(ctx context.Context, sessionID int64) (release func(), ok bool) {
+// caller's context is cancelled, waitLimit elapses, or sessionID <= 0
+// (ephemeral turns never gate). On success it returns the release func;
+// the caller MUST call it (typically via defer) — release is idempotent
+// and panic-safe through normal deferral. On cancellation or wait-limit
+// expiry it returns ok=false and the caller must abort the turn without
+// persisting anything.
+func acquireSessionTurn(ctx context.Context, sessionID int64, waitLimit time.Duration) (release func(), ok bool) {
 	if sessionID <= 0 {
 		return noopRelease, true
 	}
@@ -105,14 +121,14 @@ func acquireSessionTurn(ctx context.Context, sessionID int64) (release func(), o
 			loggerSG.Info("session turn gate wait: another turn is in flight",
 				"session", sessionID)
 		}
-		timer := time.NewTimer(sessionTurnWaitLimit)
+		timer := time.NewTimer(waitLimit)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return nil, false
 		case <-timer.C:
 			loggerSG.Warn("session turn gate wait exceeded limit, aborting waiter",
-				"session", sessionID, "limit", sessionTurnWaitLimit)
+				"session", sessionID, "limit", waitLimit)
 			return nil, false
 		case <-ready:
 			// select picks randomly among ready cases: check the

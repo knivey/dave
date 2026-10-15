@@ -19,12 +19,12 @@ import (
 // TestSessionGateSerializesSameSession pins the core contract: a second
 // acquire on the SAME session blocks until the holder releases.
 func TestSessionGateSerializesSameSession(t *testing.T) {
-	release1, ok := acquireSessionTurn(context.Background(), 101)
+	release1, ok := acquireSessionTurn(context.Background(), 101, sessionTurnWaitLimit)
 	require.True(t, ok, "first acquire should succeed")
 
 	acquired := make(chan struct{})
 	go func() {
-		release2, ok2 := acquireSessionTurn(context.Background(), 101)
+		release2, ok2 := acquireSessionTurn(context.Background(), 101, sessionTurnWaitLimit)
 		assert.True(t, ok2, "second acquire should succeed after release")
 		release2()
 		close(acquired)
@@ -49,13 +49,13 @@ func TestSessionGateSerializesSameSession(t *testing.T) {
 // must never block another session (concurrency between users / fresh chat
 // commands is the point of the design).
 func TestSessionGateDifferentSessionsIndependent(t *testing.T) {
-	release, ok := acquireSessionTurn(context.Background(), 201)
+	release, ok := acquireSessionTurn(context.Background(), 201, sessionTurnWaitLimit)
 	require.True(t, ok)
 	defer release()
 
 	done := make(chan struct{})
 	go func() {
-		release2, ok2 := acquireSessionTurn(context.Background(), 202)
+		release2, ok2 := acquireSessionTurn(context.Background(), 202, sessionTurnWaitLimit)
 		assert.True(t, ok2)
 		release2()
 		close(done)
@@ -71,13 +71,13 @@ func TestSessionGateDifferentSessionsIndependent(t *testing.T) {
 // cancelled while waiting must return not-ok (never run its turn after the
 // wait), and the gate must remain usable afterwards.
 func TestSessionGateWaiterAbortsOnCtxCancel(t *testing.T) {
-	release, ok := acquireSessionTurn(context.Background(), 301)
+	release, ok := acquireSessionTurn(context.Background(), 301, sessionTurnWaitLimit)
 	require.True(t, ok)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	aborted := make(chan bool, 1)
 	go func() {
-		rel, ok2 := acquireSessionTurn(ctx, 301)
+		rel, ok2 := acquireSessionTurn(ctx, 301, sessionTurnWaitLimit)
 		aborted <- !ok2
 		if ok2 {
 			rel()
@@ -96,7 +96,7 @@ func TestSessionGateWaiterAbortsOnCtxCancel(t *testing.T) {
 
 	release()
 
-	rel2, ok3 := acquireSessionTurn(context.Background(), 301)
+	rel2, ok3 := acquireSessionTurn(context.Background(), 301, sessionTurnWaitLimit)
 	require.True(t, ok3, "gate unusable after cancelled waiter")
 	rel2()
 }
@@ -105,7 +105,7 @@ func TestSessionGateWaiterAbortsOnCtxCancel(t *testing.T) {
 // session id keep working (release must fully reset the gate).
 func TestSessionGateSequentialReuse(t *testing.T) {
 	for i := 0; i < 3; i++ {
-		release, ok := acquireSessionTurn(context.Background(), 401)
+		release, ok := acquireSessionTurn(context.Background(), 401, sessionTurnWaitLimit)
 		require.True(t, ok, "cycle %d should acquire", i)
 		release()
 	}
@@ -118,7 +118,7 @@ func TestSessionGateZeroSessionNoOp(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			release, ok := acquireSessionTurn(context.Background(), 0)
+			release, ok := acquireSessionTurn(context.Background(), 0, sessionTurnWaitLimit)
 			assert.True(t, ok)
 			release()
 		}()
@@ -129,7 +129,7 @@ func TestSessionGateZeroSessionNoOp(t *testing.T) {
 // TestSessionTurnBusy: the notice hook reports held/free accurately.
 func TestSessionTurnBusy(t *testing.T) {
 	require.False(t, sessionTurnBusy(501), "fresh session should not be busy")
-	release, ok := acquireSessionTurn(context.Background(), 501)
+	release, ok := acquireSessionTurn(context.Background(), 501, sessionTurnWaitLimit)
 	require.True(t, ok)
 	require.True(t, sessionTurnBusy(501), "held session should be busy")
 	release()
@@ -151,11 +151,7 @@ func TestNoticesQueueTurnWaitDefault(t *testing.T) {
 // Without the valve this test fails: the return only comes from the 5s
 // test-guard ctx cancellation (elapsed too high, ctx cancelled).
 func TestSessionGateWaitLimitAborts(t *testing.T) {
-	origLimit := sessionTurnWaitLimit
-	sessionTurnWaitLimit = 100 * time.Millisecond
-	t.Cleanup(func() { sessionTurnWaitLimit = origLimit })
-
-	release, ok := acquireSessionTurn(context.Background(), 601)
+	release, ok := acquireSessionTurn(context.Background(), 601, sessionTurnWaitLimit)
 	require.True(t, ok)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -163,7 +159,7 @@ func TestSessionGateWaitLimitAborts(t *testing.T) {
 	returned := make(chan time.Duration, 1)
 	start := time.Now()
 	go func() {
-		_, ok2 := acquireSessionTurn(ctx, 601)
+		_, ok2 := acquireSessionTurn(ctx, 601, 100*time.Millisecond)
 		returned <- time.Since(start)
 		if ok2 {
 			t.Error("waiter should not have acquired the held gate")
@@ -183,13 +179,16 @@ func TestSessionGateWaitLimitAborts(t *testing.T) {
 
 // TestChatSessionGateWaitLimitNotice: when the valve fires on a chat()
 // waiter, the user is told to resend, nothing is persisted, and no API
-// call is made.
+// call is made. The floor is shrunk to 40ms and cfg.Timeout set to 60ms,
+// so the effective limit is the DERIVED 3×60ms=180ms (exercising
+// sessionGateWaitLimitFor at the real call site — the derivation's exact
+// math is pinned separately in TestSessionGateWaitLimitFor).
 func TestChatSessionGateWaitLimitNotice(t *testing.T) {
 	setupTestDB(t)
 	setupNoticesDefaults(t)
 
 	origLimit := sessionTurnWaitLimit
-	sessionTurnWaitLimit = 150 * time.Millisecond
+	sessionTurnWaitLimit = 40 * time.Millisecond
 	t.Cleanup(func() { sessionTurnWaitLimit = origLimit })
 
 	userID := ensureTestUser(t, "testnet", "valveuser")
@@ -205,8 +204,11 @@ func TestChatSessionGateWaitLimitNotice(t *testing.T) {
 	sid := createTestSession(t, "testnet", "#valve", "valveuser", "testchat", "", "")
 	insertTestMessage(t, sid, "system", "sys")
 
-	release, ok := acquireSessionTurn(context.Background(), sid)
+	release, ok := acquireSessionTurn(context.Background(), sid, sessionTurnWaitLimit)
 	require.True(t, ok, "test should hold the gate")
+
+	cfg := makeTestAIConfig()
+	cfg.Timeout = 60 * time.Millisecond // derived limit: 3 × 60ms = 180ms
 
 	// Test-hang guard only — the valve must fire long before this.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -221,7 +223,7 @@ func TestChatSessionGateWaitLimitNotice(t *testing.T) {
 	go func() {
 		defer close(done)
 		defer close(out)
-		chat(Network{Name: "testnet"}, chatGateClient(), chatGateEvent("valveuser", "#valve"), makeTestAIConfig(), ctx, out, resolved, "valve question")
+		chat(Network{Name: "testnet"}, chatGateClient(), chatGateEvent("valveuser", "#valve"), cfg, ctx, out, resolved, "valve question")
 	}()
 
 	select {
@@ -230,17 +232,13 @@ func TestChatSessionGateWaitLimitNotice(t *testing.T) {
 		t.Fatal("chat() never returned from the gate wait")
 	}
 
-	var lines []string
-	for l := range out {
-		lines = append(lines, l)
-	}
 	sawTimeout := false
-	for _, line := range lines {
-		if strings.Contains(line, "still generating") {
+	for l := range out {
+		if strings.Contains(l, "still generating") {
 			sawTimeout = true
 		}
 	}
-	assert.True(t, sawTimeout, "waiter never received the wait-limit notice; output: %v", lines)
+	assert.True(t, sawTimeout, "waiter never received the wait-limit notice")
 
 	msgs, err := sessionMgr.GetMessages(sid)
 	require.NoError(t, err)
@@ -249,6 +247,29 @@ func TestChatSessionGateWaitLimitNotice(t *testing.T) {
 	}
 
 	release()
+}
+
+// TestSessionGateWaitLimitFor: the derivation table — the effective limit
+// is max(floor, 3×timeout); the floor protects short/unset timeouts, the
+// derived arm keeps the valve above long-timeout legitimate turns.
+func TestSessionGateWaitLimitFor(t *testing.T) {
+	tests := []struct {
+		name    string
+		timeout time.Duration
+		want    time.Duration
+	}{
+		{"zero timeout keeps floor", 0, sessionTurnWaitLimit},
+		{"default 60s keeps floor", 60 * time.Second, sessionTurnWaitLimit},
+		{"3m timeout stays under floor", 3 * time.Minute, sessionTurnWaitLimit},
+		{"5m timeout derives 15m", 5 * time.Minute, 15 * time.Minute},
+		{"15m timeout derives 45m", 15 * time.Minute, 45 * time.Minute},
+		{"1h timeout derives 3h", time.Hour, 3 * time.Hour},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, sessionGateWaitLimitFor(tt.timeout))
+		})
+	}
 }
 
 // ---- wiring tests: chat() and deliverAsyncResult hold the session gate ----
@@ -649,6 +670,25 @@ func TestChatSessionGateCancelledWaiterDoesNotPersistOrRun(t *testing.T) {
 	cancel()
 	<-bDone
 
+	// Cancel path is SILENT beyond the initial turn_wait warning: the queue
+	// already told the user (stop notice), and no resend-notice may fire —
+	// the turn_wait_timeout notice is reserved for the wait-limit valve.
+	var bLines []string
+	for l := range outB {
+		bLines = append(bLines, l)
+	}
+	sawWait, sawTimeout := false, false
+	for _, line := range bLines {
+		if strings.Contains(line, "still working on your previous message") {
+			sawWait = true
+		}
+		if strings.Contains(line, "still generating") {
+			sawTimeout = true
+		}
+	}
+	assert.True(t, sawWait, "waiter should have received the turn_wait notice before blocking")
+	assert.False(t, sawTimeout, "cancelled waiter must NOT receive the turn_wait_timeout notice")
+
 	sess, err := sessionMgr.GetActiveSession("testnet", "#cancel", userID)
 	require.NoError(t, err)
 	require.NotNil(t, sess)
@@ -723,7 +763,7 @@ func TestDeliverAsyncResultWaitsForInFlightTurn(t *testing.T) {
 		userID:    userID,
 	}
 
-	release, ok := acquireSessionTurn(context.Background(), sid)
+	release, ok := acquireSessionTurn(context.Background(), sid, sessionTurnWaitLimit)
 	require.True(t, ok, "holder should acquire the session gate")
 
 	delivered := make(chan struct{})

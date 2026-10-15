@@ -352,8 +352,8 @@ func deliverAsyncResult(entry *jobEntry[asyncJobPayload], ctx context.Context, o
 	// delivery path.
 	releaseTurn, gateOK := acquireSessionTurn(ctx, entry.payload.sessionID)
 	if !gateOK {
-		loggerJM.Info("async delivery skipped: cancelled while waiting for the session's in-flight turn",
-			"session", entry.payload.sessionID, "job_id", entry.jobID)
+		loggerJM.Warn("async delivery skipped at the session gate (cancelled or wait-limit valve)",
+			"session", entry.payload.sessionID, "job_id", entry.jobID, "ctx_err", ctx.Err())
 		return
 	}
 	defer releaseTurn()

@@ -141,6 +141,114 @@ func TestNoticesQueueTurnWaitDefault(t *testing.T) {
 	var n NoticesConfig
 	setNoticesDefaults(&n)
 	assert.NotEmpty(t, n.Queue.TurnWait, "queue.turn_wait should have a default")
+	assert.NotEmpty(t, n.Queue.TurnWaitTimeout, "queue.turn_wait_timeout should have a default")
+}
+
+// TestSessionGateWaitLimitAborts: the liveness valve. A waiter must not
+// block forever — if the holder never releases (e.g. it is itself wedged
+// on a full output buffer behind the waiter's delivery slot), the waiter
+// aborts after sessionTurnWaitLimit WITHOUT needing ctx cancellation.
+// Without the valve this test fails: the return only comes from the 5s
+// test-guard ctx cancellation (elapsed too high, ctx cancelled).
+func TestSessionGateWaitLimitAborts(t *testing.T) {
+	origLimit := sessionTurnWaitLimit
+	sessionTurnWaitLimit = 100 * time.Millisecond
+	t.Cleanup(func() { sessionTurnWaitLimit = origLimit })
+
+	release, ok := acquireSessionTurn(context.Background(), 601)
+	require.True(t, ok)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	returned := make(chan time.Duration, 1)
+	start := time.Now()
+	go func() {
+		_, ok2 := acquireSessionTurn(ctx, 601)
+		returned <- time.Since(start)
+		if ok2 {
+			t.Error("waiter should not have acquired the held gate")
+		}
+	}()
+
+	select {
+	case elapsed := <-returned:
+		require.Less(t, elapsed, 2*time.Second, "waiter should abort via the wait limit, not the ctx guard")
+		require.NoError(t, ctx.Err(), "ctx should not have been cancelled — the valve fired, not the guard")
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiter never returned: gate wait is unbounded (liveness valve missing)")
+	}
+
+	release()
+}
+
+// TestChatSessionGateWaitLimitNotice: when the valve fires on a chat()
+// waiter, the user is told to resend, nothing is persisted, and no API
+// call is made.
+func TestChatSessionGateWaitLimitNotice(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	origLimit := sessionTurnWaitLimit
+	sessionTurnWaitLimit = 150 * time.Millisecond
+	t.Cleanup(func() { sessionTurnWaitLimit = origLimit })
+
+	userID := ensureTestUser(t, "testnet", "valveuser")
+	resolved := chatGateUser(userID, "valveuser")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("no API call should happen when the waiter aborts on the wait limit")
+		chatGateCompletion(w, "unused")
+	}))
+	t.Cleanup(func() { server.Close() })
+	setChatGateServices(t, server.URL+"/v1")
+
+	sid := createTestSession(t, "testnet", "#valve", "valveuser", "testchat", "", "")
+	insertTestMessage(t, sid, "system", "sys")
+
+	release, ok := acquireSessionTurn(context.Background(), sid)
+	require.True(t, ok, "test should hold the gate")
+
+	// Test-hang guard only — the valve must fire long before this.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		time.Sleep(5 * time.Second)
+		cancel()
+	}()
+
+	out := make(chan string, 50)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer close(out)
+		chat(Network{Name: "testnet"}, chatGateClient(), chatGateEvent("valveuser", "#valve"), makeTestAIConfig(), ctx, out, resolved, "valve question")
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(6 * time.Second):
+		t.Fatal("chat() never returned from the gate wait")
+	}
+
+	var lines []string
+	for l := range out {
+		lines = append(lines, l)
+	}
+	sawTimeout := false
+	for _, line := range lines {
+		if strings.Contains(line, "still generating") {
+			sawTimeout = true
+		}
+	}
+	assert.True(t, sawTimeout, "waiter never received the wait-limit notice; output: %v", lines)
+
+	msgs, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	for _, m := range msgs {
+		assert.NotContains(t, m.Content, "valve question", "aborted waiter must not persist its user message")
+	}
+
+	release()
 }
 
 // ---- wiring tests: chat() and deliverAsyncResult hold the session gate ----

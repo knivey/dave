@@ -48,15 +48,36 @@ func loadSessionTurnGate(sessionID int64) *sessionTurnGate {
 	return v.(*sessionTurnGate)
 }
 
+// sessionTurnWaitLimit bounds how long a waiter may block on the gate.
+// It is a LIVENESS VALVE, not a policy: the gate wait can deadlock against
+// the queue's per-channel delivery FIFO when enqueue order inverts gate
+// order (waiter W enqueued first becomes the delivery head while blocked
+// here; holder H streams into its 200-message output buffer that only
+// W's completed delivery can drain — H blocks on the full channel, never
+// releases the gate, W never runs). The valve fires far later than any
+// legitimate turn (each API call is bounded by the command's timeout, and
+// tool loops by iteration caps), so in normal operation it never trips;
+// when it does, the waiter aborts with a resend notice instead of wedging
+// the channel's whole delivery queue until an operator runs ^stop.
+// Per-wake-cycle bound: the timer restarts after each release/re-contend,
+// so continuous churn can extend the total wait — but churn means the gate
+// IS being released, i.e. progress, not a wedge.
+// Package var so tests can shrink it.
+var sessionTurnWaitLimit = 10 * time.Minute
+
+// noopRelease is returned for ungated (session 0) acquires.
+func noopRelease() {}
+
 // acquireSessionTurn blocks until the session's turn gate is free, the
-// caller's context is cancelled, or sessionID <= 0 (ephemeral turns never
-// gate). On success it returns the release func; the caller MUST call it
-// (typically via defer) — release is idempotent and panic-safe through
-// normal deferral. On cancellation it returns ok=false and the caller must
-// abort the turn without persisting anything.
+// caller's context is cancelled, sessionTurnWaitLimit elapses, or
+// sessionID <= 0 (ephemeral turns never gate). On success it returns the
+// release func; the caller MUST call it (typically via defer) — release is
+// idempotent and panic-safe through normal deferral. On cancellation or
+// wait-limit expiry it returns ok=false and the caller must abort the turn
+// without persisting anything.
 func acquireSessionTurn(ctx context.Context, sessionID int64) (release func(), ok bool) {
 	if sessionID <= 0 {
-		return func() {}, true
+		return noopRelease, true
 	}
 	if ctx.Err() != nil {
 		return nil, false
@@ -71,7 +92,7 @@ func acquireSessionTurn(ctx context.Context, sessionID int64) (release func(), o
 			g.ready = make(chan struct{})
 			g.mu.Unlock()
 			if waited {
-				loggerSG.Debug("session turn gate acquired after wait",
+				loggerSG.Info("session turn gate acquired after wait",
 					"session", sessionID,
 					"wait", time.Since(start).Round(time.Millisecond))
 			}
@@ -79,13 +100,24 @@ func acquireSessionTurn(ctx context.Context, sessionID int64) (release func(), o
 		}
 		ready := g.ready
 		g.mu.Unlock()
-		waited = true
+		if !waited {
+			waited = true
+			loggerSG.Info("session turn gate wait: another turn is in flight",
+				"session", sessionID)
+		}
+		timer := time.NewTimer(sessionTurnWaitLimit)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
+			return nil, false
+		case <-timer.C:
+			loggerSG.Warn("session turn gate wait exceeded limit, aborting waiter",
+				"session", sessionID, "limit", sessionTurnWaitLimit)
 			return nil, false
 		case <-ready:
 			// select picks randomly among ready cases: check the
 			// context again so a cancelled waiter never proceeds.
+			timer.Stop()
 			if ctx.Err() != nil {
 				return nil, false
 			}

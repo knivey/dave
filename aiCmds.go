@@ -2107,8 +2107,16 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 	}
 	releaseTurn, gateOK := acquireSessionTurn(ctx, session.ID)
 	if !gateOK {
-		runner.logger.Info("turn skipped: cancelled while waiting for the session's in-flight turn",
-			"session", session.ID)
+		// Cancelled (stop/shutdown — stay silent, the queue already told
+		// the user) or the wait-limit valve fired (a wedged holder — tell
+		// the user to resend; nothing was persisted, so nothing is lost).
+		runner.logger.Warn("turn aborted at the session gate", "session", session.ID, "ctx_err", ctx.Err())
+		if ctx.Err() == nil {
+			n := getNotices()
+			runner.sendError(expandNotice(n.Queue.TurnWaitTimeout, map[string]string{
+				"wait": sessionTurnWaitLimit.String(),
+			}))
+		}
 		return
 	}
 	defer releaseTurn()

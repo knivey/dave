@@ -37,6 +37,7 @@
 #   timeout              (duration, default: 60s)    Overall API call timeout. Cascade: command > service > 60s
 #   streamtimeout        (duration, default: timeout) Max idle time between stream chunks. Cascade: command > service > timeout
 #   load_notice          (bool, default: true for type = "llama" services, else false) Before the turn, probe the service's /v1/models and send a "loading model" IRC notice when the requested model is not loaded yet (llama-server built-in router / llama-swap model swap). Notice text: [llm] model_load in notices.toml. Cascade: command > service > type default.
+#   bbcode               (bool, default: false)     BBCode→IRC output translator: the model emits BBCode tags ([b] [i] [u] [s] [color=NAME|0-15]) and dave converts them to IRC control codes at emission, BEFORE markdown rendering (markdown stays the structural system; BBCode adds the colors it can't express). Colors are always two-digit; [/color] re-emits the enclosing color or a bare color-only reset (\x0F is never emitted, markdown bold/italic survive); open styles re-emit after every newline so spans persist across lines; after any color code, text starting with a digit or comma gets a \x02\x02 guard so the code can't eat it. Malformed tags ([color=bogus], stray closes) are stripped and logged; unknown bracket text ([1] citations, [label](url) links) passes through verbatim. Session storage stays raw. Cascade: command > service > false.
 #   toolverbose          (bool, default: true)       Show 🔧 tool call notifications in IRC (cascades from service)
 #   paralleltoolcalls    (bool, default: true)       Enable parallel MCP tool calls (cascades from service)
 #   reasoningeffort      (string)                    For o1/o3 models: "low", "medium", "high"
@@ -91,6 +92,7 @@
 # timeout = "2m"
 # streamtimeout = "30s"
 # load_notice = true
+# bbcode = true
 # toolverbose = true
 # paralleltoolcalls = true
 # reasoningeffort = "medium"

@@ -38,6 +38,7 @@
 #   timeout              (duration, default: 60s)    Overall API call timeout. Cascade: command > service > 60s
 #   streamtimeout        (duration, default: timeout) Max idle time between stream chunks. Cascade: command > service > timeout
 #   load_notice          (bool, default: true for type = "llama" services, else false) Before the turn, probe the service's /v1/models and send a "loading model" IRC notice when the requested model is not loaded yet (llama-server built-in router / llama-swap model swap). Notice text: [llm] model_load in notices.toml. Cascade: command > service > type default.
+#   bbcode               (bool, default: false)     Translate BBCode tags in the model's OUTPUT into IRC control codes at emission (generator finals and respond text; storage stays raw). See chats.toml bbcode entry for the full description. Cascade: command > service > false.
 #   toolverbose          (bool, default: true)       Show 🔧 tool call notifications in IRC (cascades from service)
 #   paralleltoolcalls    (bool, default: true)       Enable parallel MCP tool calls (cascades from service)
 #   reasoningeffort      (string)                    For o1/o3 models: "low", "medium", "high"
@@ -121,6 +122,7 @@
 # service = "local"
 # model = "qwen3-32b"
 # disabled = false
+# bbcode = true
 # streaming = true
 # rendermarkdown = true
 # respond_tool = true

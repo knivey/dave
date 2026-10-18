@@ -99,8 +99,12 @@ func completion(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx
 		return
 	}
 
-	logger.Info(resp.Choices[0].Text)
-	sendToOutput(resp.Choices[0].Text, output, ctx)
+	text := resp.Choices[0].Text
+	logger.Info(text) // raw model output — logs show raw (translation is emission-only)
+	if bbcodeEnabled(cfg) {
+		text = TranslateBBCode(text, bbcodeWarnFn(logger))
+	}
+	sendToOutput(text, output, ctx)
 }
 
 type Timings struct {
@@ -673,6 +677,13 @@ func (cr *chatRunner) checkEmptyRetry(content string, parts reasoningParts, empt
 type streamOutput struct {
 	renderer *markdowntoirc.StreamingRenderer
 	buffer   string
+	// bb, when non-nil, translates BBCode tags to IRC codes BEFORE the
+	// renderer/buffer ever see the text — markdown stays the structural
+	// system, BBCode the color/span system, and the renderer must never
+	// be asked to route around tag syntax. Holds back only a trailing
+	// possibly-incomplete tag and (lazily) the one-char guard decision
+	// after a color emission.
+	bb *bbcodeTranslator
 }
 
 func (so *streamOutput) HandleDelta(delta string, send func(string)) {
@@ -686,8 +697,23 @@ func (so *streamOutput) HandleDelta(delta string, send func(string)) {
 		// boundaries. Flushing is Flush()'s job and nothing else's.
 		return
 	}
+	if so.bb != nil {
+		delta = so.bb.Process(delta)
+		if delta == "" {
+			// The whole delta was an undecidable tag candidate — hold
+			// it; do NOT hand "" to the renderer (same flush hazard as
+			// wire-noise empty deltas above).
+			return
+		}
+	}
+	so.push(delta, send)
+}
+
+// push feeds translated text into the renderer (markdown mode) or the
+// plain line buffer.
+func (so *streamOutput) push(text string, send func(string)) {
 	if so.renderer != nil {
-		for _, line := range so.renderer.Process(delta) {
+		for _, line := range so.renderer.Process(text) {
 			send(line)
 		}
 		return
@@ -696,7 +722,7 @@ func (so *streamOutput) HandleDelta(delta string, send func(string)) {
 	// released on the next newline. The renderer keeps its own buffer —
 	// accumulating the raw text here too was pure O(n²) waste once the
 	// historical re-render of it went away.
-	so.buffer += delta
+	so.buffer += text
 	if strings.Contains(so.buffer, "\n") {
 		send(so.buffer)
 		so.buffer = ""
@@ -704,6 +730,14 @@ func (so *streamOutput) HandleDelta(delta string, send func(string)) {
 }
 
 func (so *streamOutput) Flush(send func(string)) {
+	if so.bb != nil {
+		// Resolve the held tail FIRST (released partial + auto-close)
+		// so its codes flow through the same renderer/buffer path as
+		// the deltas did.
+		if tail := so.bb.Flush(); tail != "" {
+			so.push(tail, send)
+		}
+	}
 	if so.renderer != nil {
 		for _, line := range so.renderer.Process("") {
 			send(line)
@@ -718,8 +752,13 @@ func (so *streamOutput) Flush(send func(string)) {
 // sendRendered renders rawText for IRC (markdown when enabled) and sends
 // it through the pastebin-wrapping path — the send shape shared by final
 // replies and the empty-response reasoning fallback, extracted so the two
-// cannot drift.
+// cannot drift. When bbcode is on, translation happens HERE, before the
+// markdown renderer and before the pastebin (the paste source carries the
+// translated codes — the paste site parses them).
 func (cr *chatRunner) sendRendered(rawText string) {
+	if bbcodeEnabled(cr.cfg) {
+		rawText = TranslateBBCode(rawText, bbcodeWarnFn(cr.logger))
+	}
 	text := rawText
 	if cr.cfg.RenderMarkdown {
 		text = markdowntoirc.MarkdownToIRC(text)
@@ -751,6 +790,9 @@ func (cr *chatRunner) handleToolCallResponse(turn *turnContext, text string, too
 		// the curated answer (respond tool or the final no-tool-call
 		// iteration).
 		t := ExtractFinalText(text)
+		if bbcodeEnabled(cr.cfg) {
+			t = TranslateBBCode(t, bbcodeWarnFn(cr.logger))
+		}
 		if cr.cfg.RenderMarkdown {
 			t = markdowntoirc.MarkdownToIRC(t)
 		}
@@ -935,6 +977,12 @@ func (cr *chatRunner) runTurnStream(ctx context.Context, params openai.ChatCompl
 	// text never). No renderer means no accidental live path.
 	if cr.cfg.RenderMarkdown && !cr.ephemeral {
 		sOut.renderer = markdowntoirc.NewStreamingRenderer()
+	}
+	// BBCode translation rides upstream of the renderer (see bbcode.go);
+	// ephemeral turns never feed it deltas — their finals translate in
+	// sendRendered instead, so no double translation.
+	if bbcodeEnabled(cr.cfg) && !cr.ephemeral {
+		sOut.bb = newBBCodeTranslator(bbcodeWarnFn(cr.logger))
 	}
 
 	var accumulatedToolCalls []ToolCall
@@ -1886,6 +1934,12 @@ func (cr *chatRunner) callResponsesStream(ctx context.Context, params responses.
 	// text never).
 	if cr.cfg.RenderMarkdown && !cr.ephemeral {
 		sOut.renderer = markdowntoirc.NewStreamingRenderer()
+	}
+	// BBCode translation rides upstream of the renderer (see bbcode.go);
+	// ephemeral turns never feed it deltas — their finals translate in
+	// sendRendered instead, so no double translation.
+	if bbcodeEnabled(cr.cfg) && !cr.ephemeral {
+		sOut.bb = newBBCodeTranslator(bbcodeWarnFn(cr.logger))
 	}
 
 	idleTimer := time.NewTimer(cr.cfg.StreamTimeout)

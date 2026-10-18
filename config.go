@@ -339,6 +339,11 @@ type AIConfig struct {
 	APIUser       string `toml:"api_user"`
 	RetryOnEmpty  *int   `toml:"retry_on_empty"`
 	LoadNotice    *bool  `toml:"load_notice"`
+	// BBCode enables the BBCode→IRC output translator (see bbcode.go):
+	// the model is instructed to emit BBCode tags and emission converts
+	// them to IRC codes, before the markdown renderer. Storage stays
+	// raw. Opt-in: cascade command > service > false.
+	BBCode *bool `toml:"bbcode"`
 	// Disabled drops the command at load time (default false): the entry
 	// is removed before validation and registration, so it never
 	// dispatches, never appears in help, and may reference a removed
@@ -368,6 +373,7 @@ type Service struct {
 	Parallel             int           `toml:"parallel"`
 	APIUser              string        `toml:"api_user"`
 	LoadNotice           *bool         `toml:"load_notice"`
+	BBCode               *bool         `toml:"bbcode"`                // output filter: translate BBCode tags to IRC codes
 	NeedsUserSuffix      *bool         `toml:"needsusersuffix"`       // guidance Knob 2: tri-state, nil = auto (anthropic/)
 	InjectionRole        string        `toml:"injection_role"`        // guidance Knob 1: system (default) | developer | user
 	AsyncResultDelivery  string        `toml:"async_result_delivery"` // async results: "message" (default) | "tool" round-trip
@@ -497,6 +503,15 @@ func (cfg *AIConfig) ApplyDefaults(service Service) {
 	if cfg.LoadNotice == nil {
 		v := service.Type == "llama"
 		cfg.LoadNotice = &v
+	}
+	// bbcode cascade: command > service > false (opt-in). Materialized so
+	// bbcodeEnabled can read it without nil checks.
+	if cfg.BBCode == nil {
+		cfg.BBCode = service.BBCode
+	}
+	if cfg.BBCode == nil {
+		v := false
+		cfg.BBCode = &v
 	}
 	// Guidance knobs (see docs/superpowers/specs/
 	// 2026-10-08-guidance-injection-role-design.md). Knob 1 materializes

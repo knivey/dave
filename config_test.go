@@ -3356,3 +3356,74 @@ system = "{{.Unclosed"
 		})
 	}
 }
+
+// TestAIConfigApplyDefaults_BBCode pins the bbcode cascade
+// (command > service > default false). Opt-in per command/service.
+func TestAIConfigApplyDefaults_BBCode(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  AIConfig
+		svc  Service
+		want bool
+	}{
+		{name: "unset everywhere defaults to false", cfg: AIConfig{}, svc: Service{}, want: false},
+		{name: "service value inherited", cfg: AIConfig{}, svc: Service{BBCode: boolPtr(true)}, want: true},
+		{name: "command beats service", cfg: AIConfig{BBCode: boolPtr(false)}, svc: Service{BBCode: boolPtr(true)}, want: false},
+		{name: "command true beats service false", cfg: AIConfig{BBCode: boolPtr(true)}, svc: Service{BBCode: boolPtr(false)}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := tt.cfg
+			cfg.ApplyDefaults(tt.svc)
+			require.NotNil(t, cfg.BBCode, "ApplyDefaults materializes the default")
+			assert.Equal(t, tt.want, *cfg.BBCode)
+			assert.Equal(t, tt.want, bbcodeEnabled(cfg), "resolver reads the materialized value")
+		})
+	}
+}
+
+// TestLoadConfigDirBBCode loads the flag from chats.toml and services.toml.
+func TestLoadConfigDirBBCode(t *testing.T) {
+	dir := createTestConfigDir(t, `
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`, map[string]string{
+		"services.toml": `
+[localsvc]
+type = "llama"
+baseurl = "http://localhost:1"
+[bbSvc]
+baseurl = "http://localhost:2"
+bbcode = true
+`,
+		"chats.toml": `
+[plain]
+service = "localsvc"
+model = "m"
+[marked]
+service = "localsvc"
+model = "m"
+bbcode = true
+[inherit]
+service = "bbSvc"
+model = "m"
+`,
+	})
+
+	cfg, err := loadConfigDir(dir)
+	require.NoError(t, err)
+
+	plain := cfg.Commands.Chats["plain"]
+	plain.ApplyDefaults(cfg.Services["localsvc"])
+	assert.False(t, bbcodeEnabled(plain), "unset command on plain service stays off")
+
+	marked := cfg.Commands.Chats["marked"]
+	marked.ApplyDefaults(cfg.Services["localsvc"])
+	assert.True(t, bbcodeEnabled(marked), "command-level bbcode = true")
+
+	inherit := cfg.Commands.Chats["inherit"]
+	inherit.ApplyDefaults(cfg.Services["bbSvc"])
+	assert.True(t, bbcodeEnabled(inherit), "service-level bbcode inherited")
+}

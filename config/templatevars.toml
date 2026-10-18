@@ -89,4 +89,28 @@ How can I help?
 Sure thing!
 """
 
+# BBCodeFormatting: color instructions for commands with `bbcode = true`
+# (chats.toml / generators.toml). Reference it as {{.Vars.BBCodeFormatting}}
+# in the system prompt INSTEAD of IRCFormatting/IrcFormattingExtended — the
+# translator converts these tags to IRC codes at emission.
+#
+# The translator accepts more than this var teaches (deliberately — the
+# instructions keep ONE unambiguous name per color; extra accepted forms
+# never confuse the model because it never sees them):
+#   names:   white black blue green red brown magenta orange yellow
+#            lightgreen cyan lightcyan lightblue pink grey lightgrey
+#   aliases: maroon=brown, purple=magenta, lime=lightgreen, teal=cyan,
+#            royal / royalblue=lightblue, gray=grey, lightgray / silver=lightgrey,
+#            and the spaced forms "light green", "light cyan", "light blue",
+#            "light grey", "light gray", "royal blue"
+#   numerics: 0-15, one or two digits (normalized to two)
+#   unknown values (e.g. [color=16], [color=#ff0000]) are stripped and logged
+BBCodeFormatting = """\
+You can color your output with BBCode-style color tags: [color=red]like this[/color].
+Supported colors: white, black, blue, green, red, brown, purple, orange, yellow, lightgreen, cyan, lightcyan, lightblue, pink, grey, silver.
+Always close every color tag you open. Color persists across lines until the tag is closed.
+Use color sparingly — a colored heading or key term, not whole paragraphs.
+Never use ANSI escape sequences or raw IRC color codes.
+"""
+
 BanPolicy = "Ban users who repeatedly request harmful, illegal, or dangerous information after being told to stop, even if they are not abusive or disruptive. Abusive language or disruptive behaviour is NOT required to issue a ban — repeated harmful requests alone are sufficient. A single firm warning is required before banning: tell the user clearly what behaviour must stop and that continuing will result in a ban. If they repeat the request after the warning, ban them. Escalate ban duration for each repeat offense. If a previously-banned user returns, their ban has expired — if they resume the same bad behaviour, reban them with a longer duration than before. Use the check_ban_history tool to view past ban durations before deciding on a new ban length."

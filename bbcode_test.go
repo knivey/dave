@@ -750,3 +750,19 @@ func TestBBCodeTagOnlyLineNoCodes(t *testing.T) {
 		}
 	})
 }
+
+// TestBBCodeInstructionNamesCovered: the 16 canonical color names taught
+// by the {{.Vars.BBCodeFormatting}} instruction var (config/
+// templatevars.toml) must each be a DIRECT bbColorNames key — the
+// instructions promise one unambiguous name per color (no numerics, no
+// aliases), so a name that only worked via an alias would be a doc bug.
+func TestBBCodeInstructionNamesCovered(t *testing.T) {
+	for _, name := range []string{
+		"white", "black", "blue", "green", "red", "brown", "purple",
+		"orange", "yellow", "lightgreen", "cyan", "lightcyan",
+		"lightblue", "pink", "grey", "silver",
+	} {
+		_, ok := bbColorNames[name]
+		assert.True(t, ok, "instruction name %q must be a direct table key", name)
+	}
+}

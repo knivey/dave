@@ -642,11 +642,12 @@ func TestTranslateBBCodeUnknownCloseWithValue(t *testing.T) {
 func TestBBCodeNoCodesOnlyLine(t *testing.T) {
 	assertNoCodesOnly := func(t *testing.T, in string) {
 		t.Helper()
+		codeOnly := regexp.MustCompile(`^([\x02\x1D\x1F\x1E]|\x03[0-9]{0,2}(,[0-9]{0,2})?)*$`)
 		for _, line := range wrapForIRC(TranslateBBCode(in, nil)) {
 			if line == "" {
 				continue // trailing-newline split artifact; sendToOutput skips these too
 			}
-			assert.NotEqual(t, "", strings.Trim(line, "\x02\x03\x1D\x1F\x1E"),
+			assert.False(t, codeOnly.MatchString(line),
 				"line %q is codes-only (blank PRIVMSG) for input %q", line, in)
 		}
 	}

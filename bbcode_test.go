@@ -610,3 +610,72 @@ func TestCompletionBBCode(t *testing.T) {
 	assert.Contains(t, joined, "\x0304\x02\x021. TILLANDSIA\x03")
 	assert.NotContains(t, joined, "[color")
 }
+
+// TestTranslateBBCodeUnknownCloseWithValue: an unknown close-with-value
+// token is UNKNOWN tag-shaped text — verbatim, no warn, and crucially it
+// must never be misread as a close of a real tag whose first letter
+// matches ([/underline=x] closing [u]) — review finding 1, Oct 2026.
+func TestTranslateBBCodeUnknownCloseWithValue(t *testing.T) {
+	t.Run("verbatim no warn", func(t *testing.T) {
+		warn, msgs := bbWarnCapture()
+		assert.Equal(t, "see [/footnote=1] here", TranslateBBCode("see [/footnote=1] here", warn))
+		assert.Empty(t, *msgs)
+	})
+	t.Run("first letter does not close a real toggle", func(t *testing.T) {
+		warn, msgs := bbWarnCapture()
+		assert.Equal(t, "\x1Fa[/underline=x]b\x1F",
+			TranslateBBCode("[u]a[/underline=x]b", warn))
+		assert.Empty(t, *msgs)
+	})
+	t.Run("known close with value still closes", func(t *testing.T) {
+		assert.Equal(t, "a\x0304x\x03b", TranslateBBCode("a[color=red]x[/color=red]b", nil))
+	})
+}
+
+// TestBBCodeNoCodesOnlyLine: a trailing newline with open styles must not
+// produce a codes-only PRIVMSG from the auto-close tail (each output line
+// is its own message; codes alone render as a blank bot message) —
+// review finding 2, Oct 2026. Drives the translated output through the
+// production wrapForIRC splitter.
+func TestBBCodeNoCodesOnlyLine(t *testing.T) {
+	assertNoCodesOnly := func(t *testing.T, in string) {
+		t.Helper()
+		for _, line := range wrapForIRC(TranslateBBCode(in, nil)) {
+			if line == "" {
+				continue // trailing-newline split artifact; sendToOutput skips these too
+			}
+			assert.NotEqual(t, "", strings.Trim(line, "\x02\x03\x1D\x1F\x1E"),
+				"line %q is codes-only (blank PRIVMSG) for input %q", line, in)
+		}
+	}
+	t.Run("trailing newline with open styles", func(t *testing.T) {
+		assertNoCodesOnly(t, "[b][color=red]x\n")
+	})
+	t.Run("trailing newline unclosed color only", func(t *testing.T) {
+		assertNoCodesOnly(t, "[color=red]x\n")
+	})
+	t.Run("trailing newline after visible text still colored", func(t *testing.T) {
+		// suppression must not lose the auto-close when visible text
+		// follows the newline on the same line
+		assert.Equal(t, "\x0304x\n\x0304y\x03", TranslateBBCode("[color=red]x\ny", nil))
+	})
+	t.Run("no trailing newline keeps auto-close", func(t *testing.T) {
+		assert.Equal(t, "\x02\x0304x\x02\x03", TranslateBBCode("[b][color=red]x", nil))
+	})
+}
+
+// TestBBCodeValueHoldCap: the bbMaxTagLen hold bound applies to value
+// growth too, not just name growth — a runaway unterminated value
+// releases as text instead of holding forever (review finding 3).
+func TestBBCodeValueHoldCap(t *testing.T) {
+	t.Run("open value growth", func(t *testing.T) {
+		tr := newBBCodeTranslator(nil)
+		got := tr.Process("[color=" + strings.Repeat("a", 100))
+		assert.Equal(t, "[color="+strings.Repeat("a", 100), got)
+	})
+	t.Run("close value growth", func(t *testing.T) {
+		tr := newBBCodeTranslator(nil)
+		got := tr.Process("[/color=" + strings.Repeat("a", 100))
+		assert.Equal(t, "[/color="+strings.Repeat("a", 100), got)
+	})
+}

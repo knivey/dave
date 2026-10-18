@@ -47,6 +47,7 @@ package main
 //     the ANSI detour; it is not repeated here.
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -127,7 +128,7 @@ func newBBCodeTranslator(warn func(string)) *bbcodeTranslator {
 
 func (t *bbcodeTranslator) warnf(format string, args ...any) {
 	if t.warn != nil {
-		t.warn("bbcode: " + fmtSprintf(format, args...))
+		t.warn("bbcode: " + fmt.Sprintf(format, args...))
 	}
 }
 
@@ -216,6 +217,18 @@ func (t *bbcodeTranslator) Flush() string {
 		// verbatim (visible, not eaten; the model left broken markup).
 		t.emitRun(&out, t.pending)
 		t.pending = ""
+	}
+	if t.pendingNL {
+		t.pendingNL = false
+		// Nothing visible ever followed the last newline: auto-close
+		// codes would land on an empty line — a codes-only PRIVMSG
+		// (a blank bot message). The instance is spent and IRC
+		// clients reset formatting at every message boundary anyway,
+		// so the codes are pure artifact — clear state, emit nothing.
+		t.bold, t.ital, t.under, t.str = false, false, false, false
+		t.colorStack = nil
+		t.justColor = false
+		return out.String()
 	}
 	t.pendingNL = false
 	for i := 0; i < len(bbCanonicalOrder); i++ {
@@ -312,18 +325,26 @@ func parseBBTag(s string) (bbTag, bool) {
 		if closing {
 			// [/color=red] — consume the value so the token closes
 			// whole; the value is redundant, the intent is a close.
+			// Known-ness uses the SAME expression as the plain-close
+			// branch below: an unknown name ([/underline=x]) is
+			// verbatim text, never a close whose first letter matches
+			// a real toggle.
 			vs := i + 1
 			j := vs
 			for j < len(s) && (isASCIILetter(s[j]) || isASCIIDigit(s[j]) || s[j] == ' ') {
 				j++
 			}
 			if j == len(s) {
+				if len(s) > bbMaxTagLen {
+					return bbTag{consumed: 1}, true // runaway partial — not a tag
+				}
 				return bbTag{}, false
 			}
 			if s[j] != ']' {
 				return bbTag{consumed: 1}, true
 			}
-			return bbTag{consumed: j + 1, closing: true, name: name, known: true, complete: true}, true
+			return bbTag{consumed: j + 1, closing: true, name: name,
+				known: name == "color" || len(name) == 1 && bbToggleCode[name[0]] != 0, complete: true}, true
 		}
 		i++
 		vs := i
@@ -331,6 +352,9 @@ func parseBBTag(s string) (bbTag, bool) {
 			i++
 		}
 		if i == len(s) {
+			if len(s) > bbMaxTagLen {
+				return bbTag{consumed: 1}, true // runaway partial — not a tag
+			}
 			return bbTag{}, false // value still growing
 		}
 		value = s[vs:i]
@@ -453,36 +477,4 @@ func bbPad2(v int) string {
 		return "0" + strconv.Itoa(v)
 	}
 	return strconv.Itoa(v)
-}
-
-// fmtSprintf exists so the warnf helper reads naturally without importing
-// fmt into the hot path of every translation (fmt is only pulled in by
-// files that log anyway; this keeps bbcode.go imports minimal).
-func fmtSprintf(format string, args ...any) string {
-	var b strings.Builder
-	b.Grow(len(format) + 16)
-	argIdx := 0
-	for i := 0; i < len(format); i++ {
-		if format[i] == '%' && i+1 < len(format) && argIdx < len(args) {
-			switch format[i+1] {
-			case 'q':
-				b.WriteString(strconv.Quote(args[argIdx].(string)))
-				argIdx++
-				i++
-				continue
-			case 's':
-				b.WriteString(args[argIdx].(string))
-				argIdx++
-				i++
-				continue
-			case 'd':
-				b.WriteString(strconv.Itoa(args[argIdx].(int)))
-				argIdx++
-				i++
-				continue
-			}
-		}
-		b.WriteByte(format[i])
-	}
-	return b.String()
 }

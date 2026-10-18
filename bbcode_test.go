@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -223,9 +224,10 @@ func TestTranslateBBCodeLinePersistence(t *testing.T) {
 			TranslateBBCode("[color=red]a\n1. b[/color]", nil))
 	})
 	t.Run("close on next line after newline", func(t *testing.T) {
-		// close tag right after the newline: no re-emit sandwich, the
-		// close wins because no visible text ever followed the newline
-		assert.Equal(t, "\x0304a\n\x03b",
+		// close tag right after the newline: no re-emit sandwich AND no
+		// close code — the close is deferred (state-only) and 'b' needs
+		// nothing (color closed, nothing open). Review finding B trace.
+		assert.Equal(t, "\x0304a\nb",
 			TranslateBBCode("[color=red]a\n[/color]b", nil))
 	})
 }
@@ -664,18 +666,86 @@ func TestBBCodeNoCodesOnlyLine(t *testing.T) {
 	})
 }
 
-// TestBBCodeValueHoldCap: the bbMaxTagLen hold bound applies to value
-// growth too, not just name growth — a runaway unterminated value
-// releases as text instead of holding forever (review finding 3).
+// TestBBCodeValueHoldCap: value growth HOLDS (unbounded) — a mid-value
+// release cap breaks chunk invariance (re-review finding A reverted the
+// caps). Invariance itself is pinned by TestBBCodeValueHoldInvariance;
+// these rows pin the streaming hold observable directly.
 func TestBBCodeValueHoldCap(t *testing.T) {
-	t.Run("open value growth", func(t *testing.T) {
+	t.Run("open value growth holds until terminator or flush", func(t *testing.T) {
 		tr := newBBCodeTranslator(nil)
-		got := tr.Process("[color=" + strings.Repeat("a", 100))
-		assert.Equal(t, "[color="+strings.Repeat("a", 100), got)
+		assert.Equal(t, "", tr.Process("[color="+strings.Repeat("a", 100)))
+		assert.Equal(t, "[color="+strings.Repeat("a", 100), tr.Flush(),
+			"unterminated candidate releases verbatim at flush")
 	})
-	t.Run("close value growth", func(t *testing.T) {
+	t.Run("close value growth holds", func(t *testing.T) {
 		tr := newBBCodeTranslator(nil)
-		got := tr.Process("[/color=" + strings.Repeat("a", 100))
-		assert.Equal(t, "[/color="+strings.Repeat("a", 100), got)
+		assert.Equal(t, "", tr.Process("[/color="+strings.Repeat("a", 100)))
+		assert.Equal(t, "[/color="+strings.Repeat("a", 100), tr.Flush(),
+			"unterminated candidate releases verbatim at flush")
+	})
+	t.Run("name growth still releases at the cap", func(t *testing.T) {
+		tr := newBBCodeTranslator(nil)
+		got := tr.Process("[" + strings.Repeat("a", 100))
+		assert.Equal(t, "["+strings.Repeat("a", 100), got,
+			"name-only growth releases (unknown names are verbatim in both modes — the cap is safe there)")
+	})
+}
+
+// TestBBCodeValueHoldInvariance: an over-length [color=<value>] candidate
+// must HOLD until its ']' — a mid-value release cap breaks chunk
+// invariance (one-shot classifies the complete tag; byte-streaming would
+// leak it verbatim). Re-review finding A, Oct 2026: the hold is bounded
+// by the stream itself (the full text is buffered by the stream loop
+// regardless), so no cap is needed here.
+func TestBBCodeValueHoldInvariance(t *testing.T) {
+	in := "[color=" + strings.Repeat("a", 70) + "]x tail"
+	want := TranslateBBCode(in, nil)
+	assert.Equal(t, "x tail", want, "complete tag with invalid value is consumed (placeholder)")
+	for size := 1; size <= len(in)+1; size++ {
+		tr := newBBCodeTranslator(nil)
+		var got strings.Builder
+		for i := 0; i < len(in); i += size {
+			end := i + size
+			if end > len(in) {
+				end = len(in)
+			}
+			got.WriteString(tr.Process(in[i:end]))
+		}
+		got.WriteString(tr.Flush())
+		require.Equal(t, want, got.String(), "chunk size %d", size)
+	}
+}
+
+// TestBBCodeTagOnlyLineNoCodes: tags on their own line after a newline
+// emit no codes there — the codes would be a codes-only PRIVMSG; the
+// next visible character's re-emit reconstructs the post-tag state.
+// Re-review finding B, Oct 2026.
+func TestBBCodeTagOnlyLineNoCodes(t *testing.T) {
+	t.Run("close tag alone on line", func(t *testing.T) {
+		assert.Equal(t, "\x02a\nc", TranslateBBCode("[b]a\n[/b]c", nil))
+	})
+	t.Run("close tag alone at end", func(t *testing.T) {
+		assert.Equal(t, "\x0304a\n", TranslateBBCode("[color=red]a\n[/color]", nil))
+	})
+	t.Run("open tag alone on line", func(t *testing.T) {
+		assert.Equal(t, "\x0304a\n\x0302\x02b\x02\x03", TranslateBBCode("[color=red]a\n[color=blue][b]b", nil))
+	})
+	t.Run("wire level never codes-only", func(t *testing.T) {
+		codeOnly := regexp.MustCompile(`^([\x02\x1D\x1F\x1E]|\x03[0-9]{0,2}(,[0-9]{0,2})?)*$`)
+		for _, in := range []string{
+			"[b]a\n[/b]",
+			"[color=red]a\n[/color]",
+			"[color=red]a\n[color=blue]",
+			"[i]a\n[/i]\n",
+			"[b][color=red]x\n",
+		} {
+			for _, line := range wrapForIRC(TranslateBBCode(in, nil)) {
+				if line == "" {
+					continue
+				}
+				assert.False(t, codeOnly.MatchString(line),
+					"line %q is codes-only (blank PRIVMSG) for input %q", line, in)
+			}
+		}
 	})
 }

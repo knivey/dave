@@ -335,9 +335,11 @@ func parseBBTag(s string) (bbTag, bool) {
 				j++
 			}
 			if j == len(s) {
-				if len(s) > bbMaxTagLen {
-					return bbTag{consumed: 1}, true // runaway partial — not a tag
-				}
+				// Hold unbounded: a mid-value cap would break chunk
+				// invariance (one-shot classifies the complete tag;
+				// byte-streaming would leak it verbatim). The hold
+				// is bounded by the stream itself. See the name-growth
+				// branch for why THAT cap is safe and this one is not.
 				return bbTag{}, false
 			}
 			if s[j] != ']' {
@@ -352,9 +354,8 @@ func parseBBTag(s string) (bbTag, bool) {
 			i++
 		}
 		if i == len(s) {
-			if len(s) > bbMaxTagLen {
-				return bbTag{consumed: 1}, true // runaway partial — not a tag
-			}
+			// Hold unbounded — a mid-value cap breaks chunk invariance
+			// (re-review finding A). The stream bounds the hold.
 			return bbTag{}, false // value still growing
 		}
 		value = s[vs:i]
@@ -365,9 +366,15 @@ func parseBBTag(s string) (bbTag, bool) {
 	}
 	if i == len(s) {
 		if len(s) > bbMaxTagLen {
+			// SAFE here, unlike the value-growth branches above: any
+			// 65+ char name is unknown, and unknown tokens are verbatim
+			// in BOTH modes — releasing at the cap yields the same bytes
+			// one-shot would. Value caps cannot make that claim (the
+			// complete tag classifies as known), which is why the value
+			// holds are unbounded.
 			return bbTag{consumed: 1}, true // runaway partial — not a tag
 		}
-		return bbTag{}, false // name/value still growing
+		return bbTag{}, false // name still growing
 	}
 	// Disqualifying char before ']': not a tag.
 	return bbTag{consumed: 1}, true
@@ -381,7 +388,12 @@ func isASCIIDigit(c byte) bool {
 	return c >= '0' && c <= '9'
 }
 
-// applyTag applies one parsed token to the state, emitting codes.
+// applyTag applies one parsed token to the state, emitting codes. Codes
+// are DEFERRED (state-only) while a newline is pending: a tag on its own
+// line after a trailing newline would otherwise put its codes on an empty
+// line — a codes-only PRIVMSG. The re-emit at the next visible character
+// reconstructs the exact post-tag state; if nothing visible ever follows,
+// the codes are pure artifact (clients reset formatting per message).
 func (t *bbcodeTranslator) applyTag(out *strings.Builder, tag bbTag) {
 	raw := "<tag>"
 	if tag.consumed <= len(t.pending) {
@@ -409,11 +421,13 @@ func (t *bbcodeTranslator) applyTag(out *strings.Builder, tag bbTag) {
 				// popping it emits nothing.
 				return
 			}
-			out.WriteByte(0x03)
-			if eff := t.bbEffectiveColor(); eff != "" {
-				out.WriteString(eff)
+			if !t.pendingNL {
+				out.WriteByte(0x03)
+				if eff := t.bbEffectiveColor(); eff != "" {
+					out.WriteString(eff)
+				}
+				t.justColor = true
 			}
-			t.justColor = true
 			return
 		}
 		code, ok := bbColorValue(tag.value)
@@ -427,8 +441,10 @@ func (t *bbcodeTranslator) applyTag(out *strings.Builder, tag bbTag) {
 			return
 		}
 		t.colorStack = append(t.colorStack, code)
-		out.WriteString("\x03" + code)
-		t.justColor = true
+		if !t.pendingNL {
+			out.WriteString("\x03" + code)
+			t.justColor = true
+		}
 		return
 	}
 	// b/i/u/s
@@ -439,7 +455,9 @@ func (t *bbcodeTranslator) applyTag(out *strings.Builder, tag bbTag) {
 			return
 		}
 		t.setToggle(c, false)
-		out.WriteByte(bbToggleCode[c])
+		if !t.pendingNL {
+			out.WriteByte(bbToggleCode[c])
+		}
 		t.justColor = false
 		return
 	}
@@ -448,7 +466,9 @@ func (t *bbcodeTranslator) applyTag(out *strings.Builder, tag bbTag) {
 		return
 	}
 	t.setToggle(c, true)
-	out.WriteByte(bbToggleCode[c])
+	if !t.pendingNL {
+		out.WriteByte(bbToggleCode[c])
+	}
 	t.justColor = false
 }
 

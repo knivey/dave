@@ -264,9 +264,11 @@ type MCPCommandConfig struct {
 // host-side caps), and an optional respond tool (respond_tool: the model
 // submits its final answer through it and the turn ends there; when
 // false, or the model finishes with plain text, the final no-tool-call
-// reply is auto-sent). Log-fed generators dispatch with optional args
-// (bare or with-args — the model defaults the window via the tool);
-// without Log, args are required. BurntSushi decodes the embedded AIConfig
+// reply is auto-sent). Optional-args dispatch (bare or with-args) is
+// granted to log-fed generators (the model defaults the window via the
+// tool) AND to generators with a configured prompt (the prompt is the
+// bare invocation's instruction); with neither Log nor Prompt, args are
+// required. BurntSushi decodes the embedded AIConfig
 // fields at the parent level and [name.log] into Log.
 type GeneratorConfig struct {
 	AIConfig
@@ -1143,6 +1145,13 @@ func validateCommands(commands *Commands, config *Config) error {
 			if err := validateLogQuerySpec(cfg.Log, name); err != nil {
 				return err
 			}
+		}
+		// prompt is optional (absent = args required at dispatch), but a
+		// non-empty whitespace-only one is a typo that would silently
+		// grant optional-args dispatch and send a blank user message —
+		// reject it loudly with the admin's section name.
+		if cfg.Prompt != "" && strings.TrimSpace(cfg.Prompt) == "" {
+			return fmt.Errorf("commands.generators.%s prompt is blank (whitespace only): remove it or set a real instruction", name)
 		}
 		commands.Generators[name] = cfg
 	}

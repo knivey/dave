@@ -360,7 +360,9 @@ var chatCmds map[string]bool
 var configCmdTakesArgs map[string]bool
 
 // configCmdOptionalArgs marks triggers that match both bare and with-args
-// invocations (log-fed generators: "^summary" and "^summary 6h focus").
+// invocations (log-fed generators: "^summary" and "^summary 6h focus";
+// prompt-set generators: "^headlies" uses the configured prompt, with-args
+// overrides it).
 var configCmdOptionalArgs map[string]bool
 
 var builtinCommandNames = []string{
@@ -512,10 +514,15 @@ func registerCommandsLocked(cmds Commands) error {
 		register := func(trigger string) {
 			newConfigCmds[trigger] = handler
 			newConfigCmdNames[trigger] = name
-			if gc.Log != nil {
-				// Log-fed generators: args are optional — the model defaults
-				// the window via the query_channel_logs tool (bare AND
-				// with-args both dispatch).
+			if gc.Log != nil || gc.Prompt != "" {
+				// Optional-args generators dispatch bare AND with-args.
+				// Log-fed generators default the window via the
+				// query_channel_logs tool; prompt-set generators use the
+				// configured prompt as the bare invocation's instruction
+				// (generator()'s fallback chain: args > prompt > built-in
+				// default). Only generators with NEITHER Log NOR Prompt
+				// require args — there is no sensible bare instruction
+				// for those.
 				newOptionalArgs[trigger] = true
 			} else {
 				newTakesArgs[trigger] = true

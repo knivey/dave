@@ -331,8 +331,9 @@ func generator(network Network, c *girc.Client, e girc.Event, cfg GeneratorConfi
 		userText = args[0]
 	}
 	if userText == "" {
-		// Bare invocation (optional-args dispatch) — the model defaults
-		// the window via the tool; the prompt is the instruction.
+		// Bare invocation (optional-args dispatch) — log-fed generators
+		// default the window via the tool; prompt-set generators use the
+		// configured prompt as the instruction.
 		userText = cfg.Prompt
 	}
 	if userText == "" {

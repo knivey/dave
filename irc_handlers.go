@@ -513,9 +513,9 @@ func handleTrigger(network Network, client *girc.Client, event girc.Event, chann
 		triggerWord, rest, hasArgs := splitFirstWord(stripped)
 		if cmd, ok := configCmds[triggerWord]; ok {
 			takesArgs := configCmdTakesArgs[triggerWord]
-			// Optional-args commands (log-fed generators) dispatch bare
-			// (takesArgs=false == hasArgs=false) and with args via the
-			// second clause.
+			// Optional-args commands (log-fed or prompt-set generators)
+			// dispatch bare (takesArgs=false == hasArgs=false) and with
+			// args via the second clause.
 			if takesArgs == hasArgs || (configCmdOptionalArgs[triggerWord] && hasArgs) {
 				name := configCmdNames[triggerWord]
 				var args []string

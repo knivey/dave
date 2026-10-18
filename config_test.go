@@ -3196,6 +3196,27 @@ from = "2026-10-06 18:00"
 	assert.Contains(t, err.Error(), "tool arguments")
 }
 
+// TestLoadConfigDirRejectsBlankPrompt pins the load-time check for
+// whitespace-only prompts: prompt is optional (absent = args required),
+// but a non-empty blank one is an admin typo that would silently grant
+// optional-args dispatch and send a garbage user message.
+func TestLoadConfigDirRejectsBlankPrompt(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": testGeneratorsServices,
+		"generators.toml": `
+[headlies]
+service = "svc"
+prompt = "   "
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	_, err := loadConfigDir(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "commands.generators.headlies")
+	assert.Contains(t, err.Error(), "prompt")
+}
+
 func TestLoadConfigDirGeneratorsMissingFileOK(t *testing.T) {
 	dir := createTestConfigDir(t, "", map[string]string{
 		"services.toml": testGeneratorsServices,

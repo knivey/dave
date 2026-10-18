@@ -147,6 +147,43 @@ func TestRegisterGenerators(t *testing.T) {
 	assert.False(t, chatCmds["summary"], "generators never join chatCmds (no context to clear)")
 }
 
+func TestRegisterGeneratorsPromptGrantsOptionalArgs(t *testing.T) {
+	if logger == nil {
+		logger = newTestLogger()
+	}
+	// headlies-shaped (prod incident Oct 2026): a non-log generator with a
+	// default prompt must dispatch bare — the prompt IS the instruction.
+	// Args-required stays for generators with neither Log nor Prompt (no
+	// sensible bare instruction exists for those).
+	cmds := Commands{Generators: map[string]GeneratorConfig{
+		"headlies": {AIConfig: AIConfig{Name: "headlies", Service: "svc"}, Prompt: "generate a headline"},
+		"noargs":   {AIConfig: AIConfig{Name: "noargs", Service: "svc"}},
+	}}
+	require.NoError(t, registerCommands(cmds))
+	t.Cleanup(func() {
+		resetRegisteredCommands(t)
+	})
+
+	commandsMutex.RLock()
+	headliesTakesArgs := configCmdTakesArgs["headlies"]
+	headliesOptional := configCmdOptionalArgs["headlies"]
+	noargsTakesArgs := configCmdTakesArgs["noargs"]
+	noargsOptional := configCmdOptionalArgs["noargs"]
+	commandsMutex.RUnlock()
+
+	assert.True(t, headliesOptional, "prompt-set generator takes optional args")
+	assert.False(t, headliesTakesArgs, "optional-args commands are NOT takesArgs")
+	assert.True(t, noargsTakesArgs, "generator without Log or Prompt still requires args")
+	assert.False(t, noargsOptional)
+
+	// The predicate handleTrigger applies (irc_handlers.go).
+	match := func(hasArgs bool) bool {
+		return headliesTakesArgs == hasArgs || (headliesOptional && hasArgs)
+	}
+	assert.True(t, match(false), "bare -headlies dispatches")
+	assert.True(t, match(true), "-headlies <focus> dispatches")
+}
+
 func TestRegisterGeneratorsConflictDetected(t *testing.T) {
 	if logger == nil {
 		logger = newTestLogger()

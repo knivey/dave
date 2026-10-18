@@ -1,5 +1,6 @@
 # Generators: one-shot, stateless agentic commands. The prompt is built from
-# the system template + one user message (your verbatim args), then run
+# the system template + one user message (your verbatim args, or the
+# configured `prompt` on bare invocation), then run
 # through the full agentic tool loop once — the model retrieves channel logs
 # itself (query_channel_logs) and delivers its answer (respond tool, or its
 # final no-tool-call reply). Nothing is persisted: no session, no messages,
@@ -56,6 +57,9 @@
 #   retry_on_empty       (int, default: 1)           Number of retries when API returns empty response (0 = disabled); retry corrections are injected per injection_role/needsusersuffix and never persisted
 #   prompt               (string)                    Default instruction when the caller gives no focus text.
 #                                               Fallback chain: focus text > prompt > built-in default.
+#                                               Setting prompt also makes the command's args optional —
+#                                               bare "^name" dispatches with the prompt as instruction.
+#                                               A non-empty whitespace-only prompt is rejected at load.
 #
 # Log-fed commands add a sub-table that configures the query_channel_logs
 # tool offered to the model — window is the tool's default window, max_tokens
@@ -63,7 +67,8 @@
 # call the tool multiple times with different windows; caps are host-enforced.
 # (A [section.log] also makes the command's args optional — bare "^name"
 # dispatches too; the model maps any time range in the request to the tool's
-# window or from/to arguments. Without it, args are required.)
+# window or from/to arguments. Without [section.log] or prompt, args are
+# required.)
 #   [section.log]
 #   window               (duration string, default: "24h") The tool's DEFAULT window — how far back the
 #                                               transcript reaches when the model omits the window

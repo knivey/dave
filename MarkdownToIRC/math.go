@@ -199,11 +199,18 @@ func (p *mathBlockParser) Trigger() []byte { return []byte{'$'} }
 // Open matches a line whose TRIMMED content starts with $$ (the rule the
 // streaming settle classifier mirrors). If the rest of the line after the
 // leading $$ contains another $$ it is a single-line block and Expression
-// is final here; otherwise the block accumulates lines until a later
-// $$-prefixed line closes it. Per the fenced-code-block contract Open does
-// NOT consume the line: the framework's AdvanceLine after a successful open
-// does. (termtex's parser advances here AND the framework advances again —
-// that double-advance eats the first content line; see the file comment.)
+// is final here — UNLESS a non-whitespace tail follows the closing $$: then
+// Open DECLINES (returns nil, never advancing) so the whole line parses as
+// a paragraph and the inline $..$ parser renders the math while the tail
+// survives as prose (degradation equals the pre-math behavior; the
+// framework's AdvanceLine after a successful open would otherwise eat the
+// tail — silent loss). A whitespace-only tail still takes the block path.
+// Otherwise the block accumulates lines until a $$-prefixed line closes it
+// (the closer consumes exactly the $$ run, re-opening its tail as prose —
+// see Continue). Per the fenced-code-block contract Open does NOT consume
+// the line: the framework's AdvanceLine after a successful open does.
+// (termtex's parser advances here AND the framework advances again — that
+// double-advance eats the first content line; see the file comment.)
 // The opener line's tail after the leading $$ is CONTENT — Pandoc
 // display-math semantics: it is stashed on the node and Close prepends it
 // as the first content line. Fenced-code info-string semantics (which
@@ -218,6 +225,11 @@ func (p *mathBlockParser) Open(parent ast.Node, reader text.Reader, pc parser.Co
 	}
 	rest := trimmed[2:]
 	if end := bytes.Index(rest, []byte("$$")); end >= 0 {
+		if len(bytes.TrimSpace(rest[end+2:])) > 0 {
+			// non-whitespace tail after the closing $$: decline to the
+			// inline path — the tail is prose, never dropped
+			return nil, parser.NoChildren
+		}
 		// single-line $$...$$ block: complete on the opener line
 		node := &mathBlock{
 			Expression: bytes.Clone(bytes.TrimSpace(rest[:end])),
@@ -232,13 +244,17 @@ func (p *mathBlockParser) Open(parent ast.Node, reader text.Reader, pc parser.Co
 }
 
 // Continue follows goldmark's fenced-code-block contract exactly: a line
-// whose trimmed content starts with $$ closes the block (consumed to EOL so
-// the framework's re-open attempt on this line's tail sees only the
-// newline); every other line — blanks included — is expression content,
-// appended as a segment and consumed with AdvanceToEOL ONLY. Never
-// AdvanceLine here: the framework advances past the newline itself, and
-// double-advancing is what dropped every second content line in termtex's
-// parser.
+// whose trimmed content starts with $$ closes the block, consuming EXACTLY
+// the $$ delimiter run (plus any leading whitespace) — NOT the whole line:
+// after Close returns, the framework re-runs openBlocks on the unconsumed
+// remainder (parser.go parseBlocks), so the closer line's tail re-opens as
+// a new block (paragraph) and renders as prose — Pandoc semantics, the
+// closer-tail analogue of the opener-tail rule; AdvanceToEOL here would
+// silently drop that text. Every other line — blanks included — is
+// expression content, appended as a segment and consumed with
+// AdvanceToEOL ONLY. Never AdvanceLine here: the framework advances past
+// the newline itself, and double-advancing is what dropped every second
+// content line in termtex's parser.
 func (p *mathBlockParser) Continue(node ast.Node, reader text.Reader, pc parser.Context) parser.State {
 	mb := node.(*mathBlock)
 	if mb.complete {
@@ -249,7 +265,13 @@ func (p *mathBlockParser) Continue(node ast.Node, reader text.Reader, pc parser.
 	line, segment := reader.PeekLine()
 	trimmed := bytes.TrimSpace(line)
 	if bytes.HasPrefix(trimmed, []byte("$$")) {
-		reader.AdvanceToEOL()
+		// line[i:] starts at the delimiter run: everything before the
+		// first $ is whitespace (trimmed starts with $$).
+		i := bytes.IndexByte(line, '$')
+		for i < len(line) && line[i] == '$' {
+			i++
+		}
+		reader.Advance(i)
 		return parser.Close
 	}
 	seg := segment

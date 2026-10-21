@@ -2,6 +2,7 @@ package markdowntoirc
 
 import (
 	mrand "math/rand/v2"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -134,6 +135,73 @@ func TestMathBlockOpenerTailIsContent(t *testing.T) {
 			notContain: []string{"\\rightarrow"},
 		},
 	})
+	// Lock the PREPEND order: the opener tail is the FIRST content line —
+	// the contain-pins above would pass even if a refactor flipped to
+	// append order.
+	out := MarkdownToIRC("$$E = mc^2\n\\text{rest}\n$$")
+	assert.Less(t, strings.Index(out, "E = mc²"), strings.Index(out, "rest"),
+		"opener tail must render before the joined content lines")
+}
+
+// TestMathBlockCloserTailsNotDropped pins the closer-tail semantics: text
+// after a closing $$ is NEVER silently dropped. A multi-line block's closer
+// line consumes exactly the $$ delimiter run, so the remainder re-opens as
+// a paragraph (Pandoc semantics — the closer-tail analogue of the
+// opener-tail rule); a single-line block with a non-whitespace tail after
+// the closing $$ DECLINES math so the whole line parses as a paragraph (the
+// inline $..$ parser still renders the math, with cosmetic $ wrappers).
+func TestMathBlockCloserTailsNotDropped(t *testing.T) {
+	runTests(t, []mdTest{
+		{
+			name:       "CloserTailIsProse",
+			input:      "$$\nE = mc^2\n$$ and that is famous",
+			contain:    []string{"E = mc²", "and that is famous"},
+			notContain: []string{"$$"},
+		},
+		{
+			name:       "CloserTailAfterOpenerTail",
+			input:      "$$E = mc^2\nrest\n$$ tail",
+			contain:    []string{"E = mc²", "rest", "tail"},
+			notContain: []string{"$$"},
+		},
+		{
+			// declined to the inline path: math renders, tail survives —
+			// containment, not exact form (the $ wrappers are the known
+			// cosmetic degradation, equal to pre-math behavior)
+			name:       "SingleLineWithTailDeclinesToProse",
+			input:      "$$E = mc^2$$ and that is famous",
+			contain:    []string{"E = mc²", "and that is famous"},
+			notContain: []string{},
+		},
+		{
+			// bare controls: unchanged by the tail rules
+			name:       "BareSingleLineUnchanged",
+			input:      "$$E = mc^2$$",
+			contain:    []string{"E = mc²"},
+			notContain: []string{"$"},
+		},
+		{
+			name:       "BareMultiLineUnchanged",
+			input:      "$$\nE = mc^2\n$$",
+			contain:    []string{"E = mc²"},
+			notContain: []string{"$"},
+		},
+		{
+			// whitespace-only closer tail: the remainder is blank, so no
+			// stray paragraph — renders exactly like the bare closer
+			name:       "WhitespaceCloserTailUnchanged",
+			input:      "$$\nE = mc^2\n$$   ",
+			contain:    []string{"E = mc²"},
+			notContain: []string{"$", "\n"},
+		},
+		{
+			// whitespace-only single-line tail still takes the block path
+			name:       "SingleLineSpaceTailUnchanged",
+			input:      "$$E = mc^2$$   ",
+			contain:    []string{"E = mc²"},
+			notContain: []string{"$"},
+		},
+	})
 }
 
 // TestStreamingMathHeldUntilClosed: a multi-line $$ math block spans blank
@@ -200,6 +268,15 @@ func TestStreamingMathChunkInvariance(t *testing.T) {
 			name:    "OpenerTail",
 			doc:     "$$E = mc^2\n\\text{rest}\n$$\n\nafter\n",
 			contain: []string{"E = mc²", "after"},
+		},
+		{
+			// Closer-tail shape: the closer line's tail after $$ is prose
+			// (never dropped), plus the declined single-line-with-tail
+			// shape — ordinary paragraph text to the classifier (its
+			// trimmed line carries an inner $$, so it is never an opener).
+			name:    "CloserTail",
+			doc:     "$$\nE = mc^2\n$$ tail here\n\n$$E = mc^2$$ inline prose\n\nafter\n",
+			contain: []string{"E = mc²", "tail here", "inline prose", "after"},
 		},
 	}
 	for _, tt := range docs {

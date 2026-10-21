@@ -102,7 +102,7 @@ func completion(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx
 	text := resp.Choices[0].Text
 	logger.Info(text) // raw model output — logs show raw (translation is emission-only)
 	if bbcodeEnabled(cfg) {
-		text = TranslateBBCode(text, bbcodeWarnFn(logger))
+		text = TranslateBBCode(text, bbcodeWarnFn(logger), bbcodeStylesEnabled(cfg))
 	}
 	sendToOutput(text, output, ctx)
 }
@@ -757,7 +757,7 @@ func (so *streamOutput) Flush(send func(string)) {
 // translated codes — the paste site parses them).
 func (cr *chatRunner) sendRendered(rawText string) {
 	if bbcodeEnabled(cr.cfg) {
-		rawText = TranslateBBCode(rawText, bbcodeWarnFn(cr.logger))
+		rawText = TranslateBBCode(rawText, bbcodeWarnFn(cr.logger), bbcodeStylesEnabled(cr.cfg))
 	}
 	text := rawText
 	if cr.cfg.RenderMarkdown {
@@ -791,7 +791,7 @@ func (cr *chatRunner) handleToolCallResponse(turn *turnContext, text string, too
 		// iteration).
 		t := ExtractFinalText(text)
 		if bbcodeEnabled(cr.cfg) {
-			t = TranslateBBCode(t, bbcodeWarnFn(cr.logger))
+			t = TranslateBBCode(t, bbcodeWarnFn(cr.logger), bbcodeStylesEnabled(cr.cfg))
 		}
 		if cr.cfg.RenderMarkdown {
 			t = markdowntoirc.MarkdownToIRC(t)
@@ -982,7 +982,7 @@ func (cr *chatRunner) runTurnStream(ctx context.Context, params openai.ChatCompl
 	// ephemeral turns never feed it deltas — their finals translate in
 	// sendRendered instead, so no double translation.
 	if bbcodeEnabled(cr.cfg) && !cr.ephemeral {
-		sOut.bb = newBBCodeTranslator(bbcodeWarnFn(cr.logger))
+		sOut.bb = newBBCodeTranslator(bbcodeWarnFn(cr.logger), bbcodeStylesEnabled(cr.cfg))
 	}
 
 	var accumulatedToolCalls []ToolCall
@@ -1939,7 +1939,7 @@ func (cr *chatRunner) callResponsesStream(ctx context.Context, params responses.
 	// ephemeral turns never feed it deltas — their finals translate in
 	// sendRendered instead, so no double translation.
 	if bbcodeEnabled(cr.cfg) && !cr.ephemeral {
-		sOut.bb = newBBCodeTranslator(bbcodeWarnFn(cr.logger))
+		sOut.bb = newBBCodeTranslator(bbcodeWarnFn(cr.logger), bbcodeStylesEnabled(cr.cfg))
 	}
 
 	idleTimer := time.NewTimer(cr.cfg.StreamTimeout)

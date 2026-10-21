@@ -24,7 +24,13 @@ package main
 //     every open/close tag emits its toggle code; no document nesting
 //     semantics, no hidden suppression ([b][b] honestly toggles off).
 //     A close with no matching open is dropped and WARNed (emitting it
-//     would inject the formatting instead of removing it).
+//     would inject the formatting instead of removing it). The toggle
+//     half is behind its own knob, `bbcode_styles` (cascade command >
+//     service > false, resolver bbcodeStylesEnabled; effective toggles
+//     = bbcode && bbcode_styles): single-letter tags are bracket-
+//     ambiguous with prose/math (`a[i]` indexing), so bbcode = true is
+//     COLOR-ONLY by default and disabled toggles ride the unknown-token
+//     path below — verbatim, no warn.
 //   - color is a STACK (the one thing IRC can't do natively): [/color]
 //     re-emits the enclosing color, or a bare \x03 at top level. A bare
 //     \x03 is the color-only reset (irc-formatting-reference.md) —
@@ -89,6 +95,17 @@ func bbcodeEnabled(cfg AIConfig) bool {
 	return cfg.BBCode != nil && *cfg.BBCode
 }
 
+// bbcodeStylesEnabled resolves whether the style-toggle half
+// ([b] [i] [u] [s]) of the translator is on. Effective toggles =
+// bbcodeEnabled && bbcodeStylesEnabled — bbcode = true alone is
+// COLOR-ONLY, because single-letter toggle tags are bracket-ambiguous
+// with real prose/math content (`a[i]` indexing, [1] citations); colors
+// are unambiguous and translate on bbcodeEnabled alone. Same defensive
+// nil style as bbcodeEnabled.
+func bbcodeStylesEnabled(cfg AIConfig) bool {
+	return cfg.BBCodeStyles != nil && *cfg.BBCodeStyles
+}
+
 // bbcodeWarnFn adapts a logxi logger to the translator's warn callback;
 // nil logger (and nil result) is silent.
 func bbcodeWarnFn(l logxi.Logger) func(string) {
@@ -100,9 +117,12 @@ func bbcodeWarnFn(l logxi.Logger) func(string) {
 
 // TranslateBBCode is the stateless one-shot form for complete responses
 // (final replies, tool-loop text, legacy completions). warn receives one
-// message per dropped malformed tag; nil is silent.
-func TranslateBBCode(text string, warn func(string)) string {
-	tr := newBBCodeTranslator(warn)
+// message per dropped malformed tag; nil is silent. styles reports
+// whether the style-toggle half is enabled (bbcodeEnabled &&
+// bbcodeStylesEnabled at the call site): with it off, toggle tags ride
+// the unknown-token path — verbatim, no warn — while colors translate.
+func TranslateBBCode(text string, warn func(string), styles bool) string {
+	tr := newBBCodeTranslator(warn, styles)
 	return tr.Process(text) + tr.Flush()
 }
 
@@ -119,11 +139,18 @@ type bbcodeTranslator struct {
 	pending                string // held tag candidate
 	justColor              bool   // a \x03 emission awaits its guard decision
 	pendingNL              bool   // a \n awaits style re-emission before visible text
-	warn                   func(string)
+	// styles gates the style-toggle half ([b] [i] [u] [s]): when false,
+	// toggle tags are prose jurisdiction and ride the unknown-token
+	// path (verbatim, no warn) exactly like [table] citations. Colors
+	// are never gated here — only the caller's bbcodeEnabled does that.
+	// With styles off no toggle can ever open, so Flush's bius
+	// auto-close loop and emitRun's toggle re-emits naturally no-op.
+	styles bool
+	warn   func(string)
 }
 
-func newBBCodeTranslator(warn func(string)) *bbcodeTranslator {
-	return &bbcodeTranslator{warn: warn}
+func newBBCodeTranslator(warn func(string), styles bool) *bbcodeTranslator {
+	return &bbcodeTranslator{warn: warn, styles: styles}
 }
 
 func (t *bbcodeTranslator) warnf(format string, args ...any) {
@@ -399,8 +426,11 @@ func (t *bbcodeTranslator) applyTag(out *strings.Builder, tag bbTag) {
 	if tag.consumed <= len(t.pending) {
 		raw = t.pending[:tag.consumed]
 	}
-	if !tag.known {
-		// Unknown name: prose/markdown jurisdiction — verbatim.
+	if !tag.known || (!t.styles && tag.name != "color") {
+		// Unknown name — or a style-toggle tag while toggles are off
+		// (bbcode_styles = false: bracket-ambiguous with prose, the
+		// owner-ruled color-only default): prose/markdown jurisdiction,
+		// verbatim.
 		t.emitRun(out, raw)
 		return
 	}

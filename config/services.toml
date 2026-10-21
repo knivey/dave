@@ -18,6 +18,7 @@
 #   load_notice          (bool, default: true when type = "llama", else false) Before each turn, GET /v1/models and send an IRC notice when the requested model is not loaded yet (llama-server router status: unloaded/loading/sleeping; llama-swap status-less list: model absent). Fails open — no notice when the endpoint errors. Set false to disable for llama services, true to enable for others. Cascades to commands.
 #   toolverbose          (bool, default: true)       Show 🔧 tool call notifications in IRC
 #   bbcode               (bool, default: false)     (cascades to commands) Translate BBCode tags in the model's output into IRC control codes at emission. See chats.toml bbcode entry for the full description.
+#   bbcode_styles        (bool, default: false)     (cascades to commands) Also translate the [b]/[i]/[u]/[s] style-toggle tags — off by default (bracket-ambiguous with prose; bbcode = true alone is color-only). See chats.toml bbcode_styles entry for the full description.
 #   needsusersuffix      (*bool, default: auto)      Guidance Knob 2 (cascades to commands): append a short user message after injected guidance when it would be the last message of the request. See chats.toml needsusersuffix entry for the full description.
 #   injection_role       (string, default: "system") Guidance Knob 1 (cascades to commands): wire role for injected guidance payload rows. See chats.toml injection_role entry for the full description.
 #   async_result_delivery (string, default: "message") (cascades to commands) How completed background jobs are delivered to the model. See chats.toml async_result_delivery entry for the full description.
@@ -47,6 +48,7 @@
 # streamtimeout = "45s"
 # load_notice = true
 # bbcode = true
+# bbcode_styles = false
 # needsusersuffix = true
 # injection_role = "system"
 # async_result_delivery = "message"

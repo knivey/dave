@@ -89,10 +89,13 @@ How can I help?
 Sure thing!
 """
 
-# BBCodeFormatting: color instructions for commands with `bbcode = true`
+# BBCodeFormatting: COLOR instructions for commands with `bbcode = true`
 # (chats.toml / generators.toml). Reference it as {{.Vars.BBCodeFormatting}}
 # in the system prompt INSTEAD of IRCFormatting/IrcFormattingExtended — the
-# translator converts these tags to IRC codes at emission.
+# translator converts these tags to IRC codes at emission. Colors only: the
+# style toggles ([b] [i] [u] [s]) are behind `bbcode_styles = true` (they
+# are bracket-ambiguous with prose like a[i] indexing) and are taught by
+# their own var, BBCodeStylesFormatting, below.
 #
 # The translator accepts more than this var teaches (deliberately — the
 # instructions keep ONE unambiguous name per color; extra accepted forms
@@ -111,6 +114,19 @@ Supported colors: white, black, blue, green, red, brown, purple, orange, yellow,
 Always close every color tag you open. Color persists across lines until the tag is closed.
 Use color sparingly — a colored heading or key term, not whole paragraphs.
 Never use ANSI escape sequences or raw IRC color codes.
+"""
+
+# BBCodeStylesFormatting: STYLE-TOGGLE instructions for commands that also
+# set `bbcode_styles = true` (without it these tags are NOT translated —
+# they would appear in the output as literal text). Reference it as
+# {{.Vars.BBCodeStylesFormatting}} alongside {{.Vars.BBCodeFormatting}}.
+# Every tag name taught here is a key the translator knows; closing tags
+# use the matching name.
+BBCodeStylesFormatting = """\
+You can also style your output with BBCode-style toggle tags: [b]bold[/b], [i]italic[/i], [u]underline[/u], [s]strikethrough[/s].
+Each tag is an independent on/off toggle, exactly like IRC: an open starts the style, the matching close tag ends it.
+Always close every tag you open. Open styles persist across lines until closed.
+Use styles sparingly, for emphasis — headings or key terms, not whole paragraphs.
 """
 
 BanPolicy = "Ban users who repeatedly request harmful, illegal, or dangerous information after being told to stop, even if they are not abusive or disruptive. Abusive language or disruptive behaviour is NOT required to issue a ban — repeated harmful requests alone are sufficient. A single firm warning is required before banning: tell the user clearly what behaviour must stop and that continuing will result in a ban. If they repeat the request after the warning, ban them. Escalate ban duration for each repeat offense. If a previously-banned user returns, their ban has expired — if they resume the same bad behaviour, reban them with a longer duration than before. Use the check_ban_history tool to view past ban durations before deciding on a new ban length."

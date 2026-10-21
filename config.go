@@ -344,6 +344,13 @@ type AIConfig struct {
 	// them to IRC codes, before the markdown renderer. Storage stays
 	// raw. Opt-in: cascade command > service > false.
 	BBCode *bool `toml:"bbcode"`
+	// BBCodeStyles enables the style-toggle half ([b] [i] [u] [s]) of
+	// the BBCode translator: single-letter toggle tags are bracket-
+	// ambiguous with real prose/math content (`a[i]` indexing, [1]
+	// citations), so bbcode = true alone is COLOR-ONLY and toggles stay
+	// verbatim unless explicitly opted in. Only effective when BBCode
+	// is on. Cascade: command > service > false.
+	BBCodeStyles *bool `toml:"bbcode_styles"`
 	// Disabled drops the command at load time (default false): the entry
 	// is removed before validation and registration, so it never
 	// dispatches, never appears in help, and may reference a removed
@@ -374,6 +381,7 @@ type Service struct {
 	APIUser              string        `toml:"api_user"`
 	LoadNotice           *bool         `toml:"load_notice"`
 	BBCode               *bool         `toml:"bbcode"`                // output filter: translate BBCode tags to IRC codes
+	BBCodeStyles         *bool         `toml:"bbcode_styles"`         // output filter: also translate [b]/[i]/[u]/[s] toggles (bbcode alone is color-only)
 	NeedsUserSuffix      *bool         `toml:"needsusersuffix"`       // guidance Knob 2: tri-state, nil = auto (anthropic/)
 	InjectionRole        string        `toml:"injection_role"`        // guidance Knob 1: system (default) | developer | user
 	AsyncResultDelivery  string        `toml:"async_result_delivery"` // async results: "message" (default) | "tool" round-trip
@@ -512,6 +520,17 @@ func (cfg *AIConfig) ApplyDefaults(service Service) {
 	if cfg.BBCode == nil {
 		v := false
 		cfg.BBCode = &v
+	}
+	// bbcode_styles cascade: command > service > false (opt-in). The
+	// toggle half of the translator is deliberately OFF by default —
+	// toggle tags are bracket-ambiguous with prose/math (`a[i]`
+	// indexing), so bbcode = true is color-only unless opted in.
+	if cfg.BBCodeStyles == nil {
+		cfg.BBCodeStyles = service.BBCodeStyles
+	}
+	if cfg.BBCodeStyles == nil {
+		v := false
+		cfg.BBCodeStyles = &v
 	}
 	// Guidance knobs (see docs/superpowers/specs/
 	// 2026-10-08-guidance-injection-role-design.md). Knob 1 materializes

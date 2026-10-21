@@ -200,6 +200,9 @@ func (p *mathBlockParser) Trigger() []byte { return []byte{'$'} }
 // NOT consume the line: the framework's AdvanceLine after a successful open
 // does. (termtex's parser advances here AND the framework advances again —
 // that double-advance eats the first content line; see the file comment.)
+// The opener line's tail after the $$ markers is DISCARDED — fenced-code
+// info-string semantics, matching termtex (Pandoc instead treats it as the
+// first content line).
 func (p *mathBlockParser) Open(parent ast.Node, reader text.Reader, pc parser.Context) (ast.Node, parser.State) {
 	line, _ := reader.PeekLine()
 	trimmed := bytes.TrimSpace(line)

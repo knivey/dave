@@ -9,6 +9,7 @@ require (
 	github.com/alecthomas/chroma/v2 v2.23.1
 	github.com/bartventer/httpcache v0.13.0
 	github.com/chai2010/webp v1.4.0
+	github.com/doug/termtex v0.0.0-20260918165034-c407d5cf5251
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/gdamore/tcell/v2 v2.8.1
 	github.com/glebarez/sqlite v1.11.0
@@ -40,7 +41,6 @@ require (
 	github.com/araddon/dateparse v0.0.0-20210429162001-6b43995a97de // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dlclark/regexp2 v1.11.5 // indirect
-	github.com/doug/termtex v0.0.0-20260918165034-c407d5cf5251 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/gdamore/encoding v1.0.1 // indirect
 	github.com/glebarez/go-sqlite v1.21.2 // indirect

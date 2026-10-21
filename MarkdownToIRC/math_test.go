@@ -139,21 +139,52 @@ func TestStreamingMathHeldUntilClosed(t *testing.T) {
 	assert.Equal(t, "after", joinEntries(r.Process("")), "final block at flush")
 }
 
-// TestStreamingMathChunkInvariance: the math-heavy document must produce
+// TestStreamingMathChunkInvariance: the math-heavy documents must produce
 // identical output for every delta chunking (the fuzz generator does not
-// emit math, so this dedicated case covers it).
+// emit math, so these dedicated cases cover it).
 func TestStreamingMathChunkInvariance(t *testing.T) {
-	doc := "intro paragraph with $a \\rightarrow b$ inline math.\n\n" +
-		"$$e^{i\\pi} + 1 = 0$$\n\n" +
-		"$$\np \\rightarrow q\n\nr \\leftarrow s\n$$\n\n" +
-		"```text\ncosts $5 and $$10 total\n```\n\n" +
-		"outro paragraph here.\n"
-	r := mrand.New(mrand.NewPCG(7, 7))
-	strats := chunkStrategies(r, doc)
-	first := streamCanonical(strats[0].deltas)
-	require.NotEmpty(t, first)
-	for _, s := range strats[1:] {
-		assert.Equal(t, first, streamCanonical(s.deltas), "chunking strategy %q diverged", s.name)
+	docs := []struct {
+		name string
+		doc  string
+		// contain pins required rendered fragments of the canonical output
+		contain []string
+	}{
+		{
+			name: "Mixed",
+			doc: "intro paragraph with $a \\rightarrow b$ inline math.\n\n" +
+				"$$e^{i\\pi} + 1 = 0$$\n\n" +
+				"$$\np \\rightarrow q\n\nr \\leftarrow s\n$$\n\n" +
+				"```text\ncosts $5 and $$10 total\n```\n\n" +
+				"outro paragraph here.\n",
+			contain: []string{"→"},
+		},
+		{
+			// Adversarial container-opener shape (externally probed in the
+			// whole-branch review): the $$ on a LIST-MARKER line opens math
+			// in goldmark (the container strips the marker) but must NOT
+			// open the settle classifier's math state (trimmed content
+			// starts with '-', not $$). The blank line inside the item and
+			// the later TOP-LEVEL $$ — which settles the blank and DOES
+			// open classifier math — must stay chunk-invariant, and the
+			// item's math must render.
+			name:    "ContainerOpener",
+			doc:     "intro\n\n- $$\n  p \\rightarrow q\n\n$$\n\nafter\n",
+			contain: []string{"p → q", "after"},
+		},
+	}
+	for _, tt := range docs {
+		t.Run(tt.name, func(t *testing.T) {
+			r := mrand.New(mrand.NewPCG(7, 7))
+			strats := chunkStrategies(r, tt.doc)
+			first := streamCanonical(strats[0].deltas)
+			require.NotEmpty(t, first)
+			for _, s := range strats[1:] {
+				assert.Equal(t, first, streamCanonical(s.deltas), "chunking strategy %q diverged", s.name)
+			}
+			for _, want := range tt.contain {
+				assert.Contains(t, first, want, "canonical output missing %q", want)
+			}
+		})
 	}
 }
 

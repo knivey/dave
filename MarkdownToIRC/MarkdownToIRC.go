@@ -9,6 +9,7 @@ import (
 
 	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/alecthomas/chroma/v2/styles"
+	"github.com/doug/termtex"
 	"github.com/knivey/dave/MarkdownToIRC/irc"
 	"github.com/knivey/dave/MarkdownToIRC/tables"
 	"github.com/yuin/goldmark"
@@ -321,6 +322,19 @@ func (r *Renderer) renderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 		}
 	case extast.KindTableHeader, extast.KindTableRow:
 	case extast.KindTableCell:
+	case KindMathInline:
+		if entering {
+			r.writeMath(w, node.(*mathInline).Expression, "$")
+		}
+	case KindMathBlock:
+		if entering {
+			// Leading newline like every other block kind (see the note at
+			// KindHTMLBlock): without it a math block glues onto the previous
+			// block's last line, and the streaming renderer's settle points
+			// coincide with these block boundaries.
+			writes(w, node, "\n")
+			r.writeMath(w, node.(*mathBlock).Expression, "$$")
+		}
 	case extast.KindTaskCheckBox:
 		tc := node.(*extast.TaskCheckBox)
 		if entering {
@@ -483,6 +497,10 @@ func (r *Renderer) renderNodeTo(w io.Writer, node ast.Node) {
 				fmt.Fprint(w, string(seg.Value(r.source)))
 			}
 		}
+	case KindMathInline:
+		r.writeMath(w, node.(*mathInline).Expression, "$")
+	case KindMathBlock:
+		r.writeMath(w, node.(*mathBlock).Expression, "$$")
 	default:
 		if node.Type() == ast.TypeBlock || node.Type() == ast.TypeInline {
 			for c := node.FirstChild(); c != nil; c = c.NextSibling() {
@@ -492,11 +510,38 @@ func (r *Renderer) renderNodeTo(w io.Writer, node ast.Node) {
 	}
 }
 
+// writeMath renders a math node's expression to single-line Unicode via
+// termtex.
+//
+// DESIGN NOTE — Inline:true is forced for BOTH inline and block math.
+// termtex's default (display) style typesets fractions stacked over a ─ bar
+// across multiple rows — correct for a monospace terminal, useless on IRC
+// where clients use proportional fonts and every line is an independent
+// PRIVMSG (stacked art cannot align). The Inline "text style" flattens
+// fractions to a/b and keeps everything on ONE row, which survives every
+// client. termtex's own goldmark renderer uses display style for $$ blocks;
+// we deliberately override that because our output target is IRC, not a
+// terminal.
+//
+// DESIGN NOTE — raw fallback: on a render error (malformed LaTeX, e.g.
+// "\frac{" → "unclosed brace group") or empty rendered output, the ORIGINAL
+// delimiters + raw expression are written verbatim so no model output is
+// ever lost: the raw $...$ text is exactly what the user saw before math
+// support existed, so degradation equals the previous behavior.
+func (r *Renderer) writeMath(w io.Writer, expr []byte, delim string) {
+	if out, err := termtex.Render(string(expr), termtex.Style{Inline: true}); err == nil && out != "" {
+		fmt.Fprint(w, out)
+		return
+	}
+	fmt.Fprint(w, delim+string(expr)+delim)
+}
+
 func MarkdownToIRC(response string) string {
 	md := goldmark.New(
 		goldmark.WithExtensions(
 			extension.Table,
 			extension.TaskList,
+			&mathExtension{},
 		),
 		goldmark.WithRenderer(&Renderer{}),
 	)
@@ -511,6 +556,7 @@ func MarkdownToIRCStream(response string) string {
 		goldmark.WithExtensions(
 			extension.TaskList,
 			extension.Table,
+			&mathExtension{},
 		),
 		goldmark.WithRenderer(r),
 	)
@@ -560,6 +606,7 @@ type StreamingRenderer struct {
 	fenceLen    int
 	fenceIndent int    // leading-column of the opener; 0 = top-level fence
 	htmlTag     string // open <pre>/<script>/<style>/<textarea> span, "" = none
+	mathOpen    bool   // inside an open $$ math block (block-parser rule: trimmed content starts with $$)
 	blankEnd    int    // offset past the last blank line of the current run; 0 = none
 
 	emitted string // output prefix already returned to the caller
@@ -697,6 +744,28 @@ func afterListMarker(line string) (string, bool) {
 
 var htmlSpanTags = []string{"pre", "script", "style", "textarea"}
 
+// isMathBlockOpener reports whether a trimmed line opens a multi-line $$
+// math block: it must start with $$ and NOT carry another $$ later on the
+// same line (that is a complete single-line block, which never holds the
+// stream). Mirrors mathBlockParser.Open's rule exactly.
+//
+// Safety of the classifier-vs-parser mismatch: the classifier opens on any
+// trimmed-$$-prefixed line, while the parser only runs where a block start
+// is legal — a $$ line inside an open fence or HTML span (handled earlier
+// in scan's switch) or indented ≥4 (indented code) never opens a math
+// block, so both directions of divergence only make the classifier hold
+// LONGER. The parser also opens math the classifier cannot see
+// (container-prefixed openers like "- $$" or "> $$"), but those can never
+// span a CLASSIFIER-VISIBLE blank run that a later top-level line would
+// settle on: a blank line closes a blockquote (and its math child), and
+// post-blank list-item content is indented or marker-lined, which the
+// settle rule already holds. The classifier therefore never settles inside
+// a math block the parser still has open. Settling is deliberately
+// conservative: holding longer only delays output, never corrupts it.
+func isMathBlockOpener(trimmed string) bool {
+	return strings.HasPrefix(trimmed, "$$") && !strings.Contains(trimmed[2:], "$$")
+}
+
 // htmlSpanOpen matches an HTML block whose close tag may be far away and
 // which can therefore span blank lines (CommonMark HTML block types 1/2).
 func htmlSpanOpen(line string) (string, bool) {
@@ -748,6 +817,15 @@ func (s *StreamingRenderer) scan() {
 				s.htmlTag = ""
 			}
 			s.blankEnd = 0
+		case s.mathOpen:
+			// A $$ math block spans blank lines, so every line that does not
+			// itself start a new trimmed $$ is expression content — blank
+			// lines included. Blank runs are suppressed exactly like an open
+			// fence's; the block can never be cut mid-expression.
+			if strings.HasPrefix(trimmed, "$$") {
+				s.mathOpen = false
+			}
+			s.blankEnd = 0
 		case trimmed == "":
 			s.blankEnd = lineEnd
 		default:
@@ -772,7 +850,9 @@ func (s *StreamingRenderer) scan() {
 				detect = stripped
 				containerFence = true
 			}
-			if ch, n, ok := openingFence(detect); ok {
+			if isMathBlockOpener(trimmed) {
+				s.mathOpen = true
+			} else if ch, n, ok := openingFence(detect); ok {
 				s.fenceChar, s.fenceLen = ch, n
 				s.fenceIndent = leadingWidth(line)
 				if containerFence {

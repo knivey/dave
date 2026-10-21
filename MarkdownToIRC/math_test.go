@@ -114,6 +114,28 @@ func TestMathBlockMultilineRetainsAllLines(t *testing.T) {
 	})
 }
 
+// TestMathBlockOpenerTailIsContent pins the Pandoc display-math semantics:
+// the opener line's tail after the leading $$ is the FIRST CONTENT LINE of
+// the expression, not a fenced-code info string to discard (termtex's
+// parser drops it — silent equation-text loss).
+func TestMathBlockOpenerTailIsContent(t *testing.T) {
+	runTests(t, []mdTest{
+		{
+			name:       "OpenerTailIsFirstContentLine",
+			input:      "$$E = mc^2\n\\text{rest}\n$$",
+			contain:    []string{"E = mc²", "rest"},
+			notContain: []string{"$$", "\\text"},
+		},
+		{
+			// whitespace-only tail == bare opener: nothing is stashed
+			name:       "WhitespaceOnlyTailLikeBareOpener",
+			input:      "$$   \np \\rightarrow q\n$$",
+			contain:    []string{"→"},
+			notContain: []string{"\\rightarrow"},
+		},
+	})
+}
+
 // TestStreamingMathHeldUntilClosed: a multi-line $$ math block spans blank
 // lines, so a blank INSIDE the open block must not settle — the block is
 // held like an open fence and released by the normal settle rules once
@@ -171,6 +193,14 @@ func TestStreamingMathChunkInvariance(t *testing.T) {
 			doc:     "intro\n\n- $$\n  p \\rightarrow q\n\n$$\n\nafter\n",
 			contain: []string{"p → q", "after"},
 		},
+		{
+			// Opener-tail shape (Pandoc semantics: the $$ opener line's
+			// tail is the first content line): chunk-invariant AND the tail
+			// must render.
+			name:    "OpenerTail",
+			doc:     "$$E = mc^2\n\\text{rest}\n$$\n\nafter\n",
+			contain: []string{"E = mc²", "after"},
+		},
 	}
 	for _, tt := range docs {
 		t.Run(tt.name, func(t *testing.T) {
@@ -197,6 +227,7 @@ func TestStreamingMathParityWithNonStreaming(t *testing.T) {
 		"intro with $a \\rightarrow b$ inline.\n\nafter\n",
 		"$$x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}$$\n\nafter\n",
 		"$$\np \\rightarrow q\n\nr \\leftarrow s\n$$\n\nafter\n",
+		"$$E = mc^2\n\\text{rest}\n$$\n\nafter\n",
 	}
 	for _, doc := range docs {
 		assert.Equal(t, normalizeIRC(MarkdownToIRC(doc)), normalizeIRC(streamingRender(doc)),

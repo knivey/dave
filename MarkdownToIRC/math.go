@@ -61,11 +61,15 @@ func (n *mathInline) Dump(source []byte, level int) {
 // mathBlock is a display math block. Multi-line content accumulates in the
 // BaseBlock's own segment list (the fenced-code-block pattern) and is
 // joined into Expression when the parser's Close runs. A single-line
-// $$...$$ block is complete at Open.
+// $$...$$ block is complete at Open. For a multi-line block whose opener
+// line carries a tail after the leading $$, openerTail stashes that tail —
+// it is the block's FIRST CONTENT LINE (Pandoc semantics), prepended by
+// Close.
 type mathBlock struct {
 	ast.BaseBlock
 	Expression []byte
 	complete   bool // single-line $$...$$: Expression is final at Open
+	openerTail []byte
 }
 
 func (n *mathBlock) Kind() ast.NodeKind { return KindMathBlock }
@@ -200,9 +204,12 @@ func (p *mathBlockParser) Trigger() []byte { return []byte{'$'} }
 // NOT consume the line: the framework's AdvanceLine after a successful open
 // does. (termtex's parser advances here AND the framework advances again —
 // that double-advance eats the first content line; see the file comment.)
-// The opener line's tail after the $$ markers is DISCARDED — fenced-code
-// info-string semantics, matching termtex (Pandoc instead treats it as the
-// first content line).
+// The opener line's tail after the leading $$ is CONTENT — Pandoc
+// display-math semantics: it is stashed on the node and Close prepends it
+// as the first content line. Fenced-code info-string semantics (which
+// termtex's parser follows) would silently drop equation text — one more
+// reason we diverge from termtex's parser here. An empty/whitespace-only
+// tail stashes nothing (the canonical bare $$ opener is unchanged).
 func (p *mathBlockParser) Open(parent ast.Node, reader text.Reader, pc parser.Context) (ast.Node, parser.State) {
 	line, _ := reader.PeekLine()
 	trimmed := bytes.TrimSpace(line)
@@ -217,6 +224,9 @@ func (p *mathBlockParser) Open(parent ast.Node, reader text.Reader, pc parser.Co
 			complete:   true,
 		}
 		return node, parser.NoChildren
+	}
+	if tail := bytes.TrimSpace(rest); len(tail) > 0 {
+		return &mathBlock{openerTail: bytes.Clone(tail)}, parser.NoChildren
 	}
 	return &mathBlock{}, parser.NoChildren
 }
@@ -251,9 +261,10 @@ func (p *mathBlockParser) Continue(node ast.Node, reader text.Reader, pc parser.
 
 // Close joins the accumulated content lines into Expression: each segment
 // right-trimmed, lines joined with \n, the result trimmed overall (math has
-// no significant whitespace). Close runs for terminator-closed AND
-// EOF-terminated blocks, so an unclosed block still renders everything it
-// accumulated — no line is ever dropped.
+// no significant whitespace). A stashed opener-line tail is prepended as
+// the FIRST content line (Pandoc semantics — see Open). Close runs for
+// terminator-closed AND EOF-terminated blocks, so an unclosed block still
+// renders everything it accumulated — no line is ever dropped.
 func (p *mathBlockParser) Close(node ast.Node, reader text.Reader, pc parser.Context) {
 	mb := node.(*mathBlock)
 	if mb.complete {
@@ -261,7 +272,10 @@ func (p *mathBlockParser) Close(node ast.Node, reader text.Reader, pc parser.Con
 	}
 	source := reader.Source()
 	lines := mb.Lines()
-	parts := make([][]byte, 0, lines.Len())
+	parts := make([][]byte, 0, lines.Len()+1)
+	if len(mb.openerTail) > 0 {
+		parts = append(parts, mb.openerTail)
+	}
 	for i := 0; i < lines.Len(); i++ {
 		seg := lines.At(i)
 		parts = append(parts, util.TrimRightSpace(seg.Value(source)))

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 
@@ -131,8 +132,13 @@ func (p reasoningParts) any() bool {
 
 // addDetails appends verbatim detail items captured from the given
 // dialect. The first capture fixes the source; a later capture from a
-// different dialect is ignored (a single assistant row is one API
-// round-trip on one path — a second dialect would mean corrupted capture).
+// different dialect is DROPPED SILENTLY and deliberately: a single
+// assistant row is one API round-trip on one path, so a second dialect
+// means upstream corruption — there is no logger in this pure accumulator
+// (its callers include the serializer-facing parse helpers), and the raw
+// chunks in the api-logs are where such mixing is diagnosed. A WARN here
+// would require threading a logger through parseSDKResponseOutput's pure
+// signature for a state that should be unreachable.
 func (p *reasoningParts) addDetails(source string, items []json.RawMessage) {
 	if len(items) == 0 {
 		return
@@ -192,6 +198,10 @@ const (
 	detailsSourceChat      = "chat"
 	detailsSourceResponses = "responses"
 )
+
+// reasoningDetailsJSONKey is the substring pre-check target for the
+// streaming exact-capture hot path (extractStreamReasoningDetailsRaw).
+var reasoningDetailsJSONKey = []byte(`"reasoning_details"`)
 
 type reasoningDetailsEnvelope struct {
 	Source string            `json:"source"`
@@ -269,8 +279,14 @@ func splitReasoningDetails(details []ReasoningDetail) reasoningParts {
 // extractStreamReasoningDetailsRaw pulls delta.reasoning_details from a
 // streaming chat chunk as VERBATIM item bytes — the exact-replay capture
 // counterpart of extractStreamReasoning (which keeps only the fidelity
-// split). nil when absent or malformed.
+// split). nil when absent or malformed. The bytes.Contains pre-check keeps
+// providers that never emit the field (local llama.cpp) at literally zero
+// added parse cost on the per-chunk hot path — the 3-stage JSON walk only
+// runs for chunks that actually mention the key.
 func extractStreamReasoningDetailsRaw(chunkRaw []byte) []json.RawMessage {
+	if !bytes.Contains(chunkRaw, reasoningDetailsJSONKey) {
+		return nil
+	}
 	var raw struct {
 		Choices []struct {
 			Delta json.RawMessage `json:"delta"`

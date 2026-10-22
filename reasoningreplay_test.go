@@ -205,12 +205,23 @@ func TestReplayReasoningFilter(t *testing.T) {
 		assert.Equal(t, "cur think", msgs[5].ReasoningContent)
 	})
 
-	t.Run("always mode keeps everything", func(t *testing.T) {
-		msgs := build()
+	t.Run("always mode keeps content but strips details in text format", func(t *testing.T) {
+		// Regression pin (code review finding 1): the old always+text
+		// fast path returned the messages unstripped, leaving envelopes
+		// in the counted payload although text format NEVER puts details
+		// on the wire — inflating every "always"-mode session's neutral
+		// token count once capture-always-on started filling the column.
+		env := marshalReasoningDetailsEnvelope(detailsSourceChat, []json.RawMessage{
+			json.RawMessage(`{"type":"reasoning.encrypted","data":"eyJk"}`),
+		})
+		msgs := append(build(), ChatMessage{Role: RoleAssistant, Content: "with env", ReasoningContent: "think", ReasoningDetails: env})
 		filtered := replayReasoningFilter(msgs, ReasoningReplayAlways, ReasoningReplayFormatText)
 		assert.Equal(t, "hist tool think", filtered[1].ReasoningContent)
 		assert.Equal(t, "hist plain think", filtered[3].ReasoningContent)
 		assert.Equal(t, "cur think", filtered[5].ReasoningContent)
+		last := filtered[len(filtered)-1]
+		assert.Equal(t, "think", last.ReasoningContent, "always keeps eligible content")
+		assert.Empty(t, last.ReasoningDetails, "text format never rides details — the envelope must not be counted")
 	})
 
 	t.Run("off mode strips all reasoning", func(t *testing.T) {

@@ -83,11 +83,26 @@ func messagesToResponseInputItems(messages []ChatMessage, replay, format string)
 				echoed := false
 				if format == ReasoningReplayFormatDetails {
 					if src, rawItems, ok := parseReasoningDetailsEnvelope(msg.ReasoningDetails); ok && src == detailsSourceResponses {
+						// All-or-nothing: OpenRouter requires the echoed
+						// sequence to match the original output exactly, so ONE
+						// unbuildable item voids the whole echo (a subset would
+						// be a modified sequence) and the row falls through to
+						// the text form below. NOTE the echo is struct-mediated,
+						// not byte-for-byte: the SDK param models
+						// id/summary/encrypted_content/content(/status) -
+						// OpenRouter's documented echo shape - and any
+						// provider-specific extra field in a stored item is
+						// dropped rather than replayed (OpenAI-strict item
+						// fidelity stays a non-goal; see reasoningreplay.go).
+						echoItems := make([]responses.ResponseInputItemUnionParam, 0, len(rawItems))
 						for _, raw := range rawItems {
 							if item, itemOK := reasoningItemParamFromRaw(raw); itemOK {
-								items = append(items, item)
-								echoed = true
+								echoItems = append(echoItems, item)
 							}
+						}
+						if len(echoItems) == len(rawItems) {
+							items = append(items, echoItems...)
+							echoed = true
 						}
 					}
 				}
@@ -158,11 +173,20 @@ func reasoningReplayInputItem(rowIdx int, text string) responses.ResponseInputIt
 // unmarshal routes through the SDK's own param type — id, encrypted_content,
 // summary, and content parts all survive, which is the provider's own echo
 // shape (OpenRouter's preserving-reasoning example carries exactly these).
-// ok=false on unparseable bytes (the caller skips the item rather than
-// sending something half-built).
+//
+// The SDK's apijson unmarshal is maximally lenient — numbers, strings,
+// arrays, and null all "succeed" with a zeroed item — so the buildability
+// test is the ECHO SHAPE: a provider reasoning item always carries its id
+// (rs_…), and an id-less result means the stored bytes were not a reasoning
+// item. ok=false voids the item (the caller's all-or-nothing rule then
+// falls the row back to the text form rather than echoing a partial or
+// garbage sequence).
 func reasoningItemParamFromRaw(raw json.RawMessage) (responses.ResponseInputItemUnionParam, bool) {
 	var item responses.ResponseReasoningItemParam
 	if err := json.Unmarshal(raw, &item); err != nil {
+		return responses.ResponseInputItemUnionParam{}, false
+	}
+	if item.ID == "" {
 		return responses.ResponseInputItemUnionParam{}, false
 	}
 	return responses.ResponseInputItemUnionParam{OfReasoning: &item}, true
@@ -304,11 +328,14 @@ func buildResponseParams(cfg AIConfig, input []responses.ResponseInputItemUnionP
 	// request asks for reasoning.encrypted_content — without the include
 	// the response carries no encrypted material to capture and echo
 	// (OpenRouter's preserving-reasoning example sets exactly this
-	// include alongside echoed reasoning items). Providers that ignore
-	// the include simply return nothing encrypted and the replay degrades
-	// to the text form per-row. The text format sends no include so the
-	// request body stays byte-identical to the pre-knob behavior.
-	if reasoningReplayFormat(cfg) == ReasoningReplayFormatDetails {
+	// include alongside echoed reasoning items). Gated on the replay MODE
+	// too: the include exists solely to produce replay material, so
+	// reasoningreplay = "off" (nothing ever replays) skips it instead of
+	// paying the larger response/api-log on every request. Providers that
+	// ignore the include simply return nothing encrypted and the replay
+	// degrades to the text form per-row. The text format sends no include
+	// so the request body stays byte-identical to the pre-knob behavior.
+	if reasoningReplayFormat(cfg) == ReasoningReplayFormatDetails && reasoningReplay(cfg) != ReasoningReplayOff {
 		params.Include = []responses.ResponseIncludable{
 			responses.ResponseIncludableReasoningEncryptedContent,
 		}

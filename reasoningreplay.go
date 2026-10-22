@@ -190,9 +190,12 @@ func replayReasoningRow(m ChatMessage, replay, format string) bool {
 // callers share rows with the live history), and an input that needs no
 // stripping is returned unchanged.
 func replayReasoningFilter(messages []ChatMessage, replay, format string) []ChatMessage {
-	if replay == ReasoningReplayAlways && format != ReasoningReplayFormatDetails {
-		return messages
-	}
+	// No fast path: the pre-details "always returns unchanged" shortcut
+	// silently kept envelopes in the counted payload once details capture
+	// landed (text format never rides them on any path — code review
+	// finding 1). The loop below is the single source of truth for every
+	// mode+format combination; "always" is simply the mode where every
+	// eligible row keeps its (single) wire slot.
 	filtered := messages
 	changed := false
 	for i := range messages {

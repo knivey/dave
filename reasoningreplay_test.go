@@ -328,4 +328,17 @@ func TestReplayReasoningFilterDetails(t *testing.T) {
 		got := replayReasoningFilter(detailsOnly, ReasoningReplayAlways, ReasoningReplayFormatDetails)
 		assert.Equal(t, env, got[0].ReasoningDetails)
 	})
+
+	t.Run("off mode with details format strips everything", func(t *testing.T) {
+		// Matrix completeness: off is format-blind at the row level
+		// (TestReplayReasoningRowDetailsEligibility pins that), and the
+		// filter's off branch must stay so too — no combination of the
+		// two knobs lets reasoning ride the wire or the count.
+		msgs := []ChatMessage{
+			{Role: RoleAssistant, Content: "r", ReasoningContent: "think", ReasoningDetails: env, ToolCalls: []ToolCall{{ID: "t1"}}},
+		}
+		got := replayReasoningFilter(msgs, ReasoningReplayOff, ReasoningReplayFormatDetails)
+		assert.Empty(t, got[0].ReasoningContent)
+		assert.Empty(t, got[0].ReasoningDetails)
+	})
 }

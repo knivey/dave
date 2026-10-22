@@ -185,7 +185,9 @@ func replayReasoningRow(m ChatMessage, replay, format string) bool {
 // dialect will carry it), so a cross-dialect envelope — one the
 // path-specific serializer would skip in favor of text — still counts as
 // details here: a slight over-estimate in the rare service-switch case,
-// always in the conservative direction for compaction budgeting.
+// typically in the conservative direction for compaction budgeting (the
+// direction is not guaranteed: a cross-dialect row whose text fallback
+// outsizes its envelope can under-shoot).
 // Copy-on-write: the original slice and rows are never mutated (compaction
 // callers share rows with the live history), and an input that needs no
 // stripping is returned unchanged.

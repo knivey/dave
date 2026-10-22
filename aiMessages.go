@@ -209,8 +209,14 @@ type reasoningDetailsEnvelope struct {
 }
 
 // marshalReasoningDetailsEnvelope renders the exact-replay envelope. Items
-// marshal VERBATIM (json.RawMessage) — OpenRouter requires the sequence to
-// match the original output, so nothing may be dropped or re-encoded.
+// carry through value-for-value: OpenRouter requires the sequence to match
+// the original output, so nothing may be dropped or re-ordered. NOTE the
+// rendering is not literal byte preservation — json.Marshal re-encodes and
+// HTML-escapes (<, >, & → \u003c… even inside RawMessage compaction), so
+// stored/replayed bytes may differ cosmetically from the wire while every
+// value is identical; any JSON parser (and OpenRouter's matching) sees the
+// same sequence. If a provider ever rejects escaped replay, switch these
+// marshal sites to json.Encoder + SetEscapeHTML(false).
 func marshalReasoningDetailsEnvelope(source string, items []json.RawMessage) string {
 	if len(items) == 0 {
 		return ""

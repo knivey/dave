@@ -75,56 +75,58 @@ type incidentInfo struct {
 }
 
 type sanitizedAIConfig struct {
-	Name                string         `json:"name"`
-	Service             string         `json:"service"`
-	Model               string         `json:"model"`
-	Streaming           bool           `json:"streaming"`
-	MaxTokens           int            `json:"maxtokens,omitempty"`
-	MaxCompletionTokens int            `json:"maxcompletiontokens,omitempty"`
-	Temperature         float32        `json:"temperature,omitempty"`
-	RenderMarkdown      bool           `json:"rendermarkdown"`
-	MCPs                []string       `json:"mcps,omitempty"`
-	TopP                float32        `json:"topp,omitempty"`
-	PresencePenalty     float32        `json:"presencepenalty,omitempty"`
-	FrequencyPenalty    float32        `json:"frequencypenalty,omitempty"`
-	ReasoningEffort     string         `json:"reasoningeffort,omitempty"`
-	ReasoningSummary    string         `json:"reasoningsummary,omitempty"`
-	ResponsesAPI        bool           `json:"responses_api"`
-	PreviousResponseID  bool           `json:"previous_response_id"`
-	NeedsUserSuffix     bool           `json:"needsusersuffix,omitempty"`
-	InjectionRole       string         `json:"injection_role,omitempty"`
-	AsyncResultDelivery string         `json:"async_result_delivery,omitempty"`
-	ReasoningReplay     string         `json:"reasoningreplay,omitempty"`
-	Timeout             string         `json:"timeout,omitempty"`
-	StreamTimeout       string         `json:"streamtimeout,omitempty"`
-	ExtraBody           map[string]any `json:"extra_body,omitempty"`
-	System              string         `json:"system,omitempty"`
+	Name                  string         `json:"name"`
+	Service               string         `json:"service"`
+	Model                 string         `json:"model"`
+	Streaming             bool           `json:"streaming"`
+	MaxTokens             int            `json:"maxtokens,omitempty"`
+	MaxCompletionTokens   int            `json:"maxcompletiontokens,omitempty"`
+	Temperature           float32        `json:"temperature,omitempty"`
+	RenderMarkdown        bool           `json:"rendermarkdown"`
+	MCPs                  []string       `json:"mcps,omitempty"`
+	TopP                  float32        `json:"topp,omitempty"`
+	PresencePenalty       float32        `json:"presencepenalty,omitempty"`
+	FrequencyPenalty      float32        `json:"frequencypenalty,omitempty"`
+	ReasoningEffort       string         `json:"reasoningeffort,omitempty"`
+	ReasoningSummary      string         `json:"reasoningsummary,omitempty"`
+	ResponsesAPI          bool           `json:"responses_api"`
+	PreviousResponseID    bool           `json:"previous_response_id"`
+	NeedsUserSuffix       bool           `json:"needsusersuffix,omitempty"`
+	InjectionRole         string         `json:"injection_role,omitempty"`
+	AsyncResultDelivery   string         `json:"async_result_delivery,omitempty"`
+	ReasoningReplay       string         `json:"reasoningreplay,omitempty"`
+	ReasoningReplayFormat string         `json:"reasoningreplayformat,omitempty"`
+	Timeout               string         `json:"timeout,omitempty"`
+	StreamTimeout         string         `json:"streamtimeout,omitempty"`
+	ExtraBody             map[string]any `json:"extra_body,omitempty"`
+	System                string         `json:"system,omitempty"`
 }
 
 func sanitizeAIConfig(cfg AIConfig) sanitizedAIConfig {
 	s := sanitizedAIConfig{
-		Name:                cfg.Name,
-		Service:             cfg.Service,
-		Model:               cfg.Model,
-		Streaming:           cfg.Streaming,
-		MaxTokens:           cfg.MaxTokens,
-		MaxCompletionTokens: cfg.MaxCompletionTokens,
-		Temperature:         cfg.Temperature,
-		RenderMarkdown:      cfg.RenderMarkdown,
-		MCPs:                cfg.MCPs,
-		TopP:                cfg.TopP,
-		PresencePenalty:     cfg.PresencePenalty,
-		FrequencyPenalty:    cfg.FrequencyPenalty,
-		ReasoningEffort:     cfg.ReasoningEffort,
-		ReasoningSummary:    cfg.ReasoningSummary,
-		ResponsesAPI:        cfg.ResponsesAPI,
-		PreviousResponseID:  cfg.PreviousResponseID,
-		NeedsUserSuffix:     needsUserSuffix(cfg),
-		InjectionRole:       guidanceRole(cfg),
-		AsyncResultDelivery: asyncResultDelivery(cfg),
-		ReasoningReplay:     reasoningReplay(cfg),
-		ExtraBody:           cfg.ExtraBody,
-		System:              cfg.System,
+		Name:                  cfg.Name,
+		Service:               cfg.Service,
+		Model:                 cfg.Model,
+		Streaming:             cfg.Streaming,
+		MaxTokens:             cfg.MaxTokens,
+		MaxCompletionTokens:   cfg.MaxCompletionTokens,
+		Temperature:           cfg.Temperature,
+		RenderMarkdown:        cfg.RenderMarkdown,
+		MCPs:                  cfg.MCPs,
+		TopP:                  cfg.TopP,
+		PresencePenalty:       cfg.PresencePenalty,
+		FrequencyPenalty:      cfg.FrequencyPenalty,
+		ReasoningEffort:       cfg.ReasoningEffort,
+		ReasoningSummary:      cfg.ReasoningSummary,
+		ResponsesAPI:          cfg.ResponsesAPI,
+		PreviousResponseID:    cfg.PreviousResponseID,
+		NeedsUserSuffix:       needsUserSuffix(cfg),
+		InjectionRole:         guidanceRole(cfg),
+		AsyncResultDelivery:   asyncResultDelivery(cfg),
+		ReasoningReplay:       reasoningReplay(cfg),
+		ReasoningReplayFormat: reasoningReplayFormat(cfg),
+		ExtraBody:             cfg.ExtraBody,
+		System:                cfg.System,
 	}
 	if cfg.Timeout != 0 {
 		s.Timeout = cfg.Timeout.String()

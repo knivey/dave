@@ -27,6 +27,89 @@ func marshalInputItems(items []responses.ResponseInputItemUnionParam) [][]byte {
 	return out
 }
 
+// TestMessagesToResponseInputItemsReplayDetails pins the exact wire shape of
+// details-format replay on the Responses path: eligible rows echo their
+// stored RESPONSES-dialect items VERBATIM — the provider's own ids and
+// encrypted_content ride, not a synthetic rs_dave_* id — while text format
+// and unusable envelopes keep the synthetic item.
+func TestMessagesToResponseInputItemsReplayDetails(t *testing.T) {
+	respEnv := marshalReasoningDetailsEnvelope(detailsSourceResponses, []json.RawMessage{
+		json.RawMessage(`{"type":"reasoning","id":"rs_provider_1","encrypted_content":"gAAAAABbWexBz","summary":[{"type":"summary_text","text":"sum"}],"content":[{"type":"reasoning_text","text":"real think"}]}`),
+	})
+	chatEnv := marshalReasoningDetailsEnvelope(detailsSourceChat, []json.RawMessage{
+		json.RawMessage(`{"type":"reasoning.text","text":"x"}`),
+	})
+	msgs := []ChatMessage{
+		{Role: RoleUser, Content: "u"},
+		{Role: RoleAssistant, Content: "a", ReasoningContent: "text form", ReasoningDetails: respEnv, ToolCalls: []ToolCall{{ID: "t1", Type: "function", Function: FunctionCall{Name: "f", Arguments: "{}"}}}},
+	}
+
+	t.Run("details format echoes the provider item verbatim", func(t *testing.T) {
+		rawItems := marshalInputItems(messagesToResponseInputItems(msgs, ReasoningReplayToolCalls, ReasoningReplayFormatDetails))
+		var reasoning []map[string]any
+		for _, raw := range rawItems {
+			var m map[string]any
+			require.NoError(t, json.Unmarshal(raw, &m))
+			if m["type"] == "reasoning" {
+				reasoning = append(reasoning, m)
+			}
+		}
+		require.Len(t, reasoning, 1, "exactly one echoed reasoning item")
+		assert.Equal(t, "rs_provider_1", reasoning[0]["id"], "the PROVIDER's id rides — not a synthetic rs_dave_* id")
+		assert.Equal(t, "gAAAAABbWexBz", reasoning[0]["encrypted_content"], "encrypted content rides verbatim")
+		assert.Equal(t, "real think", reasoning[0]["content"].([]any)[0].(map[string]any)["text"])
+		assert.Equal(t, "sum", reasoning[0]["summary"].([]any)[0].(map[string]any)["text"])
+		// No synthetic item on rows that echoed.
+		for _, raw := range rawItems {
+			assert.NotContains(t, string(raw), "rs_dave_", "no synthetic item alongside the echo")
+		}
+	})
+
+	t.Run("text format keeps the synthetic item", func(t *testing.T) {
+		rawItems := marshalInputItems(messagesToResponseInputItems(msgs, ReasoningReplayToolCalls, ReasoningReplayFormatText))
+		found := false
+		for _, raw := range rawItems {
+			if strings.Contains(string(raw), "rs_dave_1") {
+				found = true
+			}
+			assert.NotContains(t, string(raw), "encrypted_content", "text format never echoes encrypted content")
+		}
+		assert.True(t, found, "synthetic text item present")
+	})
+
+	t.Run("chat-dialect envelope falls back to the synthetic item", func(t *testing.T) {
+		mismatch := []ChatMessage{
+			{Role: RoleUser, Content: "u"},
+			{Role: RoleAssistant, Content: "a", ReasoningContent: "born chat", ReasoningDetails: chatEnv},
+		}
+		rawItems := marshalInputItems(messagesToResponseInputItems(mismatch, ReasoningReplayAlways, ReasoningReplayFormatDetails))
+		found := false
+		for _, raw := range rawItems {
+			if strings.Contains(string(raw), "rs_dave_1") {
+				found = true
+			}
+			assert.NotContains(t, string(raw), "reasoning.text", "the chat-dialect array never rides the responses path")
+		}
+		assert.True(t, found, "text fallback item present")
+	})
+
+	t.Run("details-only row echoes without a text fallback", func(t *testing.T) {
+		detailsOnly := []ChatMessage{
+			{Role: RoleUser, Content: "u"},
+			{Role: RoleAssistant, Content: "final", ReasoningDetails: respEnv},
+		}
+		rawItems := marshalInputItems(messagesToResponseInputItems(detailsOnly, ReasoningReplayAlways, ReasoningReplayFormatDetails))
+		echoed := false
+		for _, raw := range rawItems {
+			if strings.Contains(string(raw), "rs_provider_1") {
+				echoed = true
+			}
+			assert.NotContains(t, string(raw), "rs_dave_", "no synthetic item — the echo is the whole replay")
+		}
+		assert.True(t, echoed, "eligibility widening: envelope-only row replays in details mode")
+	})
+}
+
 func TestMessagesToResponseInputItems(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -166,7 +249,7 @@ func TestMessagesToResponseInputItems(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := messagesToResponseInputItems(tt.messages, ReasoningReplayOff)
+			result := messagesToResponseInputItems(tt.messages, ReasoningReplayOff, ReasoningReplayFormatText)
 			require.Len(t, result, len(tt.wantParts), "input items count")
 			rawItems := marshalInputItems(result)
 			for i, raw := range rawItems {
@@ -192,7 +275,7 @@ func TestMessagesToResponseInputItems_ImageURLIsString(t *testing.T) {
 		},
 	}
 
-	input := messagesToResponseInputItems(msgs, ReasoningReplayOff)
+	input := messagesToResponseInputItems(msgs, ReasoningReplayOff, ReasoningReplayFormatText)
 	require.Len(t, input, 1, "input items")
 
 	rawItems := marshalInputItems(input)
@@ -229,7 +312,7 @@ func TestMessagesToResponseInputItems_TextPartIsInputText(t *testing.T) {
 		},
 	}
 
-	input := messagesToResponseInputItems(msgs, ReasoningReplayOff)
+	input := messagesToResponseInputItems(msgs, ReasoningReplayOff, ReasoningReplayFormatText)
 	rawItems := marshalInputItems(input)
 	var parsed map[string]any
 	json.Unmarshal(rawItems[0], &parsed)
@@ -318,6 +401,57 @@ func TestParseSDKResponseOutput(t *testing.T) {
 	assert.Equal(t, "get_weather", toolCalls[0].Function.Name, "toolCall.Name")
 }
 
+// TestParseSDKResponseOutputCapturesReasoningItems pins the exact-replay
+// capture on the Responses path: reasoning output items are stored VERBATIM
+// (id, encrypted_content, summary, content — every byte as received) under
+// source "responses", alongside the unchanged fidelity split. The stored
+// bytes come from the SDK's RawJSON passthrough — nothing is re-encoded.
+func TestParseSDKResponseOutputCapturesReasoningItems(t *testing.T) {
+	responseJSON := `{
+		"id": "resp_123",
+		"output": [
+			{
+				"type": "reasoning",
+				"id": "rs_abc123",
+				"encrypted_content": "gAAAAABbWexBz",
+				"content": [
+					{"type": "reasoning_text", "text": "the real thinking"}
+				],
+				"summary": [
+					{"type": "summary_text", "text": "I thought about it"}
+				]
+			},
+			{
+				"type": "message",
+				"role": "assistant",
+				"content": [
+					{"type": "output_text", "text": "Hello!"}
+				]
+			}
+		]
+	}`
+
+	var resp responses.Response
+	require.NoError(t, json.Unmarshal([]byte(responseJSON), &resp), "unmarshal")
+
+	text, parts, toolCalls := parseSDKResponseOutput(resp)
+	assert.Equal(t, "Hello!", text)
+	assert.Empty(t, toolCalls)
+	// Split unchanged.
+	assert.Equal(t, "the real thinking", parts.Content)
+	assert.Equal(t, "I thought about it", parts.Summary)
+	// Exact capture: one item, verbatim.
+	require.Len(t, parts.DetailsItems, 1)
+	assert.Equal(t, detailsSourceResponses, parts.DetailsSource)
+	assert.JSONEq(t, `{
+		"type": "reasoning",
+		"id": "rs_abc123",
+		"encrypted_content": "gAAAAABbWexBz",
+		"content": [{"type": "reasoning_text", "text": "the real thinking"}],
+		"summary": [{"type": "summary_text", "text": "I thought about it"}]
+	}`, string(parts.DetailsItems[0]))
+}
+
 func TestSDKResponseUsageToGogpt(t *testing.T) {
 	usageJSON := `{
 		"input_tokens": 100,
@@ -370,6 +504,30 @@ func TestBuildResponseParams_NoReasoningWhenUnset(t *testing.T) {
 	params := buildResponseParams(cfg, nil, nil, "", apiIdentity{})
 	assert.Empty(t, params.Reasoning.Effort, "Reasoning.Effort")
 	assert.Empty(t, params.Reasoning.Summary, "Reasoning.Summary")
+}
+
+// TestBuildResponseParams_DetailsInclude pins the capture-enabling include:
+// under reasoningreplayformat = "details" the Responses request asks for
+// reasoning.encrypted_content (OpenRouter's manual-state-management example
+// — without it there is no encrypted material to capture and echo), and the
+// text format keeps the request body byte-identical to before the knob.
+func TestBuildResponseParams_DetailsInclude(t *testing.T) {
+	t.Run("details format requests encrypted content", func(t *testing.T) {
+		cfg := AIConfig{Model: "test-model", ReasoningReplayFormat: ReasoningReplayFormatDetails}
+		params := buildResponseParams(cfg, nil, nil, "", apiIdentity{})
+		assert.Equal(t, []responses.ResponseIncludable{responses.ResponseIncludableReasoningEncryptedContent}, params.Include)
+	})
+
+	t.Run("text format sends no include", func(t *testing.T) {
+		cfg := AIConfig{Model: "test-model", ReasoningReplayFormat: ReasoningReplayFormatText}
+		params := buildResponseParams(cfg, nil, nil, "", apiIdentity{})
+		assert.Empty(t, params.Include)
+	})
+
+	t.Run("default (unset) sends no include", func(t *testing.T) {
+		params := buildResponseParams(AIConfig{Model: "test-model"}, nil, nil, "", apiIdentity{})
+		assert.Empty(t, params.Include)
+	})
 }
 
 func TestBuildResponseParams_ReasoningWireJSON(t *testing.T) {
@@ -457,7 +615,7 @@ func TestMessagesToResponseInputItems_NoReasoningItems(t *testing.T) {
 		{Role: RoleUser, Content: "hello"},
 		{Role: RoleAssistant, Content: "hi"},
 	}
-	input := messagesToResponseInputItems(messages, ReasoningReplayOff)
+	input := messagesToResponseInputItems(messages, ReasoningReplayOff, ReasoningReplayFormatText)
 
 	for _, item := range input {
 		assert.Nil(t, item.OfReasoning, "should not emit reasoning items")
@@ -478,7 +636,7 @@ func TestMessagesToResponseInputItemsReplayReasoning(t *testing.T) {
 
 	reasonings := func(t *testing.T, mode string) []map[string]any {
 		t.Helper()
-		rawItems := marshalInputItems(messagesToResponseInputItems(msgs, mode))
+		rawItems := marshalInputItems(messagesToResponseInputItems(msgs, mode, ReasoningReplayFormatText))
 		var out []map[string]any
 		for _, raw := range rawItems {
 			var item map[string]any
@@ -531,7 +689,7 @@ func TestMessagesToResponseInputItemsReplayReasoning(t *testing.T) {
 	})
 
 	t.Run("raw JSON shape is content-parts-only with no summary key", func(t *testing.T) {
-		rawItems := marshalInputItems(messagesToResponseInputItems(msgs, ReasoningReplayToolCalls))
+		rawItems := marshalInputItems(messagesToResponseInputItems(msgs, ReasoningReplayToolCalls, ReasoningReplayFormatText))
 		wantShapes := map[string]string{
 			"rs_dave_2": `{"type":"reasoning","id":"rs_dave_2","content":[{"type":"reasoning_text","text":"hist think tc"}]}`,
 			"rs_dave_6": `{"type":"reasoning","id":"rs_dave_6","content":[{"type":"reasoning_text","text":"cur think tc"}]}`,
@@ -560,7 +718,7 @@ func TestMessagesToResponseInputItemsReplayReasoning(t *testing.T) {
 			{Role: RoleAssistant, Content: "reply", ReasoningSummary: "summarized thinking"},
 		}
 		for _, mode := range []string{ReasoningReplayOff, ReasoningReplayToolCalls, ReasoningReplayAlways} {
-			rawItems := marshalInputItems(messagesToResponseInputItems(msgs, mode))
+			rawItems := marshalInputItems(messagesToResponseInputItems(msgs, mode, ReasoningReplayFormatText))
 			for _, raw := range rawItems {
 				assert.NotContains(t, string(raw), `"type":"reasoning"`,
 					"a summary-only row must never gain a reasoning item in mode %q", mode)
@@ -571,7 +729,7 @@ func TestMessagesToResponseInputItemsReplayReasoning(t *testing.T) {
 	})
 
 	t.Run("reasoning item precedes its message/function-call items", func(t *testing.T) {
-		rawItems := marshalInputItems(messagesToResponseInputItems(msgs, ReasoningReplayToolCalls))
+		rawItems := marshalInputItems(messagesToResponseInputItems(msgs, ReasoningReplayToolCalls, ReasoningReplayFormatText))
 		var items []map[string]any
 		for _, raw := range rawItems {
 			var item map[string]any
@@ -615,7 +773,7 @@ func TestMessagesToResponseInputItemsReplayReasoning(t *testing.T) {
 			{Role: RoleUser, Content: "u2"},
 			{Role: RoleAssistant, Content: "final", ReasoningContent: "past plain think"},
 		}
-		rawItems := marshalInputItems(messagesToResponseInputItems(past, ReasoningReplayToolCalls))
+		rawItems := marshalInputItems(messagesToResponseInputItems(past, ReasoningReplayToolCalls, ReasoningReplayFormatText))
 		var reasoningItems []map[string]any
 		for _, raw := range rawItems {
 			var item map[string]any

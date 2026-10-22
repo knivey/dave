@@ -34,6 +34,12 @@ type ChatMessage struct {
 	// form — display/log-only, never serialized, replayed, or counted
 	// (see reasoningParts in aiMessages.go).
 	ReasoningSummary string
+	// ReasoningDetails is the exact-replay envelope (aiMessages.go):
+	// verbatim reasoning detail items plus the dialect they were born in.
+	// Populated whenever the provider emits them (capture is always on);
+	// replayed verbatim only when reasoningreplayformat = "details" and
+	// the request rides the same API path (see reasoningreplay.go).
+	ReasoningDetails string
 	MultiContent     []MessagePart
 	ToolCalls        []ToolCall
 	ToolCallID       string

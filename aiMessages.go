@@ -97,23 +97,60 @@ type ExtendedMessageResponse struct {
 
 // reasoningParts is captured model reasoning split by fidelity. The split
 // exists for replay fidelity: Content is the model's REAL thinking text and
-// the only thing that ever rides the wire back to a provider (Chat
-// Completions `reasoning_content` on assistant rows; Responses API
-// `reasoning` input items with content parts only); Summary is the
-// provider's summarized/annotated form (Responses `item.Summary[]`,
+// the only thing that rides the wire back to a provider in the default
+// "text" format (Chat Completions `reasoning_content` on assistant rows;
+// Responses API `reasoning` input items with content parts only); Summary
+// is the provider's summarized/annotated form (Responses `item.Summary[]`,
 // OpenRouter `reasoning_details` `reasoning.summary` entries, the
 // `[encrypted reasoning, id=…]` marker) — a summary is NOT the thinking, so
 // it is display/log-only and is NEVER serialized, replayed, or
-// token-counted. The two are deliberately never concatenated (except
-// display(), which prefers Content and falls back to Summary, and the
-// img-mcp enhancer's display-only note string).
+// token-counted. DetailsItems/DetailsSource are the exact-replay fidelity
+// for `reasoningreplayformat = "details"` (see reasoningreplay.go). The
+// forms are deliberately never concatenated (except display(), which
+// prefers Content and falls back to Summary, and the img-mcp enhancer's
+// display-only note string).
 type reasoningParts struct {
 	Content string
 	Summary string
+	// DetailsItems/DetailsSource are the EXACT-replay fidelity: verbatim
+	// reasoning detail items in arrival order (OpenRouter
+	// message.reasoning_details arrays — streaming chunks concatenate in
+	// order per OpenRouter's docs — or Responses API reasoning output
+	// items). Captured always (storage is local and cheap), replayed only
+	// when reasoningreplayformat = "details" (see reasoningreplay.go).
+	// Never displayable: encrypted blobs and structured items are not
+	// renderable text.
+	DetailsSource string
+	DetailsItems  []json.RawMessage
 }
 
 // any reports whether either fidelity was captured.
-func (p reasoningParts) any() bool { return p.Content != "" || p.Summary != "" }
+func (p reasoningParts) any() bool {
+	return p.Content != "" || p.Summary != "" || len(p.DetailsItems) > 0
+}
+
+// addDetails appends verbatim detail items captured from the given
+// dialect. The first capture fixes the source; a later capture from a
+// different dialect is ignored (a single assistant row is one API
+// round-trip on one path — a second dialect would mean corrupted capture).
+func (p *reasoningParts) addDetails(source string, items []json.RawMessage) {
+	if len(items) == 0 {
+		return
+	}
+	if p.DetailsSource == "" {
+		p.DetailsSource = source
+	}
+	if p.DetailsSource != source {
+		return
+	}
+	p.DetailsItems = append(p.DetailsItems, items...)
+}
+
+// detailsEnvelope renders the storage form of the captured details ("" when
+// nothing was captured).
+func (p reasoningParts) detailsEnvelope() string {
+	return marshalReasoningDetailsEnvelope(p.DetailsSource, p.DetailsItems)
+}
 
 // display returns the human-facing form: the REAL content when captured
 // (the stranded answer is usually there), else the summary.
@@ -126,7 +163,10 @@ func (p reasoningParts) display() string {
 
 // logReasoning shows BOTH captured reasoning forms in the logs — the real
 // content and the provider's summary — each only when non-empty, so an
-// operator can see exactly what was captured in which fidelity slot.
+// operator can see exactly what was captured in which fidelity slot. The
+// exact-replay envelope logs PRESENCE ONLY (dialect + byte size): the
+// verbatim blobs are frequently kilobytes of base64 that would drown the
+// log line, and their content is fully visible in the api-logs anyway.
 func logReasoning(logger logxi.Logger, parts reasoningParts) {
 	if parts.Content != "" {
 		logger.Info("reasoning", "content", parts.Content)
@@ -134,6 +174,65 @@ func logReasoning(logger logxi.Logger, parts reasoningParts) {
 	if parts.Summary != "" {
 		logger.Info("reasoning summary", "content", parts.Summary)
 	}
+	if len(parts.DetailsItems) > 0 {
+		if env := parts.detailsEnvelope(); env != "" {
+			logger.Info("reasoning details", "source", parts.DetailsSource, "bytes", len(env))
+		}
+	}
+}
+
+// Detail-source dialects for the exact-replay envelope. The payload's wire
+// shape differs per API: "chat" is an OpenRouter message.reasoning_details
+// array (replayed as an extra field on the assistant row), "responses" is
+// Responses API reasoning output items (replayed as standalone reasoning
+// input items). Exact replay only ever happens on the dialect the payload
+// was born on — cross-dialect conversion would modify the sequence, which
+// OpenRouter's preserving-reasoning contract forbids.
+const (
+	detailsSourceChat      = "chat"
+	detailsSourceResponses = "responses"
+)
+
+type reasoningDetailsEnvelope struct {
+	Source string            `json:"source"`
+	Items  []json.RawMessage `json:"items"`
+}
+
+// marshalReasoningDetailsEnvelope renders the exact-replay envelope. Items
+// marshal VERBATIM (json.RawMessage) — OpenRouter requires the sequence to
+// match the original output, so nothing may be dropped or re-encoded.
+func marshalReasoningDetailsEnvelope(source string, items []json.RawMessage) string {
+	if len(items) == 0 {
+		return ""
+	}
+	data, err := json.Marshal(reasoningDetailsEnvelope{Source: source, Items: items})
+	if err != nil {
+		// RawMessage items already parsed as JSON; marshal cannot fail.
+		return ""
+	}
+	return string(data)
+}
+
+// parseReasoningDetailsEnvelope is the storage-side inverse. ok=false for
+// empty/corrupt/unknown-dialect payloads — callers fall back to the text
+// form (reasoning_content) exactly as if nothing had been captured.
+func parseReasoningDetailsEnvelope(s string) (source string, items []json.RawMessage, ok bool) {
+	if s == "" {
+		return "", nil, false
+	}
+	var env reasoningDetailsEnvelope
+	if err := json.Unmarshal([]byte(s), &env); err != nil {
+		return "", nil, false
+	}
+	switch env.Source {
+	case detailsSourceChat, detailsSourceResponses:
+	default:
+		return "", nil, false
+	}
+	if len(env.Items) == 0 {
+		return "", nil, false
+	}
+	return env.Source, env.Items, true
 }
 
 // splitReasoningDetails splits OpenRouter reasoning_details entries by
@@ -165,6 +264,34 @@ func splitReasoningDetails(details []ReasoningDetail) reasoningParts {
 		Content: strings.Join(contentParts, "\n"),
 		Summary: strings.Join(summaryParts, "\n"),
 	}
+}
+
+// extractStreamReasoningDetailsRaw pulls delta.reasoning_details from a
+// streaming chat chunk as VERBATIM item bytes — the exact-replay capture
+// counterpart of extractStreamReasoning (which keeps only the fidelity
+// split). nil when absent or malformed.
+func extractStreamReasoningDetailsRaw(chunkRaw []byte) []json.RawMessage {
+	var raw struct {
+		Choices []struct {
+			Delta json.RawMessage `json:"delta"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(chunkRaw, &raw); err != nil || len(raw.Choices) == 0 {
+		return nil
+	}
+	var delta map[string]json.RawMessage
+	if err := json.Unmarshal(raw.Choices[0].Delta, &delta); err != nil {
+		return nil
+	}
+	arr, ok := delta["reasoning_details"]
+	if !ok {
+		return nil
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(arr, &items); err != nil {
+		return nil
+	}
+	return items
 }
 
 func extractStreamReasoning(rawBytes []byte) reasoningParts {
@@ -215,6 +342,37 @@ func extractReasoningFromField(rawBytes []byte) string {
 		json.Unmarshal(r, &reasoning)
 	}
 	return reasoning
+}
+
+// extractRawReasoningDetails pulls message.reasoning_details from a
+// non-streaming chat completion body as VERBATIM item bytes. Unlike
+// splitReasoningDetails (which keeps only the replayable-text and summary
+// slots), this is the exact-replay capture: every field — signature, id,
+// format, encrypted data — must survive into storage because OpenRouter's
+// preserving-reasoning contract requires the echoed sequence to match the
+// original output. nil when absent or malformed.
+func extractRawReasoningDetails(body []byte) []json.RawMessage {
+	var raw struct {
+		Choices []struct {
+			Message json.RawMessage `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil || len(raw.Choices) == 0 {
+		return nil
+	}
+	var msg map[string]json.RawMessage
+	if err := json.Unmarshal(raw.Choices[0].Message, &msg); err != nil {
+		return nil
+	}
+	arr, ok := msg["reasoning_details"]
+	if !ok {
+		return nil
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal(arr, &items); err != nil {
+		return nil
+	}
+	return items
 }
 
 func extractResponseReasoning(rawBytes []byte) (reasoning string, reasoningDetails []ReasoningDetail) {

@@ -329,6 +329,13 @@ type AIConfig struct {
 	// (default) | "always". See reasoningreplay.go for the gemma4-derived
 	// semantics and the per-provider wire contracts.
 	ReasoningReplay string `toml:"reasoningreplay"`
+	// ReasoningReplayFormat controls the WIRE FORM eligible rows replay
+	// in: "text" (default, reasoning_content string — the llama.cpp /
+	// DeepSeek / OpenRouter-alias dialect) | "details" (the exact
+	// reasoning_details array / reasoning items as captured, OpenRouter's
+	// preserving-reasoning contract). Orthogonal to ReasoningReplay (which
+	// decides WHICH rows); see reasoningreplay.go.
+	ReasoningReplayFormat string `toml:"reasoningreplayformat"`
 	// ContextWindow is the model's context-window size in tokens for
 	// THIS command's model — compaction budgeting varies per model more
 	// than per service, so the command can override the service value.
@@ -364,31 +371,32 @@ type AIConfig struct {
 }
 
 type Service struct {
-	Key                  string
-	Type                 string // "openai" (default) or "llama"
-	MaxTokens            int    `toml:"maxtokens"`
-	MaxCompletionTokens  int    `toml:"maxcompletiontokens"`
-	BaseURL              string
-	Temperature          float32
-	ImageFormat          string        `toml:"imageformat"`
-	ImageQuality         int           `toml:"imagequality"`
-	MaxImageSize         string        `toml:"maximagesize"`
-	Timeout              time.Duration `toml:"timeout"`
-	StreamTimeout        time.Duration `toml:"streamtimeout"`
-	ToolVerbose          *bool         `toml:"toolverbose"`
-	ParallelToolCalls    *bool         `toml:"paralleltoolcalls"`
-	Parallel             int           `toml:"parallel"`
-	APIUser              string        `toml:"api_user"`
-	LoadNotice           *bool         `toml:"load_notice"`
-	BBCode               *bool         `toml:"bbcode"`                // output filter: translate BBCode tags to IRC codes
-	BBCodeStyles         *bool         `toml:"bbcode_styles"`         // output filter: also translate [b]/[i]/[u]/[s] toggles (bbcode alone is color-only)
-	NeedsUserSuffix      *bool         `toml:"needsusersuffix"`       // guidance Knob 2: tri-state, nil = auto (anthropic/)
-	InjectionRole        string        `toml:"injection_role"`        // guidance Knob 1: system (default) | developer | user
-	AsyncResultDelivery  string        `toml:"async_result_delivery"` // async results: "message" (default) | "tool" round-trip
-	ReasoningReplay      string        `toml:"reasoningreplay"`       // reasoning history replay: "off" | "tool_calls" (default) | "always"
-	DisabledBuiltinTools []string      `toml:"disabled_builtin_tools"`
-	HiddenMCPTools       []string      `toml:"hidden_mcp_tools"`
-	HiddenMCPToolSets    []string      `toml:"hidden_mcp_tool_sets"`
+	Key                   string
+	Type                  string // "openai" (default) or "llama"
+	MaxTokens             int    `toml:"maxtokens"`
+	MaxCompletionTokens   int    `toml:"maxcompletiontokens"`
+	BaseURL               string
+	Temperature           float32
+	ImageFormat           string        `toml:"imageformat"`
+	ImageQuality          int           `toml:"imagequality"`
+	MaxImageSize          string        `toml:"maximagesize"`
+	Timeout               time.Duration `toml:"timeout"`
+	StreamTimeout         time.Duration `toml:"streamtimeout"`
+	ToolVerbose           *bool         `toml:"toolverbose"`
+	ParallelToolCalls     *bool         `toml:"paralleltoolcalls"`
+	Parallel              int           `toml:"parallel"`
+	APIUser               string        `toml:"api_user"`
+	LoadNotice            *bool         `toml:"load_notice"`
+	BBCode                *bool         `toml:"bbcode"`                // output filter: translate BBCode tags to IRC codes
+	BBCodeStyles          *bool         `toml:"bbcode_styles"`         // output filter: also translate [b]/[i]/[u]/[s] toggles (bbcode alone is color-only)
+	NeedsUserSuffix       *bool         `toml:"needsusersuffix"`       // guidance Knob 2: tri-state, nil = auto (anthropic/)
+	InjectionRole         string        `toml:"injection_role"`        // guidance Knob 1: system (default) | developer | user
+	AsyncResultDelivery   string        `toml:"async_result_delivery"` // async results: "message" (default) | "tool" round-trip
+	ReasoningReplay       string        `toml:"reasoningreplay"`       // reasoning history replay: "off" | "tool_calls" (default) | "always"
+	ReasoningReplayFormat string        `toml:"reasoningreplayformat"` // replay wire form: "text" (default) | "details" — see chats.toml
+	DisabledBuiltinTools  []string      `toml:"disabled_builtin_tools"`
+	HiddenMCPTools        []string      `toml:"hidden_mcp_tools"`
+	HiddenMCPToolSets     []string      `toml:"hidden_mcp_tool_sets"`
 	// ContextWindow is the model's context-window size in tokens, used by
 	// auto-compaction thresholding (see ShouldAutoCompact). 0 = not set,
 	// fall back to [compaction] context_window.
@@ -563,6 +571,15 @@ func (cfg *AIConfig) ApplyDefaults(service Service) {
 	}
 	if cfg.ReasoningReplay == "" {
 		cfg.ReasoningReplay = ReasoningReplayToolCalls
+	}
+	// Replay wire form (reasoningreplay.go): command > service > "text".
+	// "text" is byte-identical to the pre-knob behavior — "details" is the
+	// opt-in exact-replay dialect for services that accept it (OpenRouter).
+	if cfg.ReasoningReplayFormat == "" {
+		cfg.ReasoningReplayFormat = service.ReasoningReplayFormat
+	}
+	if cfg.ReasoningReplayFormat == "" {
+		cfg.ReasoningReplayFormat = ReasoningReplayFormatText
 	}
 	if cfg.DisabledBuiltinTools == nil {
 		cfg.DisabledBuiltinTools = service.DisabledBuiltinTools
@@ -831,6 +848,9 @@ func loadServicesFile(dir string, config *Config) error {
 			return err
 		}
 		if err := validateReasoningReplay(service.ReasoningReplay, fmt.Sprintf("services.%s", name)); err != nil {
+			return err
+		}
+		if err := validateReasoningReplayFormat(service.ReasoningReplayFormat, fmt.Sprintf("services.%s", name)); err != nil {
 			return err
 		}
 		if service.Parallel <= 0 {
@@ -1251,6 +1271,17 @@ func validateReasoningReplay(mode, where string) error {
 	return fmt.Errorf("%s reasoningreplay must be one of \"off\", \"tool_calls\", \"always\" (got %q)", where, mode)
 }
 
+// validateReasoningReplayFormat rejects unknown replay wire forms at load
+// time (reasoningReplayFormat's fallback exists only for hand-built configs
+// that skip ApplyDefaults).
+func validateReasoningReplayFormat(format, where string) error {
+	switch format {
+	case "", ReasoningReplayFormatText, ReasoningReplayFormatDetails:
+		return nil
+	}
+	return fmt.Errorf("%s reasoningreplayformat must be one of \"text\", \"details\" (got %q)", where, format)
+}
+
 func validateAndSetAPIUserTemplate(cfg *AIConfig, name, section string) error {
 	if cfg.APIUser == "" {
 		return nil
@@ -1289,6 +1320,9 @@ func validateAIConfig(cfg AIConfig, name, section string, config *Config) (AICon
 			return cfg, err
 		}
 		if err := validateReasoningReplay(cfg.ReasoningReplay, fmt.Sprintf("commands.%s.%s", section, name)); err != nil {
+			return cfg, err
+		}
+		if err := validateReasoningReplayFormat(cfg.ReasoningReplayFormat, fmt.Sprintf("commands.%s.%s", section, name)); err != nil {
 			return cfg, err
 		}
 		cfg.ApplyDefaults(service)

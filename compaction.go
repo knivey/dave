@@ -303,7 +303,7 @@ func summarySizeRatio(promptTokens, completionTokens int) float64 {
 //
 // The DECISION math (budget projection) is unchanged by which basis
 // wins: every path yields perMsg with the same 1.0 floor semantics.
-func tokensPerMessage(lastUsage *TurnUsage, liveMsgs []Message, model string, toolTokens int, replay string) (perMsg float64, basis string) {
+func tokensPerMessage(lastUsage *TurnUsage, liveMsgs []Message, model string, toolTokens int, replay, format string) (perMsg float64, basis string) {
 	if len(liveMsgs) == 0 {
 		// Nothing to average over; the floor below is the only sane
 		// answer so budget math can't divide to infinity.
@@ -334,9 +334,9 @@ func tokensPerMessage(lastUsage *TurnUsage, liveMsgs []Message, model string, to
 		}
 	} else if model != "" {
 		// replayReasoningFilter keeps the estimate wire-true: stored
-		// reasoning only counts when the resolved replay mode would put
-		// it on the next request.
-		tc := countMessageTokens(model, replayReasoningFilter(messagesToChat(rowsForProjection), replay))
+		// reasoning only counts when the resolved replay mode+format
+		// would put it on the next request.
+		tc := countMessageTokens(model, replayReasoningFilter(messagesToChat(rowsForProjection), replay, format))
 		perMsg = float64(tc.Tokens) / float64(len(rowsForProjection))
 		if tc.Encoding == "chars/4-estimate" {
 			// Encoder init failed (corrupt embedded data — unreachable
@@ -809,7 +809,7 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 	toolEnc, _ := getEncoder(toolEncName) // nil on init failure → estimateTokens, same degradation as the message side
 	toolTokens := countToolTokens(toolEnc, toolDefs)
 
-	perMsg, estBasis := tokensPerMessage(lastUsage, dbMsgs, cfg.Model, toolTokens, reasoningReplay(cfg))
+	perMsg, estBasis := tokensPerMessage(lastUsage, dbMsgs, cfg.Model, toolTokens, reasoningReplay(cfg), reasoningReplayFormat(cfg))
 	// Dave's own neutral token count of the payload the NEXT request
 	// would send: the FULL live history (live-path truncation was removed
 	// Oct 2026 — GetMessages returns everything), converted to
@@ -818,7 +818,7 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 	// the provider's accounting (or template) differs from the payload,
 	// not that the payload grew. Unconditional on model: an empty/unknown
 	// model still counts via the o200k_base approximation (Exact=false).
-	ourCount := countMessageTokens(cfg.Model, replayReasoningFilter(chatMsgs, reasoningReplay(cfg)))
+	ourCount := countMessageTokens(cfg.Model, replayReasoningFilter(chatMsgs, reasoningReplay(cfg), reasoningReplayFormat(cfg)))
 
 	// PROJECTION RECONCILIATION (supersedes the old "informational only"
 	// note that used to sit where the tool tokens are now counted): the
@@ -1117,7 +1117,7 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 	// (dave's neutral count of the post-compaction payload — pairs with
 	// the trigger log's pre-compaction count to bracket the event) and,
 	// when a model is configured, as LiveTokensEst.
-	postLiveCount := countMessageTokens(cfg.Model, replayReasoningFilter(postLiveChat, reasoningReplay(cfg)))
+	postLiveCount := countMessageTokens(cfg.Model, replayReasoningFilter(postLiveChat, reasoningReplay(cfg), reasoningReplayFormat(cfg)))
 	var liveTokensEst int
 	if cfg.Model != "" {
 		liveTokensEst = postLiveCount.Tokens
@@ -1271,6 +1271,7 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 				ToolCallID:         orig.ToolCallID,
 				ReasoningContent:   orig.ReasoningContent,
 				ReasoningSummary:   orig.ReasoningSummary,
+				ReasoningDetails:   orig.ReasoningDetails,
 				MultiContent:       orig.MultiContent,
 				IsAsyncResult:      orig.IsAsyncResult,
 				SourceCompactionID: &compIDForTag,

@@ -852,7 +852,7 @@ func tuiCmdTokenCount(parts []string, _ string) {
 	// tool map via toolDefsForConfig — getTools' exact assembly, so the
 	// count can never drift from the sent set).
 	tools := toolDefsForConfig(cfg)
-	ours := countRequestTokens(cfg.Model, replayReasoningFilter(msgs, reasoningReplay(cfg)), tools)
+	ours := countRequestTokens(cfg.Model, replayReasoningFilter(msgs, reasoningReplay(cfg), reasoningReplayFormat(cfg)), tools)
 
 	fmt.Fprintf(logView, "[white]Session #%d %s/%s model:%s service:%s[white]\n",
 		session.ID, tview.Escape(session.Network), tview.Escape(session.Channel),

@@ -96,6 +96,11 @@ type Message struct {
 	// form — display/log-only, never replayed (see reasoningParts in
 	// aiMessages.go).
 	ReasoningSummary *string `gorm:"type:text"`
+	// ReasoningDetails is the exact-replay envelope: verbatim reasoning
+	// detail items plus the API dialect they were born in (see
+	// aiMessages.go reasoningDetailsEnvelope). Captured always; replayed
+	// verbatim only under reasoningreplayformat = "details".
+	ReasoningDetails *string `gorm:"type:text"`
 	MultiContent     *string `gorm:"type:text"`
 	IsAsyncResult    bool    `gorm:"default:false"`
 	// Note: the DB still has a nullable settings_id column from an abandoned
@@ -340,7 +345,7 @@ func updateDBSessionResponseID(sessionID int64, responseID *string, model string
 		Updates(map[string]interface{}{"response_id": *responseID, "response_model": model}).Error
 }
 
-func insertDBMessage(sessionID int64, role, content string, toolCallsJSON *string, toolCallID *string, reasoningContent *string, reasoningSummary *string, multiContentJSON *string) error {
+func insertDBMessage(sessionID int64, role, content string, toolCallsJSON *string, toolCallID *string, reasoningContent *string, reasoningSummary *string, reasoningDetails *string, multiContentJSON *string) error {
 	msg := Message{
 		SessionID:        sessionID,
 		Role:             role,
@@ -349,6 +354,7 @@ func insertDBMessage(sessionID int64, role, content string, toolCallsJSON *strin
 		ToolCallID:       toolCallID,
 		ReasoningContent: reasoningContent,
 		ReasoningSummary: reasoningSummary,
+		ReasoningDetails: reasoningDetails,
 		MultiContent:     multiContentJSON,
 	}
 	if err := theDB.Create(&msg).Error; err != nil {
@@ -834,6 +840,7 @@ func cloneDBSession(sourceSessionID int64, targetNetwork, targetChannel string, 
 			ToolCallID:         m.ToolCallID,
 			ReasoningContent:   m.ReasoningContent,
 			ReasoningSummary:   m.ReasoningSummary,
+			ReasoningDetails:   m.ReasoningDetails,
 			MultiContent:       m.MultiContent,
 			IsAsyncResult:      m.IsAsyncResult,
 			Archived:           false,

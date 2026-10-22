@@ -2867,6 +2867,154 @@ func TestRunTurnStreamSplitReasoningCapture(t *testing.T) {
 		"reasoning.summary deltas accumulate into the separate Summary buffer")
 }
 
+// TestRunTurnNonStreamCapturesReasoningDetails pins the exact-replay capture
+// on the non-streaming chat path: the assistant row's stored envelope carries
+// message.reasoning_details VERBATIM (signature/id/format/encrypted data —
+// fields the fidelity split drops) under source "chat", while the existing
+// Content/Summary split behavior is unchanged.
+func TestRunTurnNonStreamCapturesReasoningDetails(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	sid := createTestSession(t, "testnet", "#101", "shrew", "testcmd", "svc", "m")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "hi"}))
+	messages, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+
+	body := `{"id":"c1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,` +
+		`"message":{"role":"assistant","content":"the answer","reasoning_details":[` +
+		`{"type":"reasoning.text","text":"real think","signature":"sha256:abc","id":"rs_1","format":"anthropic-claude-v1","index":0},` +
+		`{"type":"reasoning.encrypted","data":"eyJkYXRhIjoiIn0=","id":"rc_2"}]},` +
+		`"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, body)
+	}))
+	defer server.Close()
+
+	transport := newDaveTransport(nil, nil)
+	client := openai.NewClient(
+		option.WithAPIKey("test-key"),
+		option.WithBaseURL(server.URL+"/v1"),
+		option.WithHTTPClient(&http.Client{Transport: transport}),
+	)
+	outputCh := make(chan string, 8)
+	logger := logxi.New("test")
+	logger.SetLevel(logxi.LevelAll)
+	cr := &chatRunner{
+		openaiClient: &client,
+		transport:    transport,
+		httpClient:   &http.Client{Transport: transport},
+		baseURL:      server.URL + "/v1",
+		apiKey:       "test-key",
+		cfg:          AIConfig{Model: "m", Timeout: 10 * time.Second, RetryOnEmpty: intPtr(1)},
+		network:      Network{Name: "testnet"},
+		channel:      "#101",
+		nick:         "shrew",
+		logger:       logger,
+		ctx:          context.Background(),
+		outputCh:     outputCh,
+	}
+	cr.sessionID = sid
+
+	cr.runTurn(newTurnContext(sid, messages))
+
+	final, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	last := final[len(final)-1]
+	assert.Equal(t, RoleAssistant, last.Role)
+	assert.Equal(t, "the answer", last.Content)
+	// The existing split behavior is unchanged.
+	assert.Equal(t, "real think", last.ReasoningContent)
+	// The exact-replay envelope: verbatim items, source "chat". The
+	// signature and encrypted data bytes the typed split drops must be
+	// present here.
+	src, items, ok := parseReasoningDetailsEnvelope(last.ReasoningDetails)
+	require.True(t, ok, "envelope stored on the row: %q", last.ReasoningDetails)
+	assert.Equal(t, detailsSourceChat, src)
+	assert.Equal(t, []json.RawMessage{
+		json.RawMessage(`{"type":"reasoning.text","text":"real think","signature":"sha256:abc","id":"rs_1","format":"anthropic-claude-v1","index":0}`),
+		json.RawMessage(`{"type":"reasoning.encrypted","data":"eyJkYXRhIjoiIn0=","id":"rc_2"}`),
+	}, items)
+}
+
+// TestRunTurnStreamCapturesReasoningDetails pins the streaming exact-replay
+// capture: each chunk's delta.reasoning_details items append IN ORDER
+// (OpenRouter: "the complete reasoning sequence is built by concatenating
+// all chunks in order") into the row's envelope, verbatim — including
+// signature and encrypted-data bytes the fidelity split drops.
+func TestRunTurnStreamCapturesReasoningDetails(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	sid := createTestSession(t, "testnet", "#101", "shrew", "testcmd", "svc", "m")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "hi"}))
+	messages, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+
+	chunk := func(delta string, finish any) string {
+		return fmt.Sprintf(`data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":%s,"finish_reason":%s}]}`+"\n\n", delta, finish)
+	}
+	stream := chunk(`{"role":"assistant","content":"","reasoning_details":[{"type":"reasoning.text","text":"part one","signature":"sha256:first"},{"type":"reasoning.summary","summary":"sum"}]}`, `null`) +
+		chunk(`{"reasoning_details":[{"type":"reasoning.encrypted","data":"eyJwYXJ0LXR3byI=","id":"rc_9"}]}`, `null`) +
+		chunk(`{"content":"the answer"}`, `"stop"`) + "data: [DONE]\n\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, stream)
+	}))
+	defer server.Close()
+
+	transport := newDaveTransport(nil, nil)
+	client := openai.NewClient(
+		option.WithAPIKey("test-key"),
+		option.WithBaseURL(server.URL+"/v1"),
+		option.WithHTTPClient(&http.Client{Transport: transport}),
+	)
+	outputCh := make(chan string, 8)
+	logger := logxi.New("test")
+	logger.SetLevel(logxi.LevelAll)
+	cr := &chatRunner{
+		openaiClient: &client,
+		transport:    transport,
+		httpClient:   &http.Client{Transport: transport},
+		baseURL:      server.URL + "/v1",
+		apiKey:       "test-key",
+		cfg:          AIConfig{Model: "m", Timeout: 10 * time.Second, RetryOnEmpty: intPtr(1), Streaming: true, StreamTimeout: 5 * time.Second},
+		network:      Network{Name: "testnet"},
+		channel:      "#101",
+		nick:         "shrew",
+		logger:       logger,
+		ctx:          context.Background(),
+		outputCh:     outputCh,
+	}
+	cr.sessionID = sid
+
+	cr.runTurn(newTurnContext(sid, messages))
+
+	final, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	last := final[len(final)-1]
+	assert.Equal(t, RoleAssistant, last.Role)
+	assert.Equal(t, "the answer", last.Content)
+	// The split behavior is unchanged. Chunk 2's encrypted detail adds its
+	// marker to Summary (the stream path concatenates chunk summaries
+	// without a separator — pre-existing behavior).
+	assert.Equal(t, "part one", last.ReasoningContent)
+	assert.Equal(t, "sum[encrypted reasoning, id=rc_9]", last.ReasoningSummary)
+	// The envelope carries ALL items from BOTH chunks, in arrival order,
+	// verbatim.
+	src, items, ok := parseReasoningDetailsEnvelope(last.ReasoningDetails)
+	require.True(t, ok, "envelope stored on the row: %q", last.ReasoningDetails)
+	assert.Equal(t, detailsSourceChat, src)
+	assert.Equal(t, []json.RawMessage{
+		json.RawMessage(`{"type":"reasoning.text","text":"part one","signature":"sha256:first"}`),
+		json.RawMessage(`{"type":"reasoning.summary","summary":"sum"}`),
+		json.RawMessage(`{"type":"reasoning.encrypted","data":"eyJwYXJ0LXR3byI=","id":"rc_9"}`),
+	}, items)
+}
+
 // TestRunTurnStreamToolCallIterationLogsReasoning pins the INFO-log gap in
 // the streaming-chat tool round: the tool-call branch stores both reasoning
 // slots on the assistant tool-call message but skips flushStreamedOutput
@@ -2975,20 +3123,29 @@ func TestLogStreamCompletionEmitsBothReasoningFidelities(t *testing.T) {
 	const sessionID = int64(4242)
 	l.RestoreSession(sessionID, "testnet", "#log", 7)
 
+	var detailsParts reasoningParts
+	detailsParts.addDetails(detailsSourceChat, []json.RawMessage{
+		json.RawMessage(`{"type":"reasoning.encrypted","data":"eyJkYXRhIjoiIn0=","id":"rc_log"}`),
+	})
 	logStreamCompletion(sessionID, "m", "the answer",
 		reasoningParts{Content: "the real thinking", Summary: "the summarized thinking"},
 		nil, nil, RoleAssistant)
 	logStreamCompletion(sessionID, "m", "another",
 		reasoningParts{}, nil, nil, RoleAssistant)
+	logStreamCompletion(sessionID, "m", "third",
+		detailsParts, nil, nil, RoleAssistant)
 
 	data, err := os.ReadFile(l.GetSessionFilePath(sessionID))
 	require.NoError(t, err)
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	require.Len(t, lines, 2)
+	require.Len(t, lines, 3)
 	assert.Contains(t, lines[0], `"reasoning_content":"the real thinking"`)
 	assert.Contains(t, lines[0], `"reasoning_summary":"the summarized thinking"`)
 	assert.NotContains(t, lines[1], "reasoning_content", "empty parts must omit the key entirely")
 	assert.NotContains(t, lines[1], "reasoning_summary", "empty parts must omit the key entirely")
+	assert.Contains(t, lines[2], `"reasoning_details":[{"type":"reasoning.encrypted","data":"eyJkYXRhIjoiIn0=","id":"rc_log"}]`,
+		"the exact-replay items mirror into the reconstructed completion verbatim")
+	assert.NotContains(t, lines[1], "reasoning_details", "no capture, no key")
 }
 
 // TestRunTurnStreamReadsUsageTrailer pins the Oct 2026 production fix:

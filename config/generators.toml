@@ -44,6 +44,7 @@
 #   reasoningeffort      (string)                    For o1/o3 models: "low", "medium", "high"
 #   reasoningsummary     (string)                    Responses API only: request reasoning summaries back. "auto", "concise", or "detailed". Empty = not requested (no summaries returned).
 #   reasoningreplay      (string, default: "tool_calls") Replay stored assistant reasoning back onto the wire: "off" = never (pre-replay behavior); "tool_calls" = every assistant row with tool calls, current AND past turns (cross-turn thought context; gemma templates render past-turn rows only with chat_template_kwargs = { preserve_thinking = true } — dave sends regardless, rendering is the server's gate); "always" = every assistant row with reasoning, historical turns included (gemma templates can never render historical plain rows — the preserve arm requires tool_calls on the row). Wire: reasoning_content on assistant messages (llama.cpp chat templates / DeepSeek native / OpenRouter reasoning alias). Responses API: reasoning items carry the REAL content only (summary is display/log-only, never replayed; no-op on within-turn previous_response_id chains, which replay server-side). Cascade: command > service > "tool_calls".
+#   reasoningreplayformat (string, default: "text")      Wire form of reasoning replay: "text" = reasoning_content string (byte-identical to the pre-knob behavior); "details" = the EXACT captured structure (OpenRouter message.reasoning_details / Responses reasoning items with encrypted_content) per OpenRouter's preserving-reasoning contract — what encrypted/summarized models need for tool-loop reasoning continuity. Per-row fallback to text; eligibility widens to encrypted-only rows. See chats.toml reasoningreplayformat for the full description. Cascade: command > service > "text".
 #   servicetier          (string)                    Processing tier: "auto", "default", "flex", "priority"
 #   verbosity            (string)                    Output token count for gpt-5: "low", "medium", "high"
 #   mcps                 (string array)              Opt-in MCP server names for tool access
@@ -132,6 +133,7 @@
 # prompt = "Write a satirical article about the given topic."
 # system = "You are {{.BotNick}}, a tabloid hack for {{.Channel}} on {{.Network}}. Mine query_channel_logs for material; deliver the finished article with the respond tool."
 # reasoningreplay = "tool_calls"
+# reasoningreplayformat = "text"
 # [example.log]
 # window = "24h"
 # events = ["PRIVMSG", "NOTICE", "TOPIC", "KICK"]

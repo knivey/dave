@@ -126,6 +126,10 @@ func buildDBMessage(sessionID int64, msg ChatMessage) Message {
 	if msg.ReasoningSummary != "" {
 		reasoningSummary = &msg.ReasoningSummary
 	}
+	var reasoningDetails *string
+	if msg.ReasoningDetails != "" {
+		reasoningDetails = &msg.ReasoningDetails
+	}
 	var multiContentJSON *string
 	if len(msg.MultiContent) > 0 {
 		if mcData, err := json.Marshal(msg.MultiContent); err == nil {
@@ -141,6 +145,7 @@ func buildDBMessage(sessionID int64, msg ChatMessage) Message {
 		ToolCallID:       toolCallID,
 		ReasoningContent: reasoningContent,
 		ReasoningSummary: reasoningSummary,
+		ReasoningDetails: reasoningDetails,
 		MultiContent:     multiContentJSON,
 	}
 }
@@ -304,6 +309,9 @@ func messageFromDB(dm Message) ChatMessage {
 	}
 	if dm.ReasoningSummary != nil {
 		msg.ReasoningSummary = *dm.ReasoningSummary
+	}
+	if dm.ReasoningDetails != nil {
+		msg.ReasoningDetails = *dm.ReasoningDetails
 	}
 	if dm.ToolCalls != nil {
 		var toolCalls []ToolCall

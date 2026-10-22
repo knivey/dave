@@ -780,6 +780,7 @@ func (cr *chatRunner) handleToolCallResponse(turn *turnContext, text string, too
 		Content:          text,
 		ReasoningContent: parts.Content,
 		ReasoningSummary: parts.Summary,
+		ReasoningDetails: parts.detailsEnvelope(),
 		ToolCalls:        toolCalls,
 	}
 	turn.Add(assistantMsg)
@@ -844,7 +845,7 @@ func (cr *chatRunner) shouldRetryWithoutResponseID(usePrevID bool, err error, me
 	if err := sessionMgr.UpdateResponseID(cr.sessionID, nil, ""); err != nil {
 		cr.logger.Error("failed to clear response_id on retry", "session", cr.sessionID, "error", err)
 	}
-	return messagesToResponseInputItems(messages, reasoningReplay(cr.cfg)), "", true
+	return messagesToResponseInputItems(messages, reasoningReplay(cr.cfg), reasoningReplayFormat(cr.cfg)), "", true
 }
 
 type responsesStreamResult struct {
@@ -894,6 +895,7 @@ func (cr *chatRunner) runTurnResponsesStream(
 		Content:          text,
 		ReasoningContent: parts.Content,
 		ReasoningSummary: parts.Summary,
+		ReasoningDetails: parts.detailsEnvelope(),
 	}
 
 	if len(toolCalls) == 0 {
@@ -909,7 +911,7 @@ func (cr *chatRunner) runTurnResponsesStream(
 				emptyRetries:      emptyRetries + 1,
 				currentResponseID: "",
 				usePrevID:         false,
-				input:             messagesToResponseInputItems(turn.Messages(), reasoningReplay(cr.cfg)),
+				input:             messagesToResponseInputItems(turn.Messages(), reasoningReplay(cr.cfg), reasoningReplayFormat(cr.cfg)),
 			}
 		} else if newText != text {
 			text = newText
@@ -954,7 +956,7 @@ func (cr *chatRunner) runTurnResponsesStream(
 		toolResultMsgs := turn.LastN(numToolCalls)
 		newInput = toolResultMsgsToInputItems(toolResultMsgs)
 	} else {
-		newInput = messagesToResponseInputItems(turn.Messages(), reasoningReplay(cr.cfg))
+		newInput = messagesToResponseInputItems(turn.Messages(), reasoningReplay(cr.cfg), reasoningReplayFormat(cr.cfg))
 	}
 	return responsesStreamResult{
 		emptyRetries:      emptyRetries,
@@ -1094,6 +1096,12 @@ StreamLoop:
 			if chunkParts.Summary == "" {
 				chunkParts.Summary = d.Summary
 			}
+			// Exact-replay capture (reasoningreplay.go): the chunk's
+			// reasoning_details items append VERBATIM, in arrival order
+			// (OpenRouter: the complete sequence is built by
+			// concatenating all chunks in order). Capture is always on;
+			// replay is configured per service/command.
+			reasoningBuffer.addDetails(detailsSourceChat, extractStreamReasoningDetailsRaw(rawBytes))
 			if chunkParts.Content == "" {
 				if r := extractReasoningFromField(rawBytes); r != "" {
 					chunkParts.Content = r
@@ -1206,6 +1214,7 @@ StreamLoop:
 			Content:          content,
 			ReasoningContent: reasoningBuffer.Content,
 			ReasoningSummary: reasoningBuffer.Summary,
+			ReasoningDetails: reasoningBuffer.detailsEnvelope(),
 		})
 		if cr.ephemeral {
 			// Deferred emission: the final iteration's text, complete.
@@ -1258,6 +1267,7 @@ StreamLoop:
 		Content:          fullContent,
 		ReasoningContent: reasoningBuffer.Content,
 		ReasoningSummary: reasoningBuffer.Summary,
+		ReasoningDetails: reasoningBuffer.detailsEnvelope(),
 		ToolCalls:        accumulatedToolCalls,
 	}
 
@@ -1359,6 +1369,11 @@ func (cr *chatRunner) runTurn(turn *turnContext) bool {
 				parts.Summary = detailParts.Summary
 			}
 		}
+		// Exact-replay capture (reasoningreplay.go): the verbatim
+		// reasoning_details array rides the row regardless of the replay
+		// knob — capture is always on, replay is configured per
+		// service/command.
+		parts.addDetails(detailsSourceChat, extractRawReasoningDetails(capturedBody))
 		nonStreamTimings := extractTimings(capturedBody)
 
 		if len(toolCalls) == 0 {
@@ -1377,6 +1392,7 @@ func (cr *chatRunner) runTurn(turn *turnContext) bool {
 				Content:          content,
 				ReasoningContent: parts.Content,
 				ReasoningSummary: parts.Summary,
+				ReasoningDetails: parts.detailsEnvelope(),
 			})
 			out := FormatOutput(content)
 			cr.logger.Info(out)
@@ -1777,10 +1793,10 @@ func (cr *chatRunner) runTurnResponses(turn *turnContext) bool {
 	var input []responses.ResponseInputItemUnionParam
 	if usePrevID {
 		if len(turn.Messages()) > 0 {
-			input = messagesToResponseInputItems(turn.LastN(1), reasoningReplay(cr.cfg))
+			input = messagesToResponseInputItems(turn.LastN(1), reasoningReplay(cr.cfg), reasoningReplayFormat(cr.cfg))
 		}
 	} else {
-		input = messagesToResponseInputItems(turn.Messages(), reasoningReplay(cr.cfg))
+		input = messagesToResponseInputItems(turn.Messages(), reasoningReplay(cr.cfg), reasoningReplayFormat(cr.cfg))
 	}
 
 	emptyRetries := 0
@@ -1856,7 +1872,7 @@ func (cr *chatRunner) runTurnResponses(turn *turnContext) bool {
 				// old chain head alongside a full-history resend
 				// would duplicate context server-side. A successful
 				// retry starts a fresh chain.
-				input = messagesToResponseInputItems(turn.Messages(), reasoningReplay(cr.cfg))
+				input = messagesToResponseInputItems(turn.Messages(), reasoningReplay(cr.cfg), reasoningReplayFormat(cr.cfg))
 				currentResponseID = ""
 				usePrevID = false
 				continue
@@ -1868,6 +1884,7 @@ func (cr *chatRunner) runTurnResponses(turn *turnContext) bool {
 				Content:          content,
 				ReasoningContent: parts.Content,
 				ReasoningSummary: parts.Summary,
+				ReasoningDetails: parts.detailsEnvelope(),
 			}
 			turn.Add(assistantMsg)
 			out := FormatOutput(content)
@@ -1900,7 +1917,7 @@ func (cr *chatRunner) runTurnResponses(turn *turnContext) bool {
 			// chain currentResponseID or the provider loses all context.
 			usePrevID = true
 		} else {
-			input = messagesToResponseInputItems(turn.Messages(), reasoningReplay(cr.cfg))
+			input = messagesToResponseInputItems(turn.Messages(), reasoningReplay(cr.cfg), reasoningReplayFormat(cr.cfg))
 			// Full-history resend: the chain id must be dropped to match.
 			usePrevID = false
 		}
@@ -2491,6 +2508,12 @@ func logStreamCompletion(sessionID int64, model, content string, parts reasoning
 	}
 	if parts.Summary != "" {
 		msg["choices"].([]map[string]any)[0]["message"].(map[string]any)["reasoning_summary"] = parts.Summary
+	}
+	// The exact-replay items mirror verbatim ([]json.RawMessage marshals
+	// byte-for-byte), keeping the reconstructed completion shape-complete
+	// alongside the already-logged raw chunks.
+	if len(parts.DetailsItems) > 0 {
+		msg["choices"].([]map[string]any)[0]["message"].(map[string]any)["reasoning_details"] = parts.DetailsItems
 	}
 	if len(toolCalls) > 0 {
 		msg["choices"].([]map[string]any)[0]["tool_calls"] = toolCalls

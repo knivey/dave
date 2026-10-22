@@ -653,6 +653,16 @@ func TestRunTurnResponsesStreamSplitReasoningCapture(t *testing.T) {
 		"the reasoning item's content parts are the stored REAL content")
 	assert.Equal(t, "the summarized thinking", last.ReasoningSummary,
 		"the reasoning item's summary entries land in the separate summary slot")
+	// The exact-replay envelope: the completed response's reasoning item
+	// rides verbatim under the "responses" dialect (streaming capture is
+	// the authoritative response.completed parse — same as non-streaming).
+	src, items, ok := parseReasoningDetailsEnvelope(last.ReasoningDetails)
+	require.True(t, ok, "envelope stored on the streamed row: %q", last.ReasoningDetails)
+	assert.Equal(t, detailsSourceResponses, src)
+	require.Len(t, items, 1)
+	assert.Contains(t, string(items[0]), `"id":"rs_1"`,
+		"the provider's reasoning item id rides verbatim")
+	assert.Contains(t, string(items[0]), "the real thinking")
 }
 
 // TestRunTurnResponsesStreamDeltaBuffersFeedAPILog pins the delta-case

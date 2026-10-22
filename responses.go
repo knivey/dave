@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,7 +12,7 @@ import (
 	"github.com/openai/openai-go/v3/shared"
 )
 
-func messagesToResponseInputItems(messages []ChatMessage, replay string) []responses.ResponseInputItemUnionParam {
+func messagesToResponseInputItems(messages []ChatMessage, replay, format string) []responses.ResponseInputItemUnionParam {
 	input := make([]responses.ResponseInputItemUnionParam, 0, len(messages)*2)
 	for i, msg := range messages {
 		switch msg.Role {
@@ -64,19 +65,39 @@ func messagesToResponseInputItems(messages []ChatMessage, replay string) []respo
 		case RoleAssistant:
 			items := make([]responses.ResponseInputItemUnionParam, 0, 2+len(msg.ToolCalls))
 			// Reasoning history replay (reasoningreplay.go): eligible rows
-			// lead with a reasoning item so the provider (OpenRouter's
+			// lead with reasoning item(s) so the provider (OpenRouter's
 			// stateless proxy, llama.cpp's /v1/responses-adjacent paths)
-			// can rebuild the model's thought context. The item carries the
-			// stored REAL content only (reasoningReplayInputItem — content
-			// parts, no summary key: a summary is not the thinking and is
-			// display/log-only, never serialized). On
+			// can rebuild the model's thought context. On
 			// previous_response_id chains this never fires — the chained
 			// turns send delta-only tool-result items, and the server
-			// replays its own reasoning. With reasoningsummary unset AND
-			// no content captured this is a structural no-op: nothing was
-			// ever captured to replay.
-			if replayReasoningRow(msg, replay) {
-				items = append(items, reasoningReplayInputItem(i, msg.ReasoningContent))
+			// replays its own reasoning. The form is the format knob's
+			// choice — see the branches inside.
+			if replayReasoningRow(msg, replay, format) {
+				// Format "details": echo the row's stored RESPONSES-dialect
+				// items VERBATIM — the provider's own ids, encrypted_content,
+				// summary, content — per OpenRouter's preserving-reasoning
+				// contract (the sequence must match the original output). A
+				// chat-dialect envelope or no envelope falls back to the
+				// synthetic text item below (exact replay only happens on the
+				// path the payload was born on).
+				echoed := false
+				if format == ReasoningReplayFormatDetails {
+					if src, rawItems, ok := parseReasoningDetailsEnvelope(msg.ReasoningDetails); ok && src == detailsSourceResponses {
+						for _, raw := range rawItems {
+							if item, itemOK := reasoningItemParamFromRaw(raw); itemOK {
+								items = append(items, item)
+								echoed = true
+							}
+						}
+					}
+				}
+				// Text form (default, or the details fallback): the synthetic
+				// item carries the stored REAL content only — content parts,
+				// no summary key (a summary is not the thinking and is
+				// display/log-only, never serialized).
+				if !echoed && msg.ReasoningContent != "" {
+					items = append(items, reasoningReplayInputItem(i, msg.ReasoningContent))
+				}
 			}
 			if len(msg.ToolCalls) > 0 {
 				if msg.Content != "" {
@@ -130,6 +151,21 @@ func reasoningReplayInputItem(rowIdx int, text string) responses.ResponseInputIt
 	)
 	item.OfReasoning.Content = []responses.ResponseReasoningItemContentParam{{Text: text}}
 	return item
+}
+
+// reasoningItemParamFromRaw builds a Responses input item from a stored
+// verbatim reasoning item byte string (the exact-replay envelope). The
+// unmarshal routes through the SDK's own param type — id, encrypted_content,
+// summary, and content parts all survive, which is the provider's own echo
+// shape (OpenRouter's preserving-reasoning example carries exactly these).
+// ok=false on unparseable bytes (the caller skips the item rather than
+// sending something half-built).
+func reasoningItemParamFromRaw(raw json.RawMessage) (responses.ResponseInputItemUnionParam, bool) {
+	var item responses.ResponseReasoningItemParam
+	if err := json.Unmarshal(raw, &item); err != nil {
+		return responses.ResponseInputItemUnionParam{}, false
+	}
+	return responses.ResponseInputItemUnionParam{OfReasoning: &item}, true
 }
 
 func toolResultMsgsToInputItems(messages []ChatMessage) []responses.ResponseInputItemUnionParam {
@@ -194,6 +230,15 @@ func parseSDKResponseOutput(resp responses.Response) (text string, parts reasoni
 			for _, s := range item.Summary {
 				parts.Summary += s.Text
 			}
+			// Exact-replay capture (reasoningreplay.go): the item's
+			// VERBATIM bytes (id, encrypted_content, summary, content —
+			// via the SDK's RawJSON passthrough) under the "responses"
+			// dialect. Capture is always on; replay is configured per
+			// service/command. Multiple reasoning items (one before each
+			// message/function_call) append in output order.
+			if raw := item.AsReasoning().RawJSON(); raw != "" {
+				parts.addDetails(detailsSourceResponses, []json.RawMessage{json.RawMessage(raw)})
+			}
 		case "function_call":
 			toolCalls = append(toolCalls, ToolCall{
 				ID:   item.CallID,
@@ -253,6 +298,19 @@ func buildResponseParams(cfg AIConfig, input []responses.ResponseInputItemUnionP
 		params.Reasoning = shared.ReasoningParam{
 			Effort:  shared.ReasoningEffort(cfg.ReasoningEffort),
 			Summary: shared.ReasoningSummary(cfg.ReasoningSummary),
+		}
+	}
+	// Exact-replay capture (reasoningreplay.go): in details format the
+	// request asks for reasoning.encrypted_content — without the include
+	// the response carries no encrypted material to capture and echo
+	// (OpenRouter's preserving-reasoning example sets exactly this
+	// include alongside echoed reasoning items). Providers that ignore
+	// the include simply return nothing encrypted and the replay degrades
+	// to the text form per-row. The text format sends no include so the
+	// request body stays byte-identical to the pre-knob behavior.
+	if reasoningReplayFormat(cfg) == ReasoningReplayFormatDetails {
+		params.Include = []responses.ResponseIncludable{
+			responses.ResponseIncludableReasoningEncryptedContent,
 		}
 	}
 	if previousResponseID != "" {

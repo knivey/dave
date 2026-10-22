@@ -59,18 +59,43 @@ package main
 //
 // Replay fidelity split (aiMessages.go reasoningParts): capture stores the
 // model's REAL thinking text (messages.reasoning_content) separately from
-// the provider's summarized form (messages.reasoning_summary). Replay
-// sends ONLY the real content — a summary is not the thinking. Chat
-// Completions: reasoning_content on eligible assistant rows (never the
-// summary). Responses API: a reasoning input item carrying content parts
-// ONLY, with no summary key (reasoningReplayInputItem). The stored summary
-// is display/log-only and is NEVER serialized, replayed, or token-counted
-// on any path; with reasoningsummary unset AND no content captured,
-// Responses replay stays a structural no-op.
+// the provider's summarized form (messages.reasoning_summary), and — since
+// the reasoningreplayformat knob — ALSO the exact structure the provider
+// emitted (messages.reasoning_details, the envelope; captured always).
+// Replay form is the format knob's choice: "text" sends ONLY the real
+// content — Chat Completions `reasoning_content` on eligible assistant
+// rows (never the summary); Responses API a reasoning input item carrying
+// content parts only, with no summary key (reasoningReplayInputItem).
+// "details" sends the envelope's VERBATIM items — Chat Completions
+// `reasoning_details` on the assistant row (OpenRouter's preserving-
+// reasoning contract: the sequence must match the original output, which
+// is why capture is verbatim and replay is unmodified); Responses API the
+// provider's own reasoning items echoed back (ids, encrypted_content,
+// summary, content). Exact replay only happens on the API dialect the
+// payload was born on; a cross-dialect envelope or a missing one falls
+// back to the text form per-row. The stored summary is display/log-only
+// and is NEVER serialized, replayed, or token-counted on any path; with
+// reasoningsummary unset AND no content captured, the text form is a
+// structural no-op. OpenAI-strict reasoning-item validation remains a
+// deliberate non-goal (dave persists the echoed shape, not OpenAI's full
+// item taxonomy; OpenAI services chain server-side and never replay).
 const (
 	ReasoningReplayOff       = "off"
 	ReasoningReplayToolCalls = "tool_calls"
 	ReasoningReplayAlways    = "always"
+)
+
+// Replay wire forms (reasoningreplayformat). "text" is the default and is
+// byte-identical to the pre-knob behavior. "details" is the opt-in exact
+// dialect: OpenRouter's preserving-reasoning contract ("pass the full
+// reasoning_details block … the sequence must match the outputs generated
+// by the model during the original request") — the stored envelope's
+// verbatim items ride the wire, with per-row fallback to the text form
+// when a row captured nothing (or captured the OTHER API dialect — exact
+// replay only happens on the path the payload was born on).
+const (
+	ReasoningReplayFormatText    = "text"
+	ReasoningReplayFormatDetails = "details"
 )
 
 // reasoningReplay resolves the replay mode defensively: valid values pass
@@ -85,24 +110,52 @@ func reasoningReplay(cfg AIConfig) string {
 	return ReasoningReplayToolCalls
 }
 
+// reasoningReplayFormat resolves the replay wire form defensively: valid
+// values pass through, hand-built configs that skipped ApplyDefaults/load
+// validation fall back to "text" (the behavior-compatible default) rather
+// than leaking a garbage string into the serializers. Mirrors
+// reasoningReplay above.
+func reasoningReplayFormat(cfg AIConfig) string {
+	switch cfg.ReasoningReplayFormat {
+	case ReasoningReplayFormatText, ReasoningReplayFormatDetails:
+		return cfg.ReasoningReplayFormat
+	}
+	return ReasoningReplayFormatText
+}
+
 // replayReasoningRow is the single eligibility predicate — whether row m's
-// stored reasoning goes on the wire in mode replay. Both serializers (add
-// reasoning_content / reasoning items) and the token-accounting filter
-// (strip what won't be serialized) call this, so the two can never drift.
+// stored reasoning goes on the wire in mode replay and format format. Both
+// serializers (attach reasoning_content / reasoning items), the token-
+// accounting filter (strip what won't be serialized), and the eligibility
+// tests call this, so they can never drift.
 //
-// Requires: assistant role, non-empty ReasoningContent (the REAL thinking
-// text). A summary-only row — ReasoningSummary set, ReasoningContent empty
-// — is NEVER eligible in any mode: the summary is display/log-only and
-// never rides the wire. Then: "always" takes any such row; "tool_calls"
-// takes tool-call rows at ANY position — the current turn's agentic loop
-// AND past tool-call turns (the owner's cross-turn thought-context choice;
-// rendering of past-turn rows is the server's preserve_thinking gate, the
-// admin's chat_template_kwargs — dave only decides what is on the wire);
-// "off" and unknown raw modes replay nothing except that unknown modes are
-// mapped to tool_calls semantics, mirroring the resolver so a hand-built-
-// AIConfig call can never widen what validation rejected.
-func replayReasoningRow(m ChatMessage, replay string) bool {
-	if m.Role != RoleAssistant || m.ReasoningContent == "" {
+// Requires: assistant role, and replayable material for the format —
+// non-empty ReasoningContent (the REAL thinking text) in "text" mode; in
+// "details" mode additionally a parseable exact-replay envelope (the
+// eligibility WIDENING: an encrypted-only row — summary/encrypted details,
+// no real text, e.g. Claude via OpenRouter — finally has replayable
+// material). A summary-only row — ReasoningSummary set, nothing else — is
+// NEVER eligible in any mode/format: the summary is display/log-only and
+// never rides the wire. Then the mode gate: "always" takes any eligible
+// row; "tool_calls" takes tool-call rows at ANY position — the current
+// turn's agentic loop AND past tool-call turns (the owner's cross-turn
+// thought-context choice; rendering of past-turn rows is the server's
+// preserve_thinking gate, the admin's chat_template_kwargs — dave only
+// decides what is on the wire); "off" and unknown raw modes replay nothing
+// except that unknown modes are mapped to tool_calls semantics, mirroring
+// the resolver so a hand-built AIConfig call can never widen what
+// validation rejected. Unknown raw formats fall back to "text" semantics
+// (reasoningReplayFormat's default).
+func replayReasoningRow(m ChatMessage, replay, format string) bool {
+	if m.Role != RoleAssistant {
+		return false
+	}
+	hasText := m.ReasoningContent != ""
+	hasDetails := false
+	if format == ReasoningReplayFormatDetails {
+		_, _, hasDetails = parseReasoningDetailsEnvelope(m.ReasoningDetails)
+	}
+	if !hasText && !hasDetails {
 		return false
 	}
 	switch replay {
@@ -117,23 +170,47 @@ func replayReasoningRow(m ChatMessage, replay string) bool {
 	return len(m.ToolCalls) > 0
 }
 
-// replayReasoningFilter pre-strips ReasoningContent from rows that mode
-// replay would NOT put on the wire: the token accounting passes its
-// messages through this so countMessageTokens sees exactly the payload
-// that will be serialized ("neutral count of the payload it sends" holds
-// in both directions of the knob). ReasoningSummary is irrelevant here —
-// it never rides the wire in any mode, so it is never counted. Copy-on-
-// write: the original slice and rows are never mutated (compaction callers
-// share rows with the live history), and an input that needs no stripping
-// is returned unchanged.
-func replayReasoningFilter(messages []ChatMessage, replay string) []ChatMessage {
-	if replay == ReasoningReplayAlways {
+// replayReasoningFilter pre-strips what mode+format would NOT put on the
+// wire: the token accounting passes its messages through this so
+// countMessageTokens sees exactly the payload that will be serialized (the
+// "neutral count of the payload it sends" contract holds in every
+// direction of both knobs). ReasoningSummary is irrelevant here — it never
+// rides the wire in any mode, so it is never counted.
+//
+// Format handling mirrors the serializers' choice per row: in "details"
+// format a row with a parseable envelope counts the ENVELOPE (its Content
+// is stripped — the serializers put the exact items on the wire INSTEAD of
+// the text, never both), a row without one counts the text fallback. The
+// filter is path-agnostic (it runs before the request knows which API
+// dialect will carry it), so a cross-dialect envelope — one the
+// path-specific serializer would skip in favor of text — still counts as
+// details here: a slight over-estimate in the rare service-switch case,
+// always in the conservative direction for compaction budgeting.
+// Copy-on-write: the original slice and rows are never mutated (compaction
+// callers share rows with the live history), and an input that needs no
+// stripping is returned unchanged.
+func replayReasoningFilter(messages []ChatMessage, replay, format string) []ChatMessage {
+	if replay == ReasoningReplayAlways && format != ReasoningReplayFormatDetails {
 		return messages
 	}
 	filtered := messages
 	changed := false
 	for i := range messages {
-		if replayReasoningRow(messages[i], replay) || messages[i].ReasoningContent == "" {
+		eligible := replayReasoningRow(messages[i], replay, format)
+		var stripContent, stripDetails bool
+		if !eligible {
+			stripContent = messages[i].ReasoningContent != ""
+			stripDetails = messages[i].ReasoningDetails != ""
+		} else if format == ReasoningReplayFormatDetails {
+			if _, _, ok := parseReasoningDetailsEnvelope(messages[i].ReasoningDetails); ok {
+				stripContent = messages[i].ReasoningContent != ""
+			} else {
+				stripDetails = messages[i].ReasoningDetails != ""
+			}
+		} else {
+			stripDetails = messages[i].ReasoningDetails != ""
+		}
+		if !stripContent && !stripDetails {
 			continue
 		}
 		if !changed {
@@ -141,7 +218,12 @@ func replayReasoningFilter(messages []ChatMessage, replay string) []ChatMessage 
 			copy(filtered, messages)
 			changed = true
 		}
-		filtered[i].ReasoningContent = ""
+		if stripContent {
+			filtered[i].ReasoningContent = ""
+		}
+		if stripDetails {
+			filtered[i].ReasoningDetails = ""
+		}
 	}
 	return filtered
 }

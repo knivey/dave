@@ -23,6 +23,7 @@
 #   injection_role       (string, default: "system") Guidance Knob 1 (cascades to commands): wire role for injected guidance payload rows. See chats.toml injection_role entry for the full description.
 #   async_result_delivery (string, default: "message") (cascades to commands) How completed background jobs are delivered to the model. See chats.toml async_result_delivery entry for the full description.
 #   reasoningreplay      (string, default: "tool_calls") (cascades to commands) Replay stored assistant reasoning back onto the wire. See chats.toml reasoningreplay entry for the full description.
+#   reasoningreplayformat (string, default: "text") (cascades to commands) Wire form of reasoning replay — text vs exact reasoning_details echo. See chats.toml reasoningreplayformat entry for the full description.
 #   paralleltoolcalls    (bool, default: true)       Enable parallel MCP tool calls
 #   parallel             (int, default: 1)           Max concurrent requests per command
 #   api_user             (string)                    Go template for the end-user identifier field (cascades to commands). Sent as safety_identifier + prompt_cache_key on OpenAI/xAI (prompt_cache_key on xAI chat completions rides the x-grok-conv-id header), user on OpenRouter chat completions and unknown providers. Variables: {{.Nick}}, {{.BotNick}}, {{.Channel}}, {{.Network}}, {{.Date}}, {{.Now}} (current time, e.g. "Monday 2006-01-02 15:04"), {{.SessionID}}, {{.AsyncResultRole}}, {{.Vars.*}}. Empty = not sent.
@@ -53,6 +54,7 @@
 # injection_role = "system"
 # async_result_delivery = "message"
 # reasoningreplay = "tool_calls"
+# reasoningreplayformat = "text"
 # toolverbose = true
 # paralleltoolcalls = true
 # parallel = 1

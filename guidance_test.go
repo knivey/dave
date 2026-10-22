@@ -17,7 +17,7 @@ func TestAsyncToolRoundTripWireShape(t *testing.T) {
 	require.NoError(t, err)
 
 	// Chat Completions wire shape
-	params := messagesToChatCompletionParams(msgs, ReasoningReplayToolCalls)
+	params := messagesToChatCompletionParams(msgs, ReasoningReplayToolCalls, ReasoningReplayFormatText)
 	require.Len(t, params, 2)
 	first, err := json.Marshal(params[0])
 	require.NoError(t, err)
@@ -29,7 +29,7 @@ func TestAsyncToolRoundTripWireShape(t *testing.T) {
 	assert.Contains(t, string(second), `"tool_call_id"`)
 
 	// Responses API wire shape
-	items := messagesToResponseInputItems(msgs, ReasoningReplayToolCalls)
+	items := messagesToResponseInputItems(msgs, ReasoningReplayToolCalls, ReasoningReplayFormatText)
 	require.Len(t, items, 2)
 	callJSON, err := json.Marshal(items[0])
 	require.NoError(t, err)

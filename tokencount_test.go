@@ -167,6 +167,28 @@ func TestCountMessageTokens(t *testing.T) {
 		assert.Greater(t, got.Tokens, base.Tokens)
 	})
 
+	t.Run("reasoning details envelope is counted when set", func(t *testing.T) {
+		// The replayed reasoning_details items ARE wire payload under
+		// reasoningreplayformat = "details" (replayReasoningFilter
+		// guarantees at most one of Content/Details survives to a
+		// wire-true count) — the envelope's items must contribute tokens,
+		// while a corrupt envelope contributes nothing.
+		env := marshalReasoningDetailsEnvelope(detailsSourceChat, []json.RawMessage{
+			json.RawMessage(`{"type":"reasoning.encrypted","data":"eyJkYXRhIjoiIn0=","id":"rc_1","signature":"sha256:abc123def456"}`),
+		})
+		without := []ChatMessage{{Role: RoleAssistant, Content: "answer"}}
+		with := []ChatMessage{{Role: RoleAssistant, Content: "answer", ReasoningDetails: env}}
+		got := countMessageTokens("gpt-4o", with)
+		base := countMessageTokens("gpt-4o", without)
+		assert.Greater(t, got.Tokens, base.Tokens,
+			"the items' bytes ride the wire in details mode — they must be counted")
+
+		corrupt := []ChatMessage{{Role: RoleAssistant, Content: "answer", ReasoningDetails: "not json"}}
+		gotCorrupt := countMessageTokens("gpt-4o", corrupt)
+		assert.Equal(t, base.Tokens, gotCorrupt.Tokens,
+			"an unparseable envelope never rides the wire and must not be counted")
+	})
+
 	t.Run("reasoning summary is never counted", func(t *testing.T) {
 		// ReasoningSummary never rides the wire on any path (display/
 		// log-only — see reasoningParts in aiMessages.go), so it must

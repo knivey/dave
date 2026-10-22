@@ -7,7 +7,7 @@ import (
 	"github.com/openai/openai-go/v3/shared"
 )
 
-func messagesToChatCompletionParams(messages []ChatMessage, replay string) []openai.ChatCompletionMessageParamUnion {
+func messagesToChatCompletionParams(messages []ChatMessage, replay, format string) []openai.ChatCompletionMessageParamUnion {
 	params := make([]openai.ChatCompletionMessageParamUnion, 0, len(messages))
 	for _, msg := range messages {
 		switch msg.Role {
@@ -61,19 +61,29 @@ func messagesToChatCompletionParams(messages []ChatMessage, replay string) []ope
 			} else {
 				param = openai.AssistantMessage(msg.Content)
 			}
-			// Reasoning history replay (reasoningreplay.go): the stored REAL
-			// reasoning content rides the assistant row as reasoning_content —
-			// the field llama.cpp feeds the gemma4 chat template (which renders
-			// it as a thought channel per its own gate), the field
-			// DeepSeek's API defines natively, and OpenRouter's documented
-			// alias of `reasoning`. replayReasoningRow decides eligibility
-			// so the serializer and the token accounting can never drift.
-			// The stored Summary (messages.reasoning_summary) never rides
-			// the wire on any path — it is display/log-only.
-			if replayReasoningRow(msg, replay) {
-				param.OfAssistant.SetExtraFields(map[string]any{
-					"reasoning_content": msg.ReasoningContent,
-				})
+			// Reasoning history replay (reasoningreplay.go): eligible rows
+			// replay in the configured format — "text" (default) rides the
+			// stored REAL reasoning content as reasoning_content; "details"
+			// rides the stored envelope's VERBATIM reasoning_details array
+			// (OpenRouter's preserving-reasoning contract), per-row falling
+			// back to text when no chat-dialect details were captured.
+			// Exactly one of the two fields ever rides a row. The stored
+			// Summary never rides the wire — display/log-only.
+			if replayReasoningRow(msg, replay, format) {
+				extra := map[string]any{}
+				if format == ReasoningReplayFormatDetails {
+					if src, items, ok := parseReasoningDetailsEnvelope(msg.ReasoningDetails); ok && src == detailsSourceChat {
+						if raw, err := json.Marshal(items); err == nil {
+							extra["reasoning_details"] = json.RawMessage(raw)
+						}
+					}
+				}
+				if _, hasDetails := extra["reasoning_details"]; !hasDetails && msg.ReasoningContent != "" {
+					extra["reasoning_content"] = msg.ReasoningContent
+				}
+				if len(extra) > 0 {
+					param.OfAssistant.SetExtraFields(extra)
+				}
 			}
 			params = append(params, param)
 
@@ -108,7 +118,7 @@ func toolsToChatCompletionToolParams(tools []Tool) []openai.ChatCompletionToolUn
 func buildChatCompletionParams(cfg AIConfig, messages []ChatMessage, tools []Tool, ident apiIdentity) openai.ChatCompletionNewParams {
 	params := openai.ChatCompletionNewParams{
 		Model:    cfg.Model,
-		Messages: messagesToChatCompletionParams(messages, reasoningReplay(cfg)),
+		Messages: messagesToChatCompletionParams(messages, reasoningReplay(cfg), reasoningReplayFormat(cfg)),
 	}
 	if ident.User != "" {
 		params.User = openai.String(ident.User)

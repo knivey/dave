@@ -44,6 +44,7 @@
 #   reasoningeffort      (string)                    For o1/o3 models: "low", "medium", "high"
 #   reasoningsummary     (string)                    Responses API only: request reasoning summaries back. "auto", "concise", or "detailed". Empty = not requested (no summaries returned).
 #   reasoningreplay      (string, default: "tool_calls") Replay stored assistant reasoning back onto the wire: "off" = never (pre-replay behavior); "tool_calls" = every assistant row with tool calls, current AND past turns (cross-turn thought context); gemma templates render past-turn rows only with chat_template_kwargs = { preserve_thinking = true } (dave sends regardless — rendering is the server's gate); "always" = every assistant row with reasoning (gemma templates can never render historical plain rows — the preserve arm requires tool_calls on the row). Wire: reasoning_content on assistant messages (llama.cpp chat templates / DeepSeek native / OpenRouter reasoning alias). Responses API: reasoning items carry the REAL content only (summary is display/log-only, never replayed; no-op on previous_response_id chains, which replay server-side). Cascade: command > service > "tool_calls".
+#   reasoningreplayformat (string, default: "text") WIRE FORM of reasoning replay for rows reasoningreplay makes eligible. "text" = reasoning_content string (the llama.cpp / DeepSeek / OpenRouter-alias dialect — byte-identical to the pre-knob behavior); "details" = the EXACT provider structure dave captured (OpenRouter message.reasoning_details verbatim on assistant rows; Responses API reasoning items echoed with the provider's own ids/encrypted_content/summary) per OpenRouter's preserving-reasoning contract — the form encrypted/summarized models (e.g. Claude via OpenRouter tool loops) need for reasoning continuity. Per-row fallback to text when nothing exact was captured; exact replay only on the API path the payload was born on (a chat-captured array never rides the Responses path and vice versa). "details" widens eligibility: rows whose only reasoning is encrypted/summary details (no real text) become replayable. responses_api = true + "details" additionally requests include: ["reasoning.encrypted_content"] so there is encrypted material to echo. Exact blobs re-enter the input token bill every turn — the cost is the tradeoff. Capture is ALWAYS on (the messages.reasoning_details column fills regardless); only replay is gated. Cascade: command > service > "text".
 #   servicetier          (string)                    Processing tier: "auto", "default", "flex", "priority"
 #   verbosity            (string)                    Output token count for gpt-5: "low", "medium", "high"
 #   chat_template_kwargs (map)                       Provider-specific parameters (nested in request body)
@@ -100,6 +101,7 @@
 # reasoningeffort = "medium"
 # reasoningsummary = "auto"
 # reasoningreplay = "tool_calls"
+# reasoningreplayformat = "text"
 # servicetier = "auto"
 # verbosity = "medium"
 # chat_template_kwargs = {enable_thinking = false}

@@ -54,6 +54,9 @@ type Message struct {
 	// ReasoningSummary mirrors the main Message struct (db.go) — keep the
 	// copies in sync.
 	ReasoningSummary *string `gorm:"type:text"`
+	// ReasoningDetails mirrors the main Message struct (db.go) — the
+	// exact-replay envelope. Keep the copies in sync.
+	ReasoningDetails *string `gorm:"type:text"`
 	MultiContent     *string `gorm:"type:text"`
 	IsAsyncResult    bool    `gorm:"default:false"`
 	// settings_id deliberately absent — dead column, never written (see

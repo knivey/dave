@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -79,7 +80,7 @@ func TestReplayReasoningRow(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, replayReasoningRow(msgs[tt.idx], tt.mode))
+			assert.Equal(t, tt.want, replayReasoningRow(msgs[tt.idx], tt.mode, ReasoningReplayFormatText))
 		})
 	}
 
@@ -88,12 +89,12 @@ func TestReplayReasoningRow(t *testing.T) {
 	// including the empty raw string, which the predicate arm matches
 	// directly).
 	t.Run("unknown raw mode falls back to tool_calls semantics", func(t *testing.T) {
-		assert.True(t, replayReasoningRow(msgs[6], "bogus"))
-		assert.False(t, replayReasoningRow(msgs[8], "bogus"))
+		assert.True(t, replayReasoningRow(msgs[6], "bogus", ReasoningReplayFormatText))
+		assert.False(t, replayReasoningRow(msgs[8], "bogus", ReasoningReplayFormatText))
 	})
 	t.Run("empty raw mode falls back to tool_calls semantics", func(t *testing.T) {
-		assert.True(t, replayReasoningRow(msgs[6], ""))
-		assert.False(t, replayReasoningRow(msgs[8], ""))
+		assert.True(t, replayReasoningRow(msgs[6], "", ReasoningReplayFormatText))
+		assert.False(t, replayReasoningRow(msgs[8], "", ReasoningReplayFormatText))
 	})
 
 	// Empty reasoning never qualifies in any mode, even eligible rows.
@@ -103,7 +104,7 @@ func TestReplayReasoningRow(t *testing.T) {
 			{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "t"}}},
 		}
 		for _, mode := range []string{ReasoningReplayOff, ReasoningReplayToolCalls, ReasoningReplayAlways} {
-			assert.False(t, replayReasoningRow(empty[1], mode), mode)
+			assert.False(t, replayReasoningRow(empty[1], mode, ReasoningReplayFormatText), mode)
 		}
 	})
 
@@ -119,7 +120,7 @@ func TestReplayReasoningRow(t *testing.T) {
 		}
 		for _, mode := range []string{ReasoningReplayOff, ReasoningReplayToolCalls, ReasoningReplayAlways} {
 			for idx := range summaryOnly {
-				assert.False(t, replayReasoningRow(summaryOnly[idx], mode), "mode %q row %d", mode, idx)
+				assert.False(t, replayReasoningRow(summaryOnly[idx], mode, ReasoningReplayFormatText), "mode %q row %d", mode, idx)
 			}
 		}
 	})
@@ -147,7 +148,7 @@ func TestSummaryOnlyRowNeverReplays(t *testing.T) {
 
 	t.Run("chat completions carries no reasoning_content", func(t *testing.T) {
 		for _, mode := range modes {
-			serialized := marshalChatParams(t, messagesToChatCompletionParams(summaryOnly, mode))
+			serialized := marshalChatParams(t, messagesToChatCompletionParams(summaryOnly, mode, ReasoningReplayFormatText))
 			for i, row := range serialized {
 				_, ok := row["reasoning_content"]
 				assert.False(t, ok, "mode %q row %d must not carry reasoning_content", mode, i)
@@ -157,7 +158,7 @@ func TestSummaryOnlyRowNeverReplays(t *testing.T) {
 
 	t.Run("responses carries no reasoning items", func(t *testing.T) {
 		for _, mode := range modes {
-			rawItems := marshalInputItems(messagesToResponseInputItems(summaryOnly, mode))
+			rawItems := marshalInputItems(messagesToResponseInputItems(summaryOnly, mode, ReasoningReplayFormatText))
 			for _, raw := range rawItems {
 				assert.NotContains(t, string(raw), `"type":"reasoning"`,
 					"mode %q must not emit a reasoning item", mode)
@@ -191,7 +192,7 @@ func TestReplayReasoningFilter(t *testing.T) {
 
 	t.Run("tool_calls mode keeps tool-row reasoning, strips plain reasoning", func(t *testing.T) {
 		msgs := build()
-		filtered := replayReasoningFilter(msgs, ReasoningReplayToolCalls)
+		filtered := replayReasoningFilter(msgs, ReasoningReplayToolCalls, ReasoningReplayFormatText)
 		// Tool rows keep their reasoning at ANY position — past turn
 		// (idx 1) and current turn (idx 5); the plain rows are stripped.
 		assert.Equal(t, "hist tool think", filtered[1].ReasoningContent)
@@ -206,7 +207,7 @@ func TestReplayReasoningFilter(t *testing.T) {
 
 	t.Run("always mode keeps everything", func(t *testing.T) {
 		msgs := build()
-		filtered := replayReasoningFilter(msgs, ReasoningReplayAlways)
+		filtered := replayReasoningFilter(msgs, ReasoningReplayAlways, ReasoningReplayFormatText)
 		assert.Equal(t, "hist tool think", filtered[1].ReasoningContent)
 		assert.Equal(t, "hist plain think", filtered[3].ReasoningContent)
 		assert.Equal(t, "cur think", filtered[5].ReasoningContent)
@@ -214,7 +215,7 @@ func TestReplayReasoningFilter(t *testing.T) {
 
 	t.Run("off mode strips all reasoning", func(t *testing.T) {
 		msgs := build()
-		filtered := replayReasoningFilter(msgs, ReasoningReplayOff)
+		filtered := replayReasoningFilter(msgs, ReasoningReplayOff, ReasoningReplayFormatText)
 		assert.Empty(t, filtered[1].ReasoningContent)
 		assert.Empty(t, filtered[3].ReasoningContent)
 		assert.Empty(t, filtered[5].ReasoningContent)
@@ -225,10 +226,95 @@ func TestReplayReasoningFilter(t *testing.T) {
 			{Role: RoleUser, Content: "u"},
 			{Role: RoleAssistant, Content: "a"},
 		}
-		assert.Equal(t, msgs, replayReasoningFilter(msgs, ReasoningReplayToolCalls))
+		assert.Equal(t, msgs, replayReasoningFilter(msgs, ReasoningReplayToolCalls, ReasoningReplayFormatText))
 	})
 
 	t.Run("nil slice safe", func(t *testing.T) {
-		assert.Nil(t, replayReasoningFilter(nil, ReasoningReplayToolCalls))
+		assert.Nil(t, replayReasoningFilter(nil, ReasoningReplayToolCalls, ReasoningReplayFormatText))
+	})
+}
+
+// TestReplayReasoningRowDetailsEligibility pins the eligibility widening
+// under the details format: a row whose ONLY replayable material is the
+// stored envelope (encrypted-only capture — e.g. Claude via OpenRouter,
+// no real text) is eligible in details mode and stays NOT eligible in text
+// mode (nothing displayable/replayable there). The mode gate still applies
+// on top: "off" never, "tool_calls" still requires tool calls on the row.
+func TestReplayReasoningRowDetailsEligibility(t *testing.T) {
+	env := marshalReasoningDetailsEnvelope(detailsSourceChat, []json.RawMessage{
+		json.RawMessage(`{"type":"reasoning.encrypted","data":"eyJk","id":"rc_1"}`),
+	})
+	detailsOnly := ChatMessage{Role: RoleAssistant, ReasoningDetails: env}
+
+	assert.True(t, replayReasoningRow(detailsOnly, ReasoningReplayAlways, ReasoningReplayFormatDetails),
+		"details mode: encrypted-only row is replayable material")
+	assert.False(t, replayReasoningRow(detailsOnly, ReasoningReplayToolCalls, ReasoningReplayFormatText),
+		"text mode: encrypted-only row has no replayable material")
+	assert.False(t, replayReasoningRow(detailsOnly, ReasoningReplayOff, ReasoningReplayFormatDetails),
+		"off never replays regardless of format")
+	assert.False(t, replayReasoningRow(detailsOnly, ReasoningReplayToolCalls, ReasoningReplayFormatDetails),
+		"tool_calls mode still requires tool calls on the row")
+
+	detailsTC := detailsOnly
+	detailsTC.ToolCalls = []ToolCall{{ID: "t1"}}
+	assert.True(t, replayReasoningRow(detailsTC, ReasoningReplayToolCalls, ReasoningReplayFormatDetails),
+		"details + tool calls row replays under tool_calls mode")
+
+	// A row with BOTH fidelities stays eligible in both formats.
+	both := ChatMessage{Role: RoleAssistant, ReasoningContent: "real think", ReasoningDetails: env}
+	assert.True(t, replayReasoningRow(both, ReasoningReplayAlways, ReasoningReplayFormatText))
+	assert.True(t, replayReasoningRow(both, ReasoningReplayAlways, ReasoningReplayFormatDetails))
+
+	// Corrupt envelope does not fake eligibility.
+	corrupt := ChatMessage{Role: RoleAssistant, ReasoningDetails: "not json"}
+	assert.False(t, replayReasoningRow(corrupt, ReasoningReplayAlways, ReasoningReplayFormatDetails),
+		"unparseable envelope is not replayable material")
+}
+
+// TestReplayReasoningFilterDetails pins the wire-true filter under the
+// details format: whatever will NOT ride the wire is stripped so the token
+// accounting counts exactly the payload the serializers emit. Details-mode
+// rows with a parseable envelope lose their Content (details ride INSTEAD
+// of the text — never both); rows without an envelope keep Content (text
+// fallback) and lose the empty/absent envelope; text mode always strips
+// Details. Not-eligible rows lose both.
+func TestReplayReasoningFilterDetails(t *testing.T) {
+	env := marshalReasoningDetailsEnvelope(detailsSourceChat, []json.RawMessage{
+		json.RawMessage(`{"type":"reasoning.encrypted","data":"eyJk"}`),
+	})
+	msgs := []ChatMessage{
+		{Role: RoleAssistant, Content: "r1", ReasoningContent: "think 1", ReasoningDetails: env, ToolCalls: []ToolCall{{ID: "t1"}}},
+		{Role: RoleAssistant, Content: "r2", ReasoningContent: "think 2"}, // not eligible under tool_calls
+	}
+
+	t.Run("details format keeps envelope and strips the text it replaces", func(t *testing.T) {
+		got := replayReasoningFilter(msgs, ReasoningReplayToolCalls, ReasoningReplayFormatDetails)
+		assert.Equal(t, env, got[0].ReasoningDetails, "eligible row keeps its envelope")
+		assert.Equal(t, "", got[0].ReasoningContent, "details ride INSTEAD of the text")
+		assert.Equal(t, "", got[1].ReasoningDetails, "not-eligible row loses Details")
+		assert.Equal(t, "", got[1].ReasoningContent, "not-eligible row loses Content")
+		// Copy-on-write: originals untouched.
+		assert.Equal(t, "think 1", msgs[0].ReasoningContent)
+		assert.Equal(t, "think 2", msgs[1].ReasoningContent)
+	})
+
+	t.Run("details format without envelope falls back to text", func(t *testing.T) {
+		noEnv := []ChatMessage{{Role: RoleAssistant, Content: "r", ReasoningContent: "think", ToolCalls: []ToolCall{{ID: "t"}}}}
+		got := replayReasoningFilter(noEnv, ReasoningReplayToolCalls, ReasoningReplayFormatDetails)
+		assert.Equal(t, "think", got[0].ReasoningContent, "no envelope: text rides")
+		assert.Equal(t, "", got[0].ReasoningDetails)
+	})
+
+	t.Run("text format strips Details everywhere", func(t *testing.T) {
+		got := replayReasoningFilter(msgs, ReasoningReplayToolCalls, ReasoningReplayFormatText)
+		assert.Equal(t, "think 1", got[0].ReasoningContent, "text rides")
+		assert.Equal(t, "", got[0].ReasoningDetails, "details never ride in text format")
+		assert.Equal(t, "", got[1].ReasoningContent)
+	})
+
+	t.Run("always mode with details-only row keeps the envelope", func(t *testing.T) {
+		detailsOnly := []ChatMessage{{Role: RoleAssistant, ReasoningDetails: env}}
+		got := replayReasoningFilter(detailsOnly, ReasoningReplayAlways, ReasoningReplayFormatDetails)
+		assert.Equal(t, env, got[0].ReasoningDetails)
 	})
 }

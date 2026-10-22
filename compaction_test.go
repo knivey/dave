@@ -632,8 +632,9 @@ func TestCallSummarizerMissingServiceErrorsEarly(t *testing.T) {
 // invariant that re-inserted preserved-tail rows are tagged with
 // SourceCompactionID = comp.ID. This tag is what the next compaction uses
 // to identify duplicates so it can supersede them instead of double-counting.
-// It also pins that the tail copy carries BOTH reasoning fidelities —
-// ReasoningContent and ReasoningSummary — like every other copied column.
+// It also pins that the tail copy carries ALL THREE reasoning fidelities —
+// ReasoningContent, ReasoningSummary, and the exact-replay envelope — like
+// every other copied column.
 func TestCompactSession_TagsTailCopiesWithSourceCompactionID(t *testing.T) {
 	setupTestDB(t)
 
@@ -656,6 +657,9 @@ func TestCompactSession_TagsTailCopiesWithSourceCompactionID(t *testing.T) {
 		if i == 5 {
 			reasoningMsg.ReasoningContent = "the real thinking"
 			reasoningMsg.ReasoningSummary = "the summarized thinking"
+			reasoningMsg.ReasoningDetails = marshalReasoningDetailsEnvelope(detailsSourceChat, []json.RawMessage{
+				json.RawMessage(`{"type":"reasoning.encrypted","data":"eyJrZXkiOiJ2YWx1ZSJ9","id":"rc_tail"}`),
+			})
 		}
 		require.NoError(t, sessionMgr.AddMessage(sid, reasoningMsg))
 	}
@@ -693,6 +697,13 @@ func TestCompactSession_TagsTailCopiesWithSourceCompactionID(t *testing.T) {
 			require.NotNil(t, m.ReasoningSummary,
 				"the tail copy must carry ReasoningSummary alongside ReasoningContent")
 			assert.Equal(t, "the summarized thinking", *m.ReasoningSummary)
+			require.NotNil(t, m.ReasoningDetails,
+				"the tail copy must carry the exact-replay envelope alongside the split fidelities")
+			_, items, ok := parseReasoningDetailsEnvelope(*m.ReasoningDetails)
+			require.True(t, ok, "the tail-copied envelope still parses")
+			require.Len(t, items, 1)
+			assert.Contains(t, string(items[0]), "eyJrZXkiOiJ2YWx1ZSJ9",
+				"the encrypted bytes survive the tail copy verbatim")
 		}
 		tailCopies++
 	}
@@ -1303,7 +1314,7 @@ func TestTokensPerMessage(t *testing.T) {
 	}
 
 	t.Run("usage path", func(t *testing.T) {
-		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, "", 0, ReasoningReplayToolCalls)
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, "", 0, ReasoningReplayToolCalls, ReasoningReplayFormatText)
 		assert.Equal(t, 100.0, perMsg)
 		assert.Equal(t, "usage", basis)
 	})
@@ -1311,7 +1322,7 @@ func TestTokensPerMessage(t *testing.T) {
 	t.Run("usage path wins over tokenizer", func(t *testing.T) {
 		// Real API numbers for the provider beat any tokenizer estimate
 		// — a configured model must not steal the basis from usage.
-		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, "gpt-4o", 0, ReasoningReplayToolCalls)
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, "gpt-4o", 0, ReasoningReplayToolCalls, ReasoningReplayFormatText)
 		assert.Equal(t, 100.0, perMsg)
 		assert.Equal(t, "usage", basis)
 	})
@@ -1321,7 +1332,7 @@ func TestTokensPerMessage(t *testing.T) {
 		// the messages themselves cost (1000-600)/10 = 40/msg — NOT the
 		// amortized 100/msg that divides the constant tool prefix into
 		// every message.
-		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, "", 600, ReasoningReplayToolCalls)
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, "", 600, ReasoningReplayToolCalls, ReasoningReplayFormatText)
 		assert.Equal(t, 40.0, perMsg)
 		assert.Equal(t, "usage-net-tools", basis)
 	})
@@ -1330,7 +1341,7 @@ func TestTokensPerMessage(t *testing.T) {
 		// net = 1000-990 = 10 = effective: the floor admits the
 		// de-biased dividend exactly at the boundary → perMsg 1.0 via
 		// the DE-BIASED path (legacy would report 100).
-		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, "", 990, ReasoningReplayToolCalls)
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, "", 990, ReasoningReplayToolCalls, ReasoningReplayFormatText)
 		assert.Equal(t, 1.0, perMsg)
 		assert.Equal(t, "usage-net-tools", basis)
 	})
@@ -1339,7 +1350,7 @@ func TestTokensPerMessage(t *testing.T) {
 		// net = 1000-995 = 5 < effective 10: the subtraction cannot
 		// yield a meaningful per-message average, so the legacy
 		// prompt/effective division stands (perMsg 100, not 0.5).
-		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, "", 995, ReasoningReplayToolCalls)
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, "", 995, ReasoningReplayToolCalls, ReasoningReplayFormatText)
 		assert.Equal(t, 100.0, perMsg)
 		assert.Equal(t, "usage-net-tools", basis,
 			"basis stays self-describing: the log carries tool_tokens alongside for the reconstruction")
@@ -1349,26 +1360,26 @@ func TestTokensPerMessage(t *testing.T) {
 		// net = -200: the tool estimate ate the whole prompt outright
 		// (provider under-counts tools or the estimate drifted) — fall
 		// back to prompt/effective; never a nonsense sub-1.0 perMsg.
-		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, "", 1200, ReasoningReplayToolCalls)
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 1000}, msgs, "", 1200, ReasoningReplayToolCalls, ReasoningReplayFormatText)
 		assert.Equal(t, 100.0, perMsg)
 		assert.Equal(t, "usage-net-tools", basis)
 	})
 
 	t.Run("zero prompt tokens falls back", func(t *testing.T) {
-		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 0}, msgs, "", 0, ReasoningReplayToolCalls)
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 0}, msgs, "", 0, ReasoningReplayToolCalls, ReasoningReplayFormatText)
 		// 10 rows of "filler" (7 runes → estimateTokens = 1 each).
 		assert.Equal(t, 1.0, perMsg)
 		assert.Equal(t, "chars/4", basis)
 	})
 
 	t.Run("tokenizer fallback basis exact", func(t *testing.T) {
-		perMsg, basis := tokensPerMessage(nil, msgs, "gpt-4o", 0, ReasoningReplayToolCalls)
+		perMsg, basis := tokensPerMessage(nil, msgs, "gpt-4o", 0, ReasoningReplayToolCalls, ReasoningReplayFormatText)
 		assert.Greater(t, perMsg, 0.0)
 		assert.Equal(t, "tokenizer:o200k_base", basis)
 	})
 
 	t.Run("tokenizer fallback basis approx for unknown model", func(t *testing.T) {
-		perMsg, basis := tokensPerMessage(nil, msgs, "grok-4", 0, ReasoningReplayToolCalls)
+		perMsg, basis := tokensPerMessage(nil, msgs, "grok-4", 0, ReasoningReplayToolCalls, ReasoningReplayFormatText)
 		assert.Greater(t, perMsg, 0.0)
 		assert.Equal(t, "tokenizer:o200k_base,approx", basis)
 	})
@@ -1377,12 +1388,12 @@ func TestTokensPerMessage(t *testing.T) {
 		// No usage rows → the tokenizer path never counted the tool
 		// prefix; a non-zero toolTokens must not perturb it (there is
 		// no tool-inflated dividend to de-bias).
-		perMsg, basis := tokensPerMessage(nil, msgs, "gpt-4o", 5000, ReasoningReplayToolCalls)
+		perMsg, basis := tokensPerMessage(nil, msgs, "gpt-4o", 5000, ReasoningReplayToolCalls, ReasoningReplayFormatText)
 		assert.Equal(t, "tokenizer:o200k_base", basis)
 		want := float64(countMessageTokens("gpt-4o", messagesToChat(msgs)).Tokens) / float64(len(msgs))
 		assert.InDelta(t, want, perMsg, 0.0001)
 
-		perMsg, basis = tokensPerMessage(nil, msgs, "", 5000, ReasoningReplayToolCalls)
+		perMsg, basis = tokensPerMessage(nil, msgs, "", 5000, ReasoningReplayToolCalls, ReasoningReplayFormatText)
 		assert.Equal(t, 1.0, perMsg)
 		assert.Equal(t, "chars/4", basis)
 	})
@@ -1390,7 +1401,7 @@ func TestTokensPerMessage(t *testing.T) {
 	t.Run("tokenizer fallback averages the full live history", func(t *testing.T) {
 		// Live-path truncation is gone (Oct 2026): the next request sends
 		// all 10 rows, so the estimate averages over all of them.
-		perMsg, basis := tokensPerMessage(nil, msgs, "gpt-4o", 0, ReasoningReplayToolCalls)
+		perMsg, basis := tokensPerMessage(nil, msgs, "gpt-4o", 0, ReasoningReplayToolCalls, ReasoningReplayFormatText)
 		assert.Greater(t, perMsg, 0.0)
 		assert.Equal(t, "tokenizer:o200k_base", basis)
 		want := float64(countMessageTokens("gpt-4o", messagesToChat(msgs)).Tokens) / float64(len(msgs))
@@ -1402,18 +1413,18 @@ func TestTokensPerMessage(t *testing.T) {
 			{Content: strings.Repeat("x", 400)}, // 100 est
 			{Content: strings.Repeat("y", 400)}, // 100 est
 		}
-		perMsg, basis := tokensPerMessage(nil, fallbackMsgs, "", 0, ReasoningReplayToolCalls)
+		perMsg, basis := tokensPerMessage(nil, fallbackMsgs, "", 0, ReasoningReplayToolCalls, ReasoningReplayFormatText)
 		assert.Equal(t, 100.0, perMsg)
 		assert.Equal(t, "chars/4", basis)
 	})
 
 	t.Run("floor at one token per message", func(t *testing.T) {
-		perMsg, _ := tokensPerMessage(&TurnUsage{PromptTokens: 1}, msgs, "", 0, ReasoningReplayToolCalls)
+		perMsg, _ := tokensPerMessage(&TurnUsage{PromptTokens: 1}, msgs, "", 0, ReasoningReplayToolCalls, ReasoningReplayFormatText)
 		assert.Equal(t, 1.0, perMsg, "budget math must never see a sub-1.0 per-message cost")
 	})
 
 	t.Run("empty live history guards division", func(t *testing.T) {
-		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 500}, nil, "gpt-4o", 0, ReasoningReplayToolCalls)
+		perMsg, basis := tokensPerMessage(&TurnUsage{PromptTokens: 500}, nil, "gpt-4o", 0, ReasoningReplayToolCalls, ReasoningReplayFormatText)
 		assert.Equal(t, 1.0, perMsg)
 		assert.Equal(t, "chars/4", basis)
 	})
@@ -1436,22 +1447,22 @@ func TestTokensPerMessage(t *testing.T) {
 			buildDBMessage(0, ChatMessage{Role: RoleAssistant, ReasoningContent: cC, ToolCalls: []ToolCall{{ID: "t2", Type: "function", Function: FunctionCall{Name: "g", Arguments: "{}"}}}}),
 		}
 
-		perMsg, basis := tokensPerMessage(nil, rows, "gpt-4o", 0, ReasoningReplayToolCalls)
+		perMsg, basis := tokensPerMessage(nil, rows, "gpt-4o", 0, ReasoningReplayToolCalls, ReasoningReplayFormatText)
 		assert.Equal(t, "tokenizer:o200k_base", basis)
-		want := float64(countMessageTokens("gpt-4o", replayReasoningFilter(messagesToChat(rows), ReasoningReplayToolCalls)).Tokens) /
+		want := float64(countMessageTokens("gpt-4o", replayReasoningFilter(messagesToChat(rows), ReasoningReplayToolCalls, ReasoningReplayFormatText)).Tokens) /
 			float64(len(rows))
 		assert.InDelta(t, want, perMsg, 0.0001)
 		assert.NotEqual(t, want, float64(countMessageTokens("gpt-4o", messagesToChat(rows)).Tokens)/float64(len(rows)),
 			"eligible reasoning kept AND ineligible reasoning stripped — the mode must actually change the count")
 
-		perMsg, basis = tokensPerMessage(nil, rows, "gpt-4o", 0, ReasoningReplayOff)
+		perMsg, basis = tokensPerMessage(nil, rows, "gpt-4o", 0, ReasoningReplayOff, ReasoningReplayFormatText)
 		assert.Equal(t, "tokenizer:o200k_base", basis)
-		wantOff := float64(countMessageTokens("gpt-4o", replayReasoningFilter(messagesToChat(rows), ReasoningReplayOff)).Tokens) /
+		wantOff := float64(countMessageTokens("gpt-4o", replayReasoningFilter(messagesToChat(rows), ReasoningReplayOff, ReasoningReplayFormatText)).Tokens) /
 			float64(len(rows))
 		assert.InDelta(t, wantOff, perMsg, 0.0001)
 		assert.Less(t, wantOff, want, "off mode strips every row's reasoning while tool_calls keeps the tool rows'")
 
-		perMsg, _ = tokensPerMessage(nil, rows, "gpt-4o", 0, ReasoningReplayAlways)
+		perMsg, _ = tokensPerMessage(nil, rows, "gpt-4o", 0, ReasoningReplayAlways, ReasoningReplayFormatText)
 		wantAlways := float64(countMessageTokens("gpt-4o", messagesToChat(rows)).Tokens) / float64(len(rows))
 		assert.InDelta(t, wantAlways, perMsg, 0.0001, "always charges the raw message counts")
 	})

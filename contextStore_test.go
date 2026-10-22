@@ -272,7 +272,7 @@ func TestDBToolCalls(t *testing.T) {
 	tcJSON := string(tcData)
 	toolCallID := "tc1"
 
-	err := insertDBMessage(sid, "assistant", "", &tcJSON, &toolCallID, nil, nil, nil)
+	err := insertDBMessage(sid, "assistant", "", &tcJSON, &toolCallID, nil, nil, nil, nil)
 	require.NoError(t, err, "insertDBMessage with tool calls failed")
 
 	msgs, err := loadDBSessionMessages(sid)
@@ -431,6 +431,34 @@ func TestDBReasoningSummaryRoundtrip(t *testing.T) {
 	require.Len(t, msgs, 1)
 	assert.Equal(t, "the real thinking", msgs[0].ReasoningContent, "ReasoningContent")
 	assert.Equal(t, "the summarized form", msgs[0].ReasoningSummary, "ReasoningSummary")
+}
+
+// TestDBReasoningDetailsRoundtrip pins the exact-replay envelope's storage
+// round-trip: the verbatim envelope string survives AddMessage → DB →
+// GetMessages unchanged (byte-for-byte — parseReasoningDetailsEnvelope is
+// what gives it meaning later).
+func TestDBReasoningDetailsRoundtrip(t *testing.T) {
+	setupTestDB(t)
+
+	sid := createTestSession(t, "net", "#chan", "nick", "chat", "", "")
+	env := marshalReasoningDetailsEnvelope(detailsSourceChat, []json.RawMessage{
+		json.RawMessage(`{"type":"reasoning.text","text":"think","signature":"sha256:abc"}`),
+		json.RawMessage(`{"type":"reasoning.encrypted","data":"eyJk","id":"rc_1"}`),
+	})
+
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{
+		Role:             RoleAssistant,
+		Content:          "answer",
+		ReasoningContent: "the real thinking",
+		ReasoningDetails: env,
+	}))
+
+	msgs, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	require.Len(t, msgs, 1)
+	assert.Equal(t, env, msgs[0].ReasoningDetails, "envelope survives the round-trip byte-for-byte")
+	_, _, ok := parseReasoningDetailsEnvelope(msgs[0].ReasoningDetails)
+	assert.True(t, ok, "the round-tripped envelope still parses")
 }
 
 // TestMessageFromDBReasoningSummary pins the row→message conversion for the

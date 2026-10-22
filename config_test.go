@@ -600,6 +600,119 @@ reasoningreplay = "bogus"
 	})
 }
 
+// TestAIConfigApplyDefaults_ReasoningReplayFormat pins the format knob's
+// cascade (command > service > "text") and the defensive resolver: valid
+// values pass through, garbage falls back to "text" so a hand-built
+// AIConfig can never leak an unknown wire form into the serializers.
+func TestAIConfigApplyDefaults_ReasoningReplayFormat(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  AIConfig
+		svc  Service
+		want string
+	}{
+		{
+			name: "unset everywhere defaults to text",
+			cfg:  AIConfig{},
+			svc:  Service{},
+			want: ReasoningReplayFormatText,
+		},
+		{
+			name: "service value inherited",
+			cfg:  AIConfig{},
+			svc:  Service{ReasoningReplayFormat: ReasoningReplayFormatDetails},
+			want: ReasoningReplayFormatDetails,
+		},
+		{
+			name: "command beats service",
+			cfg:  AIConfig{ReasoningReplayFormat: ReasoningReplayFormatText},
+			svc:  Service{ReasoningReplayFormat: ReasoningReplayFormatDetails},
+			want: ReasoningReplayFormatText,
+		},
+		{
+			name: "command details beats text service",
+			cfg:  AIConfig{ReasoningReplayFormat: ReasoningReplayFormatDetails},
+			svc:  Service{ReasoningReplayFormat: ReasoningReplayFormatText},
+			want: ReasoningReplayFormatDetails,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := tt.cfg
+			cfg.ApplyDefaults(tt.svc)
+			assert.Equal(t, tt.want, cfg.ReasoningReplayFormat, "ReasoningReplayFormat")
+			assert.Equal(t, tt.want, reasoningReplayFormat(cfg), "resolver matches the materialized value")
+		})
+	}
+
+	t.Run("resolver maps garbage to text", func(t *testing.T) {
+		assert.Equal(t, ReasoningReplayFormatText, reasoningReplayFormat(AIConfig{ReasoningReplayFormat: "bogus"}))
+	})
+}
+
+// TestLoadConfigDirRejectsInvalidReasoningReplayFormat pins load-time
+// validation of reasoningreplayformat on chat commands: an unknown format
+// fails the chats load instead of silently falling back to text.
+func TestLoadConfigDirRejectsInvalidReasoningReplayFormat(t *testing.T) {
+	dir := createTestConfigDir(t, `
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`, map[string]string{
+		"services.toml": `
+[localsvc]
+type = "llama"
+`,
+		"chats.toml": `
+[badformat]
+service = "localsvc"
+model = "m"
+reasoningreplayformat = "array"
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	_, err := loadConfigDir(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "reasoningreplayformat")
+	assert.Contains(t, err.Error(), "array")
+}
+
+// TestLoadConfigDirReasoningReplayFormatServiceValues pins the service-level
+// branch: both formats load, and a bad one names the service.
+func TestLoadConfigDirReasoningReplayFormatServiceValues(t *testing.T) {
+	for _, format := range []string{ReasoningReplayFormatText, ReasoningReplayFormatDetails} {
+		t.Run("valid "+format, func(t *testing.T) {
+			dir := createTestConfigDir(t, "", map[string]string{
+				"services.toml": `
+[localsvc]
+type = "llama"
+reasoningreplayformat = "` + format + `"
+`,
+			})
+			defer os.RemoveAll(dir)
+			_, err := loadConfigDir(dir)
+			require.NoError(t, err)
+		})
+	}
+
+	t.Run("invalid format rejected", func(t *testing.T) {
+		dir := createTestConfigDir(t, "", map[string]string{
+			"services.toml": `
+[localsvc]
+type = "llama"
+reasoningreplayformat = "nope"
+`,
+		})
+		defer os.RemoveAll(dir)
+		_, err := loadConfigDir(dir)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "reasoningreplayformat")
+		assert.Contains(t, err.Error(), "localsvc")
+	})
+}
+
 // TestLoadConfigDirNeedsUserSuffixExplicitFalse pins the Knob 2 tri-state
 // through TOML: an explicit false decodes to a non-nil *bool (suppressing
 // even anthropic auto-detect) and stays distinguishable from unset.

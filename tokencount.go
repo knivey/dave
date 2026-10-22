@@ -267,6 +267,10 @@ var daveExtraModelPrefixes = map[string]string{
 //	+ tokens(ReasoningContent) when set — ReasoningSummary is NEVER
 //	  counted: it never rides the wire on any path (display/log-only,
 //	  see reasoningParts in aiMessages.go)
+//	+ tokens(reasoningDetailsEnvelope items) when set — the exact-replay
+//	  payload under reasoningreplayformat = "details" (see
+//	  reasoningreplay.go; replayReasoningFilter keeps wire-true inputs to
+//	  at most one reasoning slot per row)
 //
 // plus replyPrimingTokens (3) once for the final assistant reply. The
 // wire format sends MultiContent INSTEAD of Content for user messages,
@@ -332,6 +336,20 @@ func countMessageTokens(model string, msgs []ChatMessage) TokenCount {
 		}
 		if m.ReasoningContent != "" {
 			total += count(m.ReasoningContent)
+		}
+		// Exact-replay payload (reasoningreplay.go): under
+		// reasoningreplayformat = "details" the envelope's items ride the
+		// wire in place of the text — replayReasoningFilter guarantees a
+		// wire-true input carries at most one of the two slots, so
+		// counting both when both are set is the same belt-and-suspenders
+		// overestimate as Content+MultiContent. A corrupt envelope never
+		// rides and counts zero.
+		if m.ReasoningDetails != "" {
+			if _, items, ok := parseReasoningDetailsEnvelope(m.ReasoningDetails); ok {
+				if raw, err := json.Marshal(items); err == nil {
+					total += count(string(raw))
+				}
+			}
 		}
 	}
 	return TokenCount{Tokens: total, Encoding: encName, Exact: exact, ImageParts: imageParts}

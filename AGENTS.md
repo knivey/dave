@@ -151,6 +151,8 @@ Diagnostics are shell commands — opencode v2 runs NO LSP server (the `lsp` con
 ## Subagent Model Selection
 **ONLY** models from the **zai-coding-plan** (Z.AI) provider may be used for subagents (code reviews, exploration, implementation) — preferably its best available model (e.g. `zai-coding-plan/glm-5.3#max`). Do NOT use other providers (opencode, llama.cpp) — they may be out of funds or inferior.
 
+The model ID named here is authoritative — dispatch with it directly. If a catalog check is ever needed, query `tools.opencode.models` with `all: true`: the DEFAULT listing shows only the newest version of each family and hides base entries (a default query returns only `glm-5.3-flash`/`glm-5.3-highspeed`; base `glm-5.3` is invisible without `all: true`). Never "upgrade" to an unlisted sibling based on the default catalog — `highspeed` is not in the subscription and `flash` is the weaker tier.
+
 ## Review Process
 - When implementing multi-task plans, perform **both spec compliance review AND code quality review** after every task, no matter how trivial. Never skip either review.
 - Spec review verifies the code matches the task requirements (nothing missing, nothing extra).

@@ -105,6 +105,7 @@ func setupMockDeps(t *testing.T) *mockBot {
 
 	configMu.Lock()
 	config = Config{
+		Networks: map[string]Network{"testnet": {}},
 		Commands: Commands{
 			Chats: map[string]AIConfig{
 				"testchat": makeTestAIConfig(),
@@ -1548,6 +1549,50 @@ func TestDeliverAsyncResultCancelSilent(t *testing.T) {
 	}
 
 	release()
+}
+
+// TestRecoverPendingJobsSkipsUnknownNetwork: jobs whose network is no
+// longer in the config must not be recovered in either branch — their
+// delivery queue item would poll botReady at 1Hz until shutdown (and
+// recovery would re-enqueue them every boot under the age cap). The rows
+// stay untouched; a network that returns is recovered by a later boot.
+func TestRecoverPendingJobsSkipsUnknownNetwork(t *testing.T) {
+	setupTestDB(t)
+	setupTestJobManager(t)
+	_ = setupMockDeps(t)
+
+	sid := createTestSession(t, "ghostnet", "#test", "ghostuser", "testchat", "", "")
+	insertTestMessage(t, sid, "system", "sys")
+
+	// Completed-undelivered on the dead network.
+	require.NoError(t, createPendingJob(sid, "ghost-completed", "generate_image_async", "img-mcp"))
+	require.NoError(t, completePendingJob("ghost-completed", "image url: http://example.com/ghost.png"))
+	// Pending (monitor path) on the dead network.
+	require.NoError(t, createPendingJob(sid, "ghost-pending", "generate_image_async", "img-mcp"))
+
+	asyncJobMgr.cancel()
+	asyncJobMgr.ctx, asyncJobMgr.cancel = context.WithCancel(context.Background())
+
+	recoverPendingJobs()
+
+	// Monitor path: nothing registered.
+	asyncJobMgr.mu.Lock()
+	_, pendingRegistered := asyncJobMgr.jobs["ghost-pending"]
+	asyncJobMgr.mu.Unlock()
+	assert.False(t, pendingRegistered, "pending job on unknown network must not get a monitor")
+
+	// Completed path: no delivery — job stays completed, nothing injected.
+	time.Sleep(300 * time.Millisecond)
+	jobs, err := getCompletedPendingJobs(sid)
+	require.NoError(t, err)
+	assert.Len(t, jobs, 1, "completed job on unknown network must not be re-delivered")
+
+	msgs, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	for _, m := range msgs {
+		assert.NotContains(t, m.Content, "Background task completed",
+			"unknown-network job's result must not be injected")
+	}
 }
 
 func TestRegisterAsyncJob_Duplicate(t *testing.T) {

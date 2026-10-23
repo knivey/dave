@@ -561,6 +561,20 @@ func recoverPendingJobs() {
 			}
 		}
 
+		// Skip jobs whose network is gone from the config — covers BOTH
+		// branches below: a recovered monitor's completion enqueues a
+		// delivery whose queue item would poll botReady at 1Hz until
+		// shutdown for a network that never connects (and recovery would
+		// re-enqueue it every boot under the age cap). The row stays
+		// untouched; if the network ever returns, a later boot recovers it.
+		networkConfigured := false
+		readConfig(func() { _, networkConfigured = config.Networks[session.Network] })
+		if !networkConfigured {
+			loggerJM.Warn("skipping job for network not in config",
+				"job_id", j.JobID, "network", session.Network)
+			continue
+		}
+
 		// Completed-undelivered: the result is already stored in the row
 		// — there is nothing to monitor on the MCP server (which may not
 		// even remember the job anymore). Re-enqueue the DELIVERY path,

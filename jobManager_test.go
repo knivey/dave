@@ -1636,6 +1636,181 @@ func TestCleanupPendingJobsByAge(t *testing.T) {
 	assert.Equal(t, "new-delivered", remaining[1].JobID)
 }
 
+// TestDeliverAsyncResultValveSilentWhenDeliveredElsewhere: if another
+// path (the holder's inline loop) delivered the job while this delivery
+// parked at the gate, the valve abort must stay silent — the user already
+// got their result; telling them to "message me to pick it up" would be
+// false.
+func TestDeliverAsyncResultValveSilentWhenDeliveredElsewhere(t *testing.T) {
+	setupTestDB(t)
+	setupTestJobManager(t)
+	_ = setupMockDeps(t)
+	setupNoticesDefaults(t)
+
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
+	insertTestMessage(t, sid, "system", "sys")
+	require.NoError(t, createPendingJob(sid, "stale-delivered", "generate_image_async", "img-mcp"))
+	require.NoError(t, completePendingJob("stale-delivered", "image url: http://example.com/sd.png"))
+
+	origLimit := sessionTurnWaitLimit
+	sessionTurnWaitLimit = 40 * time.Millisecond
+	t.Cleanup(func() { sessionTurnWaitLimit = origLimit })
+
+	tinyCfg := makeTestAIConfig()
+	tinyCfg.Timeout = 60 * time.Millisecond // derived limit: 180ms
+	configMu.Lock()
+	old := config
+	c := config
+	c.Commands.Chats = map[string]AIConfig{"testchat": tinyCfg}
+	config = c
+	configMu.Unlock()
+	t.Cleanup(func() {
+		configMu.Lock()
+		config = old
+		configMu.Unlock()
+	})
+
+	userID := ensureTestUser(t, "testnet", "testuser")
+	entry := &jobEntry[asyncJobPayload]{
+		jobID: "stale-delivered", payload: asyncJobPayload{sessionID: sid},
+		toolName: "generate_image_async", mcpServer: "img-mcp",
+		network: "testnet", channel: "#test", nick: "testuser", userID: userID,
+	}
+
+	release, ok := acquireSessionTurn(context.Background(), sid, sessionTurnWaitLimit)
+	require.True(t, ok)
+
+	output := make(chan string, 50)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		deliverAsyncResult(entry, context.Background(), output)
+	}()
+
+	// While the delivery parks at the gate, the holder's inline loop
+	// delivers the job.
+	time.Sleep(60 * time.Millisecond)
+	require.NoError(t, markPendingJobDelivered("stale-delivered"))
+
+	<-done
+	close(output)
+	release()
+
+	for l := range output {
+		assert.NotContains(t, l, "background task finished",
+			"valve abort must stay silent when the job was delivered elsewhere")
+	}
+}
+
+// TestDeliverAsyncResultValveSilentWhenUserMovedOn: if the user's ACTIVE
+// session is no longer the job's session at abort time (SwitchActive
+// failed, or another delivery switched them away during the wait), the
+// "send a message and I'll pick it up" promise is false — messaging their
+// current session will not deliver this job. The abort must stay silent
+// and leave the job to boot recovery / later session activity.
+func TestDeliverAsyncResultValveSilentWhenUserMovedOn(t *testing.T) {
+	setupTestDB(t)
+	setupTestJobManager(t)
+	_ = setupMockDeps(t)
+	setupNoticesDefaults(t)
+
+	// S: job's session (user starts here; no switch needed). T: the newer
+	// session the user moves to WHILE the delivery parks at the gate.
+	sidS := createTestSession(t, "testnet", "#mv", "mvuser", "testchat", "", "")
+	insertTestMessage(t, sidS, "system", "sys")
+	sidT := createTestSession(t, "testnet", "#mv", "mvuser", "testchat", "", "")
+	insertTestMessage(t, sidT, "system", "sys")
+	// Make S active again (createTestSession made T active).
+	_, err := sessionMgr.SwitchActive("testnet", "#mv", ensureTestUser(t, "testnet", "mvuser"), sidS)
+	require.NoError(t, err)
+
+	require.NoError(t, createPendingJob(sidS, "moved-on", "generate_image_async", "img-mcp"))
+	require.NoError(t, completePendingJob("moved-on", "image url: http://example.com/mo.png"))
+
+	origLimit := sessionTurnWaitLimit
+	sessionTurnWaitLimit = 40 * time.Millisecond
+	t.Cleanup(func() { sessionTurnWaitLimit = origLimit })
+
+	tinyCfg := makeTestAIConfig()
+	tinyCfg.Timeout = 60 * time.Millisecond
+	configMu.Lock()
+	old := config
+	c := config
+	c.Commands.Chats = map[string]AIConfig{"testchat": tinyCfg}
+	config = c
+	configMu.Unlock()
+	t.Cleanup(func() {
+		configMu.Lock()
+		config = old
+		configMu.Unlock()
+	})
+
+	userID := ensureTestUser(t, "testnet", "mvuser")
+	entry := &jobEntry[asyncJobPayload]{
+		jobID: "moved-on", payload: asyncJobPayload{sessionID: sidS},
+		toolName: "generate_image_async", mcpServer: "img-mcp",
+		network: "testnet", channel: "#mv", nick: "mvuser", userID: userID,
+	}
+
+	release, ok := acquireSessionTurn(context.Background(), sidS, sessionTurnWaitLimit)
+	require.True(t, ok)
+
+	output := make(chan string, 50)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		deliverAsyncResult(entry, context.Background(), output)
+	}()
+
+	// While the delivery parks at the gate, the user moves to T.
+	time.Sleep(60 * time.Millisecond)
+	_, err = sessionMgr.SwitchActive("testnet", "#mv", userID, sidT)
+	require.NoError(t, err)
+
+	<-done
+	close(output)
+	release()
+
+	for l := range output {
+		assert.NotContains(t, l, "background task finished",
+			"valve abort must stay silent when the user is no longer on the job's session")
+	}
+
+	jobs, err := getCompletedPendingJobs(sidS)
+	require.NoError(t, err)
+	assert.Len(t, jobs, 1, "job must stay pending for a later recovery path")
+}
+
+// TestRecoverToolPendingJobsSkipsUnknownNetwork: the dead-network skip
+// covers the session-less tool recovery path too — its delivery items
+// spin at botReady exactly like the session ones.
+func TestRecoverToolPendingJobsSkipsUnknownNetwork(t *testing.T) {
+	setupTestDB(t)
+	setupTestJobManager(t)
+	_ = setupMockDeps(t)
+
+	require.NoError(t, createToolPendingJob("ghost-tool", "generate_image_async", "img-mcp", "ghostnet", "#tool", "ghostuser", 42))
+	// Crash window between result-write and delivery: the result is set
+	// while status is still pending — exactly what recoverToolPendingJobs'
+	// j.Result branch serves.
+	require.NoError(t, theDB.Model(&PendingJob{}).
+		Where("job_id = ?", "ghost-tool").
+		Update("result", "done").Error)
+
+	recoverToolPendingJobs()
+
+	// Without the skip, a queue item is admitted and parks in the
+	// channel's running set, spinning on botReady for a network that
+	// never connects.
+	time.Sleep(150 * time.Millisecond)
+	assert.False(t, queueMgr.IsRunning("ghostnet", "#tool", 42),
+		"tool job on unknown network must not enqueue a spinning delivery")
+
+	var count int64
+	require.NoError(t, theDB.Model(&PendingJob{}).Where("job_id = ?", "ghost-tool").Count(&count).Error)
+	assert.EqualValues(t, 1, count, "ghost tool job row must stay untouched")
+}
+
 func TestRegisterAsyncJob_Duplicate(t *testing.T) {
 	setupTestJobManager(t)
 	// Park the job goroutine inside wait_for_job. Without this the wait fails

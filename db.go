@@ -696,10 +696,12 @@ func getPendingJobsForRecovery(requireSessionID bool) ([]PendingJob, error) {
 }
 
 // cleanupPendingJobsByAge hard-deletes pending_jobs rows older than
-// maxAgeDays, any status: delivered rows are pure history, and undelivered
-// ones are far past every recovery window (completedJobRecoveryMaxAge and
-// any session that could still deliver them). PendingJob has no soft-delete
-// column, so GORM's Delete is a real DELETE. Returns rows removed.
+// maxAgeDays, any status: delivered rows are pure history, and by then an
+// undelivered row has no useful recovery left — the completed re-delivery
+// window (1h) is long past, the sessions pass has already completed the
+// owning session, and pre-GC the monitor branch re-attached such rows
+// forever. PendingJob has no soft-delete column, so GORM's Delete is a
+// real DELETE. Returns rows removed.
 func cleanupPendingJobsByAge(maxAgeDays int) (int64, error) {
 	if maxAgeDays <= 0 {
 		return 0, nil

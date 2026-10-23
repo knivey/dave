@@ -142,6 +142,8 @@ func TestNoticesQueueTurnWaitDefault(t *testing.T) {
 	setNoticesDefaults(&n)
 	assert.NotEmpty(t, n.Queue.TurnWait, "queue.turn_wait should have a default")
 	assert.NotEmpty(t, n.Queue.TurnWaitTimeout, "queue.turn_wait_timeout should have a default")
+	assert.NotEmpty(t, n.Queue.AsyncDeferred, "queue.async_deferred should have a default")
+	assert.NotEmpty(t, n.Queue.AsyncDeferredSwitched, "queue.async_deferred_switched should have a default")
 }
 
 // TestSessionGateWaitLimitAborts: the liveness valve. A waiter must not

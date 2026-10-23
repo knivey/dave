@@ -388,6 +388,26 @@ func deliverAsyncResult(entry *jobEntry[asyncJobPayload], ctx context.Context, o
 				"session", entry.payload.sessionID, "job_id", entry.jobID)
 			return
 		}
+		// The captured switchedBack flag and the pre-gate state can both
+		// be STALE by now — the wait lasted up to the valve limit. Re-check
+		// LIVE state before promising anything: (1) another path (the
+		// holder's inline loop) may have delivered the job while we parked
+		// — nothing left to tell the user; (2) the user's active session
+		// may no longer be the job's session (SwitchActive failed under
+		// lock contention, or another delivery switched them away during
+		// the wait) — "send a message" would retrieve nothing, so stay
+		// silent and leave the job to boot recovery / later session
+		// activity.
+		if jobs, err := getCompletedPendingJobs(entry.payload.sessionID); err == nil && len(jobs) == 0 {
+			loggerJM.Info("async delivery valve abort: job already delivered elsewhere",
+				"session", entry.payload.sessionID, "job_id", entry.jobID)
+			return
+		}
+		if active, err := sessionMgr.GetActiveSession(entry.network, entry.channel, entry.userID); err != nil || active == nil || active.ID != entry.payload.sessionID {
+			loggerJM.Warn("async delivery valve abort: user no longer on the job's session, staying silent",
+				"session", entry.payload.sessionID, "job_id", entry.jobID)
+			return
+		}
 		loggerJM.Warn("async delivery aborted: session gate wait exceeded limit",
 			"session", entry.payload.sessionID, "job_id", entry.jobID,
 			"limit", sessionGateWaitLimitFor(currentCfg.Timeout))
@@ -530,6 +550,16 @@ func injectAsyncResultFromDB(sessionID int64, cfg AIConfig, job PendingJob, netw
 // the default.
 var completedJobRecoveryMaxAge = time.Hour
 
+// networkInConfig reports whether a network is present in the live
+// config. Recovery skips jobs whose network is gone — their delivery
+// queue items would poll botReady at 1Hz until shutdown for a network
+// that never connects (and recovery would re-enqueue them every boot).
+func networkInConfig(network string) bool {
+	configured := false
+	readConfig(func() { _, configured = config.Networks[network] })
+	return configured
+}
+
 func recoverPendingJobs() {
 	if theDB == nil {
 		return
@@ -567,9 +597,7 @@ func recoverPendingJobs() {
 		// shutdown for a network that never connects (and recovery would
 		// re-enqueue it every boot under the age cap). The row stays
 		// untouched; if the network ever returns, a later boot recovers it.
-		networkConfigured := false
-		readConfig(func() { _, networkConfigured = config.Networks[session.Network] })
-		if !networkConfigured {
+		if !networkInConfig(session.Network) {
 			loggerJM.Warn("skipping job for network not in config",
 				"job_id", j.JobID, "network", session.Network)
 			continue
@@ -809,6 +837,15 @@ func recoverToolPendingJobs() {
 		}
 		if j.UserID != nil {
 			userID = *j.UserID
+		}
+
+		// Same dead-network skip as the session recovery above: a tool
+		// job's delivery item would spin at botReady forever for a network
+		// that never connects.
+		if network != "" && !networkInConfig(network) {
+			loggerJM.Warn("skipping tool job for network not in config",
+				"job_id", j.JobID, "network", network)
+			continue
 		}
 
 		if j.Result != nil {

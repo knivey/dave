@@ -1595,6 +1595,47 @@ func TestRecoverPendingJobsSkipsUnknownNetwork(t *testing.T) {
 	}
 }
 
+// TestCleanupPendingJobsByAge: pending_jobs rows older than MaxAgeDays
+// are hard-deleted by the boot GC (any status — delivered rows are pure
+// history, undelivered ones are past every recovery window); recent rows
+// of every status survive.
+func TestCleanupPendingJobsByAge(t *testing.T) {
+	setupTestDB(t)
+
+	sid := createTestSession(t, "testnet", "#gc", "gcuser", "testchat", "", "")
+
+	makeJob := func(id string, status string, age time.Duration) {
+		require.NoError(t, createPendingJob(sid, id, "generate_image_async", "img-mcp"))
+		if status == StatusCompleted {
+			require.NoError(t, completePendingJob(id, "result "+id))
+		}
+		if status == StatusDelivered {
+			require.NoError(t, completePendingJob(id, "result "+id))
+			require.NoError(t, markPendingJobDelivered(id))
+		}
+		old := time.Now().Add(-age).UTC()
+		require.NoError(t, theDB.Model(&PendingJob{}).
+			Where("job_id = ?", id).
+			Update("created_at", old).Error)
+	}
+
+	makeJob("old-delivered", StatusDelivered, 100*24*time.Hour)
+	makeJob("old-completed", StatusCompleted, 100*24*time.Hour)
+	makeJob("old-pending", StatusPending, 100*24*time.Hour)
+	makeJob("new-delivered", StatusDelivered, time.Hour)
+	makeJob("new-completed", StatusCompleted, time.Hour)
+
+	affected, err := cleanupPendingJobsByAge(90)
+	require.NoError(t, err)
+	assert.EqualValues(t, 3, affected, "only the three old rows should be deleted")
+
+	var remaining []PendingJob
+	require.NoError(t, theDB.Order("job_id").Find(&remaining).Error)
+	require.Len(t, remaining, 2)
+	assert.Equal(t, "new-completed", remaining[0].JobID)
+	assert.Equal(t, "new-delivered", remaining[1].JobID)
+}
+
 func TestRegisterAsyncJob_Duplicate(t *testing.T) {
 	setupTestJobManager(t)
 	// Park the job goroutine inside wait_for_job. Without this the wait fails

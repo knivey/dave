@@ -695,6 +695,20 @@ func getPendingJobsForRecovery(requireSessionID bool) ([]PendingJob, error) {
 	return jobs, err
 }
 
+// cleanupPendingJobsByAge hard-deletes pending_jobs rows older than
+// maxAgeDays, any status: delivered rows are pure history, and undelivered
+// ones are far past every recovery window (completedJobRecoveryMaxAge and
+// any session that could still deliver them). PendingJob has no soft-delete
+// column, so GORM's Delete is a real DELETE. Returns rows removed.
+func cleanupPendingJobsByAge(maxAgeDays int) (int64, error) {
+	if maxAgeDays <= 0 {
+		return 0, nil
+	}
+	cutoff := time.Now().AddDate(0, 0, -maxAgeDays)
+	res := theDB.Where("created_at < ?", cutoff).Delete(&PendingJob{})
+	return res.RowsAffected, res.Error
+}
+
 func createToolPendingJob(jobID, toolName, mcpServer, network, channel, nick string, userID int64) error {
 	job := PendingJob{
 		JobID:     jobID,

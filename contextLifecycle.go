@@ -56,4 +56,13 @@ func CleanupContexts() {
 	if affected > 0 {
 		loggerCS.Info("Cleaned up old sessions", "count", affected)
 	}
+
+	// Pending-jobs GC rides the same boot pass and the same age knob:
+	// delivered rows are history, undelivered ones are past every
+	// recovery window by then.
+	if jobAffected, err := cleanupPendingJobsByAge(config.Database.MaxAgeDays); err != nil {
+		loggerCS.Error("Failed to cleanup pending jobs", "error", err)
+	} else if jobAffected > 0 {
+		loggerCS.Info("Cleaned up old pending jobs", "count", jobAffected)
+	}
 }

@@ -372,8 +372,8 @@ func deliverAsyncResult(entry *jobEntry[asyncJobPayload], ctx context.Context, o
 	// so they survive restarts) or by BOOT RECOVERY: recoverPendingJobs
 	// re-enqueues completed-undelivered jobs younger than
 	// completedJobRecoveryMaxAge (1h). An abandoned session with a result
-	// older than that holds it undelivered (no pending-jobs GC deletes
-	// rows younger than MaxAgeDays).
+	// older than that holds it undelivered until the boot-time pending-jobs
+	// GC (cleanupPendingJobsByAge, MaxAgeDays) removes the row.
 	releaseTurn, gateOK := acquireSessionTurn(ctx, entry.payload.sessionID, sessionGateWaitLimitFor(currentCfg.Timeout))
 	if !gateOK {
 		// Two abort causes, deliberately different UX (mirrors chat()'s

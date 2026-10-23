@@ -12,6 +12,11 @@
 #   turn_wait_timeout (string)   Sent when that wait exceeded its safety limit (normally 10m, or 3x the command's
 #                                timeout when longer) — the message was not recorded; the user should resend.
 #                                Placeholders: {wait} (the actual time waited)
+#   async_deferred  (string)     Sent when a background-job delivery gave up at the session-gate valve while the user
+#                                was still on the job's session — messaging again delivers the result.
+#                                Placeholders: {nick}
+#   async_deferred_switched (string) Same, when the delivery had already switched the user back to the job's session.
+#                                Placeholders: {nick}, {id}
 #
 # [rate] options:
 #   msgs             (string[])  Random pick for rate-limit notice
@@ -146,6 +151,8 @@
 # stopped = "\x0315⏹ Generation stopped."
 # turn_wait = "\x0307⏳ {nick}: still working on your previous message...\x0f"
 # turn_wait_timeout = "\x0304⚠️ Your previous message is still generating after {wait} — please resend it once it finishes."
+# async_deferred = "\x0307⚠️ {nick}: your background task finished but delivery was delayed — send a message and I'll pick it up...\x0f"
+# async_deferred_switched = "\x0307⚠️ {nick}: switched you back to session #{id} for a finished background task — delivery was delayed; send a message and I'll pick it up...\x0f"
 #
 # [rate]
 # msgs = ["hold on you're going to fast"]

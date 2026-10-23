@@ -315,6 +315,13 @@ func deliverAsyncResult(entry *jobEntry[asyncJobPayload], ctx context.Context, o
 
 	activeSession, _ := sessionMgr.GetActiveSession(entry.network, entry.channel, entry.userID)
 
+	// switchedBack records whether this delivery moved the user's active
+	// session to the job's session BEFORE reaching the gate — the
+	// valve-abort notice wording depends on it, and the promise "send a
+	// message and I'll pick it up" depends on the ORDERING (switch before
+	// gate: the job's session is active at abort time, so the inline
+	// delivery loop of the user's next message will find the job).
+	switchedBack := false
 	if activeSession == nil || activeSession.ID != entry.payload.sessionID {
 		if msg := switchToSession(entry); msg != "" {
 			select {
@@ -323,6 +330,7 @@ func deliverAsyncResult(entry *jobEntry[asyncJobPayload], ctx context.Context, o
 				return
 			}
 		}
+		switchedBack = true
 	}
 
 	bot := asyncJobMgr.getBot(entry.network)
@@ -364,11 +372,36 @@ func deliverAsyncResult(entry *jobEntry[asyncJobPayload], ctx context.Context, o
 	// so they survive restarts) or by BOOT RECOVERY: recoverPendingJobs
 	// re-enqueues completed-undelivered jobs younger than
 	// completedJobRecoveryMaxAge (1h). An abandoned session with a result
-	// older than that holds it until MaxAgeDays cleanup.
+	// older than that holds it undelivered (no pending-jobs GC deletes
+	// rows younger than MaxAgeDays).
 	releaseTurn, gateOK := acquireSessionTurn(ctx, entry.payload.sessionID, sessionGateWaitLimitFor(currentCfg.Timeout))
 	if !gateOK {
-		loggerJM.Warn("async delivery skipped at the session gate (cancelled or wait-limit valve)",
-			"session", entry.payload.sessionID, "job_id", entry.jobID, "ctx_err", ctx.Err())
+		// Two abort causes, deliberately different UX (mirrors chat()'s
+		// split): cancellation (stop/shutdown — silent, the queue already
+		// told the user) and the wait-limit valve (the holder is wedged or
+		// pathologically slow — tell the user their result is deferred and
+		// that messaging retrieves it; the job stays completed and the
+		// session-switch above left the job's session active, which is
+		// exactly what makes that instruction true).
+		if ctx.Err() != nil {
+			loggerJM.Info("async delivery skipped: cancelled while waiting for the session's in-flight turn",
+				"session", entry.payload.sessionID, "job_id", entry.jobID)
+			return
+		}
+		loggerJM.Warn("async delivery aborted: session gate wait exceeded limit",
+			"session", entry.payload.sessionID, "job_id", entry.jobID,
+			"limit", sessionGateWaitLimitFor(currentCfg.Timeout))
+		n := getNotices()
+		tmpl := n.Queue.AsyncDeferred
+		vars := map[string]string{"nick": entry.nick}
+		if switchedBack {
+			tmpl = n.Queue.AsyncDeferredSwitched
+			vars["id"] = fmt.Sprintf("%d", entry.payload.sessionID)
+		}
+		select {
+		case output <- expandNotice(tmpl, vars):
+		case <-ctx.Done():
+		}
 		return
 	}
 	defer releaseTurn()

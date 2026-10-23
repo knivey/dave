@@ -1332,6 +1332,224 @@ func TestRecoverPendingJobsQueueDepthDefersToNextBoot(t *testing.T) {
 	assert.Equal(t, "depth-job-2", jobs[0].JobID, "the second job is the one refused at depth")
 }
 
+// TestDeliverAsyncResultValveNotice_SameSession pins State A of the
+// valve-abort notice: the user is still on the job's session, so the plain
+// async_deferred wording fires — no switch involved.
+func TestDeliverAsyncResultValveNotice_SameSession(t *testing.T) {
+	setupTestDB(t)
+	setupTestJobManager(t)
+	_ = setupMockDeps(t)
+	setupNoticesDefaults(t)
+
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
+	insertTestMessage(t, sid, "system", "sys")
+	require.NoError(t, createPendingJob(sid, "valve-notice-1", "generate_image_async", "img-mcp"))
+	require.NoError(t, completePendingJob("valve-notice-1", "image url: http://example.com/1.png"))
+
+	origLimit := sessionTurnWaitLimit
+	sessionTurnWaitLimit = 40 * time.Millisecond
+	t.Cleanup(func() { sessionTurnWaitLimit = origLimit })
+
+	tinyCfg := makeTestAIConfig()
+	tinyCfg.Timeout = 60 * time.Millisecond // derived limit: 180ms
+	configMu.Lock()
+	old := config
+	c := config
+	c.Commands.Chats = map[string]AIConfig{"testchat": tinyCfg}
+	config = c
+	configMu.Unlock()
+	t.Cleanup(func() {
+		configMu.Lock()
+		config = old
+		configMu.Unlock()
+	})
+
+	userID := ensureTestUser(t, "testnet", "testuser")
+	entry := &jobEntry[asyncJobPayload]{
+		jobID: "valve-notice-1", payload: asyncJobPayload{sessionID: sid},
+		toolName: "generate_image_async", mcpServer: "img-mcp",
+		network: "testnet", channel: "#test", nick: "testuser", userID: userID,
+	}
+
+	release, ok := acquireSessionTurn(context.Background(), sid, sessionTurnWaitLimit)
+	require.True(t, ok, "test should hold the gate")
+
+	output := make(chan string, 50)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		deliverAsyncResult(entry, context.Background(), output)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(6 * time.Second):
+		t.Fatal("deliverAsyncResult never returned from the gate wait")
+	}
+	close(output)
+	release()
+
+	var lines []string
+	for l := range output {
+		lines = append(lines, l)
+	}
+	sawNotice := false
+	for _, l := range lines {
+		if strings.Contains(l, "background task finished") {
+			sawNotice = true
+		}
+	}
+	assert.True(t, sawNotice, "valve abort must send the async_deferred notice; output: %v", lines)
+
+	// Job stays pending; nothing injected.
+	msgs, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	for _, m := range msgs {
+		assert.NotContains(t, m.Content, "Background task completed")
+	}
+	jobs, err := getCompletedPendingJobs(sid)
+	require.NoError(t, err)
+	assert.Len(t, jobs, 1, "job must stay pending")
+}
+
+// TestDeliverAsyncResultValveNotice_SwitchedBack pins State B and the
+// ordering the notice's promise depends on: when the user had moved to a
+// newer session, the delivery ALREADY switched them back before reaching
+// the gate, so the valve abort must (a) name the switch in its wording and
+// (b) leave the job's session ACTIVE — that is what makes "send a message
+// and I'll pick it up" true (the inline delivery loop reads the ACTIVE
+// session's pending jobs). A future refactor moving the gate before the
+// switch would silently falsify both.
+func TestDeliverAsyncResultValveNotice_SwitchedBack(t *testing.T) {
+	setupTestDB(t)
+	setupTestJobManager(t)
+	_ = setupMockDeps(t)
+	setupNoticesDefaults(t)
+
+	// S: the job's session. T: the newer session the user moved to.
+	sidS := createTestSession(t, "testnet", "#sw", "swuser", "testchat", "", "")
+	insertTestMessage(t, sidS, "system", "sys")
+	sidT := createTestSession(t, "testnet", "#sw", "swuser", "testchat", "", "")
+	insertTestMessage(t, sidT, "system", "sys")
+
+	require.NoError(t, createPendingJob(sidS, "valve-notice-2", "generate_image_async", "img-mcp"))
+	require.NoError(t, completePendingJob("valve-notice-2", "image url: http://example.com/2.png"))
+
+	origLimit := sessionTurnWaitLimit
+	sessionTurnWaitLimit = 40 * time.Millisecond
+	t.Cleanup(func() { sessionTurnWaitLimit = origLimit })
+
+	tinyCfg := makeTestAIConfig()
+	tinyCfg.Timeout = 60 * time.Millisecond
+	configMu.Lock()
+	old := config
+	c := config
+	c.Commands.Chats = map[string]AIConfig{"testchat": tinyCfg}
+	config = c
+	configMu.Unlock()
+	t.Cleanup(func() {
+		configMu.Lock()
+		config = old
+		configMu.Unlock()
+	})
+
+	userID := ensureTestUser(t, "testnet", "swuser")
+	entry := &jobEntry[asyncJobPayload]{
+		jobID: "valve-notice-2", payload: asyncJobPayload{sessionID: sidS},
+		toolName: "generate_image_async", mcpServer: "img-mcp",
+		network: "testnet", channel: "#sw", nick: "swuser", userID: userID,
+	}
+
+	release, ok := acquireSessionTurn(context.Background(), sidS, sessionTurnWaitLimit)
+	require.True(t, ok, "test should hold the job session's gate")
+
+	output := make(chan string, 50)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		deliverAsyncResult(entry, context.Background(), output)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(6 * time.Second):
+		t.Fatal("deliverAsyncResult never returned from the gate wait")
+	}
+	close(output)
+	release()
+
+	var lines []string
+	for l := range output {
+		lines = append(lines, l)
+	}
+	sawSwitchNotice, sawDeferredNotice := false, false
+	for _, l := range lines {
+		if strings.Contains(l, "switched you back to session #") {
+			sawDeferredNotice = true
+		}
+		if strings.Contains(l, "Use") && strings.Contains(l, "resume") {
+			sawSwitchNotice = true
+		}
+	}
+	assert.True(t, sawDeferredNotice, "valve abort must use the switched wording; output: %v", lines)
+	assert.True(t, sawSwitchNotice, "the switch-back notice should have preceded the abort")
+
+	// THE ORDERING PIN: the job's session is active at abort time — the
+	// notice's "message me and I'll pick it up" depends on it.
+	active, err := sessionMgr.GetActiveSession("testnet", "#sw", userID)
+	require.NoError(t, err)
+	require.NotNil(t, active)
+	assert.Equal(t, sidS, active.ID, "job session must be active after the valve abort")
+
+	jobs, err := getCompletedPendingJobs(sidS)
+	require.NoError(t, err)
+	assert.Len(t, jobs, 1, "job must stay pending")
+}
+
+// TestDeliverAsyncResultCancelSilent: a cancelled delivery (stop/shutdown)
+// stays silent — the queue already told the user; the async_deferred
+// notice is reserved for the wait-limit valve.
+func TestDeliverAsyncResultCancelSilent(t *testing.T) {
+	setupTestDB(t)
+	setupTestJobManager(t)
+	_ = setupMockDeps(t)
+	setupNoticesDefaults(t)
+
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
+	insertTestMessage(t, sid, "system", "sys")
+	require.NoError(t, createPendingJob(sid, "cancel-silent-1", "generate_image_async", "img-mcp"))
+	require.NoError(t, completePendingJob("cancel-silent-1", "image url: http://example.com/3.png"))
+
+	userID := ensureTestUser(t, "testnet", "testuser")
+	entry := &jobEntry[asyncJobPayload]{
+		jobID: "cancel-silent-1", payload: asyncJobPayload{sessionID: sid},
+		toolName: "generate_image_async", mcpServer: "img-mcp",
+		network: "testnet", channel: "#test", nick: "testuser", userID: userID,
+	}
+
+	release, ok := acquireSessionTurn(context.Background(), sid, sessionTurnWaitLimit)
+	require.True(t, ok)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	output := make(chan string, 50)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		deliverAsyncResult(entry, ctx, output)
+	}()
+	time.Sleep(150 * time.Millisecond) // let the delivery park at the gate
+	cancel()
+	<-done
+	close(output)
+
+	for l := range output {
+		assert.NotContains(t, l, "background task finished",
+			"cancelled delivery must not send the valve notice")
+	}
+
+	release()
+}
+
 func TestRegisterAsyncJob_Duplicate(t *testing.T) {
 	setupTestJobManager(t)
 	// Park the job goroutine inside wait_for_job. Without this the wait fails

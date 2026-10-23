@@ -31,12 +31,14 @@ type NoticesConfig struct {
 }
 
 type QueueNotices struct {
-	Msg             string `toml:"msg"`
-	Started         string `toml:"started"`
-	AsyncSubmitted  string `toml:"async_submitted"`
-	Stopped         string `toml:"stopped"`
-	TurnWait        string `toml:"turn_wait"`
-	TurnWaitTimeout string `toml:"turn_wait_timeout"`
+	Msg                   string `toml:"msg"`
+	Started               string `toml:"started"`
+	AsyncSubmitted        string `toml:"async_submitted"`
+	Stopped               string `toml:"stopped"`
+	TurnWait              string `toml:"turn_wait"`
+	TurnWaitTimeout       string `toml:"turn_wait_timeout"`
+	AsyncDeferred         string `toml:"async_deferred"`
+	AsyncDeferredSwitched string `toml:"async_deferred_switched"`
 }
 
 type RateNotices struct {
@@ -222,6 +224,12 @@ func setNoticesDefaults(n *NoticesConfig) {
 	}
 	if n.Queue.TurnWaitTimeout == "" {
 		n.Queue.TurnWaitTimeout = "\x0304⚠️ Your previous message is still generating after {wait} — please resend it once it finishes."
+	}
+	if n.Queue.AsyncDeferred == "" {
+		n.Queue.AsyncDeferred = "\x0307⚠️ {nick}: your background task finished but delivery was delayed — send a message and I'll pick it up...\x0f"
+	}
+	if n.Queue.AsyncDeferredSwitched == "" {
+		n.Queue.AsyncDeferredSwitched = "\x0307⚠️ {nick}: switched you back to session #{id} for a finished background task — delivery was delayed; send a message and I'll pick it up...\x0f"
 	}
 	if len(n.Rate.Msgs) == 0 {
 		n.Rate.Msgs = []string{"hold on you're going to fast"}

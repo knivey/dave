@@ -7,6 +7,11 @@
 #   started          (string)    Processing started notice. Placeholders: {nick}, {wait}, {prompt}, {position}, {eta}
 #   async_submitted  (string)    Async image job submitted notice. Placeholders: {nick}
 #   stopped          (string)    Generation stopped by user
+#   turn_wait        (string)    Sent when a continuation arrives while its session already has a turn in flight
+#                                (it waits behind it). Placeholders: {nick}
+#   turn_wait_timeout (string)   Sent when that wait exceeded its safety limit (normally 10m, or 3x the command's
+#                                timeout when longer) — the message was not recorded; the user should resend.
+#                                Placeholders: {wait} (the actual time waited)
 #
 # [rate] options:
 #   msgs             (string[])  Random pick for rate-limit notice
@@ -139,6 +144,8 @@
 # started = "\x0306▶ {nick}: Processing your request (waited {wait})...{prompt}\x0f"
 # async_submitted = "\x0303🎨 Generating image for \x02{nick}\x02... I'll send the result when it's ready."
 # stopped = "\x0315⏹ Generation stopped."
+# turn_wait = "\x0307⏳ {nick}: still working on your previous message...\x0f"
+# turn_wait_timeout = "\x0304⚠️ Your previous message is still generating after {wait} — please resend it once it finishes."
 #
 # [rate]
 # msgs = ["hold on you're going to fast"]

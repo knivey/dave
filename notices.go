@@ -31,10 +31,12 @@ type NoticesConfig struct {
 }
 
 type QueueNotices struct {
-	Msg            string `toml:"msg"`
-	Started        string `toml:"started"`
-	AsyncSubmitted string `toml:"async_submitted"`
-	Stopped        string `toml:"stopped"`
+	Msg             string `toml:"msg"`
+	Started         string `toml:"started"`
+	AsyncSubmitted  string `toml:"async_submitted"`
+	Stopped         string `toml:"stopped"`
+	TurnWait        string `toml:"turn_wait"`
+	TurnWaitTimeout string `toml:"turn_wait_timeout"`
 }
 
 type RateNotices struct {
@@ -214,6 +216,12 @@ func setNoticesDefaults(n *NoticesConfig) {
 	}
 	if n.Queue.Stopped == "" {
 		n.Queue.Stopped = "\x0315⏹ Generation stopped."
+	}
+	if n.Queue.TurnWait == "" {
+		n.Queue.TurnWait = "\x0307⏳ {nick}: still working on your previous message...\x0f"
+	}
+	if n.Queue.TurnWaitTimeout == "" {
+		n.Queue.TurnWaitTimeout = "\x0304⚠️ Your previous message is still generating after {wait} — please resend it once it finishes."
 	}
 	if len(n.Rate.Msgs) == 0 {
 		n.Rate.Msgs = []string{"hold on you're going to fast"}

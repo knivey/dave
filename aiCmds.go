@@ -2165,6 +2165,39 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 		}
 	}
 
+	// Session turn gate (sessionGate.go DESIGN NOTE): serialize turns on
+	// this session so concurrent continuations wait behind the in-flight
+	// turn instead of racing history snapshots and scrambling row order.
+	// Acquired BEFORE the user message is persisted so a cancelled waiter
+	// leaves no orphan row. Scope is the session: fresh chat commands
+	// (ClearContext + new session), other users, and ephemeral turns are
+	// untouched.
+	if sessionTurnBusy(session.ID) {
+		n := getNotices()
+		runner.sendWarning(expandNotice(n.Queue.TurnWait, map[string]string{"nick": nick}))
+	}
+	gateStart := time.Now()
+	releaseTurn, gateOK := acquireSessionTurn(ctx, session.ID, sessionGateWaitLimitFor(cfg.Timeout))
+	if !gateOK {
+		// Two abort causes, deliberately different UX: cancellation
+		// (stop/shutdown — stay silent, the queue already told the
+		// user) and the wait-limit valve (a wedged holder — tell the
+		// user to resend; nothing was persisted, so nothing is lost).
+		if ctx.Err() != nil {
+			runner.logger.Info("turn skipped: cancelled while waiting for the session's in-flight turn",
+				"session", session.ID)
+			return
+		}
+		runner.logger.Warn("turn aborted: session gate wait exceeded limit",
+			"session", session.ID, "limit", sessionGateWaitLimitFor(cfg.Timeout))
+		n := getNotices()
+		runner.sendError(expandNotice(n.Queue.TurnWaitTimeout, map[string]string{
+			"wait": time.Since(gateStart).Round(time.Second).String(),
+		}))
+		return
+	}
+	defer releaseTurn()
+
 	var userMsg ChatMessage
 	if cfg.DetectImages {
 		messages, err := sessionMgr.GetMessages(session.ID)

@@ -95,6 +95,24 @@ imageformat = "jpg"
 imagequality = 75
 maximagesize = "1024x1024"
 
+[openrouter]
+key = "sk-or-v1-YOUR-KEY-HERE"  # OpenRouter API key (https://openrouter.ai/settings/keys)
+maxcompletiontokens = 600
+baseurl = "https://openrouter.ai/api/v1/"
+temperature = 0.7  # optional
+imageformat = "jpg"
+imagequality = 75
+maximagesize = "1024x1024"
+# OpenRouter is the provider the reasoning_details dialect is built for:
+# eligible rows replay the EXACT captured structure (encrypted/summarized
+# reasoning included — the continuity tool-calling models like Claude need)
+# instead of the reasoning_content text form. Capture is always on; this
+# knob only changes the replay wire form. Set per-command if only some
+# commands on this service should use it.
+reasoningreplayformat = "details"
+# context_window varies per model on OpenRouter — set it per command
+# (chats.toml context_window) rather than here.
+
 [sd]
 baseurl = "http://192.168.100.45:7860"
 

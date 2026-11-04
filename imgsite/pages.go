@@ -238,7 +238,11 @@ table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
 </head>
 <body data-page="image" data-image-id="{{.ID}}"{{if .AtEnd}} data-at-end="true"{{end}}{{if .LastEvent}} data-last-event="{{.LastEvent}}"{{end}}>
 <nav class="topnav">
-<a href="/">&larr; gallery</a>
+{{/* Back link target follows the sort context ({{.SortQS}} is "" on
+      default entry, "?sort=liked" when the page was entered from the
+      top-rated gallery — see likedSortQS): a top-rated visitor
+      returns to top rated, everyone else to newest. */}}
+<a href="/{{.SortQS}}">&larr; gallery</a>
 <span class="spacer"></span>
 {{/* Plain GET form: Enter navigates to the server-rendered /search
      page. No JS module boots a search layer on the image page, so this
@@ -256,7 +260,7 @@ table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
 <a href="{{.OrigURL}}">open file</a>
 </nav>
 <div class="viewer">
-{{if .HasPrev}}<a class="chevron left" id="nav-prev" href="/{{.PrevID}}" title="newer (← / p)">&#8249;</a>{{end}}
+{{if .HasPrev}}<a class="chevron left" id="nav-prev" href="/{{.PrevID}}{{.SortQS}}" title="newer (← / p)">&#8249;</a>{{end}}
 <div class="stage">
 {{/* Main image = ORIGINAL bytes (owner request, Sep 2026): uploads are
      already webp and small enough that the display thumb buys nothing
@@ -276,7 +280,7 @@ table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
 <img src="{{.OrigURL}}" alt="{{.OriginalPrompt}}">
 </button>
 </div>
-{{if .HasNext}}<a class="chevron right" id="nav-next" href="/{{.NextID}}" title="older (→ / n)">&#8250;</a>{{end}}
+{{if .HasNext}}<a class="chevron right" id="nav-next" href="/{{.NextID}}{{.SortQS}}" title="older (→ / n)">&#8250;</a>{{end}}
 </div>
 <main>
 <h1>{{.Filename}}</h1>
@@ -297,9 +301,9 @@ table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
      never touch the buttons' own state classes. Glyphs are the emoji
      heart pair in .vglyph spans — see the vote CSS comment above for
      why filter (not color) drives their unpressed gray. */}}
-<form class="like-form" method="post" action="/{{.ID}}/like">
-<button type="submit" class="like-btn{{if .LikedByYou}} liked{{end}}" id="like-btn" formaction="/{{.ID}}/like" aria-pressed="{{if .LikedByYou}}true{{else}}false{{end}}" title="{{if .LikedByYou}}unlike{{else}}like{{end}}"><span class="vglyph">&#10084;&#65039;</span> <span id="like-count">{{.LikeCount}}</span></button>
-<button type="submit" class="dislike-btn{{if .DislikedByYou}} disliked{{end}}" id="dislike-btn" formaction="/{{.ID}}/dislike" aria-pressed="{{if .DislikedByYou}}true{{else}}false{{end}}" title="{{if .DislikedByYou}}remove dislike{{else}}dislike{{end}}"><span class="vglyph">&#128148;</span> <span id="dislike-count">{{.DislikeCount}}</span></button>
+<form class="like-form" method="post" action="/{{.ID}}/like{{.SortQS}}">
+<button type="submit" class="like-btn{{if .LikedByYou}} liked{{end}}" id="like-btn" formaction="/{{.ID}}/like{{.SortQS}}" aria-pressed="{{if .LikedByYou}}true{{else}}false{{end}}" title="{{if .LikedByYou}}unlike{{else}}like{{end}}"><span class="vglyph">&#10084;&#65039;</span> <span id="like-count">{{.LikeCount}}</span></button>
+<button type="submit" class="dislike-btn{{if .DislikedByYou}} disliked{{end}}" id="dislike-btn" formaction="/{{.ID}}/dislike{{.SortQS}}" aria-pressed="{{if .DislikedByYou}}true{{else}}false{{end}}" title="{{if .DislikedByYou}}remove dislike{{else}}dislike{{end}}"><span class="vglyph">&#128148;</span> <span id="dislike-count">{{.DislikeCount}}</span></button>
 </form>
 {{/* Reactions (anonymous, cookie-token identity — see reactions.go).
       ANY emoji is reactable; the row lists only EXISTING reactions
@@ -317,7 +321,7 @@ table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
       attribute escaping handles that). */}}
 {{if .ReactionsEnabled}}
 <form class="react-form" method="post">
-{{range .ReactionButtons}}<button type="submit" class="react-chip{{if .Mine}} reacted{{end}}" data-emoji="{{.Emoji}}" formaction="/{{$.ID}}/react/{{.Emoji}}" aria-pressed="{{if .Mine}}true{{else}}false{{end}}">{{.Emoji}} <span class="react-count" data-emoji="{{.Emoji}}">{{.Count}}</span></button>
+{{range .ReactionButtons}}<button type="submit" class="react-chip{{if .Mine}} reacted{{end}}" data-emoji="{{.Emoji}}" formaction="/{{$.ID}}/react/{{.Emoji}}{{$.SortQS}}" aria-pressed="{{if .Mine}}true{{else}}false{{end}}">{{.Emoji}} <span class="react-count" data-emoji="{{.Emoji}}">{{.Count}}</span></button>
 {{end}}{{if .OverflowChips}}<span class="react-overflow" title="more reactions">+{{.OverflowChips}}</span>
 {{end}}<button type="button" class="react-open" id="react-open" title="add a reaction">&#65291; React</button>
 </form>
@@ -425,7 +429,13 @@ table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
 // so untrusted prompt text can never inject markup no matter what the
 // snippet markers split around (see search.go's marker design note).
 const cardsPartialSrc = `{{define "cards"}}{{range .Cards}}<article class="card" data-id="{{.ID}}">
-<a class="card-link" href="/{{.ID}}">
+{{/* Card links carry the top-rated context ($.SortLiked — $ because
+      the range rebinds dot to the card): the details page's back
+      link and chevrons depend on it (see likedSortQS). Search views
+      never set SortLiked, so their cards stay bare; the gallery's
+      fragment path sets it exactly like the page path, so fetched
+      pages are never the ones that drop it. */}}
+<a class="card-link" href="/{{.ID}}{{if $.SortLiked}}?sort=liked{{end}}">
 {{if .ThumbFailed}}<img loading="lazy" src="{{.OrigURL}}" alt="{{.PromptSnippet}}">{{else if .ThumbPending}}<img class="pending" loading="lazy" src="{{.ThumbURL}}" data-orig="{{.OrigURL}}" alt="{{.PromptSnippet}}">{{else}}<img loading="lazy" src="{{.ThumbURL}}" alt="{{.PromptSnippet}}">{{end}}
 </a>
 {{if .SnippetParts}}<p class="prompt">{{range .SnippetParts}}{{if .Hit}}<mark>{{.Text}}</mark>{{else}}{{.Text}}{{end}}{{end}}</p>{{else}}<p class="prompt">{{.PromptSnippet}}</p>{{end}}
@@ -843,6 +853,30 @@ func gallerySortLiked(r *http.Request) bool {
 	return r.URL.Query().Get("sort") == "liked"
 }
 
+// likedSortQS is the details-page spelling of the gallery's sort
+// context: "" (default mode) or "?sort=liked" (entered from the
+// top-rated gallery). The SAME strict vocabulary as gallerySortLiked,
+// one source of truth.
+//
+// DESIGN NOTE (top-rated navigation context, Nov 2026 — user request
+// via .tell: the "<- gallery" back link must return to the top-rated
+// page when the image was entered from there). The context rides the
+// details URL itself as ?sort=liked: top-rated cards set it, and the
+// details page then renders it into every same-page navigation (back
+// link, chevrons, vote/reaction form actions) so browsing, no-JS
+// toggles, reloads, and shared URLs all preserve it. It is
+// navigation state, NOT image identity: og:url, copy-link, download,
+// and open-file never carry it, and default-mode or search-entry
+// pages render exactly the bare markup they always did. Client-built
+// details URLs (image.js's live chevron reveal, rebuilt reaction
+// chips) derive the same suffix from location.search.
+func likedSortQS(r *http.Request) string {
+	if gallerySortLiked(r) {
+		return "?sort=liked"
+	}
+	return ""
+}
+
 // clampSnippet truncates to maxRunes (including the ellipsis) so gallery
 // cards stay one-liner-ish regardless of prompt length.
 func clampSnippet(s string, maxRunes int) string {
@@ -1025,6 +1059,14 @@ type imageView struct {
 	// codebase's keyset naming the arrival direction is prev
 	// (newer) — see handleNeighbors.
 	AtEnd bool
+
+	// SortQS is the top-rated navigation context ("" or
+	// "?sort=liked" — see likedSortQS): set by handleImagePage from
+	// the request, rendered into the back link, both chevrons, and
+	// every form action so navigation out of a top-rated-entered
+	// page stays in mode. Bare entry renders "" and the markup is
+	// byte-identical to the pre-context templates.
+	SortQS string
 }
 
 // buildImageView assembles the template view from a row plus its keyset
@@ -1270,6 +1312,9 @@ func (a *App) handleImagePage(w http.ResponseWriter, r *http.Request, id string)
 	}
 
 	view := buildImageView(img, prev, next, a.absBaseForSite(sc, r))
+	// Top-rated navigation context: set BEFORE the template renders
+	// (back link, chevrons, form actions all read it — see SortQS).
+	view.SortQS = likedSortQS(r)
 	cfg := a.getConfig()
 	// Vote state: counts always, the visitor's own stance when they
 	// carry a liker cookie (page GETs never mint one — only the POST

@@ -410,6 +410,10 @@ func (a *App) handleVoteToggle(vote int) http.HandlerFunc {
 			}
 			return
 		}
-		http.Redirect(w, r, "/"+id, http.StatusSeeOther)
+		// 303 back to the details page; likedSortQS preserves the
+		// top-rated navigation context (the form action carried it —
+		// dropping it would revert the back link to newest after a
+		// no-JS toggle).
+		http.Redirect(w, r, "/"+id+likedSortQS(r), http.StatusSeeOther)
 	}
 }

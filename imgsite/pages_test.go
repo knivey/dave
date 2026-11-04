@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -1199,4 +1200,92 @@ func TestPagesWithoutHubOmitEventCursor(t *testing.T) {
 		_, body := getPage(t, ts.URL, path)
 		assert.NotContains(t, body, "data-last-event", "path %s must omit the cursor without a hub (fragments always)", path)
 	}
+}
+
+// TestLikedSortBackLinkPropagation pins the top-rated navigation
+// context end to end (user request via .tell, Nov 2026: "<- gallery
+// link goes back to the top rated page if you clicked a pic from the
+// top rated page"). The context rides the details URL itself
+// (?sort=liked — the gallery's own strict sort vocabulary, set by
+// top-rated cards) so no-JS navigation, reloads, and shared URLs all
+// preserve it; the back link, chevrons, and every form action on the
+// details page then keep pointing at /?sort=liked. Search-entry and
+// default-entry pages stay bare, and og:url never claims the context
+// (it is navigation state, not image identity).
+func TestLikedSortBackLinkPropagation(t *testing.T) {
+	app := newTestApp(t, reactionTestConfig())
+	ts := newTestServer(t, app)
+	insertImage(t, app, "srt1001", "2026-10-07 01:00:00")
+	insertImage(t, app, "srt1002", "2026-10-07 02:00:00")
+	insertImage(t, app, "srt1003", "2026-10-07 03:00:00")
+	// One reaction so a chip renders (chips exist only for non-zero
+	// tallies) — the chip formaction must carry the context too.
+	_, _, _, err := dbToggleReaction(app.db, "srt1002", "stok1", "🔥")
+	require.NoError(t, err)
+
+	// Top-rated gallery: cards link into details WITH the context.
+	status, body := getPage(t, ts.URL, "/?sort=liked")
+	require.Equal(t, http.StatusOK, status)
+	for _, id := range []string{"srt1001", "srt1002", "srt1003"} {
+		assert.Contains(t, body, `<a class="card-link" href="/`+id+`?sort=liked">`,
+			"top-rated cards carry the sort context into details")
+	}
+
+	// The infinite-scroll fragment serves the same param'd links
+	// (fetched pages must not be the ones that drop the context).
+	status, body = getPage(t, ts.URL, "/gallery?sort=liked")
+	require.Equal(t, http.StatusOK, status)
+	assert.Contains(t, body, `<a class="card-link" href="/srt1002?sort=liked">`,
+		"fragment cards carry the sort context too")
+
+	// Default gallery: bare card links. (The sort-nav's own
+	// /?sort=liked link is unrelated markup, so the negatives anchor
+	// on the card id.)
+	status, body = getPage(t, ts.URL, "/")
+	require.Equal(t, http.StatusOK, status)
+	for _, id := range []string{"srt1001", "srt1002", "srt1003"} {
+		assert.Contains(t, body, `<a class="card-link" href="/`+id+`">`)
+		assert.NotContains(t, body, `href="/`+id+`?sort=liked"`,
+			"default-mode cards never claim a sort context")
+	}
+
+	// Search results: bare too — search relevance order is its own
+	// mode and has no top-rated context to preserve.
+	status, body = getPage(t, ts.URL, "/search?q=prompt")
+	require.Equal(t, http.StatusOK, status)
+	for _, id := range []string{"srt1001", "srt1002", "srt1003"} {
+		assert.Contains(t, body, `<a class="card-link" href="/`+id+`">`)
+		assert.NotContains(t, body, `href="/`+id+`?sort=liked"`,
+			"search cards never claim a sort context")
+	}
+
+	// Details page entered with the context: back link, chevrons, and
+	// every form action keep it. srt1002 is the middle row, so both
+	// chevrons render (prev = newer = srt1003, next = older = srt1001).
+	status, body = getPage(t, ts.URL, "/srt1002?sort=liked")
+	require.Equal(t, http.StatusOK, status)
+	assert.Contains(t, body, `<a href="/?sort=liked">&larr; gallery</a>`,
+		"back link returns to the top-rated page")
+	assert.Contains(t, body, `id="nav-prev" href="/srt1003?sort=liked"`,
+		"prev chevron keeps the context (chevron browsing stays in mode)")
+	assert.Contains(t, body, `id="nav-next" href="/srt1001?sort=liked"`)
+	assert.Contains(t, body, `action="/srt1002/like?sort=liked"`)
+	assert.Contains(t, body, `formaction="/srt1002/like?sort=liked"`)
+	assert.Contains(t, body, `formaction="/srt1002/dislike?sort=liked"`)
+	assert.Contains(t, body, `formaction="/srt1002/react/%f0%9f%94%a5?sort=liked"`,
+		"reaction chip formactions keep the context (no-JS toggle round-trips stay in mode)")
+	// The context is navigation-only: og:url stays the canonical bare
+	// page URL unfurlers should share.
+	ogURL := regexp.MustCompile(`property="og:url" content="([^"]*)"`).FindStringSubmatch(body)
+	require.NotNil(t, ogURL, "og:url renders")
+	assert.NotContains(t, ogURL[1], "sort=", "og:url stays canonical (no sort param)")
+
+	// Details page entered bare: everything renders exactly as before.
+	status, body = getPage(t, ts.URL, "/srt1002")
+	require.Equal(t, http.StatusOK, status)
+	assert.Contains(t, body, `<a href="/">&larr; gallery</a>`)
+	assert.Contains(t, body, `id="nav-prev" href="/srt1003"`)
+	assert.Contains(t, body, `id="nav-next" href="/srt1001"`)
+	assert.Contains(t, body, `action="/srt1002/like"`)
+	assert.Contains(t, body, `formaction="/srt1002/react/%f0%9f%94%a5"`)
 }

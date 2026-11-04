@@ -476,6 +476,34 @@ func TestReactionToggleFormRedirectsBack(t *testing.T) {
 	require.NotEmpty(t, resp.Cookies(), "cookie is minted on the form path too")
 }
 
+// TestReactionToggleRedirectPreservesLikedSort: the no-JS reaction
+// chip on a top-rated details page posts WITH ?sort=liked (the chip's
+// formaction carries it), so the 303 back must return to the same
+// top-rated context — see TestLikeToggleRedirectPreservesLikedSort.
+func TestReactionToggleRedirectPreservesLikedSort(t *testing.T) {
+	app := newTestApp(t, reactionTestConfig())
+	ts := newTestServer(t, app)
+	ts.Client().CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	insertImage(t, app, "rxn1018", "2026-10-06 01:00:00")
+
+	req, err := http.NewRequest("POST", ts.URL+"/rxn1018/react/"+url.PathEscape("🔥")+"?sort=liked", nil)
+	require.NoError(t, err)
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	t.Cleanup(func() { resp.Body.Close() })
+	require.Equal(t, http.StatusSeeOther, resp.StatusCode)
+	assert.Equal(t, "/rxn1018?sort=liked", resp.Header.Get("Location"),
+		"redirect returns to the details page in the same sort context")
+
+	// Without the param the redirect stays bare (default mode); the
+	// second 🔥 toggle also retracts the first, leaving no state.
+	resp = postReact(t, ts, "rxn1018", "🔥", "", "")
+	require.Equal(t, http.StatusSeeOther, resp.StatusCode)
+	assert.Equal(t, "/rxn1018", resp.Header.Get("Location"))
+}
+
 func TestReactionToggleNotFoundAndGone(t *testing.T) {
 	app := newTestApp(t, reactionTestConfig())
 	ts := newTestServer(t, app)

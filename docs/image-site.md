@@ -367,7 +367,7 @@ timestamps. Cursor wire format: `?after=YYYY-MM-DD%20HH%3AMM%3ASS.mmm~<id>`
 | `GET /search-fragment?q=…&after=…` | search results page (HTML fragment — first page + infinite scroll) | no-cache |
 | `GET /static/…` | embedded web/ assets (JS/CSS; no directory listings) | `public, max-age=3600` |
 | `GET /favicon.ico` | inline SVG favicon | `public, max-age=86400` |
-| `GET /<id>` | image details page (HTML) | no-cache (next-button is live) |
+| `GET /<id>` | image details page (HTML); `?sort=liked` = entered from the top-rated gallery — back link, chevrons, and form actions keep that context (see "Top-rated navigation context") | no-cache (next-button is live) |
 | `POST /<id>/like` | like toggle (anonymous cookie identity — see "Likes"); JSON for `Accept: application/json`, 303 back to the page otherwise | no-store (JSON path) |
 | `POST /<id>/dislike` | dislike toggle — same contract as the like toggle; like and dislike are mutually exclusive per token (a dislike switches a held like and vice versa) | no-store (JSON path) |
 | `POST /<id>/react/<emoji>` | emoji reaction toggle — same identity/visibility/limits contract; `<emoji>` is the raw emoji itself (percent-encoded, any emoji — no catalog membership); multi-emoji per visitor; JSON `{emoji,reacted,reactions,mine}` | no-store (JSON path) |
@@ -696,6 +696,31 @@ gallery (infinite scroll's fragment URL, search.js's gallery restore +
 `history.replaceState`) derives its sort param from one source of
 truth, `galleryQS()` in gallery.js — hardcoding either path strands a
 cursor-mode mismatch that 400s every subsequent page fetch.
+
+### Top-rated navigation context (back link returns to top rated)
+
+User request via .tell, Nov 2026: the "<- gallery" link on a details
+page must return to the top-rated page when the image was entered from
+there. The context rides the details URL itself: top-rated cards (page
+AND fragment — both set `SortLiked`) link to `/<id>?sort=liked`, using
+the gallery's own strict sort vocabulary. The details page reads it
+once (`likedSortQS`, the same strict `"liked"` match as
+`gallerySortLiked`) and renders it into every same-page navigation:
+the back link (`/?sort=liked` instead of `/`), both chevrons, the vote
+form action + both formactions, and every reaction chip's formaction —
+so chevron/keyboard browsing and no-JS toggle round trips (the 303
+Location preserves it) stay in mode instead of silently reverting the
+back link to newest. image.js derives the same suffix from
+`location.search` (`sortQS`) for the URLs it builds itself: the
+live-revealed chevron, JS-rebuilt reaction chips, and the PicMo pick
+POST. It is navigation state, NOT image identity: `og:url`,
+copy-link, download, and open-file never carry it, and default-entry
+and search-entry pages render byte-identical bare markup (search views
+never set `SortLiked`). Guarded by `TestLikedSortBackLinkPropagation`
++ `TestLikeToggleRedirectPreservesLikedSort` +
+`TestReactionToggleRedirectPreservesLikedSort` +
+`TestImageJSCarriesLikedSortContext` (source-level pin, like the other
+JS pins).
 
 ## Reactions (`POST /<id>/react/<emoji>` · reactions.go · migrations 006 + 007)
 

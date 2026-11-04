@@ -1594,3 +1594,54 @@ func TestDetailsPageOGBaseSiteMatrix(t *testing.T) {
 		assert.NotContains(t, body, "safe.example.com", "the safe base never leaks onto the default page")
 	})
 }
+
+// jsFuncBody extracts one tab-indented function's source from a
+// served module (source-pin tests use it to scope Contains assertions
+// to a function). end is relative to the text AFTER the signature, so
+// it must be re-based by the signature length before slicing rest —
+// skipping that re-base silently truncates the tail of the body
+// (assertions on mid-body lines still pass, which is exactly why the
+// bug is worth killing at the source).
+func jsFuncBody(t *testing.T, js, signature string) string {
+	t.Helper()
+	start := strings.Index(js, signature)
+	require.NotEqual(t, -1, start, signature+" not found in served module")
+	rest := js[start:]
+	end := strings.Index(rest[len(signature):], "\n\t}")
+	require.NotEqual(t, -1, end, signature+" body end not found in served module")
+	return rest[:len(signature)+end+len("\n\t}")]
+}
+
+// TestImageJSCarriesLikedSortContext pins the client half of the
+// top-rated navigation context (source-level, like the other JS pins
+// — the behavioral harness is a browser): image.js must derive the
+// SAME strict sort=liked vocabulary the server uses (from the page
+// URL, never a referrer) and append it to every client-built details
+// URL — the live-revealed chevron's href and the JS-rebuilt reaction
+// chips' formActions. Without it, the SSE chevron reveal or any chip
+// rebuild would be the one click that silently drops the back link's
+// top-rated context.
+func TestImageJSCarriesLikedSortContext(t *testing.T) {
+	app := newTestApp(t, testConfig())
+	ts := newTestServer(t, app)
+
+	resp := fetchPath(t, ts, "/static/image.js")
+	require.Equal(t, 200, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	js := string(body)
+
+	// The context is derived from the page URL exactly the way the
+	// server derives it (strict "liked" — see gallerySortLiked).
+	assert.Contains(t, js, `get("sort") === "liked" ? "?sort=liked" : ""`,
+		"sortQS must mirror the server's strict sort=liked vocabulary")
+
+	// revealPrev builds the live chevron's href client-side.
+	assert.Contains(t, jsFuncBody(t, js, "\tfunction revealPrev("), `a.href = "/" + id + sortQS`,
+		"the live-revealed chevron must propagate the sort context")
+
+	// renderReactionRow rebuilds chips client-side with formActions of
+	// their own (the fetch-failure fallback POSTs through them).
+	assert.Contains(t, jsFuncBody(t, js, "\tfunction renderReactionRow("), `+ encodeURIComponent(emoji) + sortQS`,
+		"JS-rebuilt reaction chips must propagate the sort context")
+}

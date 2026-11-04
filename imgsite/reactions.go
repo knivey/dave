@@ -328,5 +328,8 @@ func (a *App) handleReactionToggle(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	http.Redirect(w, r, "/"+id, http.StatusSeeOther)
+	// 303 back to the details page; likedSortQS preserves the
+	// top-rated navigation context (the chip's formaction carried it —
+	// see the likes.go twin of this redirect).
+	http.Redirect(w, r, "/"+id+likedSortQS(r), http.StatusSeeOther)
 }

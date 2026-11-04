@@ -402,6 +402,36 @@ func TestLikeToggleFormRedirectsBack(t *testing.T) {
 	}
 }
 
+// TestLikeToggleRedirectPreservesLikedSort: the no-JS vote form on a
+// top-rated details page posts WITH ?sort=liked (the form action
+// carries it), so the 303 back must return to the same top-rated
+// context — dropping it would silently revert the back link to
+// newest after one no-JS toggle.
+func TestLikeToggleRedirectPreservesLikedSort(t *testing.T) {
+	app := newTestApp(t, testConfig())
+	ts := newTestServer(t, app)
+	ts.Client().CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	insertImage(t, app, "lik1017", "2026-10-05 01:00:00")
+
+	for _, kind := range []string{"like", "dislike"} {
+		req, err := http.NewRequest("POST", ts.URL+"/lik1017/"+kind+"?sort=liked", nil)
+		require.NoError(t, err, "%s path", kind)
+		resp, err := ts.Client().Do(req)
+		require.NoError(t, err, "%s path", kind)
+		t.Cleanup(func() { resp.Body.Close() })
+		require.Equal(t, http.StatusSeeOther, resp.StatusCode, "%s path", kind)
+		assert.Equal(t, "/lik1017?sort=liked", resp.Header.Get("Location"),
+			"redirect returns to the details page in the same sort context")
+	}
+
+	// Without the param the redirect stays bare (default mode).
+	resp := postVote(t, ts, "lik1017", "like", "", "")
+	require.Equal(t, http.StatusSeeOther, resp.StatusCode)
+	assert.Equal(t, "/lik1017", resp.Header.Get("Location"))
+}
+
 func TestLikeToggleNotFoundAndGone(t *testing.T) {
 	app := newTestApp(t, testConfig())
 	ts := newTestServer(t, app)

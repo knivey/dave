@@ -26,6 +26,17 @@ import { connect } from "./sse.js";
 
 const NEIGHBORS_DEBOUNCE_MS = 300;
 
+// sortQS is the top-rated navigation context on the details URL
+// ("" or "?sort=liked" — set by top-rated gallery cards, server-side
+// twin likedSortQS in pages.go). Every client-built URL that targets
+// another details page (or posts back to this one) must append it, or
+// that one click drops the context the back link depends on: the
+// live-revealed chevron, the JS-rebuilt reaction chips' formActions,
+// and the PicMo pick POST. Derived from the page URL with the same
+// strict "liked" vocabulary — never a referrer (empty on reloads, new
+// tabs, and some browsers).
+const sortQS = new URLSearchParams(location.search).get("sort") === "liked" ? "?sort=liked" : "";
+
 export function boot() {
 	const viewer = document.querySelector(".viewer");
 	const currentID = document.body.dataset.imageId;
@@ -585,7 +596,7 @@ export function boot() {
 			chip.type = "submit";
 			chip.className = "react-chip" + (myReactions.has(emoji) ? " reacted" : "");
 			chip.dataset.emoji = emoji;
-			chip.formAction = "/" + currentID + "/react/" + encodeURIComponent(emoji);
+			chip.formAction = "/" + currentID + "/react/" + encodeURIComponent(emoji) + sortQS;
 			chip.setAttribute("aria-pressed", myReactions.has(emoji) ? "true" : "false");
 			chip.textContent = emoji + " ";
 			const cnt = document.createElement("span");
@@ -628,7 +639,7 @@ export function boot() {
 	async function toggleReactionEmoji(emoji) {
 		setTogglesDisabled(true);
 		try {
-			const resp = await fetch("/" + currentID + "/react/" + encodeURIComponent(emoji), {
+			const resp = await fetch("/" + currentID + "/react/" + encodeURIComponent(emoji) + sortQS, {
 				method: "POST",
 				headers: { Accept: "application/json" },
 			});
@@ -798,7 +809,7 @@ export function boot() {
 		const a = document.createElement("a");
 		a.className = "chevron left";
 		a.id = "nav-prev";
-		a.href = "/" + id;
+		a.href = "/" + id + sortQS;
 		a.title = "newer (← / p)";
 		a.textContent = "\u2039";
 		// Reduced motion: skip the fade entirely and show the chevron

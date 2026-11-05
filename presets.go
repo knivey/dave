@@ -2,8 +2,11 @@ package main
 
 // Presets: shared base configs (config/presets.toml) that commands in
 // chats.toml, completions.toml, and generators.toml inherit from via
-// `preset = "name"`. A preset may itself reference another preset
-// (layering); expansion is base-first and command keys win last.
+// `preset = "name"` or `preset = ["a", "b", …]` (multiple presets layered
+// onto one command, left-to-right: earlier entries are more base, later
+// entries win collisions). A preset may itself reference another preset
+// (layering, single reference — arrays are a command-site feature);
+// expansion is base-first and command keys win last.
 //
 // DESIGN NOTE — why the merge happens at the raw TOML layer: merging
 // decoded structs cannot distinguish "field absent" (inherit from the
@@ -27,6 +30,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -123,6 +127,45 @@ func mergeTables(base, overlay map[string]any) map[string]any {
 	return out
 }
 
+// presetRefs extracts a command's `preset` references. The key accepts a
+// single name (string) or several names (array of strings) — the array is
+// a command-site feature only; inside presets.toml the reference stays a
+// single string so every preset has one derivation line. Every element
+// must be a non-empty string; anything else is a config error naming the
+// accepted shapes.
+func presetRefs(table map[string]any) ([]string, error) {
+	ref, ok := table["preset"]
+	if !ok {
+		return nil, nil
+	}
+	switch v := ref.(type) {
+	case string:
+		if v == "" {
+			return nil, errPresetShape("an empty string")
+		}
+		return []string{v}, nil
+	case []any:
+		if len(v) == 0 {
+			return nil, errPresetShape("an empty array")
+		}
+		out := make([]string, 0, len(v))
+		for i, e := range v {
+			s, ok := e.(string)
+			if !ok || s == "" {
+				return nil, errPresetShape(fmt.Sprintf("a non-string or empty element at index %d", i))
+			}
+			out = append(out, s)
+		}
+		return out, nil
+	default:
+		return nil, errPresetShape("a non-string value")
+	}
+}
+
+func errPresetShape(detail string) error {
+	return fmt.Errorf("preset must be a non-empty string or a non-empty array of non-empty strings (got %s)", detail)
+}
+
 // loadCommandFileWithPresets is loadCommandFile for the AIConfig-shaped
 // command maps (chats, completions, generators): decode the file into
 // raw tables, expand each command's `preset` reference, then decode the
@@ -157,40 +200,72 @@ func loadCommandFileWithPresets(path string, presets map[string]map[string]any, 
 		return err
 	}
 	for name, table := range raw {
-		ref, hasRef := table["preset"]
-		if !hasRef {
-			continue
-		}
-		refName, ok := ref.(string)
-		if !ok || refName == "" {
-			return fmt.Errorf("%s: command %q: preset must be a non-empty string", filepath.Base(path), name)
-		}
-		tables, chain, err := resolvePresetChain(refName, presets)
+		refs, err := presetRefs(table)
 		if err != nil {
 			return fmt.Errorf("%s: command %q: %w", filepath.Base(path), name, err)
 		}
+		if len(refs) == 0 {
+			continue
+		}
 		delete(table, "preset") // consumed; never decode into dest
-		merged := map[string]any{}
-		for _, t := range tables {
-			// Fold each chain layer WITHOUT its own preset key: the
-			// reference is consumed by the expansion, never inherited
-			// into the merged table.
-			layer := make(map[string]any, len(t))
-			for k, v := range t {
-				if k == "preset" {
-					continue
-				}
-				layer[k] = v
+		// Collect every chain's tables with their (rank, entry)
+		// coordinates. DESIGN NOTE — why the merge order is rank-first:
+		// merging each array entry's chain result left-to-right would
+		// let a later entry's INHERITED base stomp an earlier entry's
+		// override of that same base key (turbo sets maxtokens = 500
+		// over base's 100; creative, chained to the same base and
+		// silent on maxtokens, would drag it back to 100). Sorting all
+		// layers by (rank, entryIdx) makes the effective value of any
+		// key come from the most-derived preset that actually sets it,
+		// with array order breaking ties between equally-derived
+		// presets and the command beating everything. A single-preset
+		// command has one chain, so the sort is its original base-first
+		// order — behavior identical to the pre-multi-preset code.
+		type presetLayer struct {
+			table    map[string]any
+			rank     int // position in its own chain, base-first (0 = the chain's base)
+			entryIdx int // position in the command's preset array
+		}
+		var layers []presetLayer
+		chains := make([]string, 0, len(refs))
+		for entryIdx, ref := range refs {
+			tables, chain, err := resolvePresetChain(ref, presets)
+			if err != nil {
+				return fmt.Errorf("%s: command %q: %w", filepath.Base(path), name, err)
 			}
-			merged = mergeTables(merged, layer)
+			for rank, t := range tables {
+				// Copy each layer WITHOUT its own preset key: the
+				// reference is consumed by the expansion, never
+				// inherited into the merged table.
+				layer := make(map[string]any, len(t))
+				for k, v := range t {
+					if k == "preset" {
+						continue
+					}
+					layer[k] = v
+				}
+				layers = append(layers, presetLayer{table: layer, rank: rank, entryIdx: entryIdx})
+			}
+			chains = append(chains, strings.Join(chain, " -> "))
+		}
+		sort.SliceStable(layers, func(i, j int) bool {
+			if layers[i].rank != layers[j].rank {
+				return layers[i].rank < layers[j].rank
+			}
+			return layers[i].entryIdx < layers[j].entryIdx
+		})
+		merged := map[string]any{}
+		for _, l := range layers {
+			merged = mergeTables(merged, l.table)
 		}
 		merged = mergeTables(merged, table) // command's own keys win last
 		raw[name] = merged
-		// The chain (derived preset first, base last — the command
-		// itself is not in it) is what debugged merge surprises need;
-		// the merged document itself can be huge.
+		// The chains (derived preset first, base last — the command
+		// itself is not in them; multiple entries join with " + ") are
+		// what debugged merge surprises need; the merged document itself
+		// can be huge.
 		loggerPresets.Debug("applied preset chain",
-			"file", filepath.Base(path), "command", name, "chain", strings.Join(chain, " -> "))
+			"file", filepath.Base(path), "command", name, "chain", strings.Join(chains, " + "))
 	}
 	var buf bytes.Buffer
 	if err := toml.NewEncoder(&buf).Encode(raw); err != nil {

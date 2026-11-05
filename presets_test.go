@@ -462,6 +462,223 @@ preset = "top"
 	assert.True(t, deep.RenderMarkdown, "layer 3 fields land")
 }
 
+// TestLoadConfigDirPresetsMultipleMixins pins the array form on commands:
+// preset = ["a", "b"] layers left-to-right — earlier entries are more
+// base, later entries win collisions, command keys always win last.
+func TestLoadConfigDirPresetsMultipleMixins(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": presetTestServices,
+		"presets.toml": `
+[tools]
+service = "localsvc"
+model = "gpt-4o"
+streaming = true
+maxtokens = 500
+
+[creative]
+temperature = 0.9
+rendermarkdown = true
+`,
+		"chats.toml": `
+[mixed]
+preset = ["tools", "creative"]
+temperature = 1.1
+description = "mixes both"
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg, err := loadConfigDir(dir)
+	require.NoError(t, err)
+
+	mixed, ok := cfg.Commands.Chats["mixed"]
+	require.True(t, ok, "mixed command loaded")
+	assert.Equal(t, "localsvc", mixed.Service, "first entry's fields land")
+	assert.True(t, mixed.Streaming, "first entry's bools land")
+	assert.Equal(t, 500, mixed.MaxTokens, "first entry's fields the second entry doesn't touch land")
+	assert.Equal(t, "gpt-4o", mixed.Model, "first entry's scalars survive when the second entry is silent")
+	assert.True(t, mixed.RenderMarkdown, "second entry's fields land")
+	assert.InDelta(t, 1.1, float64(mixed.Temperature), 0.0001, "command beats every preset")
+	assert.Equal(t, "mixes both", mixed.Description, "command's own fields land")
+}
+
+// TestLoadConfigDirPresetsMultipleDiamondKeepsChainOverrides is the
+// load-bearing multi-preset test: each array entry's chain must resolve
+// SEPARATELY (base-first), then the chain RESULTS layer left-to-right.
+// Naively concatenating [base, turbo, base, creative] would let the
+// second base stomp turbo's override of maxtokens back down to base's
+// value — an earlier entry's override of a shared base key must survive.
+// Later entries still win collisions (creative's temperature beats
+// turbo's).
+func TestLoadConfigDirPresetsMultipleDiamondKeepsChainOverrides(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": presetTestServices,
+		"presets.toml": `
+[base]
+service = "localsvc"
+streaming = true
+temperature = 0.1
+maxtokens = 100
+
+[turbo]
+preset = "base"
+model = "m2"
+temperature = 0.8
+maxtokens = 500
+
+[creative]
+preset = "base"
+rendermarkdown = true
+temperature = 0.9
+`,
+		"chats.toml": `
+[combo]
+preset = ["turbo", "creative"]
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg, err := loadConfigDir(dir)
+	require.NoError(t, err)
+
+	combo, ok := cfg.Commands.Chats["combo"]
+	require.True(t, ok, "combo command loaded")
+	assert.Equal(t, "localsvc", combo.Service, "shared base fields inherit through both chains")
+	assert.True(t, combo.Streaming, "shared base bools inherit through both chains")
+	assert.Equal(t, "m2", combo.Model, "earlier entry's own fields land")
+	assert.Equal(t, 500, combo.MaxTokens, "earlier entry's override of a shared base key must NOT be stomped by the base re-merging in the later entry's chain")
+	assert.True(t, combo.RenderMarkdown, "later entry's own fields land")
+	assert.InDelta(t, 0.9, float64(combo.Temperature), 0.0001, "later entry wins the collision with the earlier entry")
+}
+
+// TestLoadConfigDirPresetsMultipleOnCompletionsAndGenerators sanity-pins
+// that the array form works on every command file kind (the code path is
+// shared, but the wiring is per-file in loadConfigDir).
+func TestLoadConfigDirPresetsMultipleOnCompletionsAndGenerators(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": presetTestServices,
+		"presets.toml": `
+[svc]
+service = "localsvc"
+streaming = true
+
+[gen]
+model = "qwen3-32b"
+`,
+		"completions.toml": `
+[comp]
+preset = ["svc", "gen"]
+description = "completion mixin"
+`,
+		"generators.toml": `
+[summary]
+preset = ["svc", "gen"]
+prompt = "summarize the channel"
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg, err := loadConfigDir(dir)
+	require.NoError(t, err)
+
+	comp, ok := cfg.Commands.Completions["comp"]
+	require.True(t, ok, "completion command loaded")
+	assert.Equal(t, "localsvc", comp.Service, "first entry's fields land on completions")
+	assert.True(t, comp.Streaming, "first entry's bools land on completions")
+	assert.Equal(t, "qwen3-32b", comp.Model, "second entry's fields land on completions")
+
+	gen, ok := cfg.Commands.Generators["summary"]
+	require.True(t, ok, "generator command loaded")
+	assert.Equal(t, "localsvc", gen.Service, "first entry's fields land on generators")
+	assert.True(t, gen.Streaming, "first entry's bools land on generators")
+	assert.Equal(t, "qwen3-32b", gen.Model, "second entry's fields land on generators")
+	assert.Equal(t, "summarize the channel", gen.Prompt, "generator's own fields land")
+}
+
+func TestLoadConfigDirPresetsMultipleEmptyArrayRejected(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": presetTestServices,
+		"presets.toml": `
+[base]
+service = "localsvc"
+`,
+		"chats.toml": `
+[empty]
+preset = []
+service = "localsvc"
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	_, err := loadConfigDir(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "preset")
+	assert.Contains(t, err.Error(), "empty")
+}
+
+func TestLoadConfigDirPresetsMultipleEmptyStringElementRejected(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": presetTestServices,
+		"presets.toml": `
+[base]
+service = "localsvc"
+`,
+		"chats.toml": `
+[badslot]
+preset = ["base", ""]
+service = "localsvc"
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	_, err := loadConfigDir(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "preset")
+	assert.Contains(t, err.Error(), "badslot")
+}
+
+func TestLoadConfigDirPresetsMultipleNonStringElementRejected(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": presetTestServices,
+		"presets.toml": `
+[base]
+service = "localsvc"
+`,
+		"chats.toml": `
+[mixedtypes]
+preset = ["base", 5]
+service = "localsvc"
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	_, err := loadConfigDir(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "preset")
+	assert.Contains(t, err.Error(), "mixedtypes")
+}
+
+func TestLoadConfigDirPresetsMultipleUnknownNameRejected(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": presetTestServices,
+		"presets.toml": `
+[base]
+service = "localsvc"
+`,
+		"chats.toml": `
+[partially-known]
+preset = ["base", "nope"]
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	_, err := loadConfigDir(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "preset")
+	assert.Contains(t, err.Error(), "nope", "error names the unknown preset")
+	assert.Contains(t, err.Error(), "partially-known", "error names the referencing command")
+}
+
 // TestLoadConfigDirPresetsTypeFlipMatchesDirectDecode pins that replacing
 // a preset's map with a scalar (mergeTables replaces wholesale) matches
 // what typing the scalar directly in chats.toml does today: BurntSushi

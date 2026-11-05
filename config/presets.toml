@@ -1,5 +1,6 @@
 # Presets: shared base configs that commands in chats.toml, completions.toml,
-# and generators.toml inherit from via preset = "name". Every command accepts
+# and generators.toml inherit from via preset = "name" (one preset) or
+# preset = ["a", "b"] (several layered). Every command accepts
 # the same fields as a preset (see the reference lists in those files), so a
 # preset is just a named partial command table.
 #
@@ -19,6 +20,14 @@
 #   - A preset may itself carry preset = "other" (layered, base-first:
 #     most derived wins). Cycles and unknown preset names are load errors
 #     naming the chain — fatal at startup, error-returning on /reload.
+#     A preset's own reference is always a single name (arrays are a
+#     command-site feature).
+#   - A command may list several presets: preset = ["a", "b"]. A field's
+#     effective value comes from whichever preset actually sets it most
+#     specifically — a preset beats the base it chains from, whichever
+#     array entry brought it; later entries win ties; command fields beat
+#     everything. Shape errors (empty array, empty or non-string entries)
+#     are load errors naming the command.
 #   - Preset names share one namespace across chats/completions/generators.
 #   - After merging, the normal service cascade still applies for fields the
 #     merged command leaves unset (command > preset > service > defaults).

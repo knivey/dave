@@ -639,27 +639,98 @@ func TestLinks(t *testing.T) {
 		{
 			name:    "SimpleLink",
 			input:   "[click here](https://example.com)",
-			contain: []string{"click here", "(https://example.com)"},
+			contain: []string{"click here: https://example.com"},
+			// Clickability contract: the URL is delimited by spaces (or
+			// end-of-line), NEVER by parens — RFC 3986 counts ( ) as
+			// legal URI sub-delims, so IRC autolinkers swallow a
+			// trailing ) into the URL and the link 404s (the production
+			// report that drove this form, Nov 2026: an image URL
+			// wrapped in parens was unclickable for many users).
+			notContain: []string{"(https://example.com)", "https://example.com)"},
 		},
 		{
 			name:    "LinkWithBoldText",
 			input:   "[**bold link**](https://example.com)",
-			contain: []string{"\x02bold link\x02", "(https://example.com)"},
+			contain: []string{"\x02bold link\x02: https://example.com"},
 		},
 		{
 			name:    "LinkWithItalicText",
 			input:   "[*italic link*](https://example.com)",
-			contain: []string{"\x1Ditalic link\x1D", "(https://example.com)"},
+			contain: []string{"\x1Ditalic link\x1D: https://example.com"},
 		},
 		{
 			name:    "LinkWithCodeText",
 			input:   "[`code link`](https://example.com)",
-			contain: []string{"\x030,90code link\x03", "(https://example.com)"},
+			contain: []string{"\x030,90code link\x03: https://example.com"},
 		},
 		{
 			name:    "MultipleLinks",
 			input:   "[one](https://one.com) and [two](https://two.com)",
-			contain: []string{"one", "(https://one.com)", "two", "(https://two.com)"},
+			contain: []string{"one: https://one.com", "two: https://two.com"},
+		},
+		{
+			// Self-referential link: the label IS the URL (models emit
+			// this shape constantly). Emit the URL once — the
+			// "url: url" duplication of the generic form is pure noise.
+			name:       "SelfLinkDeduped",
+			input:      "[https://example.com](https://example.com)",
+			contain:    []string{"https://example.com"},
+			notContain: []string{"https://example.com: ", "https://example.com (https://example.com)"},
+		},
+		{
+			// Padded label still matches the destination (goldmark
+			// keeps the inner spaces in the Text segment; the dedupe
+			// compares trimmed).
+			name:       "SelfLinkDedupedPadded",
+			input:      "[ https://example.com ](https://example.com)",
+			contain:    []string{"https://example.com"},
+			notContain: []string{"https://example.com: ", "(https://example.com)"},
+		},
+		{
+			// Empty/whitespace label: collapse to the bare URL — the
+			// generic form would lead with a dangling ": ".
+			name:       "EmptyLabelCollapsesToURL",
+			input:      "[](https://example.com)",
+			contain:    []string{"https://example.com"},
+			notContain: []string{": https://example.com"},
+		},
+		{
+			// Near-miss label (path suffix differs): NOT a self link —
+			// renders as text + URL like any other link.
+			name:    "SelfLinkNearMissNotDeduped",
+			input:   "[https://example.com/page](https://example.com)",
+			contain: []string{"https://example.com/page: https://example.com"},
+		},
+	})
+}
+
+// TestAutolinks pins the `<https://…>` / `<user@host>` autolink node
+// kind: goldmark stores the URL in an unexported value field, NOT as
+// walked children, so without an explicit KindAutoLink case the
+// default walk renders NOTHING — the URL silently vanished from IRC
+// output entirely (found in code review of the clickability fix; worse
+// than unclickable — data loss). Bare URL, same paren-free contract.
+func TestAutolinks(t *testing.T) {
+	runTests(t, []mdTest{
+		{
+			name:       "URLAutolink",
+			input:      "see <https://example.com/docs> now",
+			contain:    []string{"https://example.com/docs"},
+			notContain: []string{"see  now"},
+		},
+		{
+			name:    "EmailAutolink",
+			input:   "mail <bob@example.com> ok",
+			contain: []string{"bob@example.com"},
+		},
+		{
+			// Autolink as a link label with the same destination: the
+			// label contributes no walked text (unexported field), so
+			// it trims to empty and the link collapses to the bare URL.
+			name:       "AutolinkLabelSelfURL",
+			input:      "[<https://example.com>](https://example.com)",
+			contain:    []string{"https://example.com"},
+			notContain: []string{"https://example.com: ", ": https://example.com"},
 		},
 	})
 }
@@ -669,17 +740,21 @@ func TestImages(t *testing.T) {
 		{
 			name:    "SimpleImage",
 			input:   "![alt text](https://example.com/img.png)",
-			contain: []string{"[image: alt text](https://example.com/img.png)"},
+			contain: []string{"[image: alt text] https://example.com/img.png"},
+			// Same clickability contract as links: no paren may trail
+			// the URL. The old form kept RAW markdown —
+			// "[image: alt](url)" — trailing the URL with ) exactly.
+			notContain: []string{"(https://example.com/img.png)", "https://example.com/img.png)"},
 		},
 		{
 			name:    "ImageWithBoldAlt",
 			input:   "![**bold alt**](https://example.com/img.png)",
-			contain: []string{"[image: \x02bold alt\x02](https://example.com/img.png)"},
+			contain: []string{"[image: \x02bold alt\x02] https://example.com/img.png"},
 		},
 		{
 			name:    "MultipleImages",
 			input:   "![first](a.png) and ![second](b.png)",
-			contain: []string{"[image: first](a.png)", "[image: second](b.png)"},
+			contain: []string{"[image: first] a.png", "[image: second] b.png"},
 		},
 	})
 }
@@ -690,8 +765,7 @@ func TestMixedNewFeatures(t *testing.T) {
 			name:  "LinkAndHR",
 			input: "[docs](https://docs.example.com)\n\n---\n\nSee above",
 			contain: []string{
-				"docs",
-				"(https://docs.example.com)",
+				"docs: https://docs.example.com",
 				strings.Repeat("-", 40),
 				"See above",
 			},
@@ -701,7 +775,7 @@ func TestMixedNewFeatures(t *testing.T) {
 			name:  "ImageAndHR",
 			input: "![screenshot](shot.png)\n\n---\n\ncaption",
 			contain: []string{
-				"[image: screenshot](shot.png)",
+				"[image: screenshot] shot.png",
 				strings.Repeat("-", 40),
 				"caption",
 			},
@@ -712,10 +786,8 @@ func TestMixedNewFeatures(t *testing.T) {
 			input: "- [read more](https://example.com)\n- [docs](https://docs.example.com)",
 			contain: []string{
 				"\u2022",
-				"read more",
-				"(https://example.com)",
-				"docs",
-				"(https://docs.example.com)",
+				"read more: https://example.com",
+				"docs: https://docs.example.com",
 			},
 		},
 		{
@@ -723,8 +795,7 @@ func TestMixedNewFeatures(t *testing.T) {
 			input: "> check [this](https://example.com)",
 			contain: []string{
 				"\x0309>",
-				"this",
-				"(https://example.com)",
+				"this: https://example.com",
 			},
 		},
 		{
@@ -901,6 +972,36 @@ func TestTables(t *testing.T) {
 |------|-----|
 | Example | https://example.com |`,
 			contain: []string{"Example", "https://example.com"},
+		},
+		{
+			// Markdown links INSIDE table cells render through the
+			// table-cell renderer (renderNodeTo), not renderNode — the
+			// paren-free clickability contract must hold there too.
+			name: "TableWithMarkdownLink",
+			input: `| Site | Link |
+|------|------|
+| Example | [docs](https://example.com) |`,
+			contain:    []string{"docs: https://example.com"},
+			notContain: []string{"(https://example.com)"},
+		},
+		{
+			// Self-referential link in a cell: same dedupe as prose.
+			name: "TableWithSelfLink",
+			input: `| Site | Link |
+|------|------|
+| Example | [https://example.com](https://example.com) |`,
+			contain:    []string{"https://example.com"},
+			notContain: []string{"https://example.com: ", "https://example.com (https://example.com)"},
+		},
+		{
+			// Autolinks in table cells: renderNodeTo needs its own
+			// KindAutoLink case or the cell renders empty (the URL
+			// lives in goldmark's unexported value field, not children).
+			name: "TableWithAutolink",
+			input: `| Site | Link |
+|------|------|
+| Example | <https://example.com> |`,
+			contain: []string{"https://example.com"},
 		},
 		{
 			name: "TableSingleColumn",

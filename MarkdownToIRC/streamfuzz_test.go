@@ -110,7 +110,16 @@ func (g *docGen) inline() string {
 		case 4:
 			fmt.Fprintf(&sb, "`%s %s`", g.words(1), g.words(1))
 		case 5:
-			fmt.Fprintf(&sb, "[%s](%s)", g.words(1), g.pick(genURLs))
+			// Self-referential links exercise the dedupe branch
+			// (label == destination renders the URL once) so chunk
+			// invariance covers it, not just the unit tests; plain
+			// word labels exercise the generic "text: url" form.
+			if g.intn(2) == 0 {
+				u := g.pick(genURLs)
+				fmt.Fprintf(&sb, "[%s](%s)", u, u)
+			} else {
+				fmt.Fprintf(&sb, "[%s](%s)", g.words(1), g.pick(genURLs))
+			}
 		case 6:
 			fmt.Fprintf(&sb, "![img](%s)", g.pick(genURLs))
 		case 7:

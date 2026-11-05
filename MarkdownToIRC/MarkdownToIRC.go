@@ -270,15 +270,45 @@ func (r *Renderer) renderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 		}
 	case ast.KindLink:
 		link := node.(*ast.Link)
+		// DESIGN NOTE — IRC clickability (production report, Nov 2026:
+		// a URL wrapped in parens was unclickable for many users).
+		// Parens are LEGAL URI characters (RFC 3986 sub-delims), so IRC
+		// autolinkers swallow a trailing ) into the URL and the link
+		// 404s. The URL is therefore delimited by spaces/end-of-line,
+		// never parens: "text: url". Labels that carry no text of their
+		// own — self-referential links ([url](url), a constant model
+		// emission) and empty/whitespace labels ([](url), or a label
+		// that is itself an autolink — autolinks contribute no walked
+		// text, see KindAutoLink below) — collapse to the bare URL;
+		// the generic form would render "url: url" or a dangling ": ".
+		if trimmed := strings.TrimSpace(r.nodeText(node)); trimmed == "" || trimmed == string(link.Destination) {
+			if entering {
+				writes(w, node, string(link.Destination))
+				return ast.WalkSkipChildren
+			}
+			return ast.WalkContinue
+		}
 		if !entering {
-			writes(w, node, fmt.Sprintf(" (%s)", link.Destination))
+			writes(w, node, fmt.Sprintf(": %s", link.Destination))
+		}
+	case ast.KindAutoLink:
+		// DESIGN NOTE — goldmark stores an autolink's URL in an
+		// unexported value field, NOT as walked children (ast/inline.go
+		// NewAutoLink), so the default walk below finds nothing and the
+		// URL would silently VANISH from the output (code-review finding
+		// on the clickability fix: "see <url> now" rendered "see  now"
+		// — data loss, worse than unclickable). URL(source) returns the
+		// full address for both URL autolinks (<https://…>) and email
+		// autolinks (<user@host>). Bare URL, same paren-free contract.
+		if entering {
+			writes(w, node, string(node.(*ast.AutoLink).URL(r.source)))
 		}
 	case ast.KindImage:
 		img := node.(*ast.Image)
 		if entering {
 			writes(w, node, "[image: ")
 		} else {
-			writes(w, node, fmt.Sprintf("](%s)", img.Destination))
+			writes(w, node, fmt.Sprintf("] %s", img.Destination))
 		}
 	case ast.KindText:
 		t := node.(*ast.Text)
@@ -463,17 +493,28 @@ func (r *Renderer) renderNodeTo(w io.Writer, node ast.Node) {
 		fmt.Fprintf(w, "\x030,90%s\x03", r.nodeText(node))
 	case ast.KindLink:
 		link := node.(*ast.Link)
+		// Same clickability contract as renderNode's KindLink (see the
+		// DESIGN NOTE there): paren-free "text: url", self-link and
+		// empty-label collapse to the bare URL.
+		if trimmed := strings.TrimSpace(r.nodeText(node)); trimmed == "" || trimmed == string(link.Destination) {
+			fmt.Fprint(w, string(link.Destination))
+			return
+		}
 		for c := node.FirstChild(); c != nil; c = c.NextSibling() {
 			r.renderNodeTo(w, c)
 		}
-		fmt.Fprintf(w, " (%s)", link.Destination)
+		fmt.Fprintf(w, ": %s", link.Destination)
+	case ast.KindAutoLink:
+		// Same as renderNode's KindAutoLink: the URL is not walked
+		// children — without this case the cell renders empty.
+		fmt.Fprint(w, string(node.(*ast.AutoLink).URL(r.source)))
 	case ast.KindImage:
 		img := node.(*ast.Image)
 		fmt.Fprint(w, "[image: ")
 		for c := node.FirstChild(); c != nil; c = c.NextSibling() {
 			r.renderNodeTo(w, c)
 		}
-		fmt.Fprintf(w, "](%s)", img.Destination)
+		fmt.Fprintf(w, "] %s", img.Destination)
 	case ast.KindText:
 		t := node.(*ast.Text)
 		if !t.IsRaw() {

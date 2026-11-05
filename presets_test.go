@@ -824,6 +824,51 @@ preset = ["base", "fine"]
 	assert.Equal(t, int64(99), mrg.ExtraBody["max_tokens"], "later entry's top-level extra_body key lands")
 }
 
+// TestLoadConfigDirPresetsExplicitBaseLaterWinsTie pins the one shape
+// where array order inverts a within-chain derivation using the same
+// preset names: listing the BASE directly after the preset that chains
+// from it makes both depth 0, and the later entry wins the tie — an
+// explicit base reference is a legitimate way to revert a derived
+// preset's value on a key ("I asked for base on top"). Mirror of the
+// diamond: same fixture, entry order swapped.
+func TestLoadConfigDirPresetsExplicitBaseLaterWinsTie(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": presetTestServices,
+		"presets.toml": `
+[base]
+service = "localsvc"
+streaming = true
+maxtokens = 100
+
+[turbo]
+preset = "base"
+model = "m2"
+maxtokens = 500
+`,
+		"chats.toml": `
+[revert]
+preset = ["turbo", "base"]
+
+[keep]
+preset = ["base", "turbo"]
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg, err := loadConfigDir(dir)
+	require.NoError(t, err)
+
+	revert, ok := cfg.Commands.Chats["revert"]
+	require.True(t, ok, "revert command loaded")
+	assert.Equal(t, 100, revert.MaxTokens, "explicitly listing base later reverts turbo's override (both depth 0, later entry wins the tie)")
+	assert.Equal(t, "m2", revert.Model, "earlier entry's non-conflicting fields still land")
+	assert.True(t, revert.Streaming, "shared base bools inherit")
+
+	keep, ok := cfg.Commands.Chats["keep"]
+	require.True(t, ok, "keep command loaded")
+	assert.Equal(t, 500, keep.MaxTokens, "mirror order: turbo later wins the tie")
+}
+
 // TestLoadConfigDirPresetsTypeFlipMatchesDirectDecode pins that replacing
 // a preset's map with a scalar (mergeTables replaces wholesale) matches
 // what typing the scalar directly in chats.toml does today: BurntSushi

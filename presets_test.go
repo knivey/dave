@@ -679,6 +679,151 @@ preset = ["base", "nope"]
 	assert.Contains(t, err.Error(), "partially-known", "error names the referencing command")
 }
 
+// TestLoadConfigDirPresetsMultipleStandaloneMixinKeepsOverride pins the
+// hop-distance ordering across chains of DIFFERENT lengths: a directly
+// referenced standalone preset (one-node chain) must not lose a key
+// collision to a LATER entry's inherited base — base is transitively
+// pulled in by chained (which is silent on maxtokens), while plain is
+// explicitly listed by the admin. Rank-within-chain ordering fails here
+// (plain and base both rank 0, entryIdx hands base the win); depth from
+// the command resolves it (plain depth 0 merges after base depth 1).
+func TestLoadConfigDirPresetsMultipleStandaloneMixinKeepsOverride(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": presetTestServices,
+		"presets.toml": `
+[plain]
+service = "localsvc"
+maxtokens = 500
+
+[base]
+temperature = 0.7
+maxtokens = 100
+
+[chained]
+preset = "base"
+model = "m2"
+`,
+		"chats.toml": `
+[mix]
+preset = ["plain", "chained"]
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg, err := loadConfigDir(dir)
+	require.NoError(t, err)
+
+	mix, ok := cfg.Commands.Chats["mix"]
+	require.True(t, ok, "mix command loaded")
+	assert.Equal(t, 500, mix.MaxTokens, "a directly listed standalone preset must not lose to a later entry's inherited base")
+	assert.Equal(t, "m2", mix.Model, "later entry's own fields land")
+	assert.InDelta(t, 0.7, float64(mix.Temperature), 0.0001, "base fields nobody conflicts with inherit")
+	assert.Equal(t, "localsvc", mix.Service, "standalone preset's other fields land")
+}
+
+// TestLoadConfigDirPresetsArrayInsidePresetRejected pins that an array is
+// NOT legal as a preset's own reference — arrays are a command-site
+// feature only, so every preset keeps one derivation line. Now that
+// arrays are legal on commands, this is the form an admin will try first.
+func TestLoadConfigDirPresetsArrayInsidePresetRejected(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": presetTestServices,
+		"presets.toml": `
+[a]
+service = "localsvc"
+
+[b]
+maxtokens = 500
+
+[mixin]
+preset = ["a", "b"]
+`,
+		"chats.toml": `
+[plain]
+service = "localsvc"
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	_, err := loadConfigDir(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "preset")
+	assert.Contains(t, err.Error(), "mixin")
+}
+
+// TestLoadConfigDirPresetsDuplicateEntriesIdempotent pins that listing the
+// same preset twice is harmless: its layers merge twice in the same
+// relative order, so the result is identical to listing it once.
+func TestLoadConfigDirPresetsDuplicateEntriesIdempotent(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": presetTestServices,
+		"presets.toml": `
+[base]
+service = "localsvc"
+streaming = true
+
+[turbo]
+preset = "base"
+model = "m2"
+`,
+		"chats.toml": `
+[once]
+preset = ["turbo"]
+
+[twice]
+preset = ["turbo", "turbo"]
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg, err := loadConfigDir(dir)
+	require.NoError(t, err)
+
+	once, ok := cfg.Commands.Chats["once"]
+	require.True(t, ok, "once command loaded")
+	twice, ok := cfg.Commands.Chats["twice"]
+	require.True(t, ok, "twice command loaded")
+	// Name comes from the section header, not the merge — normalize it
+	// so the whole-struct compare tests the merged config only.
+	twice.Name = once.Name
+	assert.Equal(t, once, twice, "duplicate array entries merge idempotently")
+}
+
+// TestLoadConfigDirPresetsMultipleNestedMaps pins deep-merge combined with
+// multi-preset layering: two entries both carrying extra_body keep every
+// sub-key — inherited and overridden — with the later entry winning only
+// the sub-keys it actually sets.
+func TestLoadConfigDirPresetsMultipleNestedMaps(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": presetTestServices,
+		"presets.toml": `
+[base]
+service = "localsvc"
+extra_body = {reasoning = {effort = "high", budget = 1000}, top_k = 20}
+
+[fine]
+extra_body = {reasoning = {effort = "low"}, max_tokens = 99}
+`,
+		"chats.toml": `
+[mrg]
+preset = ["base", "fine"]
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	cfg, err := loadConfigDir(dir)
+	require.NoError(t, err)
+
+	mrg, ok := cfg.Commands.Chats["mrg"]
+	require.True(t, ok, "mrg command loaded")
+	reasoning, ok := mrg.ExtraBody["reasoning"].(map[string]any)
+	require.True(t, ok, "extra_body.reasoning stays a nested map under mixin layering")
+	assert.Equal(t, "low", reasoning["effort"], "later entry's nested key wins")
+	assert.Equal(t, int64(1000), reasoning["budget"], "base's nested sibling key survives the later entry")
+	assert.Equal(t, int64(20), mrg.ExtraBody["top_k"], "base's top-level extra_body key survives the later entry")
+	assert.Equal(t, int64(99), mrg.ExtraBody["max_tokens"], "later entry's top-level extra_body key lands")
+}
+
 // TestLoadConfigDirPresetsTypeFlipMatchesDirectDecode pins that replacing
 // a preset's map with a scalar (mergeTables replaces wholesale) matches
 // what typing the scalar directly in chats.toml does today: BurntSushi

@@ -3,8 +3,10 @@ package main
 // Presets: shared base configs (config/presets.toml) that commands in
 // chats.toml, completions.toml, and generators.toml inherit from via
 // `preset = "name"` or `preset = ["a", "b", …]` (multiple presets layered
-// onto one command, left-to-right: earlier entries are more base, later
-// entries win collisions). A preset may itself reference another preset
+// onto one command: a field comes from the preset closest to the command
+// that actually sets it — directly listed presets beat other entries'
+// inherited bases — and ties at equal distance break to the later entry).
+// A preset may itself reference another preset
 // (layering, single reference — arrays are a command-site feature);
 // expansion is base-first and command keys win last.
 //
@@ -208,22 +210,31 @@ func loadCommandFileWithPresets(path string, presets map[string]map[string]any, 
 			continue
 		}
 		delete(table, "preset") // consumed; never decode into dest
-		// Collect every chain's tables with their (rank, entry)
-		// coordinates. DESIGN NOTE — why the merge order is rank-first:
-		// merging each array entry's chain result left-to-right would
-		// let a later entry's INHERITED base stomp an earlier entry's
-		// override of that same base key (turbo sets maxtokens = 500
-		// over base's 100; creative, chained to the same base and
-		// silent on maxtokens, would drag it back to 100). Sorting all
-		// layers by (rank, entryIdx) makes the effective value of any
-		// key come from the most-derived preset that actually sets it,
-		// with array order breaking ties between equally-derived
-		// presets and the command beating everything. A single-preset
-		// command has one chain, so the sort is its original base-first
-		// order — behavior identical to the pre-multi-preset code.
+		// Collect every chain's tables with their (depth, entry)
+		// coordinates. DESIGN NOTE — why the merge order is depth-first:
+		// the effective value of any key must come from the preset
+		// CLOSEST to the command that actually sets it, with array
+		// order breaking ties and the command beating everything. Two
+		// simpler orderings both violate that. Merging each entry's
+		// chain RESULT left-to-right lets a later entry's INHERITED base
+		// stomp an earlier entry's override of the same base key
+		// (turbo sets maxtokens = 500 over base's 100; creative, chained
+		// to the same base and silent on maxtokens, would drag it back
+		// to 100). And ordering by rank WITHIN a chain breaks across
+		// chains of different lengths: a standalone preset (one-node
+		// chain, rank 0) ties with a deeper chain's base and loses the
+		// entryIdx tiebreak, so an explicitly listed mixin loses to a
+		// base the other entry merely inherits. Sorting all layers by
+		// (depth desc, entryIdx asc) — depth = hops from the command,
+		// 0 = directly referenced — resolves both: every directly
+		// referenced preset merges after every inherited layer, array
+		// order stacks equally-direct presets left-to-right. A
+		// single-preset command has one chain, so the sort is its
+		// original base-first order — behavior identical to the
+		// pre-multi-preset code.
 		type presetLayer struct {
 			table    map[string]any
-			rank     int // position in its own chain, base-first (0 = the chain's base)
+			depth    int // hops from the command: 0 = directly referenced preset, 1 = its base, …
 			entryIdx int // position in the command's preset array
 		}
 		var layers []presetLayer
@@ -233,7 +244,7 @@ func loadCommandFileWithPresets(path string, presets map[string]map[string]any, 
 			if err != nil {
 				return fmt.Errorf("%s: command %q: %w", filepath.Base(path), name, err)
 			}
-			for rank, t := range tables {
+			for i, t := range tables {
 				// Copy each layer WITHOUT its own preset key: the
 				// reference is consumed by the expansion, never
 				// inherited into the merged table.
@@ -244,15 +255,15 @@ func loadCommandFileWithPresets(path string, presets map[string]map[string]any, 
 					}
 					layer[k] = v
 				}
-				layers = append(layers, presetLayer{table: layer, rank: rank, entryIdx: entryIdx})
+				layers = append(layers, presetLayer{table: layer, depth: len(tables) - 1 - i, entryIdx: entryIdx})
 			}
 			chains = append(chains, strings.Join(chain, " -> "))
 		}
 		sort.SliceStable(layers, func(i, j int) bool {
-			if layers[i].rank != layers[j].rank {
-				return layers[i].rank < layers[j].rank
+			if layers[i].depth != layers[j].depth {
+				return layers[i].depth > layers[j].depth // deeper (more base) merges first
 			}
-			return layers[i].entryIdx < layers[j].entryIdx
+			return layers[i].entryIdx < layers[j].entryIdx // later array entries win ties
 		})
 		merged := map[string]any{}
 		for _, l := range layers {

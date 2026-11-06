@@ -294,6 +294,10 @@ var daveExtraModelPrefixes = map[string]string{
 // per piece with Encoding "chars/4-estimate", Exact false. The caller
 // is never failed.
 func countMessageTokens(model string, msgs []ChatMessage) TokenCount {
+	// The serializer merges consecutive system rows into one wire message
+	// (see mergeConsecutiveSystemMessages) — count the same merged shape so
+	// this stays a count of exactly the payload dave sends.
+	msgs = mergeConsecutiveSystemMessages(msgs)
 	encName, exact := resolveEncodingForModel(model)
 	enc, err := getEncoder(encName)
 	if err != nil {

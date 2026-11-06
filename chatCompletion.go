@@ -8,6 +8,11 @@ import (
 )
 
 func messagesToChatCompletionParams(messages []ChatMessage, replay, format string) []openai.ChatCompletionMessageParamUnion {
+	// Wire normalization (see mergeConsecutiveSystemMessages): the
+	// post-compaction [system, system(summary), …] live shape must reach
+	// the wire as ONE leading system message — strict chat templates
+	// (Qwen's) reject a non-first system message.
+	messages = mergeConsecutiveSystemMessages(messages)
 	params := make([]openai.ChatCompletionMessageParamUnion, 0, len(messages))
 	for _, msg := range messages {
 		switch msg.Role {

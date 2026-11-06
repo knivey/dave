@@ -336,3 +336,131 @@ func TestExtractStreamReasoning(t *testing.T) {
 		assert.Equal(t, reasoningParts{}, extractStreamReasoning([]byte(`not json`)))
 	})
 }
+
+// buildPostCompactionHistory mirrors the live shape of EVERY compacted
+// session (production evidence, incident 2026-11-06 session 2991): a fresh
+// re-rendered system prompt, the compaction summary as a SECOND consecutive
+// RoleSystem row, then the preserved tail starting at RoleUser. Strict chat
+// templates (Qwen's raises "System message must be at the beginning")
+// reject any system message that is not the first wire message, so this
+// shape must never reach the wire as two system rows.
+func buildPostCompactionHistory() []ChatMessage {
+	return []ChatMessage{
+		{Role: RoleSystem, Content: "You are dave, a chatbot on IRC"},
+		{Role: RoleSystem, Content: "[CONVERSATION SUMMARY — covers 69 earlier messages] User asked about AV1 encoding."},
+		{Role: RoleUser, Content: "search recent CVE PoCs"},
+		{Role: RoleAssistant, Content: "", ToolCalls: []ToolCall{{ID: "t1", Type: "function", Function: FunctionCall{Name: "websearch", Arguments: "{}"}}}},
+		{Role: RoleTool, Content: "results", ToolCallID: "t1"},
+		{Role: RoleUser, Content: "nevermind all that just use the create_paste tool"},
+	}
+}
+
+func TestMergeConsecutiveSystemMessages(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []ChatMessage
+		want []ChatMessage
+	}{
+		{
+			name: "no system rows is unchanged",
+			in:   []ChatMessage{{Role: RoleUser, Content: "u"}, {Role: RoleAssistant, Content: "a"}},
+			want: []ChatMessage{{Role: RoleUser, Content: "u"}, {Role: RoleAssistant, Content: "a"}},
+		},
+		{
+			name: "single system row is unchanged",
+			in:   []ChatMessage{{Role: RoleSystem, Content: "sys"}, {Role: RoleUser, Content: "u"}},
+			want: []ChatMessage{{Role: RoleSystem, Content: "sys"}, {Role: RoleUser, Content: "u"}},
+		},
+		{
+			name: "post-compaction pair collapses with blank-line join",
+			in: []ChatMessage{
+				{Role: RoleSystem, Content: "prompt"},
+				{Role: RoleSystem, Content: "summary"},
+				{Role: RoleUser, Content: "u"},
+			},
+			want: []ChatMessage{
+				{Role: RoleSystem, Content: "prompt\n\nsummary"},
+				{Role: RoleUser, Content: "u"},
+			},
+		},
+		{
+			name: "triple collapses to one row",
+			in: []ChatMessage{
+				{Role: RoleSystem, Content: "a"},
+				{Role: RoleSystem, Content: "b"},
+				{Role: RoleSystem, Content: "c"},
+			},
+			want: []ChatMessage{{Role: RoleSystem, Content: "a\n\nb\n\nc"}},
+		},
+		{
+			name: "two separate runs collapse independently",
+			in: []ChatMessage{
+				{Role: RoleSystem, Content: "a"},
+				{Role: RoleSystem, Content: "b"},
+				{Role: RoleUser, Content: "u"},
+				{Role: RoleSystem, Content: "c"},
+				{Role: RoleSystem, Content: "d"},
+			},
+			want: []ChatMessage{
+				{Role: RoleSystem, Content: "a\n\nb"},
+				{Role: RoleUser, Content: "u"},
+				{Role: RoleSystem, Content: "c\n\nd"},
+			},
+		},
+		{
+			name: "empty contents drop out of the join",
+			in: []ChatMessage{
+				{Role: RoleSystem, Content: "prompt"},
+				{Role: RoleSystem, Content: ""},
+				{Role: RoleUser, Content: "u"},
+			},
+			want: []ChatMessage{
+				{Role: RoleSystem, Content: "prompt"},
+				{Role: RoleUser, Content: "u"},
+			},
+		},
+		{
+			name: "run of all-empty contents keeps one empty system row",
+			in: []ChatMessage{
+				{Role: RoleSystem, Content: ""},
+				{Role: RoleSystem, Content: ""},
+				{Role: RoleUser, Content: "u"},
+			},
+			want: []ChatMessage{
+				{Role: RoleSystem, Content: ""},
+				{Role: RoleUser, Content: "u"},
+			},
+		},
+		{
+			name: "developer rows never merge (distinct wire role)",
+			in: []ChatMessage{
+				{Role: RoleSystem, Content: "sys"},
+				{Role: RoleDeveloper, Content: "guidance"},
+				{Role: RoleUser, Content: "u"},
+			},
+			want: []ChatMessage{
+				{Role: RoleSystem, Content: "sys"},
+				{Role: RoleDeveloper, Content: "guidance"},
+				{Role: RoleUser, Content: "u"},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mergeConsecutiveSystemMessages(tt.in)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+
+	t.Run("input slice is never mutated", func(t *testing.T) {
+		in := []ChatMessage{
+			{Role: RoleSystem, Content: "a"},
+			{Role: RoleSystem, Content: "b"},
+			{Role: RoleUser, Content: "u"},
+		}
+		_ = mergeConsecutiveSystemMessages(in)
+		assert.Equal(t, "a", in[0].Content)
+		assert.Equal(t, "b", in[1].Content)
+		assert.Len(t, in, 3)
+	})
+}

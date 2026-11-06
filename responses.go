@@ -52,6 +52,14 @@ func userMsgToResponseInputItem(msg ChatMessage) responses.ResponseInputItemUnio
 }
 
 func messagesToResponseInputItems(messages []ChatMessage, replay, format string) []responses.ResponseInputItemUnionParam {
+	// Wire normalization (see mergeConsecutiveSystemMessages): the
+	// post-compaction [system, system(summary), …] live shape must reach
+	// the wire as ONE leading system message — strict chat templates
+	// (Qwen's) reject a non-first system message. Note: reasoning-replay
+	// item ids below index the MERGED slice — they are rebuilt every
+	// request and nothing stores references to them, so the shift is
+	// harmless.
+	messages = mergeConsecutiveSystemMessages(messages)
 	input := make([]responses.ResponseInputItemUnionParam, 0, len(messages)*2)
 	for i, msg := range messages {
 		switch msg.Role {

@@ -375,6 +375,9 @@ func historySessionCurrent(network Network, c *girc.Client, e girc.Event, ctx co
 	if session.ResponseID != nil {
 		parts = append(parts, "responses chain")
 	}
+	// Last emit: the return is deliberately ignored — nothing follows
+	// this line, so early-exit is meaningless. A line appended after
+	// this must switch to the `if !sendLine(...) { return }` shape.
 	sendLine(n.Sessions.CurrentContext, map[string]string{
 		"note": strings.Join(parts, " · "),
 	})

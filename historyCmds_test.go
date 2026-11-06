@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -770,16 +771,31 @@ func TestFormatWindowTokens(t *testing.T) {
 	assert.Equal(t, "200k", formatWindowTokens(200000))
 }
 
-// TestHistorySessionCurrent_NoticesDefaults pins that the new notice keys
-// survive a stale notices.toml (missing keys fall back to defaults) — the
-// same contract every other notice key follows.
+// TestHistorySessionCurrent_NoticesDefaults pins the stale-file contract
+// end-to-end: a notices.toml whose [sessions] section predates the
+// current_* keys loads fine, with the missing keys falling back to their
+// defaults (loadNoticesFile decodes then calls setNoticesDefaults).
 func TestHistorySessionCurrent_NoticesDefaults(t *testing.T) {
-	var n NoticesConfig
-	setNoticesDefaults(&n)
-	for _, key := range []string{
-		n.Sessions.CurrentNone, n.Sessions.CurrentHeader, n.Sessions.CurrentStarter,
-		n.Sessions.CurrentMessages, n.Sessions.CurrentUsage, n.Sessions.CurrentContext,
+	dir := createTestConfigDir(t, "", map[string]string{
+		"notices.toml": `
+[sessions]
+header = "custom header"
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	var cfg Config
+	require.NoError(t, loadNoticesFile(dir, &cfg))
+
+	assert.Equal(t, "custom header", cfg.Notices.Sessions.Header, "keys present in the file win")
+	for name, key := range map[string]string{
+		"current_none":     cfg.Notices.Sessions.CurrentNone,
+		"current_header":   cfg.Notices.Sessions.CurrentHeader,
+		"current_starter":  cfg.Notices.Sessions.CurrentStarter,
+		"current_messages": cfg.Notices.Sessions.CurrentMessages,
+		"current_usage":    cfg.Notices.Sessions.CurrentUsage,
+		"current_context":  cfg.Notices.Sessions.CurrentContext,
 	} {
-		assert.NotEmpty(t, key)
+		assert.NotEmpty(t, key, "stale notices.toml missing %s must fall back to the default", name)
 	}
 }

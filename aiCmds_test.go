@@ -3603,3 +3603,46 @@ func TestEphemeralRunnerGuards(t *testing.T) {
 		assert.Nil(t, sess.ResponseID, "no response id persisted for ephemeral runs")
 	})
 }
+
+// registeredTestMCPToolName installs one throwaway tool name in the
+// tool→server map so executeToolCalls dispatch reaches the args stage
+// without standing up a real in-process MCP server — the same map-swap
+// pattern TestExecuteToolCalls_SingleToolSendsCallNotice uses.
+func registeredTestMCPToolName(t *testing.T) string {
+	t.Helper()
+	const name = "edit_image_ref_args_test"
+	mcpServersMu.Lock()
+	origToolMap := mcpToolToServer
+	origServers := mcpServers
+	mcpToolToServer = map[string]string{name: "serverRefArgs"}
+	mcpServers = map[string]*MCPServer{"serverRefArgs": {}}
+	mcpServersMu.Unlock()
+	t.Cleanup(func() {
+		mcpServersMu.Lock()
+		mcpToolToServer = origToolMap
+		mcpServers = origServers
+		mcpServersMu.Unlock()
+	})
+	return name
+}
+
+func TestExecuteToolCallsAbortsUnresolvableRef(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+	cr := newImageViewTestRunner(t, AIConfig{DetectImages: true, MaxContextImages: 5}, 9)
+	turn := newTurnContext(9, nil)
+	turn.Add(ChatMessage{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "c1"}}})
+
+	orig := resolveImageRefArgsFn
+	resolveImageRefArgsFn = func(map[string]any) error { return fmt.Errorf("image ref %q could not be resolved: missing", "usr_x") }
+	t.Cleanup(func() { resolveImageRefArgsFn = orig })
+
+	args, _ := json.Marshal(map[string]any{"input_images": []string{"usr_x"}})
+	cr.executeToolCalls(turn, []ToolCall{{ID: "c1", Type: "function",
+		Function: FunctionCall{Name: registeredTestMCPToolName(t), Arguments: string(args)}}})
+
+	last := turn.Messages()[len(turn.Messages())-1]
+	assert.Equal(t, RoleTool, last.Role)
+	assert.Contains(t, last.Content, "usr_x", "call aborted with an error result naming the ref")
+	assert.Empty(t, cr.pendingInjections)
+}

@@ -1527,6 +1527,14 @@ func (cr *chatRunner) executeToolCalls(turn *turnContext, toolCalls []ToolCall) 
 			continue
 		}
 		injectScopeArgsFromRunner(toolArgs, tc.Function.Name, cr)
+		// Expand usr_/web_ image refs in input_images to data URIs; an
+		// unresolvable ref aborts the call with a readable error result
+		// the model can act on (same shape as the arg-parse failure above).
+		if err := resolveImageRefArgsFn(toolArgs); err != nil {
+			toolMsg := toolResultMsg(tc.ID, "error: "+err.Error())
+			turn.Add(toolMsg)
+			continue
+		}
 		result, err := callMCPToolWithContext(cr.ctx, tc.Function.Name, toolArgs)
 		if err != nil {
 			toolMsg := toolResultMsg(tc.ID, "error: "+err.Error())

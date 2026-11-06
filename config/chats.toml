@@ -61,6 +61,13 @@
 #   hidden_mcp_tools     (string array)              MCP tool names to hide from the LLM. Bare names ("tool") or server-prefixed ("server.tool"). Cascade: command > service > root default ([]).
 #   hidden_mcp_tool_sets (string array)              Named tool sets from mcps.toml [hidden_mcp_tool_sets.*]. Merged with hidden_mcp_tools. Cascade: command > service > root default ([]).
 #
+# Builtin tool: view_image — offered only when detectimages = true (the
+#   command is vision-capable). Lets the model pull any image URL into the
+#   conversation (fetched pages, generated image pages). Each viewed image is
+#   budgeted by maxcontextimages and labeled with a ref id (web_...) usable by
+#   future image-editing tools. Not hidden by default (tool notices show it);
+#   disable per command/service via disabled_builtin_tools = ["view_image"].
+#
 # /me action support: The LLM can use "/me <action text>" on its own line to send IRC CTCP ACTION messages.
 # Add {{.Vars.IRCActionNote}} to the system prompt to instruct the LLM how to use this feature.
 #

@@ -1180,6 +1180,107 @@ func TestRunTurnResponsesViewImageChainDeliversImage(t *testing.T) {
 	}
 }
 
+// TestRunTurnViewImageSeesImageChatPath is the Chat Completions e2e sibling
+// of TestRunTurnResponsesViewImageChainDeliversImage: round 1 returns a
+// view_image tool call, and round 2's REQUEST must contain the tool result
+// followed by the injected labeled image message (the full-history resend
+// path — no chaining involved).
+func TestRunTurnViewImageSeesImageChatPath(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+	config.ImagesDir = t.TempDir()
+	t.Cleanup(func() { config.ImagesDir = "" })
+
+	imgBytes := createTestJPEG(t)
+	imgSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Write(imgBytes)
+	}))
+	defer imgSrv.Close()
+	config.TrustedImageHosts = []string{"127.0.0.1"}
+	t.Cleanup(func() { config.TrustedImageHosts = nil })
+
+	sid := setupSessionWithResponseID(t, "")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "what is this"}))
+
+	var mu sync.Mutex
+	var bodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		n := len(bodies)
+		bodies = append(bodies, string(raw))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if n == 0 {
+			viewArgs, _ := json.Marshal(map[string]string{"url": imgSrv.URL + "/pic.jpg"})
+			fmt.Fprintf(w, `{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"view_image","arguments":%s}}]}}]}`, viewArgs)
+			return
+		}
+		fmt.Fprint(w, `{"choices":[{"message":{"role":"assistant","content":"it is a test jpeg"}}]}`)
+	}))
+	defer server.Close()
+
+	cfg := AIConfig{
+		Model: "test-model",
+		// view_image execution knobs (runTurn does not ApplyDefaults):
+		// DetectImages gates the offering (and declares vision capability),
+		// while MaxContextImages / ImageFormat / ImageQuality are required
+		// for the handler to actually fetch+inject — zero values hit the
+		// budget refusal.
+		DetectImages:     true,
+		MaxContextImages: 5,
+		ImageFormat:      "jpg",
+		ImageQuality:     75,
+		Timeout:          10 * time.Second, StreamTimeout: 10 * time.Second,
+	}
+	runner := makeResponsesRunner(t, server.URL, sid, cfg) // runner builder works for either API — it just wires the client
+	messages, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	runner.runTurn(newTurnContext(sid, messages))
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, bodies, 2)
+	// Round 2 resends the FULL history: system + user carry string content,
+	// only the injected image message carries a parts array — so content is
+	// decoded as RawMessage and the parts array is probed per message
+	// (unmarshaling mixed shapes into a typed slice returns an error).
+	var req struct {
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(bodies[1]), &req))
+	var sawTool, sawImage bool
+	toolIdx, imageIdx := -1, -1
+	for i, m := range req.Messages {
+		if m.Role == "tool" {
+			sawTool = true
+			toolIdx = i
+		}
+		if m.Role == "user" {
+			var parts []struct {
+				Type string `json:"type"`
+			}
+			if json.Unmarshal(m.Content, &parts) != nil {
+				continue // plain string content (the original user message)
+			}
+			for _, p := range parts {
+				if p.Type == "image_url" {
+					sawImage = true
+					imageIdx = i
+				}
+			}
+		}
+	}
+	assert.True(t, sawTool, "round-2 request carries the tool result")
+	assert.True(t, sawImage, "round-2 request carries the injected image")
+	assert.Greater(t, imageIdx, toolIdx, "the injected image message must follow the tool result")
+}
+
 // TestRunTurnResponsesProxyRejectRetriesWithoutID covers the Layer 2 net
 // for stateless Responses proxies (OpenRouter): when chaining IS enabled
 // and the proxy rejects previous_response_id outright, the turn must retry

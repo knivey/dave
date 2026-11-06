@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	neturl "net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -291,11 +292,41 @@ var imageHTTPClient = &http.Client{
 	Transport: ssrfSafeTransport,
 }
 
+// imageHTTPClientTrusted skips ONLY the SSRF private-IP dial block, for
+// hosts the admin explicitly listed in trusted_image_hosts (imgsite
+// typically resolves privately). Every other download guarantee stays:
+// scheme, redirects, 30s timeout, size cap, content-type check.
+var imageHTTPClientTrusted = &http.Client{Timeout: 30 * time.Second}
+
+// trustedImageHost reports whether host exactly (case-insensitively) matches
+// a trusted_image_hosts entry. No wildcards, no suffix matching — a wildcard
+// bypass of an SSRF guard is a footgun (load-time validation enforces the
+// same for the config file).
+func trustedImageHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	var hosts []string
+	readConfig(func() { hosts = config.TrustedImageHosts })
+	for _, h := range hosts {
+		if strings.EqualFold(h, host) {
+			return true
+		}
+	}
+	return false
+}
+
 func downloadImage(url string) ([]byte, string, error) {
 	if logger != nil {
 		logger.Debug("downloading image", "url", url)
 	}
 	client := imageHTTPClient
+	if u, perr := neturl.Parse(url); perr == nil && trustedImageHost(u.Hostname()) {
+		client = imageHTTPClientTrusted
+		if logger != nil {
+			logger.Debug("trusted image host, skipping SSRF private-IP guard", "host", u.Hostname())
+		}
+	}
 
 	resp, err := client.Get(url)
 	if err != nil {
@@ -338,7 +369,7 @@ func downloadImage(url string) ([]byte, string, error) {
 	return data, contentType, nil
 }
 
-func convertImage(imgData []byte, mimeType, format string, quality, maxW, maxH, maxPixels int) ([]byte, string, error) {
+func convertImage(imgData []byte, mimeType, format string, quality, maxW, maxH, maxPixels int) (out []byte, dataURI string, width int, height int, err error) {
 	if maxPixels <= 0 {
 		maxPixels = defaultMaxImagePixels
 	}
@@ -347,12 +378,11 @@ func convertImage(imgData []byte, mimeType, format string, quality, maxW, maxH, 
 	// total (dimensions x frame count) before touching any pixel data.
 	if w, h, frames, ok := headerDimensions(imgData, mimeType); ok {
 		if exceedsPixelCap(w, h, frames, int64(maxPixels)) {
-			return nil, "", fmt.Errorf("%w: header claims %dx%d x %d frame(s)", errImageTooManyPixels, w, h, frames)
+			return nil, "", 0, 0, fmt.Errorf("%w: header claims %dx%d x %d frame(s)", errImageTooManyPixels, w, h, frames)
 		}
 	}
 
 	var img image.Image
-	var err error
 
 	reader := bytes.NewReader(imgData)
 	switch {
@@ -374,17 +404,17 @@ func convertImage(imgData []byte, mimeType, format string, quality, maxW, maxH, 
 	}
 
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to decode image: %w", err)
+		return nil, "", 0, 0, fmt.Errorf("failed to decode image: %w", err)
 	}
 
 	bounds := img.Bounds()
-	width := bounds.Dx()
-	height := bounds.Dy()
+	width = bounds.Dx()
+	height = bounds.Dy()
 
 	// Defense-in-depth: headers can disagree with decoded dimensions in
 	// crafted files, so re-check the real dimensions before resizing.
 	if exceedsPixelCap(width, height, 1, int64(maxPixels)) {
-		return nil, "", fmt.Errorf("%w: decoded image is %dx%d", errImageTooManyPixels, width, height)
+		return nil, "", 0, 0, fmt.Errorf("%w: decoded image is %dx%d", errImageTooManyPixels, width, height)
 	}
 
 	if maxW > 0 || maxH > 0 {
@@ -424,30 +454,63 @@ func convertImage(imgData []byte, mimeType, format string, quality, maxW, maxH, 
 	}
 
 	var buf bytes.Buffer
-	var dataURI string
 
 	switch format {
 	case "webp":
 		err = webp.Encode(&buf, img, &webp.Options{Quality: float32(quality)})
 		if err != nil {
-			return nil, "", fmt.Errorf("failed to encode webp: %w", err)
+			return nil, "", 0, 0, fmt.Errorf("failed to encode webp: %w", err)
 		}
 		dataURI = "data:image/webp;base64,"
 	case "jpg", "jpeg":
 		err = jpeg.Encode(&buf, img, &jpeg.Options{Quality: quality})
 		if err != nil {
-			return nil, "", fmt.Errorf("failed to encode jpeg: %w", err)
+			return nil, "", 0, 0, fmt.Errorf("failed to encode jpeg: %w", err)
 		}
 		dataURI = "data:image/jpeg;base64,"
 	default:
-		return nil, "", fmt.Errorf("unsupported image format: %s", format)
+		return nil, "", 0, 0, fmt.Errorf("unsupported image format: %s", format)
 	}
 
 	encodedData := buf.Bytes()
 	if logger != nil {
 		logger.Debug("image converted", "format", format, "original_type", mimeType, "original_size", formatSize(len(imgData)), "new_size", formatSize(len(encodedData)))
 	}
-	return encodedData, dataURI, nil
+	return encodedData, dataURI, bounds.Dx(), bounds.Dy(), nil
+}
+
+// fetchedImage is the product of the shared intake pipeline: downloaded
+// (SSRF-guarded unless trusted-hosted), bomb-checked, resized, re-encoded,
+// base64-URI'd. Both intake paths consume it: user pastes
+// (buildImageMessage) and view_image.
+type fetchedImage struct {
+	Encoded []byte // converted bytes — what the ref store persists
+	DataURI string // full data:<mime>;base64,… URI for the model
+	MIME    string // encoded mime type
+	Width   int
+	Height  int
+}
+
+func fetchAndConvertImage(url, format string, quality, maxW, maxH, maxPixels int) (*fetchedImage, error) {
+	imgData, mimeType, err := downloadImage(url)
+	if err != nil {
+		return nil, err
+	}
+	encoded, dataURI, w, h, err := convertImage(imgData, mimeType, format, quality, maxW, maxH, maxPixels)
+	if err != nil {
+		return nil, err
+	}
+	mime := "image/jpeg"
+	if format == "webp" {
+		mime = "image/webp"
+	}
+	return &fetchedImage{
+		Encoded: encoded,
+		DataURI: dataURI + base64.StdEncoding.EncodeToString(encoded),
+		MIME:    mime,
+		Width:   w,
+		Height:  h,
+	}, nil
 }
 
 func decodeBMP(r io.Reader) (image.Image, error) {
@@ -518,15 +581,7 @@ func buildImageMessage(text string, imageUrls []string, maxImages int, format st
 	var successfulURLs []string
 
 	for _, url := range imageUrls {
-		imgData, mimeType, err := downloadImage(url)
-		if err != nil {
-			if logger != nil {
-				logger.Warn("skipping image URL", "url", url, "error", err.Error())
-			}
-			continue
-		}
-
-		imgData, dataURI, err := convertImage(imgData, mimeType, format, quality, maxW, maxH, maxPixels)
+		fi, err := fetchAndConvertImage(url, format, quality, maxW, maxH, maxPixels)
 		if err != nil {
 			if errors.Is(err, errImageTooManyPixels) {
 				// Decompression-bomb skip: observable but non-fatal.
@@ -536,18 +591,15 @@ func buildImageMessage(text string, imageUrls []string, maxImages int, format st
 				continue
 			}
 			if logger != nil {
-				logger.Warn("failed to convert image", "url", url, "error", err.Error())
+				logger.Warn("skipping image URL", "url", url, "error", err.Error())
 			}
 			continue
 		}
 
-		b64 := base64.StdEncoding.EncodeToString(imgData)
-		dataURI = dataURI + b64
-
 		parts = append(parts, MessagePart{
 			Type: PartTypeImageURL,
 			ImageURL: &ImageURL{
-				URL:    dataURI,
+				URL:    fi.DataURI,
 				Detail: ImageDetailAuto,
 			},
 		})

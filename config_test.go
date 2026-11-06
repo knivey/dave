@@ -1672,6 +1672,41 @@ host = "irc.example.com"
 	})
 }
 
+func TestLoadConfigDirTrustedImageHosts(t *testing.T) {
+	dir := createTestConfigDir(t, `
+trusted_image_hosts = ["img.example.com", "IMG.other.host"]
+`, nil)
+	defer os.RemoveAll(dir)
+
+	cfg, err := loadConfigDir(dir)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"img.example.com", "IMG.other.host"}, cfg.TrustedImageHosts,
+		"hosts load verbatim (case preserved); matching is case-insensitive at use site")
+}
+
+func TestLoadConfigDirRejectsWildcardTrustedImageHost(t *testing.T) {
+	for _, host := range []string{"*.example.com", "img.*.com", "?"} {
+		t.Run(host, func(t *testing.T) {
+			dir := createTestConfigDir(t, "trusted_image_hosts = [\""+host+"\"]\n", nil)
+			defer os.RemoveAll(dir)
+
+			_, err := loadConfigDir(dir)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "trusted_image_hosts")
+			assert.Contains(t, err.Error(), "wildcard")
+		})
+	}
+}
+
+func TestLoadConfigDirImagesDirDefault(t *testing.T) {
+	dir := createTestConfigDir(t, "", nil)
+	defer os.RemoveAll(dir)
+
+	cfg, err := loadConfigDir(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "data/images", cfg.ImagesDir)
+}
+
 func TestLoadConfigDirHiddenToolsDefault(t *testing.T) {
 	t.Run("hidden_tools defaults to all builtin tools", func(t *testing.T) {
 		mainTOML := `

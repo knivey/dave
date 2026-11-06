@@ -36,6 +36,8 @@ type Config struct {
 	Notices              NoticesConfig       `toml:"-"`
 	HiddenTools          []string            `toml:"hidden_tools"`
 	MaxImagePixels       int                 `toml:"maximagepixels"`
+	TrustedImageHosts    []string            `toml:"trusted_image_hosts"`
+	ImagesDir            string              `toml:"images_dir"`
 	DisabledBuiltins     []string            `toml:"disabled_builtins"`
 	DisabledBuiltinTools []string            `toml:"disabled_builtin_tools"`
 	HiddenMCPTools       []string            `toml:"hidden_mcp_tools"`
@@ -750,6 +752,9 @@ func loadConfigDir(dir string) (Config, error) {
 	if config.MaxImagePixels <= 0 {
 		config.MaxImagePixels = defaultMaxImagePixels
 	}
+	if config.ImagesDir == "" {
+		config.ImagesDir = "data/images"
+	}
 	if len(config.HiddenTools) == 0 {
 		config.HiddenTools = []string{"register_background_job", "check_ban_history", "query_channel_logs", "respond"}
 	}
@@ -778,6 +783,14 @@ func loadConfigDir(dir string) (Config, error) {
 	}
 	if config.TUI.Scrollbar.Width == 0 {
 		config.TUI.Scrollbar.Width = 1
+	}
+	for _, h := range config.TrustedImageHosts {
+		if strings.ContainsAny(h, "*?") {
+			return config, fmt.Errorf("trusted_image_hosts: wildcards are not supported (got %q) — list exact hostnames; a wildcarded SSRF-guard bypass is a footgun", h)
+		}
+		if strings.TrimSpace(h) == "" {
+			return config, fmt.Errorf("trusted_image_hosts: empty hostname entry")
+		}
 	}
 	for name, network := range config.Networks {
 		network.Name = name

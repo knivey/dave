@@ -1,5 +1,7 @@
 package main
 
+import "time"
+
 var loggerCS = newLogger("contextStore")
 
 func ClearContext(network, channel string, userID int64) {
@@ -64,5 +66,20 @@ func CleanupContexts() {
 		loggerCS.Error("Failed to cleanup pending jobs", "error", err)
 	} else if jobAffected > 0 {
 		loggerCS.Info("Cleaned up old pending jobs", "count", jobAffected)
+	}
+
+	// Image-ref GC rides the same pass and knob: refs older than MaxAgeDays
+	// belong to long-gone sessions; the images also live in archived message
+	// rows until those go away. Orphan files (crash between write and insert)
+	// get a grace period sweep in the same pass.
+	if refAffected, err := cleanupImageRefsByAge(config.Database.MaxAgeDays); err != nil {
+		loggerCS.Error("Failed to cleanup image refs", "error", err)
+	} else if refAffected > 0 {
+		loggerCS.Info("Cleaned up old image refs", "count", refAffected)
+	}
+	if n, err := sweepOrphanImageFiles(config.ImagesDir, 24*time.Hour); err != nil {
+		loggerCS.Error("Failed to sweep orphan image files", "error", err)
+	} else if n > 0 {
+		loggerCS.Info("Swept orphan image files", "count", n)
 	}
 }

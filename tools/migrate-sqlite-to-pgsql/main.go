@@ -97,6 +97,21 @@ type TurnUsage struct {
 	CreatedAt        time.Time
 }
 
+// ImageRef mirrors the main ImageRef struct (imageref.go) — the migration
+// tool copies rows 1:1 between dialects.
+type ImageRef struct {
+	ID        uint64 `gorm:"primaryKey"`
+	Ref       string `gorm:"uniqueIndex;size:64"`
+	SessionID int64  `gorm:"index"`
+	Origin    string `gorm:"size:16"`
+	SourceURL string `gorm:"type:text"`
+	MIME      string `gorm:"size:64"`
+	FilePath  string `gorm:"type:text"`
+	Width     int
+	Height    int
+	CreatedAt time.Time
+}
+
 func (TurnUsage) TableName() string { return "turn_usage" }
 
 func (SessionSetting) TableName() string { return "session_settings" }
@@ -165,12 +180,14 @@ func main() {
 		fmt.Printf("Would migrate %d pending_jobs\n", count)
 		srcDB.Model(&TurnUsage{}).Count(&count)
 		fmt.Printf("Would migrate %d turn_usage records\n", count)
+		srcDB.Model(&ImageRef{}).Count(&count)
+		fmt.Printf("Would migrate %d image_refs\n", count)
 		fmt.Println("Dry run complete — no data was written.")
 		return
 	}
 
 	fmt.Println("Running AutoMigrate on PostgreSQL...")
-	if err := dstDB.AutoMigrate(&Session{}, &SessionSetting{}, &Message{}, &PendingJob{}, &TurnUsage{}); err != nil {
+	if err := dstDB.AutoMigrate(&Session{}, &SessionSetting{}, &Message{}, &PendingJob{}, &TurnUsage{}, &ImageRef{}); err != nil {
 		fmt.Fprintf(os.Stderr, "AutoMigrate failed: %v\n", err)
 		os.Exit(1)
 	}
@@ -192,10 +209,13 @@ func main() {
 	if err := migrateTable[TurnUsage](srcDB, dstDB, 500, "turn_usage records"); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 	}
+	if err := migrateTable[ImageRef](srcDB, dstDB, 500, "image_refs"); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+	}
 
 	dstDB.Exec("SET session_replication_role = 'DEFAULT'")
 
-	tables := []string{"sessions", "session_settings", "messages", "pending_jobs", "turn_usage"}
+	tables := []string{"sessions", "session_settings", "messages", "pending_jobs", "turn_usage", "image_refs"}
 	for _, table := range tables {
 		dstDB.Exec(fmt.Sprintf("SELECT setval(pg_get_serial_sequence('%s', 'id'), COALESCE((SELECT MAX(id) FROM %s), 0))", table, table))
 	}

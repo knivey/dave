@@ -293,7 +293,7 @@ func initDB(cfg DatabaseConfig, log logxi.Logger) (*gorm.DB, error) {
 
 	if err := db.AutoMigrate(
 		&Session{}, &Message{}, &PendingJob{}, &TurnUsage{}, &SessionSetting{},
-		&User{}, &UserKnownHost{}, &NickChange{}, &Ban{}, &Compaction{},
+		&User{}, &UserKnownHost{}, &NickChange{}, &Ban{}, &Compaction{}, &ImageRef{},
 	); err != nil {
 		return nil, fmt.Errorf("running migrations: %w", err)
 	}

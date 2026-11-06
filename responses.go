@@ -12,6 +12,45 @@ import (
 	"github.com/openai/openai-go/v3/shared"
 )
 
+// userMsgToResponseInputItem converts a user message (multimodal or plain)
+// to its Responses input item. Extracted from messagesToResponseInputItems
+// so the tool-loop delta builder (toolLoopMsgsToInputItems) carries
+// injected image messages with identical wire shapes to the full-history
+// serializer.
+func userMsgToResponseInputItem(msg ChatMessage) responses.ResponseInputItemUnionParam {
+	if len(msg.MultiContent) > 0 {
+		content := make(responses.ResponseInputMessageContentListParam, 0, len(msg.MultiContent))
+		for _, part := range msg.MultiContent {
+			switch part.Type {
+			case PartTypeText:
+				content = append(content, responses.ResponseInputContentParamOfInputText(part.Text))
+			case PartTypeImageURL:
+				imgParam := responses.ResponseInputImageParam{
+					ImageURL: openai.String(part.ImageURL.URL),
+				}
+				if part.ImageURL.Detail != "" {
+					imgParam.Detail = responses.ResponseInputImageDetail(part.ImageURL.Detail)
+				}
+				content = append(content, responses.ResponseInputContentUnionParam{
+					OfInputImage: &imgParam,
+				})
+			}
+		}
+		return responses.ResponseInputItemUnionParam{
+			OfMessage: &responses.EasyInputMessageParam{
+				Role:    responses.EasyInputMessageRoleUser,
+				Content: responses.EasyInputMessageContentUnionParam{OfInputItemContentList: content},
+			},
+		}
+	}
+	return responses.ResponseInputItemUnionParam{
+		OfMessage: &responses.EasyInputMessageParam{
+			Role:    responses.EasyInputMessageRoleUser,
+			Content: responses.EasyInputMessageContentUnionParam{OfString: openai.String(msg.Content)},
+		},
+	}
+}
+
 func messagesToResponseInputItems(messages []ChatMessage, replay, format string) []responses.ResponseInputItemUnionParam {
 	input := make([]responses.ResponseInputItemUnionParam, 0, len(messages)*2)
 	for i, msg := range messages {
@@ -29,38 +68,7 @@ func messagesToResponseInputItems(messages []ChatMessage, replay, format string)
 			})
 
 		case RoleUser:
-			if len(msg.MultiContent) > 0 {
-				content := make(responses.ResponseInputMessageContentListParam, 0, len(msg.MultiContent))
-				for _, part := range msg.MultiContent {
-					switch part.Type {
-					case PartTypeText:
-						content = append(content, responses.ResponseInputContentParamOfInputText(part.Text))
-					case PartTypeImageURL:
-						imgParam := responses.ResponseInputImageParam{
-							ImageURL: openai.String(part.ImageURL.URL),
-						}
-						if part.ImageURL.Detail != "" {
-							imgParam.Detail = responses.ResponseInputImageDetail(part.ImageURL.Detail)
-						}
-						content = append(content, responses.ResponseInputContentUnionParam{
-							OfInputImage: &imgParam,
-						})
-					}
-				}
-				input = append(input, responses.ResponseInputItemUnionParam{
-					OfMessage: &responses.EasyInputMessageParam{
-						Role:    responses.EasyInputMessageRoleUser,
-						Content: responses.EasyInputMessageContentUnionParam{OfInputItemContentList: content},
-					},
-				})
-			} else {
-				input = append(input, responses.ResponseInputItemUnionParam{
-					OfMessage: &responses.EasyInputMessageParam{
-						Role:    responses.EasyInputMessageRoleUser,
-						Content: responses.EasyInputMessageContentUnionParam{OfString: openai.String(msg.Content)},
-					},
-				})
-			}
+			input = append(input, userMsgToResponseInputItem(msg))
 
 		case RoleAssistant:
 			items := make([]responses.ResponseInputItemUnionParam, 0, 2+len(msg.ToolCalls))
@@ -192,13 +200,23 @@ func reasoningItemParamFromRaw(raw json.RawMessage) (responses.ResponseInputItem
 	return responses.ResponseInputItemUnionParam{OfReasoning: &item}, true
 }
 
-func toolResultMsgsToInputItems(messages []ChatMessage) []responses.ResponseInputItemUnionParam {
+// toolLoopMsgsToInputItems builds the delta-only input for a chained
+// Responses tool round-trip: everything after the assistant tool-call
+// message. Tool results become function_call_output; queued image
+// injections (RoleUser multimodal) convert like any user message — the old
+// tool-results-only builder silently dropped them (spec §3). Assistant rows
+// are skipped: the chained server already knows the assistant message that
+// produced the calls.
+func toolLoopMsgsToInputItems(messages []ChatMessage) []responses.ResponseInputItemUnionParam {
 	input := make([]responses.ResponseInputItemUnionParam, 0, len(messages))
 	for _, msg := range messages {
-		if msg.Role == RoleTool {
+		switch msg.Role {
+		case RoleTool:
 			input = append(input, responses.ResponseInputItemParamOfFunctionCallOutput(
 				msg.ToolCallID, msg.Content,
 			))
+		case RoleUser:
+			input = append(input, userMsgToResponseInputItem(msg))
 		}
 	}
 	return input

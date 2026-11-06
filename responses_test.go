@@ -352,6 +352,30 @@ func TestMessagesToResponseInputItems_TextPartIsInputText(t *testing.T) {
 	assert.False(t, strings.Contains(raw, `"type":"text"`), "found chat completions type 'text', expected responses API type 'input_text'")
 }
 
+// TestToolLoopMsgsToInputItemsCarriesInjectedUser pins the chained
+// tool-loop delta builder: tool results AND flushed view_image injections
+// (RoleUser multimodal) must ride the input — the old tool-results-only
+// builder silently dropped them (spec §3). The assistant tool-call row is
+// skipped: the chained server already knows it.
+func TestToolLoopMsgsToInputItemsCarriesInjectedUser(t *testing.T) {
+	msgs := []ChatMessage{
+		{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "c1"}}}, // must be skipped
+		{Role: RoleTool, ToolCallID: "c1", Content: "Image loaded"},
+		{Role: RoleUser, MultiContent: []MessagePart{
+			{Type: PartTypeText, Text: "[image — ref: web_abc — source: u]"},
+			{Type: PartTypeImageURL, ImageURL: &ImageURL{URL: "data:image/jpeg;base64,AAA", Detail: ImageDetailAuto}},
+		}},
+	}
+	input := toolLoopMsgsToInputItems(msgs)
+	require.Len(t, input, 2)
+
+	rawItems := marshalInputItems(input)
+	assert.Contains(t, string(rawItems[0]), "function_call_output", "tool result must ride the delta input")
+	s := string(rawItems[1])
+	assert.Contains(t, s, "input_image", "injected user message must ride the chained delta input")
+	assert.Contains(t, s, "data:image/jpeg;base64,AAA")
+}
+
 func TestGogptToolsToResponseToolParams(t *testing.T) {
 	tools := []Tool{
 		{

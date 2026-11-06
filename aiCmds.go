@@ -938,12 +938,15 @@ func (cr *chatRunner) runTurnResponsesStream(
 	}
 
 	emptyRetries = 0
+	// Capture the index BEFORE the assistant message lands: the chained
+	// delta input is everything this round added after it (tool results +
+	// flushed image injections) — see toolLoopMsgsToInputItems.
+	preToolIdx := len(turn.Messages())
 	assistantMsg.ToolCalls = toolCalls
 	turn.Add(assistantMsg)
 	cr.logger.Info("assistant made tool calls", "count", len(toolCalls))
 	cr.storeUsage(sdkResponseUsageToUsage(resp.Usage, string(resp.Status)), "responses_stream", durationMs)
 
-	numToolCalls := len(toolCalls)
 	cr.executeToolCalls(turn, toolCalls)
 	if cr.responded {
 		// respond delivered the final answer — the turn is complete,
@@ -953,13 +956,13 @@ func (cr *chatRunner) runTurnResponsesStream(
 
 	var newInput []responses.ResponseInputItemUnionParam
 	// Mirror the non-streaming tool-loop: input shape and the chain
-	// decision are ONE choice — delta-only input (tool results) must chain
-	// currentResponseID on the next request or the provider loses all
-	// context; full-history input must drop the id to match.
+	// decision are ONE choice — delta-only input (tool results +
+	// injections) must chain currentResponseID on the next request or the
+	// provider loses all context; full-history input must drop the id to
+	// match.
 	chain := chainActive(cr.cfg, currentResponseID)
 	if chain {
-		toolResultMsgs := turn.LastN(numToolCalls)
-		newInput = toolResultMsgsToInputItems(toolResultMsgs)
+		newInput = toolLoopMsgsToInputItems(turn.MessagesFrom(preToolIdx))
 	} else {
 		newInput = messagesToResponseInputItems(turn.Messages(), reasoningReplay(cr.cfg), reasoningReplayFormat(cr.cfg))
 	}
@@ -1912,7 +1915,11 @@ func (cr *chatRunner) runTurnResponses(turn *turnContext) bool {
 
 		emptyRetries = 0
 		cr.storeUsage(sdkResponseUsageToUsage(resp.Usage, string(resp.Status)), "responses", durationMs)
-		numToolCalls := len(toolCalls)
+		// Capture the index BEFORE handleToolCallResponse adds the
+		// assistant message, the tool results, and the flushed injections:
+		// the chained delta input is everything this round added after the
+		// assistant tool-call message.
+		preToolIdx := len(turn.Messages())
 		cr.handleToolCallResponse(turn, text, toolCalls, parts)
 		if cr.responded {
 			// respond delivered the final answer — the turn is complete,
@@ -1922,10 +1929,10 @@ func (cr *chatRunner) runTurnResponses(turn *turnContext) bool {
 		}
 
 		if chainActive(cr.cfg, currentResponseID) {
-			toolResultMsgs := turn.LastN(numToolCalls)
-			input = toolResultMsgsToInputItems(toolResultMsgs)
-			// Input is now delta-only (tool results): the next request must
-			// chain currentResponseID or the provider loses all context.
+			input = toolLoopMsgsToInputItems(turn.MessagesFrom(preToolIdx))
+			// Input is now delta-only (tool results + injections): the next
+			// request must chain currentResponseID or the provider loses all
+			// context.
 			usePrevID = true
 		} else {
 			input = messagesToResponseInputItems(turn.Messages(), reasoningReplay(cr.cfg), reasoningReplayFormat(cr.cfg))

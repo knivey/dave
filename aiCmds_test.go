@@ -1094,6 +1094,92 @@ func TestRunTurnResponsesToolLoopChainsFreshID(t *testing.T) {
 	}
 }
 
+// TestRunTurnResponsesViewImageChainDeliversImage pins the Review Focus #2
+// hazard: on a previous_response_id chain the tool-loop follow-up sends
+// delta-only input; the old builder (turn.LastN(numToolCalls) filtered to
+// tool roles) SILENTLY DROPPED the flushed view_image injection. The
+// follow-up body must carry BOTH the tool result and the injected image.
+func TestRunTurnResponsesViewImageChainDeliversImage(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		t.Run(fmt.Sprintf("streaming=%v", streaming), func(t *testing.T) {
+			setupTestDB(t)
+			setupNoticesDefaults(t)
+			config.ImagesDir = t.TempDir()
+			t.Cleanup(func() { config.ImagesDir = "" })
+
+			// Image server: loopback + trusted so downloadImage passes the SSRF guard.
+			imgBytes := createTestJPEG(t)
+			imgSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "image/jpeg")
+				w.Write(imgBytes)
+			}))
+			defer imgSrv.Close()
+			config.TrustedImageHosts = []string{"127.0.0.1"}
+			t.Cleanup(func() { config.TrustedImageHosts = nil })
+
+			sid := setupSessionWithResponseID(t, "")
+			require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+			require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "look"}))
+
+			var mu sync.Mutex
+			var bodies []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				raw, _ := io.ReadAll(r.Body)
+				mu.Lock()
+				n := len(bodies)
+				bodies = append(bodies, string(raw))
+				mu.Unlock()
+				var payload map[string]any
+				if n == 0 {
+					viewArgs, _ := json.Marshal(map[string]string{"url": imgSrv.URL + "/pic.jpg"})
+					payload = makeResponsesAPIToolCallResponse("resp-1", "view_image", string(viewArgs))
+				} else {
+					payload = makeResponsesAPIResponse("resp-2", "done")
+				}
+				if streaming {
+					w.Header().Set("Content-Type", "text/event-stream")
+					event, _ := json.Marshal(map[string]any{"type": "response.completed", "response": payload})
+					fmt.Fprintf(w, "data: %s\n\n", event)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				json.NewEncoder(w).Encode(payload)
+			}))
+			defer server.Close()
+
+			cfg := AIConfig{
+				Model: "test-model", ResponsesAPI: true, PreviousResponseID: true,
+				Streaming: streaming,
+				// view_image execution knobs: DetectImages gates the offering
+				// (and declares vision capability), while MaxContextImages /
+				// ImageFormat / ImageQuality are required for the handler to
+				// actually fetch+inject — zero values hit the budget refusal.
+				DetectImages:     true,
+				MaxContextImages: 5,
+				ImageFormat:      "jpg",
+				ImageQuality:     75,
+				Timeout:          10 * time.Second, StreamTimeout: 10 * time.Second,
+			}
+			runner := makeResponsesRunner(t, server.URL, sid, cfg)
+			messages, err := sessionMgr.GetMessages(sid)
+			require.NoError(t, err)
+			runner.runTurn(newTurnContext(sid, messages))
+
+			mu.Lock()
+			defer mu.Unlock()
+			require.Len(t, bodies, 2, "tool round-trip + follow-up")
+			prevID1, input1 := parseRecordedRequestBody(t, bodies[1])
+			assert.Equal(t, "resp-1", prevID1, "follow-up must chain")
+			joined := ""
+			for _, item := range input1 {
+				joined += string(item)
+			}
+			assert.Contains(t, joined, "function_call_output", "tool result rides the delta input")
+			assert.Contains(t, joined, "input_image", "view_image injection MUST ride the chained delta input")
+		})
+	}
+}
+
 // TestRunTurnResponsesProxyRejectRetriesWithoutID covers the Layer 2 net
 // for stateless Responses proxies (OpenRouter): when chaining IS enabled
 // and the proxy rejects previous_response_id outright, the turn must retry

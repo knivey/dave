@@ -81,6 +81,16 @@ func TestTurnContext_LastN(t *testing.T) {
 	assert.Len(t, last5, 3, "LastN should return all if n > len")
 }
 
+func TestTurnContextMessagesFrom(t *testing.T) {
+	tc := newTurnContext(1, []ChatMessage{{Role: RoleSystem, Content: "s"}})
+	tc.Add(ChatMessage{Role: RoleUser, Content: "a"})
+	tc.Add(ChatMessage{Role: RoleAssistant, Content: "b"})
+	assert.Len(t, tc.MessagesFrom(1), 2)
+	assert.Len(t, tc.MessagesFrom(0), 3)
+	assert.Nil(t, tc.MessagesFrom(3))
+	assert.Len(t, tc.MessagesFrom(-5), 3, "negative index clamps to 0")
+}
+
 func TestTurnContext_Add_WithToolCalls(t *testing.T) {
 	setupTestDB(t)
 

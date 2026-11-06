@@ -47,3 +47,17 @@ func (tc *turnContext) LastN(n int) []ChatMessage {
 	}
 	return tc.messages[len(tc.messages)-n:]
 }
+
+// MessagesFrom returns messages[idx:] (clamped). The chained Responses
+// tool-loop delta input is "everything after the assistant tool-call
+// message", which includes tool results AND flushed image injections —
+// LastN(numToolCalls) cannot express that.
+func (tc *turnContext) MessagesFrom(idx int) []ChatMessage {
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(tc.messages) {
+		return nil
+	}
+	return tc.messages[idx:]
+}

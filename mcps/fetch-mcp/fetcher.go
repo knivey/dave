@@ -28,6 +28,10 @@ type FetchResult struct {
 	StartIndex        int
 	NextIndex         int
 	IsRawContent      bool
+	// Images holds direct image URLs harvested from the raw page HTML.
+	// Readability's text-density scoring drops image-only containers, so
+	// this is harvested independently of the markdown pipeline.
+	Images []string
 }
 
 type Fetcher struct {
@@ -97,6 +101,7 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string, startIndex int, maxL
 			Truncated:         truncated,
 			StartIndex:        startIndex,
 			NextIndex:         nextIndex(startIndex, maxLength, len(cached.Markdown)),
+			Images:            cached.Images,
 		}, nil
 	}
 
@@ -166,9 +171,17 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string, startIndex int, maxL
 		return nil, fmt.Errorf("converting to markdown: %w", err)
 	}
 
+	// Lazy-load placeholder <img src="data:..."> tags otherwise inline tens
+	// of KB of base64 into the markdown. Applied before caching so the cache
+	// stores the elided form.
+	markdown = elideDataURIs(markdown)
+
+	images := harvestImageURLs(parsedURL, bodyBytes)
+
 	f.mdCache.Set(rawURL, &CachedMarkdown{
 		Markdown: markdown,
 		Title:    title,
+		Images:   images,
 	})
 
 	content, truncated := paginate(markdown, startIndex, maxLength)
@@ -179,6 +192,7 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string, startIndex int, maxL
 		Truncated:   truncated,
 		StartIndex:  startIndex,
 		NextIndex:   nextIndex(startIndex, maxLength, len(markdown)),
+		Images:      images,
 	}, nil
 }
 

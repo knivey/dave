@@ -9,6 +9,9 @@ type CachedMarkdown struct {
 	Markdown string
 	Title    string
 	URL      string
+	// Images are the direct image URLs harvested from the raw page HTML at
+	// fetch time; the raw body is not retained, so they ride the cache.
+	Images   []string
 	CachedAt time.Time
 }
 

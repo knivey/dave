@@ -29,14 +29,15 @@ type FetchInput struct {
 }
 
 type FetchOutput struct {
-	Content           string `json:"content"`
-	ContentType       string `json:"content_type,omitempty"`
-	Title             string `json:"title,omitempty"`
-	StartIndex        int    `json:"start_index"`
-	NextIndex         int    `json:"next_index,omitempty"`
-	Truncated         bool   `json:"truncated"`
-	CacheStatus       string `json:"cache_status,omitempty"`
-	FromMarkdownCache bool   `json:"from_markdown_cache,omitempty"`
+	Content           string   `json:"content"`
+	ContentType       string   `json:"content_type,omitempty"`
+	Title             string   `json:"title,omitempty"`
+	Images            []string `json:"images,omitempty" jsonschema:"Direct image URLs found on the page (img src/srcset, image links, og:image, preload), resolved to absolute URLs. Use one of these when you need the actual image behind an HTML page."`
+	StartIndex        int      `json:"start_index"`
+	NextIndex         int      `json:"next_index,omitempty"`
+	Truncated         bool     `json:"truncated"`
+	CacheStatus       string   `json:"cache_status,omitempty"`
+	FromMarkdownCache bool     `json:"from_markdown_cache,omitempty"`
 }
 
 const maxAllowedLength = 100000
@@ -73,6 +74,7 @@ func (h *ToolHandlers) handleFetch(ctx context.Context, req *mcp.CallToolRequest
 		Content:           content,
 		ContentType:       contentType,
 		Title:             result.Title,
+		Images:            result.Images,
 		StartIndex:        result.StartIndex,
 		NextIndex:         result.NextIndex,
 		Truncated:         result.Truncated,

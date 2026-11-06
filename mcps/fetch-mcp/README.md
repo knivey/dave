@@ -23,10 +23,27 @@ Native Go web fetching MCP server. Fetches URLs and converts HTML to clean markd
 | `content` | The fetched and converted content |
 | `content_type` | `"markdown"` for HTML pages, `"raw"` for non-HTML |
 | `title` | Page title (from readability or `<title>` tag) |
+| `images` | Direct image URLs found on the page (see below) |
 | `start_index` | Current offset into the full content |
 | `next_index` | Offset for the next page (0 if no more content) |
 | `truncated` | Whether the content was cut off at `max_length` |
 | `cache_status` | HTTP cache status (`HIT`, `MISS`, `REVALIDATED`, `STALE`, `BYPASS`) |
+
+#### The `images` field
+
+Readability's text-density scoring drops image-only containers entirely, so on image-centric pages (galleries, photo detail views) the direct image URL can vanish from the converted markdown — the model then cannot answer "what is the image URL behind this page" (this broke session 2993 on an img.zkpq.ca photo page). The `images` field closes that gap: direct image URLs harvested from the **raw** HTML, independent of the markdown pipeline.
+
+Harvest sources (document order, deduped, capped at 20):
+
+- `<img>` `data-src` / `data-srcset` / `src` / `srcset` (data-* first: lazy-load convention puts the real image in `data-src` and a placeholder in `src`)
+- `<picture>` `<source srcset>` (HTML guarantees an `<img>` fallback inside `<picture>`, so this only adds alternative sizes/encodings)
+- `<a href>` whose path has an image extension (`.jpg`, `.png`, `.webp`, …). Extension-less wrapping hrefs are deliberately NOT harvested — gallery filmstrips use `<a href="/page"><img src="/thumb.webp"></a>` where the href is a page, and harvesting those floods the cap with page URLs. The wrapped `<img src>` always lands instead.
+- `og:image`, `og:image:url`, `og:image:secure_url`, `twitter:image`, `twitter:image:src` meta
+- `<link rel="preload" as="image">` (`imagesrcset`/`imagesrc`, `as` matched case-insensitively) and `<link rel="image_src">`
+
+All URLs are resolved to absolute against the page URL — or the first `<base href>` when the page carries one; `data:` and non-http(s) schemes are skipped; the field is omitted when nothing is found. The harvested list rides the markdown cache alongside the content.
+
+Data-URI lazy-load placeholders (`<img src="data:image/webp;base64,...">`) are also elided from the converted markdown itself (`![alt](data URI elided)`), so the no-readability path can no longer inline tens of KB of base64 per placeholder image.
 
 ## Architecture
 
@@ -35,7 +52,7 @@ Two-layer caching:
 1. **HTTP cache** (`bartventer/httpcache`, RFC 9111 compliant) — respects `Cache-Control`, `ETag`, `Last-Modified`, handles `304 Not Modified` revalidation automatically
 2. **Markdown cache** — in-memory TTL-based cache of converted content, avoids re-parsing on pagination calls
 
-Pipeline: URL → cached HTTP fetch → readability extraction → html-to-markdown conversion → paginate and return.
+Pipeline: URL → cached HTTP fetch → readability extraction → html-to-markdown conversion (data-URI placeholders elided) + image URL harvest from the raw HTML → paginate and return.
 
 If readability fails or is disabled, falls back to converting the full HTML. Non-HTML responses pass through as-is.
 

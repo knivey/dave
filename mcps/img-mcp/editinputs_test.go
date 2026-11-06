@@ -136,3 +136,20 @@ func TestResolveEditInputsRejectsUnknownEntry(t *testing.T) {
 	assert.Contains(t, err.Error(), "view_image")
 	assert.Contains(t, err.Error(), "https://img.example.com/some.png", "error names the offending entry")
 }
+
+// TestResolveEditInputsRejectsEmptyEntries is the defense-in-depth half of
+// the crash-window guard: zero entries must be an error, not a silent
+// "resolved to nothing" — prepareComfyEditWorkflow accepts zero images, so
+// an empty "success" here would let the workflow file's default image
+// silently stand in for the user's input.
+func TestResolveEditInputsRejectsEmptyEntries(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig("")
+	_, err := resolveEditInputs(context.Background(), db, cfg, "jj1", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no input images provided")
+
+	_, err = resolveEditInputs(context.Background(), db, cfg, "jj1", []string{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no input images provided")
+}

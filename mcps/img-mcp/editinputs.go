@@ -53,6 +53,14 @@ func extForDataMIME(mime string) string {
 // upload; gen_ refs fetch from ComfyUI/imgsite and upload; anything else is
 // an error teaching the model the ref loop. Entries are resolved in order.
 func resolveEditInputs(ctx context.Context, db *sqlx.DB, cfg Config, jobID string, entries []string) ([]InputImageRef, error) {
+	if len(entries) == 0 {
+		// Defense-in-depth for the crash window processJob guards: zero
+		// entries would otherwise "resolve" to zero refs with no error,
+		// and prepareComfyEditWorkflow accepts zero images (its only
+		// count guard is over-supply) — the edit would silently generate
+		// from the workflow file's default image instead of the user's.
+		return nil, fmt.Errorf("no input images provided")
+	}
 	var out []InputImageRef
 	for i, entry := range entries {
 		var (

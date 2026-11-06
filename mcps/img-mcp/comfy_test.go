@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -746,12 +747,18 @@ func TestBuildPromptNote(t *testing.T) {
 				Prompt:   "make it blue",
 				Strength: floatPtr(0.65),
 				InputImages: []InputImageRef{
-					{Ref: "data:image/png;base64,AAA", Comfy: ComfyImage{Filename: "edit_j7_0.png"}},
+					// A real decodable data URI (the production shape —
+					// dave rewrites usr_/web_ refs to data URIs) plus a
+					// compact gen_ ref.
+					{Ref: "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("PNGBYTES")), Comfy: ComfyImage{Filename: "edit_j7_0.png"}},
 					{Ref: "gen_abc", Comfy: ComfyImage{Filename: "edit_j7_1.png"}},
 				},
 			}},
+			// sha256("PNGBYTES")[:12] = 541fec54762a; the data-URI entry
+			// collapses to the compact descriptor, the gen_ ref stays
+			// verbatim.
 			want: `{"prompt":"make it blue","llm_generated":false,"job_id":"j_7",` +
-				`"edited_from":["data:image/png;base64,AAA","gen_abc"],"strength":0.65}`,
+				`"edited_from":["data:image/png;sha256=541fec54762a (8 bytes)","gen_abc"],"strength":0.65}`,
 		},
 	}
 	for _, tt := range tests {
@@ -807,6 +814,35 @@ func TestBuildPromptNoteTruncatesReasoning(t *testing.T) {
 	want := "a" + strings.Repeat("é", maxPromptNoteReasoningRunes-1) + promptNoteTruncationMarker
 	assert.Equal(t, want, payload.EnhancementReasoning,
 		"truncation must cut on rune boundaries")
+}
+
+// TestDescribeEditRef pins the compact edited_from descriptor: data-URI
+// entries (the production shape — dave rewrites usr_/web_ refs to data
+// URIs before the call) must collapse to mime+sha256+size instead of
+// embedding their base64 payload into permanent metadata, while gen_ refs
+// stay verbatim. The undecodable fallback hashes the raw entry string so a
+// hand-built ref still gets a stable descriptor.
+func TestDescribeEditRef(t *testing.T) {
+	uri := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("PNGBYTES"))
+	desc := describeEditRef(uri)
+	assert.Equal(t, "data:image/png;sha256=541fec54762a (8 bytes)", desc,
+		"sha256 of the DECODED bytes, 12 hex chars, decoded byte count")
+	assert.NotContains(t, desc, "UE5HQllURVM=", "the base64 payload must not ride the descriptor")
+	assert.NotContains(t, desc, ";base64", "mime params are stripped — only the mime segment rides")
+
+	assert.Equal(t, "gen_abc", describeEditRef("gen_abc"),
+		"non-data-URI refs (gen_) stay verbatim — already compact ids")
+	assert.Equal(t, "usr_1", describeEditRef("usr_1"),
+		"a hand-built non-URI ref passes through too; the resolver rejects those earlier")
+
+	// Undecodable payload: fall back to hashing the RAW entry so the
+	// descriptor is still stable and sized, never an error path.
+	raw := "data:image/jpeg;base64,!!!not-base64!!!"
+	fallback := describeEditRef(raw)
+	assert.Contains(t, fallback, "data:image/jpeg;sha256=")
+	assert.Contains(t, fallback, fmt.Sprintf("(%d bytes)", len(raw)),
+		"fallback sizes the raw entry string")
+	assert.NotContains(t, fallback, "!!!not-base64!!!")
 }
 
 // mockComfyFlowServer stands in for ComfyUI's HTTP+WS API: it records every

@@ -432,12 +432,12 @@ func (h *ToolHandlers) validateEditInput(workflowName string, inputImages []stri
 }
 
 // handleEditImageAsync queues an edit job. It deliberately skips
-// applyNetworkPolicy: the policy's lever is prompt ENHANCEMENT (and its
-// Force flag rewrites generate→enhance_generate), but an edit job's type
-// must stay JobTypeEdit or processJob's edit branch never runs — and the
-// edit prompt is an instruction ("make it blue"), not raw scene material
-// to embellish. Returns GenerateImageAsyncOutput — the shape is identical
-// (just a job_id).
+// applyNetworkPolicy: there is no enhancement path for edits (processJob's
+// enhance block is type-gated on JobTypeEnhanceGenerate) and the policy's
+// enhancement-selection/Force machinery is generation-specific — Force only
+// rewrites JobTypeGenerate, so for an edit job the call could never do
+// anything but return its arguments unchanged: dead work. Returns
+// GenerateImageAsyncOutput — the shape is identical (just a job_id).
 func (h *ToolHandlers) handleEditImageAsync(ctx context.Context, req *mcp.CallToolRequest, input EditImageAsyncInput) (*mcp.CallToolResult, GenerateImageAsyncOutput, error) {
 	workflow, err := h.validateEditInput(input.Workflow, input.InputImages, input.Strength)
 	if err != nil {

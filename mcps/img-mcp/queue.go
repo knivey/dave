@@ -803,21 +803,33 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 	// rather than incidental.
 	noteNSFW := firstPassNSFW && !safetyNetworkSkipped(cfg, job.Input.Network)
 
-	promptNote, err := buildPromptNote(job, enhancementReasoning, noteNSFW)
-	if err != nil {
-		q.failJob(job, fmt.Sprintf("workflow preparation failed: %v", err))
-		return
-	}
-
 	// Edit jobs resolve their input references into uploaded ComfyUI
-	// coordinates here — INSIDE processJob, not the tool handler — so a
-	// restart-recovered job finds its coordinates already persisted
-	// (InputImages, stamped by dbUpdateJobInputImages below) and skips the
-	// resolution/upload entirely. If ComfyUI's input dir was cleaned since,
-	// the submit/monitor fails with a readable error (accepted).
+	// coordinates here — INSIDE processJob, not the tool handler, and
+	// BEFORE buildPromptNote so the submit-time note carries the same
+	// edited_from provenance the rewrite-time note rebuilds (the note is
+	// embedded in the submitted workflow graph, and for non-webp outputs
+	// that skip the EXIF rewrite it is the ONLY note the image keeps — a
+	// submit-time note without edited_from would permanently disagree with
+	// the rewrite-time one). A restart-recovered job finds its
+	// coordinates already persisted (InputImages, stamped by
+	// dbUpdateJobInputImages below) and skips the resolution/upload
+	// entirely. If ComfyUI's input dir was cleaned since, the
+	// submit/monitor fails with a readable error (accepted).
 	var editImages []ComfyImage
 	if job.Type == JobTypeEdit {
 		if len(job.Input.InputImages) == 0 {
+			if len(job.Input.RawInputImages) == 0 {
+				// Crash window: Submit persisted the job row, but the
+				// restart re-queued it before dbUpdateJobInputImages
+				// landed the resolved coordinates — and RawInputImages
+				// is deliberately not persisted, so there is nothing
+				// left to re-resolve. Fail readably instead of letting
+				// resolveEditInputs' empty loop produce zero refs and
+				// the workflow file's default image silently stand in
+				// for the user's input.
+				q.failJob(job, "edit inputs failed: no input images recorded for this job — cannot re-resolve after restart; please retry the edit")
+				return
+			}
 			refs, err := resolveEditInputs(jobCtx, q.db, cfg, job.ID, job.Input.RawInputImages)
 			if err != nil {
 				q.failJob(job, fmt.Sprintf("edit inputs failed: %v", err))
@@ -834,6 +846,12 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 		for _, r := range job.Input.InputImages {
 			editImages = append(editImages, r.Comfy)
 		}
+	}
+
+	promptNote, err := buildPromptNote(job, enhancementReasoning, noteNSFW)
+	if err != nil {
+		q.failJob(job, fmt.Sprintf("workflow preparation failed: %v", err))
+		return
 	}
 
 	var workflow ComfyWorkflow

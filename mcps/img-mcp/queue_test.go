@@ -541,7 +541,10 @@ func TestBuildUploadMeta(t *testing.T) {
 				Prompt:   "make it blue",
 				Strength: floatPtr(0.5),
 				InputImages: []InputImageRef{
-					{Ref: "usr_1", Comfy: ComfyImage{Filename: "edit_editjob_0.jpg"}},
+					// Production shape: dave rewrites usr_/web_ refs to
+					// data URIs; edited_from carries the compact
+					// descriptor, never the base64 blob.
+					{Ref: "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("PNGBYTES")), Comfy: ComfyImage{Filename: "edit_editjob_0.png"}},
 					{Ref: "gen_abc", Comfy: ComfyImage{Filename: "edit_editjob_1.png"}},
 				},
 				Network: "libera",
@@ -553,11 +556,11 @@ func TestBuildUploadMeta(t *testing.T) {
 				EnhancedPrompt: "make it blue",
 				WorkflowName:   "edit",
 				Network:        "libera",
-				EditedFrom:     []string{"usr_1", "gen_abc"},
+				EditedFrom:     []string{"data:image/png;sha256=541fec54762a (8 bytes)", "gen_abc"},
 				Strength:       floatPtr(0.5),
 			},
 			expectJSONEq: `{"job_id":"editjob","original_prompt":"make it blue","enhanced_prompt":"make it blue",
-				"workflow_name":"edit","network":"libera","edited_from":["usr_1","gen_abc"],"strength":0.5}`,
+				"workflow_name":"edit","network":"libera","edited_from":["data:image/png;sha256=541fec54762a (8 bytes)","gen_abc"],"strength":0.5}`,
 		},
 	}
 	for _, tt := range tests {
@@ -1889,6 +1892,21 @@ func TestEditJobRecoveryReusesPersistedUploadNames(t *testing.T) {
 	first, ok := firstAny.(string)
 	require.True(t, ok, "the image node input must decode back as a string, got %T", firstAny)
 
+	// The SUBMITTED note must already carry the same edited_from provenance
+	// the rewrite-time note rebuilds: the edit branch resolves inputs BEFORE
+	// buildPromptNote (pre-hoist, the fresh-resolve path embedded strength
+	// but no edited_from). The data-URI entry renders as the compact
+	// descriptor — sha256("PNG")[:12] = 796120837694 — never the blob.
+	noteNode, ok := mockComfy.submittedPrompts()[0].Prompt[davePromptNoteNodeID]
+	require.True(t, ok, "submitted workflow must carry the prompt note node")
+	var note promptNotePayload
+	require.NoError(t, json.Unmarshal([]byte(noteNode.Inputs["text"].(string)), &note))
+	require.Len(t, note.EditedFrom, 1, "submit-time note must carry edited_from")
+	assert.Equal(t, "data:image/png;sha256=796120837694 (3 bytes)", note.EditedFrom[0])
+	assert.Equal(t, 0.5, *note.Strength, "submit-time note carries the strength")
+	assert.NotContains(t, noteNode.Inputs["text"].(string), "UE5H",
+		"the base64 payload must never ride the note")
+
 	// Recovery shape: a NEW queue (simulated restart) processing a job
 	// whose InputImages were already persisted (jobFromDBJob
 	// reconstruction). Re-submit the completed job's resolved coords
@@ -1914,4 +1932,27 @@ func filepathFromInputName(t *testing.T, in string) string {
 		return in[i+1:]
 	}
 	return in
+}
+
+// TestEditJobWithoutInputsFailsReadably pins the crash-window guard: a job
+// whose InputImages AND RawInputImages are both empty (the shape a crash
+// between Submit and the coordinate persist leaves behind — RawInputImages
+// is deliberately not persisted) must fail with a readable retry error.
+// Pre-fix, resolveEditInputs' empty loop returned zero refs with no error
+// and prepareComfyEditWorkflow accepted them, so the "edit" silently
+// generated from the workflow file's default image.
+func TestEditJobWithoutInputsFailsReadably(t *testing.T) {
+	mockComfy := newMockComfyFlowServer(t)
+	cfg := editQueueConfig(t, mockComfy.URL())
+	q, stop := setupTestQueue(t, cfg)
+	defer stop()
+
+	job, err := q.Submit(JobTypeEdit, "edit", JobInput{Prompt: "p"})
+	require.NoError(t, err)
+	res := q.WaitForJob(job.ID, 30*time.Second)
+	require.NotNil(t, res)
+	assert.Equal(t, StatusFailed, res.Status)
+	assert.Contains(t, res.Error, "no input images recorded")
+	assert.Contains(t, res.Error, "retry the edit")
+	assert.Empty(t, mockComfy.submittedPrompts(), "nothing must reach comfy — a default-image edit is worse than a failure")
 }

@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -230,13 +233,14 @@ func truncateForPromptNote(reasoning string) string {
 //     neither field = never enhanced (direct tools). skip_networks jobs
 //     never carry the flag — the whole classification machinery, first pass
 //     included, is skipped there.
-//   - EditedFrom/Strength are edit-job provenance: the ORIGINAL ref strings
-//     the caller supplied (a data URI keeps its full string, a gen_ ref its
-//     compact id — never the uploaded ComfyUI filename) and the denoise
-//     strength actually used. Both rebuild identically at rewrite time
-//     because they derive from the job row (input_images/strength columns),
-//     so a crash-recovered edit keeps its provenance with no extra
-//     plumbing. Omitted for generation jobs via omitempty.
+//   - EditedFrom/Strength are edit-job provenance: the input refs the
+//     caller supplied and the denoise strength actually used. Data-URI
+//     refs render as a compact sha256 descriptor (describeEditRef) —
+//     full-blob provenance was ruled out for permanent-metadata bloat —
+//     while gen_ refs stay verbatim. Both rebuild identically at rewrite
+//     time because they derive from the job row (input_images/strength
+//     columns), so a crash-recovered edit keeps its provenance with no
+//     extra plumbing. Omitted for generation jobs via omitempty.
 type promptNotePayload struct {
 	Prompt               string   `json:"prompt"`
 	LLMGenerated         bool     `json:"llm_generated"`
@@ -251,15 +255,58 @@ type promptNotePayload struct {
 	Strength             *float64 `json:"strength,omitempty"`
 }
 
-// editedFromRefs extracts the original ref strings from resolved edit
-// inputs — the provenance shared by the prompt note and the upload meta.
-// Nil for generation jobs so omitempty drops the key.
+// editedFromRefs renders the edit-input provenance list shared by the
+// prompt note and the upload meta. CONTROLLER RULING: full data-URI blobs
+// are rejected as edited_from provenance — dave resolves usr_/web_ refs to
+// data URIs before the call, so verbatim refs would embed megabytes of
+// base64 into permanent metadata (the EXIF note baked into every output
+// image, the imgsite upload POST, and the site's workflow_json). Data-URI
+// entries therefore render as a compact descriptor (describeEditRef) that
+// identifies the exact input bytes without the payload; non-data-URI
+// entries (gen_ refs) are already compact ids and stay verbatim. Nil for
+// generation jobs so omitempty drops the key.
 func editedFromRefs(input JobInput) []string {
 	var refs []string
 	for _, r := range input.InputImages {
-		refs = append(refs, r.Ref)
+		refs = append(refs, describeEditRef(r.Ref))
 	}
 	return refs
+}
+
+// editedFromHashChars is how much of the sha256 hex digest the compact
+// descriptor carries — 12 hex chars (48 bits) is far beyond any realistic
+// collision count for one job's handful of inputs, and keeps the descriptor
+// a single readable token.
+const editedFromHashChars = 12
+
+// describeEditRef renders one edit-input ref for edited_from provenance.
+// A data URI collapses to "data:<mime>;sha256=<hex12> (<N> bytes)": the
+// mime segment (params like ;base64 stripped), a 12-hex-char sha256 of the
+// DECODED bytes (raw entry string on the defensive fallback — every ref
+// that came through resolveEditInputs decodes), and the decoded byte
+// count. The descriptor identifies the exact input without embedding it
+// (see editedFromRefs for the bloat ruling). Anything else — a gen_ ref —
+// passes through verbatim.
+func describeEditRef(ref string) string {
+	if !strings.HasPrefix(ref, "data:") {
+		return ref
+	}
+	mime := ref
+	if comma := strings.Index(ref, ","); comma >= 0 {
+		mime = ref[:comma]
+	}
+	if i := strings.Index(mime, ";"); i >= 0 {
+		mime = mime[:i]
+	}
+	mime = strings.TrimPrefix(mime, "data:")
+
+	n, sum := len(ref), sha256.Sum256([]byte(ref))
+	if comma := strings.Index(ref, ","); comma >= 0 {
+		if raw, err := base64.StdEncoding.DecodeString(ref[comma+1:]); err == nil {
+			n, sum = len(raw), sha256.Sum256(raw)
+		}
+	}
+	return fmt.Sprintf("data:%s;sha256=%s (%d bytes)", mime, hex.EncodeToString(sum[:])[:editedFromHashChars], n)
 }
 
 // buildPromptNote assembles the submit-time note: everything known when the

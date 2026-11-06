@@ -72,6 +72,14 @@
 # headers = { "X-API-Key" = "your-shared-secret" }
 # timeout = "2m"
 # keepalive = "30s"
+#
+# Example — bouvet code-sandbox MCP (remote Firecracker microVMs, no network access
+# from inside sandboxes; 60s default per-exec timeout, so dave's timeout needs headroom):
+# [bouvet]
+# transport = "http"
+# url = "http://bouvet.example.internal:8080/mcp"
+# timeout = "90s"
+# keepalive = "30s"
 
 [db-mcp]
 transport = "stdio"

@@ -77,10 +77,19 @@ type CompactionConfig struct {
 	PromptTemplate string `toml:"prompt_template"`
 }
 
-func (c *CompactionConfig) ApplyDefaults() {
+// normalizedAutoThreshold returns the effective auto-compaction
+// threshold, applying the same <=0 → 0.7 default as ApplyDefaults. Shared
+// by display paths that read a raw config snapshot (the -session context
+// line) so the threshold shown is always the threshold enforced.
+func normalizedAutoThreshold(c CompactionConfig) float64 {
 	if c.AutoThreshold <= 0 {
-		c.AutoThreshold = 0.7
+		return 0.7
 	}
+	return c.AutoThreshold
+}
+
+func (c *CompactionConfig) ApplyDefaults() {
+	c.AutoThreshold = normalizedAutoThreshold(*c)
 	if c.MinTurns <= 0 {
 		c.MinTurns = 6
 	}

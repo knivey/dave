@@ -278,7 +278,20 @@ func historySessionCurrent(network Network, c *girc.Client, e girc.Event, ctx co
 		clonedFrom = formatClonedFrom(*session, resolveClonedFromNicks([]Session{*session}))
 	}
 
-	if !sendOrDone(ctx, output, expandNotice(n.Sessions.CurrentHeader, map[string]string{
+	// sendLine wraps every emitted line like the sibling display commands
+	// (-sessions, -history): an admin-customized template or long
+	// model/service names can exceed the IRC line budget, and unwrapped
+	// emission risks server-side truncation.
+	sendLine := func(tmpl string, vars map[string]string) bool {
+		for _, wrapped := range wrapLine(expandNotice(tmpl, vars)) {
+			if !sendOrDone(ctx, output, wrapped) {
+				return false
+			}
+		}
+		return true
+	}
+
+	if !sendLine(n.Sessions.CurrentHeader, map[string]string{
 		"icon":        "\x0303●\x0F",
 		"id":          fmt.Sprintf("%d", session.ID),
 		"trigger":     network.Trigger,
@@ -289,11 +302,11 @@ func historySessionCurrent(network Network, c *girc.Client, e girc.Event, ctx co
 		"started_ago": formatTimeAgo(session.CreatedAt),
 		"active_ago":  formatTimeAgo(session.LastActive),
 		"cloned_from": clonedFrom,
-	})) {
+	}) {
 		return
 	}
 	if preview != "" {
-		if !sendOrDone(ctx, output, expandNotice(n.Sessions.CurrentStarter, map[string]string{"preview": preview})) {
+		if !sendLine(n.Sessions.CurrentStarter, map[string]string{"preview": preview}) {
 			return
 		}
 	}
@@ -301,10 +314,10 @@ func historySessionCurrent(network Network, c *girc.Client, e girc.Event, ctx co
 	if archivedMsgs > 0 {
 		archivedSuffix = fmt.Sprintf(" (%d archived)", archivedMsgs)
 	}
-	if !sendOrDone(ctx, output, expandNotice(n.Sessions.CurrentMessages, map[string]string{
+	if !sendLine(n.Sessions.CurrentMessages, map[string]string{
 		"live":            fmt.Sprintf("%d", len(msgs)),
 		"archived_suffix": archivedSuffix,
-	})) {
+	}) {
 		return
 	}
 
@@ -320,12 +333,12 @@ func historySessionCurrent(network Network, c *girc.Client, e girc.Event, ctx co
 		if reasoningAll, _, rErr := sumSessionReasoningTokens(session.ID); rErr == nil && reasoningAll > 0 {
 			reasoningNote = fmt.Sprintf(" · reasoning %d", reasoningAll)
 		}
-		if !sendOrDone(ctx, output, expandNotice(n.Sessions.CurrentUsage, map[string]string{
+		if !sendLine(n.Sessions.CurrentUsage, map[string]string{
 			"prompt":         fmt.Sprintf("%d", lastUsage.PromptTokens),
 			"cached":         fmt.Sprintf("%d", lastUsage.CachedTokens),
 			"completion":     fmt.Sprintf("%d", lastUsage.CompletionTokens),
 			"reasoning_note": reasoningNote,
-		})) {
+		}) {
 			return
 		}
 	}
@@ -341,10 +354,7 @@ func historySessionCurrent(network Network, c *girc.Client, e girc.Event, ctx co
 	var ccfg CompactionConfig
 	readConfig(func() { ccfg = config.Compaction })
 	autoOn := ccfg.Enabled && ccfg.AutoEnabled
-	threshold := ccfg.AutoThreshold
-	if threshold <= 0 {
-		threshold = 0.7 // mirrors CompactionConfig.ApplyDefaults
-	}
+	threshold := normalizedAutoThreshold(ccfg)
 	windowStr := formatWindowTokens(window)
 	var parts []string
 	switch {
@@ -365,9 +375,9 @@ func historySessionCurrent(network Network, c *girc.Client, e girc.Event, ctx co
 	if session.ResponseID != nil {
 		parts = append(parts, "responses chain")
 	}
-	sendOrDone(ctx, output, expandNotice(n.Sessions.CurrentContext, map[string]string{
+	sendLine(n.Sessions.CurrentContext, map[string]string{
 		"note": strings.Join(parts, " · "),
-	}))
+	})
 }
 
 func sendSessionsLinesSelf(output chan<- string, ctx context.Context, sessions []Session, trigger string) {

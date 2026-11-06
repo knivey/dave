@@ -610,13 +610,16 @@ func TestHistorySessionCurrent_Omissions(t *testing.T) {
 
 	prevChats := config.Commands.Chats
 	prevCompaction := config.Compaction
+	prevServices := config.Services
 	config.Commands.Chats = map[string]AIConfig{
 		"testchat": {Service: "svc1", Model: "gpt-4o"}, // no ContextWindow
 	}
 	config.Compaction = CompactionConfig{} // no window fallback either
+	config.Services = map[string]Service{} // self-contained: no ambient svc1 window
 	defer func() {
 		config.Commands.Chats = prevChats
 		config.Compaction = prevCompaction
+		config.Services = prevServices
 	}()
 
 	network := Network{Name: "testnet", Trigger: "!"}
@@ -660,6 +663,111 @@ func TestHistorySessionCurrent_CommandGone(t *testing.T) {
 	}, 4)
 	joined := strings.Join(lines, "\n")
 	assert.Contains(t, joined, "no longer exists", "command_gone error surfaces")
+}
+
+// TestHistorySessionCurrent_Fragments pins the conditional context
+// fragments in their PRESENT state (the Full test pins them absent): the
+// compaction count, the responses-chain flag, and the <=0 threshold
+// falling back to the ApplyDefaults 0.7 — the displayed threshold is the
+// enforced one.
+func TestHistorySessionCurrent_Fragments(t *testing.T) {
+	setupBotTest(t)
+
+	prevChats := config.Commands.Chats
+	prevCompaction := config.Compaction
+	config.Commands.Chats = map[string]AIConfig{
+		"testchat": {Service: "svc1", Model: "gpt-4o", ContextWindow: 8000},
+	}
+	// AutoThreshold 0 must display as the 0.7 default.
+	config.Compaction = CompactionConfig{Enabled: true, AutoEnabled: true, AutoThreshold: 0}
+	defer func() {
+		config.Commands.Chats = prevChats
+		config.Compaction = prevCompaction
+	}()
+
+	network := Network{Name: "testnet", Trigger: "!"}
+	sid := createTestSession(t, network.Name, "#test", "testuser", "testchat", "svc1", "gpt-4o")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "hi"}))
+
+	// Two compaction events → "compacted 2×".
+	for i := 0; i < 2; i++ {
+		require.NoError(t, theDB.Create(&Compaction{SessionID: sid, Trigger: "manual"}).Error)
+	}
+	// Active Responses chain.
+	rid := "resp_123"
+	require.NoError(t, theDB.Model(&Session{}).Where("id = ?", sid).Update("response_id", rid).Error)
+	// Usage: 4000/8000 = 50%.
+	require.NoError(t, theDB.Create(&TurnUsage{
+		SessionID: sid, PromptTokens: 4000, CompletionTokens: 100, APIPath: "x",
+	}).Error)
+
+	client := bots["testnet"].Client
+	e := makeHistoryEvent("#test", "testuser")
+	lines := runHistoryCommand(t, func(ctx context.Context, output chan<- string) {
+		historySessionCurrent(network, client, e, ctx, output)
+	}, 10)
+	joined := strings.Join(lines, "\n")
+
+	assert.Contains(t, joined, "50% of 8k", "context percentage present")
+	assert.Contains(t, joined, "auto-compacts at 70%", "unset threshold displays the ApplyDefaults 0.7 — the enforced value")
+	assert.Contains(t, joined, "compacted 2×", "compaction count fragment present")
+	assert.Contains(t, joined, "responses chain", "responses-chain fragment present")
+}
+
+// TestHistorySessionCurrent_WrapsLongLines pins sibling parity: every
+// emitted line goes through wrapLine, so an oversize notice line (e.g. an
+// admin-customized template) is split instead of risking server-side
+// truncation.
+func TestHistorySessionCurrent_WrapsLongLines(t *testing.T) {
+	setupBotTest(t)
+
+	prevChats := config.Commands.Chats
+	prevCompaction := config.Compaction
+	prevStarter := config.Notices.Sessions.CurrentStarter
+	config.Commands.Chats = map[string]AIConfig{
+		"testchat": {Service: "svc1", Model: "gpt-4o"},
+	}
+	config.Compaction = CompactionConfig{}
+	// Force an oversize starter line through the handler. Words with
+	// spaces: wrapLine splits on word boundaries, so an unbroken
+	// 450-byte word would pass through verbatim by design (pre-existing
+	// wrapLine behavior) — realistic oversize content has spaces.
+	config.Notices.Sessions.CurrentStarter = strings.Repeat("x ", 250) + "{preview}"
+	defer func() {
+		config.Commands.Chats = prevChats
+		config.Compaction = prevCompaction
+		config.Notices.Sessions.CurrentStarter = prevStarter
+	}()
+
+	network := Network{Name: "testnet", Trigger: "!"}
+	sid := createTestSession(t, network.Name, "#test", "testuser", "testchat", "svc1", "gpt-4o")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "hi"}))
+
+	client := bots["testnet"].Client
+	e := makeHistoryEvent("#test", "testuser")
+	lines := runHistoryCommand(t, func(ctx context.Context, output chan<- string) {
+		historySessionCurrent(network, client, e, ctx, output)
+	}, 10)
+
+	require.NotEmpty(t, lines)
+	sawSplitStarter := false
+	for _, l := range lines {
+		assert.LessOrEqual(t, len(l), 400, "every emitted line must respect the wrapLine boundary")
+		if strings.Contains(l, "hi") {
+			sawSplitStarter = true
+		}
+	}
+	assert.True(t, sawSplitStarter, "the oversize starter line was split, not dropped")
+	assert.Contains(t, strings.Join(lines, "\n"), strings.Repeat("x ", 50),
+		"the padded starter content survived the wrap")
+}
+
+func TestFormatWindowTokens(t *testing.T) {
+	assert.Equal(t, "800", formatWindowTokens(800))
+	assert.Equal(t, "1k", formatWindowTokens(1000))
+	assert.Equal(t, "16k", formatWindowTokens(16000))
+	assert.Equal(t, "131k", formatWindowTokens(131072))
+	assert.Equal(t, "200k", formatWindowTokens(200000))
 }
 
 // TestHistorySessionCurrent_NoticesDefaults pins that the new notice keys

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"hash/crc32"
 	"image"
 	"image/color"
@@ -689,7 +690,7 @@ func TestBuildImageMessageNonImageURLPreserved(t *testing.T) {
 		text := "check " + htmlServer.URL + "/page.html and " + imgServer.URL + "/pic.jpg here"
 		urls := []string{htmlServer.URL + "/page.html", imgServer.URL + "/pic.jpg"}
 
-		msg, err := buildImageMessage(text, urls, 5, "jpg", 75, 1024, 1024, 0)
+		msg, err := buildImageMessage(text, urls, 5, "jpg", 75, 1024, 1024, 0, 0)
 		require.NoError(t, err, "buildImageMessage() error")
 
 		require.GreaterOrEqual(t, len(msg.MultiContent), 2, "expected at least 2 parts")
@@ -697,8 +698,8 @@ func TestBuildImageMessageNonImageURLPreserved(t *testing.T) {
 		var textPart string
 		var imageCount int
 		for _, part := range msg.MultiContent {
-			if part.Type == PartTypeText {
-				textPart = part.Text
+			if part.Type == PartTypeText && !strings.HasPrefix(part.Text, "[image ") {
+				textPart = part.Text // prose only — [image N — ref: …] labels legitimately carry the URL
 			}
 			if part.Type == PartTypeImageURL {
 				imageCount++
@@ -715,7 +716,7 @@ func TestBuildImageMessageNonImageURLPreserved(t *testing.T) {
 		text := "visit " + htmlServer.URL + "/a and " + htmlServer.URL + "/b"
 		urls := []string{htmlServer.URL + "/a", htmlServer.URL + "/b"}
 
-		msg, err := buildImageMessage(text, urls, 5, "jpg", 75, 1024, 1024, 0)
+		msg, err := buildImageMessage(text, urls, 5, "jpg", 75, 1024, 1024, 0, 0)
 		require.NoError(t, err, "buildImageMessage() error")
 
 		var textPart string
@@ -739,13 +740,13 @@ func TestBuildImageMessageNonImageURLPreserved(t *testing.T) {
 		text := "see " + imgServer.URL + "/pic.jpg now"
 		urls := []string{imgServer.URL + "/pic.jpg"}
 
-		msg, err := buildImageMessage(text, urls, 5, "jpg", 75, 1024, 1024, 0)
+		msg, err := buildImageMessage(text, urls, 5, "jpg", 75, 1024, 1024, 0, 0)
 		require.NoError(t, err, "buildImageMessage() error")
 
 		var textPart string
 		for _, part := range msg.MultiContent {
-			if part.Type == PartTypeText {
-				textPart = part.Text
+			if part.Type == PartTypeText && !strings.HasPrefix(part.Text, "[image ") {
+				textPart = part.Text // prose only — the label legitimately carries the URL
 			}
 		}
 
@@ -1003,7 +1004,7 @@ func TestBuildImageMessageSkipsPixelBombNonFatal(t *testing.T) {
 	defer server.Close()
 
 	text := "see " + server.URL + "/bomb.png now"
-	msg, err := buildImageMessage(text, []string{server.URL + "/bomb.png"}, 5, "jpg", 75, 1024, 1024, 0)
+	msg, err := buildImageMessage(text, []string{server.URL + "/bomb.png"}, 5, "jpg", 75, 1024, 1024, 0, 0)
 	require.NoError(t, err, "pixel bomb skip must be non-fatal")
 
 	var imageCount int
@@ -1020,6 +1021,41 @@ func TestBuildImageMessageSkipsPixelBombNonFatal(t *testing.T) {
 	assert.Contains(t, textPart, server.URL, "skipped URL stays in text")
 	assert.Contains(t, textPart, "see", "surrounding text preserved")
 	assert.Contains(t, textPart, "now", "surrounding text preserved")
+}
+
+func TestBuildImageMessageRefPairing(t *testing.T) {
+	setupTestDB(t)
+	config.ImagesDir = t.TempDir()
+	t.Cleanup(func() { config.ImagesDir = "" })
+	config.TrustedImageHosts = []string{"127.0.0.1"}
+	t.Cleanup(func() { config.TrustedImageHosts = nil })
+
+	srv := newTestImageServer(t)
+	defer srv.Close()
+
+	msg, err := buildImageMessage("look at this "+srv.URL+"/a.jpg "+srv.URL+"/b.jpg",
+		[]string{srv.URL + "/a.jpg", srv.URL + "/b.jpg"}, 5, "jpg", 75, 1024, 1024, 0, 7)
+	require.NoError(t, err)
+	require.Len(t, msg.MultiContent, 5, "leading text part + (label, image) x2")
+
+	assert.Equal(t, PartTypeText, msg.MultiContent[0].Type)
+	assert.Contains(t, msg.MultiContent[0].Text, "look at this")
+
+	for i, pair := range []int{1, 3} {
+		label := msg.MultiContent[pair]
+		img := msg.MultiContent[pair+1]
+		assert.Equal(t, PartTypeText, label.Type)
+		assert.Regexp(t, fmt.Sprintf(`^\[image %d — ref: usr_[0-9a-f]{12} —`, i+1), label.Text,
+			"label precedes its image, 1-indexed, carries a usr_ ref and the URL")
+		assert.Contains(t, label.Text, srv.URL)
+		assert.Equal(t, PartTypeImageURL, img.Type)
+		assert.Contains(t, img.ImageURL.URL, "data:image/jpeg;base64,")
+	}
+
+	// Both refs registered with the session id.
+	var count int64
+	require.NoError(t, theDB.Model(&ImageRef{}).Where("session_id = ? AND origin = ?", 7, "user").Count(&count).Error)
+	assert.Equal(t, int64(2), count)
 }
 
 func TestDownloadImageChunkedBodyBounded(t *testing.T) {

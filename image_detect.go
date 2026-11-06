@@ -572,7 +572,7 @@ func stripSuccessfulURLs(text string, successfulURLs []string) string {
 	return strings.Join(strings.Fields(text), " ")
 }
 
-func buildImageMessage(text string, imageUrls []string, maxImages int, format string, quality, maxW, maxH, maxPixels int) (ChatMessage, error) {
+func buildImageMessage(text string, imageUrls []string, maxImages int, format string, quality, maxW, maxH, maxPixels int, sessionID int64) (ChatMessage, error) {
 	if len(imageUrls) > maxImages {
 		imageUrls = imageUrls[:maxImages]
 	}
@@ -580,6 +580,10 @@ func buildImageMessage(text string, imageUrls []string, maxImages int, format st
 	var parts []MessagePart
 	var successfulURLs []string
 
+	// Each label part PRECEDES its image part — the adjacent text block
+	// pairing: the model visually maps the ref in the label to the image
+	// that follows it, so a future edit tool can resolve "usr_xxxx" back
+	// to the exact bytes in context.
 	for _, url := range imageUrls {
 		fi, err := fetchAndConvertImage(url, format, quality, maxW, maxH, maxPixels)
 		if err != nil {
@@ -596,13 +600,26 @@ func buildImageMessage(text string, imageUrls []string, maxImages int, format st
 			continue
 		}
 
-		parts = append(parts, MessagePart{
-			Type: PartTypeImageURL,
-			ImageURL: &ImageURL{
-				URL:    fi.DataURI,
-				Detail: ImageDetailAuto,
+		ref, refErr := registerImageRef(sessionID, "user", url, fi.MIME, fi.Width, fi.Height, fi.Encoded)
+		if refErr != nil {
+			if logger != nil {
+				logger.Warn("image ref registration failed (image still attached)", "url", url, "error", refErr.Error())
+			}
+		}
+		if ref == "" {
+			ref = "unregistered"
+		}
+		n := len(successfulURLs) + 1
+		parts = append(parts,
+			MessagePart{Type: PartTypeText, Text: fmt.Sprintf("[image %d — ref: %s — %s]", n, ref, url)},
+			MessagePart{
+				Type: PartTypeImageURL,
+				ImageURL: &ImageURL{
+					URL:    fi.DataURI,
+					Detail: ImageDetailAuto,
+				},
 			},
-		})
+		)
 		successfulURLs = append(successfulURLs, url)
 	}
 

@@ -2226,7 +2226,7 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 			var err error
 			var maxImagePixels int
 			readConfig(func() { maxImagePixels = config.MaxImagePixels })
-			userMsg, err = buildImageMessage(cleanText, imageUrls, cfg.MaxImages, cfg.ImageFormat, cfg.ImageQuality, cfg.MaxImageWidth, cfg.MaxImageHeight, maxImagePixels)
+			userMsg, err = buildImageMessage(cleanText, imageUrls, cfg.MaxImages, cfg.ImageFormat, cfg.ImageQuality, cfg.MaxImageWidth, cfg.MaxImageHeight, maxImagePixels, session.ID)
 			if err != nil {
 				runner.sendError(expandNotice(n.DB.ProcessImages, map[string]string{"error": err.Error()}))
 				return

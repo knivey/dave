@@ -169,6 +169,10 @@ output_node = "28"
 prompt_node = "6"
 negative_prompt_node = "7"
 seed_nodes = ["3"]
+# image_nodes (string list, default []) — LoadImage node ids an EDIT workflow
+#   wires uploaded input images into (edit_image/edit_image_async only).
+# denoise_node (string, default "") — node whose inputs.denoise receives the
+#   edit strength; unset keeps the workflow file's own default.
 # Expected generation time for ETA calculations
 typical_time = "30s"
 

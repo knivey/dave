@@ -555,6 +555,74 @@ func TestPrepareComfyWorkflowMissingPromptNode(t *testing.T) {
 	assert.Contains(t, err.Error(), "prompt node")
 }
 
+// mustWriteWorkflowString writes raw workflow JSON to a temp file and
+// returns its path — the string-input sibling of mustWriteWorkflow, for
+// tests that build an inline workflow fixture.
+func mustWriteWorkflowString(t *testing.T, jsonStr string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "edit_workflow.json")
+	require.NoError(t, os.WriteFile(path, []byte(jsonStr), 0644))
+	return path
+}
+
+func editTestWorkflowJSON(t *testing.T) string {
+	t.Helper()
+	wf := ComfyWorkflow{
+		"6":  {Inputs: map[string]interface{}{"text": "orig"}, Class: "CLIPTextEncode"},
+		"40": {Inputs: map[string]interface{}{"image": "placeholder.png"}, Class: "LoadImage"},
+		"3":  {Inputs: map[string]interface{}{"denoise": 1.0, "seed": 1}, Class: "KSampler"},
+	}
+	b, err := json.Marshal(wf)
+	require.NoError(t, err)
+	return string(b)
+}
+
+func editTestConfig(t *testing.T) Config {
+	cfg := testConfig("")
+	cfg.Workflows["edit"] = WorkflowConfig{
+		WorkflowPath: mustWriteWorkflowString(t, editTestWorkflowJSON(t)),
+		ClientID:     "test-client", OutputNode: "output-node", PromptNode: "6",
+		ImageNodes:  []string{"40"},
+		DenoiseNode: "3",
+		Timeout:     60,
+	}
+	return cfg
+}
+
+func TestPrepareComfyEditWorkflowWiresImagesAndDenoise(t *testing.T) {
+	cfg := editTestConfig(t)
+	// One image per configured image node: the brief's draft passed two
+	// images against a single-image-node config, which the
+	// len(images) > len(image_nodes) guard rejects — and the second image
+	// was never asserted. The subfolder case is covered by wf2 below.
+	images := []ComfyImage{
+		{Filename: "edit_1_0.jpg"},
+	}
+	strength := 0.6
+	wf, err := prepareComfyEditWorkflow(cfg, "edit", "make it blue", "", nil, "note", images, &strength)
+	require.NoError(t, err)
+	assert.Equal(t, "edit_1_0.jpg", wf["40"].Inputs["image"], "no subfolder -> bare name")
+	wf2, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.png", Subfolder: "sub"}}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "sub/x.png", wf2["40"].Inputs["image"], "subfolder -> sub/name")
+	assert.Equal(t, 0.6, wf["3"].Inputs["denoise"], "strength wired to denoise_node")
+	assert.Equal(t, 1.0, wf2["3"].Inputs["denoise"], "nil strength leaves the workflow default")
+	assert.Equal(t, "make it blue", wf["6"].Inputs["text"], "prompt wiring inherited from prepareComfyWorkflow")
+}
+
+func TestPrepareComfyEditWorkflowMissingNodeErrors(t *testing.T) {
+	cfg := editTestConfig(t)
+	// Map values are not addressable: copy, mutate, store back (the same
+	// pattern the prepareComfyWorkflow tests use).
+	wc := cfg.Workflows["edit"]
+	wc.ImageNodes = []string{"999"}
+	cfg.Workflows["edit"] = wc
+	_, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.jpg"}}, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "999")
+	assert.Contains(t, err.Error(), "edit", "error names the node and workflow")
+}
+
 func TestBuildPromptNote(t *testing.T) {
 	tests := []struct {
 		name      string

@@ -100,15 +100,22 @@ type SafetyConfig struct {
 }
 
 type WorkflowConfig struct {
-	WorkflowPath       string        `toml:"workflow_path"`
-	ClientID           string        `toml:"clientid"`
-	OutputNode         string        `toml:"output_node"`
-	PromptNode         string        `toml:"prompt_node"`
-	NegativePromptNode string        `toml:"negative_prompt_node"`
-	SeedNodes          []string      `toml:"seed_nodes"`
-	Timeout            int           `toml:"timeout"`
-	TypicalTime        time.Duration `toml:"typical_time"`
-	Description        string        `toml:"description"`
+	WorkflowPath       string   `toml:"workflow_path"`
+	ClientID           string   `toml:"clientid"`
+	OutputNode         string   `toml:"output_node"`
+	PromptNode         string   `toml:"prompt_node"`
+	NegativePromptNode string   `toml:"negative_prompt_node"`
+	SeedNodes          []string `toml:"seed_nodes"`
+	// ImageNodes names the LoadImage node ids an EDIT workflow wires uploaded
+	// input images into (inputs.image). Only edit workflows configure these;
+	// calling edit_image against a workflow without them is a readable error.
+	ImageNodes []string `toml:"image_nodes"`
+	// DenoiseNode optionally names the node whose inputs.denoise receives the
+	// edit strength (0-1). Unset = the workflow file's own default rides.
+	DenoiseNode string        `toml:"denoise_node"`
+	Timeout     int           `toml:"timeout"`
+	TypicalTime time.Duration `toml:"typical_time"`
+	Description string        `toml:"description"`
 }
 
 func loadConfig(configFile string) (Config, error) {

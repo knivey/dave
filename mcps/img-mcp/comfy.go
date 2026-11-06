@@ -359,6 +359,52 @@ func prepareComfyWorkflow(cfg Config, workflowName, prompt, negativePrompt strin
 	return workflow, nil
 }
 
+// comfyImageInputName renders a ComfyUI LoadImage inputs.image value:
+// bare filename at the input root, "subfolder/name" otherwise.
+func comfyImageInputName(name, subfolder string) string {
+	if subfolder == "" {
+		return name
+	}
+	return subfolder + "/" + name
+}
+
+// prepareComfyEditWorkflow builds an edit (img2img) prompt: it reuses
+// prepareComfyWorkflow for everything a generation gets (prompt/negative
+// text, seeds, orphan prompt note), then wires the uploaded input images
+// into the configured image_nodes (in order) and the optional strength into
+// denoise_node. Missing image nodes are errors, not silent skips — the same
+// guard style as the prompt-node lookup.
+func prepareComfyEditWorkflow(cfg Config, workflowName, prompt, negativePrompt string, seedOverride *int64, promptNote string, images []ComfyImage, strength *float64) (ComfyWorkflow, error) {
+	workflow, err := prepareComfyWorkflow(cfg, workflowName, prompt, negativePrompt, seedOverride, promptNote)
+	if err != nil {
+		return nil, err
+	}
+	wc := cfg.Workflows[workflowName]
+	if len(wc.ImageNodes) == 0 {
+		return nil, fmt.Errorf("workflow %q has no image_nodes configured — not an edit workflow", workflowName)
+	}
+	if len(images) > len(wc.ImageNodes) {
+		return nil, fmt.Errorf("workflow %q accepts %d input image(s), got %d", workflowName, len(wc.ImageNodes), len(images))
+	}
+	for i, nodeID := range wc.ImageNodes {
+		node, ok := workflow[nodeID]
+		if !ok || node.Inputs == nil {
+			return nil, fmt.Errorf("image node %q not found in workflow %q", nodeID, wc.WorkflowPath)
+		}
+		if i < len(images) {
+			node.Inputs["image"] = comfyImageInputName(images[i].Filename, images[i].Subfolder)
+		}
+	}
+	if strength != nil && wc.DenoiseNode != "" {
+		node, ok := workflow[wc.DenoiseNode]
+		if !ok || node.Inputs == nil {
+			return nil, fmt.Errorf("denoise node %q not found in workflow %q", wc.DenoiseNode, wc.WorkflowPath)
+		}
+		node.Inputs["denoise"] = *strength
+	}
+	return workflow, nil
+}
+
 // comfyClientID derives the per-job ComfyUI client id used at prompt
 // submission AND on the monitor's /ws connection. ComfyUI keys /ws sockets
 // by clientId and evicts same-id reconnects, so with concurrent workers a

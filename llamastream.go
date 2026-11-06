@@ -77,6 +77,12 @@ func (cr *chatRunner) releaseLlamaStream() {
 		cr.logger.Warn("llama stream release: bad request", "error", err.Error())
 		return
 	}
+	// llama-server enforces --api-key on /v1/stream like every other
+	// route — an unauthenticated release would 401 (silently, WARN-only)
+	// on key-protected deployments and strand the detached generation.
+	if cr.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+cr.apiKey)
+	}
 	resp, err := cr.httpClient.Do(req)
 	if err != nil {
 		cr.logger.Warn("llama stream release failed", "error", err.Error())

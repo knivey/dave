@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -58,7 +59,7 @@ func newLlamaStreamServer(t *testing.T, rec *llamaStreamRecorder) *httptest.Serv
 			w.Header().Set("Content-Type", "text/event-stream")
 			fmt.Fprint(w, llamaTestDoneStream)
 		case r.Method == http.MethodDelete && strings.HasSuffix(r.URL.Path, "/stream"):
-			rec.record("DELETE " + r.URL.Path + "?" + r.URL.RawQuery)
+			rec.record("DELETE " + r.URL.Path + "?" + r.URL.RawQuery + " auth=" + r.Header.Get("Authorization"))
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			rec.record("OTHER " + r.Method + " " + r.URL.Path)
@@ -116,8 +117,8 @@ func TestRunTurnStreamLlamaConversationHeaderAndRelease(t *testing.T) {
 	assert.Contains(t, strings.Join(lines, "\n"), "all done text")
 	assert.Equal(t, []string{
 		"POST conv=conv-abc123",
-		"DELETE /v1/stream?conv_id=conv-abc123",
-	}, rec.snapshot(), "expected exactly one headered POST followed by one release DELETE")
+		"DELETE /v1/stream?conv_id=conv-abc123 auth=Bearer k",
+	}, rec.snapshot(), "expected exactly one headered POST followed by one authenticated release DELETE")
 }
 
 // TestRunTurnStreamConversationHeaderRequiresLlamaService: non-llama services
@@ -223,9 +224,18 @@ func TestRunTurnStreamReleaseOnCancel(t *testing.T) {
 
 	rec := &llamaStreamRecorder{}
 	keepAlive := streamChunk(`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"."},"finish_reason":null}]}`)
+	ctx, cancel := context.WithCancel(context.Background())
+	// Arm the cancel only once the POST is actually on the wire: arming
+	// on a wall-clock timer before the turn starts races the DB-migration
+	// setup (deterministically losing under -race) and turns this into a
+	// pre-cancelled-ctx test. Firing 150ms after the first POST cancels
+	// the stream genuinely mid-flight.
+	postSeen := make(chan struct{})
+	var postSeenOnce sync.Once
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/chat/completions"):
+			postSeenOnce.Do(func() { close(postSeen) })
 			rec.record("POST")
 			w.Header().Set("Content-Type", "text/event-stream")
 			fmt.Fprint(w, streamChunk(`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"working"},"finish_reason":null}]}`))
@@ -249,25 +259,74 @@ func TestRunTurnStreamReleaseOnCancel(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	// Arm the cancel BEFORE the turn starts (mutate runs before the
-	// goroutine) so the stream is cancelled mid-flight, not after the
-	// turn already returned.
-	time.AfterFunc(300*time.Millisecond, cancel)
+	go func() {
+		<-postSeen
+		time.Sleep(150 * time.Millisecond)
+		cancel()
+	}()
 	runLlamaStreamTurn(t, server, func(cr *chatRunner) {
 		cr.llamaService = true
 		cr.convID = "conv-abc123"
 		cr.ctx = ctx
 	})
 
-	// runLlamaStreamTurn waits for runTurn to return; the cancel path exits
-	// the stream loop at the next keepalive chunk. The DELETE must follow.
+	// runLlamaStreamTurn waits for runTurn to return; the cancel lands
+	// mid-flight (keepalive chunks unblock the loop-top ctx check). The
+	// release DELETE must follow on its detached context.
 	events := rec.snapshot()
 	require.NotEmpty(t, events)
 	assert.Equal(t, "POST", events[0])
 	assert.Contains(t, events, "DELETE /v1/stream?conv_id=conv-abc123",
 		"cancel must release the server-side session; got %v", events)
+}
+
+// TestRunTurnStreamLlamaToolLoopReleasesPerIteration: each tool-loop
+// iteration is its own runTurnStream call — the release DELETE for
+// iteration N must complete before iteration N+1's POST re-registers the
+// session (the sequencing that makes per-iteration releases safe). Pins
+// the exact interleaving so a future "optimization" cannot silently drop
+// or reorder it.
+func TestRunTurnStreamLlamaToolLoopReleasesPerIteration(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	toolStream := streamChunk(`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}`) +
+		streamChunk(`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"nonexistent_tool","arguments":"{}"}}]},"finish_reason":null}]}`) +
+		streamChunk(`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`) +
+		"data: [DONE]\n\n"
+
+	rec := &llamaStreamRecorder{}
+	var posts int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/chat/completions"):
+			rec.record(fmt.Sprintf("POST#%d conv=%s", atomic.AddInt32(&posts, 1), r.Header.Get("X-Conversation-Id")))
+			w.Header().Set("Content-Type", "text/event-stream")
+			if posts == 1 {
+				fmt.Fprint(w, toolStream)
+				return
+			}
+			fmt.Fprint(w, llamaTestDoneStream)
+		case r.Method == http.MethodDelete && strings.HasSuffix(r.URL.Path, "/stream"):
+			rec.record("DELETE " + r.URL.Path + "?" + r.URL.RawQuery)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	runLlamaStreamTurn(t, server, func(cr *chatRunner) {
+		cr.llamaService = true
+		cr.convID = "conv-abc123"
+	})
+
+	assert.Equal(t, []string{
+		"POST#1 conv=conv-abc123",
+		"DELETE /v1/stream?conv_id=conv-abc123",
+		"POST#2 conv=conv-abc123",
+		"DELETE /v1/stream?conv_id=conv-abc123",
+	}, rec.snapshot(), "each iteration must release before the next POST re-registers")
 }
 
 // TestRunTurnStreamReleaseFailureNonFatal: a 500 on the release DELETE must
@@ -315,7 +374,7 @@ func TestRunTurnStreamReleaseEscapesConvID(t *testing.T) {
 
 	events := rec.snapshot()
 	require.Len(t, events, 2)
-	assert.Equal(t, "DELETE /v1/stream?conv_id=weird+id%26x%3D1", events[1])
+	assert.Equal(t, "DELETE /v1/stream?conv_id=weird+id%26x%3D1 auth=Bearer k", events[1])
 }
 
 // TestNewChatRunnerLlamaServiceFlag: the production constructor derives the

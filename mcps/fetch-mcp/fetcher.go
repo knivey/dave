@@ -138,6 +138,17 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string, startIndex int, maxL
 
 	contentType := resp.Header.Get("Content-Type")
 	if !isHTML(contentType, bodyBytes) {
+		// The stub returns BEFORE any markdown caching: the raw branch never
+		// cached anyway, and a stub (which is not the page content) must not
+		// enter the cache either.
+		if stub, isBinary := binaryContentStub(mediaType(contentType), len(bodyBytes)); isBinary {
+			return &FetchResult{
+				Markdown:     stub,
+				CacheStatus:  cacheStatus,
+				IsRawContent: true,
+				StartIndex:   startIndex,
+			}, nil
+		}
 		content := string(bodyBytes)
 		content, truncated := paginate(content, startIndex, maxLength)
 		return &FetchResult{
@@ -219,6 +230,52 @@ func isHTML(contentType string, body []byte) bool {
 	}
 	lower := strings.ToLower(string(trimmed))
 	return strings.Contains(lower, "<html")
+}
+
+// mediaType strips parameters: "text/html; charset=utf-8" -> "text/html".
+func mediaType(contentType string) string {
+	if i := strings.IndexByte(contentType, ';'); i != -1 {
+		contentType = contentType[:i]
+	}
+	return strings.ToLower(strings.TrimSpace(contentType))
+}
+
+// textualContentTypes are the non-HTML content types returned as-is.
+var textualContentTypes = map[string]bool{
+	"application/json": true, "application/xml": true,
+	"application/javascript": true, "application/ecmascript": true,
+	"application/yaml": true, "application/x-yaml": true,
+	"application/toml": true, "application/rss+xml": true,
+	"application/atom+xml": true, "application/x-www-form-urlencoded": true,
+}
+
+// binaryContentStub classifies a non-HTML response: images get a stub that
+// points the model at dave's view_image tool; other binaries get a generic
+// stub; textual types return ok=false (raw passthrough). Previously ALL
+// non-HTML bodies were passed through string(bodyBytes) — fetching an image
+// URL returned mangled binary into the model's context.
+func binaryContentStub(mt string, size int) (string, bool) {
+	if strings.HasPrefix(mt, "image/") {
+		return fmt.Sprintf("[binary image content (%s, %s) — use the view_image tool to view it]", mt, humanSize(size)), true
+	}
+	if strings.HasPrefix(mt, "text/") || textualContentTypes[mt] ||
+		strings.HasSuffix(mt, "+xml") || strings.HasSuffix(mt, "+json") {
+		return "", false
+	}
+	return fmt.Sprintf("[binary content (%s, %s) — not fetchable as text]", mt, humanSize(size)), true
+}
+
+func humanSize(b int) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
 func extractTitle(body []byte) string {

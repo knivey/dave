@@ -216,3 +216,71 @@ func TestFetcherIntegration(t *testing.T) {
 		assert.Contains(t, err.Error(), "unsupported URL scheme")
 	})
 }
+
+// newTestFetcher builds a Fetcher the way existing fetcher tests do (the
+// Config literal from TestFetcherIntegration). NewFetcher accepts a nil
+// markdown cache but Fetch panics on one (MarkdownCache.Get locks a nil
+// receiver), so a fresh empty cache is passed instead; the binary-stub and
+// raw-text paths return BEFORE any cache Set, so nothing they produce is
+// ever cached.
+func newTestFetcher(t *testing.T) *Fetcher {
+	t.Helper()
+	cfg := Config{
+		Fetch: FetchConfig{
+			Timeout:      10 * time.Second,
+			MaxRedirects: 10,
+			MaxBodySize:  20 * 1024 * 1024,
+			UserAgent:    "test-fetcher",
+		},
+		Cache:       CacheConfig{DSN: "memcache://"},
+		Readability: ReadabilityConfig{},
+	}
+	f, err := NewFetcher(cfg, NewMarkdownCache(5*time.Minute))
+	require.NoError(t, err)
+	return f
+}
+
+func TestFetchBinaryImageStub(t *testing.T) {
+	pngBytes := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 0}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Write(pngBytes)
+	}))
+	defer srv.Close()
+
+	f := newTestFetcher(t)
+	res, err := f.Fetch(context.Background(), srv.URL, 0, 20000)
+	require.NoError(t, err)
+	assert.Contains(t, res.Markdown, "[binary image content (image/png,")
+	assert.Contains(t, res.Markdown, "use the view_image tool")
+	assert.NotContains(t, res.Markdown, "\x89PNG", "no mangled binary in the model context")
+}
+
+func TestFetchBinaryAudioStub(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/mpeg")
+		w.Write([]byte("ID3 fakemp3 bytes"))
+	}))
+	defer srv.Close()
+
+	f := newTestFetcher(t)
+	res, err := f.Fetch(context.Background(), srv.URL, 0, 20000)
+	require.NoError(t, err)
+	assert.Contains(t, res.Markdown, "[binary content (audio/mpeg,")
+}
+
+func TestFetchTextPassthroughUnchanged(t *testing.T) {
+	for _, ct := range []string{"text/plain", "application/json", "application/xml; charset=utf-8", "application/geo+json"} {
+		t.Run(ct, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", ct)
+				w.Write([]byte(`{"a":1}`))
+			}))
+			defer srv.Close()
+			f := newTestFetcher(t)
+			res, err := f.Fetch(context.Background(), srv.URL, 0, 20000)
+			require.NoError(t, err)
+			assert.Equal(t, `{"a":1}`, res.Markdown)
+		})
+	}
+}

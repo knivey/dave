@@ -278,6 +278,50 @@ func historySessionCurrent(network Network, c *girc.Client, e girc.Event, ctx co
 		clonedFrom = formatClonedFrom(*session, resolveClonedFromNicks([]Session{*session}))
 	}
 
+	// The provider's own numbers for the last recorded turn — absent
+	// (nil) before the first reply completes.
+	lastUsage, err := getLastTurnUsageForSession(session.ID)
+	if err != nil {
+		lastUsage = nil
+	}
+
+	// Context-pressure fragments, computed before the usage emit so they
+	// can share its line. Only when a window resolves (command > service
+	// > [compaction] fallback — effectiveContextWindow). The percentage
+	// is provider prompt_tokens ÷ window: exactly the comparand
+	// ShouldAutoCompact uses, so the number predicts compaction.
+	window, _ := effectiveContextWindow(cfg)
+	var contextParts []string
+	if window > 0 {
+		var ccfg CompactionConfig
+		readConfig(func() { ccfg = config.Compaction })
+		autoOn := ccfg.Enabled && ccfg.AutoEnabled
+		threshold := normalizedAutoThreshold(ccfg)
+		windowStr := formatWindowTokens(window)
+		switch {
+		case lastUsage != nil && lastUsage.PromptTokens > 0:
+			part := fmt.Sprintf("%.0f%% of %s", float64(lastUsage.PromptTokens)/float64(window)*100, windowStr)
+			if autoOn {
+				part += fmt.Sprintf(" (auto-compacts at %.0f%%)", threshold*100)
+			}
+			contextParts = append(contextParts, part)
+		case autoOn:
+			contextParts = append(contextParts, fmt.Sprintf("window %s (auto-compacts at %.0f%%)", windowStr, threshold*100))
+		default:
+			contextParts = append(contextParts, fmt.Sprintf("window %s", windowStr))
+		}
+		if comps, cErr := getCompactionsForSession(session.ID); cErr == nil && len(comps) > 0 {
+			contextParts = append(contextParts, fmt.Sprintf("compacted %d×", len(comps)))
+		}
+		if session.ResponseID != nil {
+			contextParts = append(contextParts, "responses chain")
+		}
+	}
+	contextNote := ""
+	if len(contextParts) > 0 {
+		contextNote = " · " + strings.Join(contextParts, " · ")
+	}
+
 	// sendLine wraps every emitted line like the sibling display commands
 	// (-sessions, -history): an admin-customized template or long
 	// model/service names can exceed the IRC line budget, and unwrapped
@@ -291,17 +335,23 @@ func historySessionCurrent(network Network, c *girc.Client, e girc.Event, ctx co
 		return true
 	}
 
+	archivedSuffix := ""
+	if archivedMsgs > 0 {
+		archivedSuffix = fmt.Sprintf(" (%d archived)", archivedMsgs)
+	}
 	if !sendLine(n.Sessions.CurrentHeader, map[string]string{
-		"icon":        "\x0303●\x0F",
-		"id":          fmt.Sprintf("%d", session.ID),
-		"trigger":     network.Trigger,
-		"command":     session.ChatCommand,
-		"model":       cfg.Model,
-		"service":     cfg.Service,
-		"date":        session.CreatedAt.Format("Jan 02"),
-		"started_ago": formatTimeAgo(session.CreatedAt),
-		"active_ago":  formatTimeAgo(session.LastActive),
-		"cloned_from": clonedFrom,
+		"icon":            "\x0303●\x0F",
+		"id":              fmt.Sprintf("%d", session.ID),
+		"trigger":         network.Trigger,
+		"command":         session.ChatCommand,
+		"model":           cfg.Model,
+		"service":         cfg.Service,
+		"date":            session.CreatedAt.Format("Jan 02"),
+		"started_ago":     formatTimeAgo(session.CreatedAt),
+		"active_ago":      formatTimeAgo(session.LastActive),
+		"live":            fmt.Sprintf("%d", len(msgs)),
+		"archived_suffix": archivedSuffix,
+		"cloned_from":     clonedFrom,
 	}) {
 		return
 	}
@@ -309,24 +359,6 @@ func historySessionCurrent(network Network, c *girc.Client, e girc.Event, ctx co
 		if !sendLine(n.Sessions.CurrentStarter, map[string]string{"preview": preview}) {
 			return
 		}
-	}
-	archivedSuffix := ""
-	if archivedMsgs > 0 {
-		archivedSuffix = fmt.Sprintf(" (%d archived)", archivedMsgs)
-	}
-	if !sendLine(n.Sessions.CurrentMessages, map[string]string{
-		"live":            fmt.Sprintf("%d", len(msgs)),
-		"archived_suffix": archivedSuffix,
-	}) {
-		return
-	}
-
-	// The provider's own numbers for the last recorded turn. Omitted
-	// entirely when the session has no usage rows yet (before the first
-	// reply completes).
-	lastUsage, err := getLastTurnUsageForSession(session.ID)
-	if err != nil {
-		lastUsage = nil
 	}
 	if lastUsage != nil {
 		reasoningNote := ""
@@ -338,49 +370,23 @@ func historySessionCurrent(network Network, c *girc.Client, e girc.Event, ctx co
 			"cached":         fmt.Sprintf("%d", lastUsage.CachedTokens),
 			"completion":     fmt.Sprintf("%d", lastUsage.CompletionTokens),
 			"reasoning_note": reasoningNote,
+			"context_note":   contextNote,
 		}) {
 			return
 		}
-	}
-
-	// Context pressure, only when a window resolves (command > service >
-	// [compaction] fallback — effectiveContextWindow). The percentage is
-	// provider prompt_tokens ÷ window: exactly the comparand
-	// ShouldAutoCompact uses, so the number predicts compaction.
-	window, _ := effectiveContextWindow(cfg)
-	if window <= 0 {
+		// Usage and context fragments shared the line above.
 		return
 	}
-	var ccfg CompactionConfig
-	readConfig(func() { ccfg = config.Compaction })
-	autoOn := ccfg.Enabled && ccfg.AutoEnabled
-	threshold := normalizedAutoThreshold(ccfg)
-	windowStr := formatWindowTokens(window)
-	var parts []string
-	switch {
-	case lastUsage != nil && lastUsage.PromptTokens > 0:
-		part := fmt.Sprintf("%.0f%% of %s", float64(lastUsage.PromptTokens)/float64(window)*100, windowStr)
-		if autoOn {
-			part += fmt.Sprintf(" (auto-compacts at %.0f%%)", threshold*100)
-		}
-		parts = append(parts, part)
-	case autoOn:
-		parts = append(parts, fmt.Sprintf("window %s (auto-compacts at %.0f%%)", windowStr, threshold*100))
-	default:
-		parts = append(parts, fmt.Sprintf("window %s", windowStr))
+	// No usage rows yet — the context fragments (if any) stand alone.
+	if len(contextParts) > 0 {
+		// Last emit: the return is deliberately ignored — nothing
+		// follows this line, so early-exit is meaningless. A line
+		// appended after this must switch to the `if !sendLine(...) {
+		// return }` shape.
+		sendLine(n.Sessions.CurrentContext, map[string]string{
+			"note": strings.Join(contextParts, " · "),
+		})
 	}
-	if comps, cErr := getCompactionsForSession(session.ID); cErr == nil && len(comps) > 0 {
-		parts = append(parts, fmt.Sprintf("compacted %d×", len(comps)))
-	}
-	if session.ResponseID != nil {
-		parts = append(parts, "responses chain")
-	}
-	// Last emit: the return is deliberately ignored — nothing follows
-	// this line, so early-exit is meaningless. A line appended after
-	// this must switch to the `if !sendLine(...) { return }` shape.
-	sendLine(n.Sessions.CurrentContext, map[string]string{
-		"note": strings.Join(parts, " · "),
-	})
 }
 
 func sendSessionsLinesSelf(output chan<- string, ctx context.Context, sessions []Session, trigger string) {

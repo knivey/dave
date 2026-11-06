@@ -52,11 +52,10 @@
 #   other_none       (string)    No sessions for target user. Placeholders: {nick}
 #   all_header       (string)    All sessions header. Placeholders: {network}, {channel}
 #   current_none     (string)    -session: no active session for the caller
-#   current_header   (string)    -session: header line. Placeholders: {icon}, {id}, {trigger}, {command}, {model}, {service}, {date}, {started_ago}, {active_ago}, {cloned_from}
+#   current_header   (string)    -session: header line. Placeholders: {icon}, {id}, {trigger}, {command}, {model}, {service}, {date}, {started_ago}, {active_ago}, {live}, {archived_suffix}, {cloned_from}
 #   current_starter  (string)    -session: starter preview line. Placeholders: {preview} (omitted when the session has no first message)
-#   current_messages (string)    -session: message counts line. Placeholders: {live}, {archived_suffix}
-#   current_usage    (string)    -session: provider last-turn usage line (omitted before the first recorded turn). Placeholders: {prompt}, {cached}, {completion}, {reasoning_note}
-#   current_context  (string)    -session: context pressure line (omitted when no context window resolves). Placeholders: {note} — precomposed from % of window, auto-compact threshold, compaction count, responses-chain flag
+#   current_usage    (string)    -session: combined provider usage + context line (omitted before the first recorded turn). Placeholders: {prompt}, {cached}, {completion}, {reasoning_note}, {context_note} — context_note is precomposed from % of window, auto-compact threshold, compaction count, responses-chain flag (empty when no window resolves)
+#   current_context  (string)    -session: context-only fallback line when no usage rows exist yet but a window resolves. Placeholders: {note}
 #
 # [db] options:
 #   not_available    (string)    Database unavailable
@@ -193,10 +192,9 @@
 # other_none = "No sessions found for {nick}."
 # all_header = "\x02All sessions in {channel} on {network}:\x02"
 # current_none = "No active session — start a chat first."
-# current_header = "{icon} \x02#{id} ▸ {trigger}{command}\x0F ({model} @ {service}) — started {date} ({started_ago}), active {active_ago}{cloned_from}"
+# current_header = "{icon} \x02#{id} ▸ {trigger}{command}\x0F ({model} @ {service}) — started {date} ({started_ago}), active {active_ago} · {live} msgs live{archived_suffix}{cloned_from}"
 # current_starter = "  ▸ {preview}"
-# current_messages = "  {live} msgs live{archived_suffix}"
-# current_usage = "  Provider last turn: prompt {prompt} (cached {cached}) · completion {completion}{reasoning_note}"
+# current_usage = "  Provider last turn: prompt {prompt} (cached {cached}) · completion {completion}{reasoning_note}{context_note}"
 # current_context = "  Context: {note}"
 #
 # [db]

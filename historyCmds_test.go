@@ -587,20 +587,37 @@ func TestHistorySessionCurrent_Full(t *testing.T) {
 	var sess Session
 	require.NoError(t, theDB.Where("id = ?", sid).First(&sess).Error)
 
-	assert.Contains(t, joined, fmt.Sprintf("#%d", sid), "header names the session id")
-	assert.Contains(t, joined, "!testchat", "header shows trigger+command like the list view")
-	assert.Contains(t, joined, "gpt-4o", "header shows the live config's model")
-	assert.Contains(t, joined, "svc1", "header shows the service")
-	assert.Contains(t, joined, sess.CreatedAt.Format("Jan 02"), "header shows the start date")
 	assert.Contains(t, joined, starter, "starter preview line shows the first message")
-	assert.Contains(t, joined, "2 msgs live (1 archived)", "live count excludes the archived row; suffix mirrors the list view")
-	assert.Contains(t, joined, "prompt 6500 (cached 3000) · completion 800 · reasoning 400",
-		"provider last-turn line with the reasoning fragment when reasoning exists")
-	assert.Contains(t, joined, "41% of 16k", "context pressure from provider prompt tokens vs the resolved window")
-	assert.Contains(t, joined, "auto-compacts at 80%", "threshold fragment when auto-compaction is enabled")
-	assert.Contains(t, joined, fmt.Sprintf("cloned from #%d by dave", srcSID), "cloned-from tag renders like the list view")
-	assert.NotContains(t, joined, "compacted", "no compaction events yet — fragment omitted")
-	assert.NotContains(t, joined, "responses chain", "no ResponseID — chain fragment omitted")
+
+	// 3-line layout: header (with msg count) + starter + combined
+	// usage/context.
+	require.Len(t, lines, 3, "header + starter + combined usage/context = 3 lines")
+	findLine := func(fragment string) string {
+		for _, l := range lines {
+			if strings.Contains(l, fragment) {
+				return l
+			}
+		}
+		return ""
+	}
+	headerLine := findLine(fmt.Sprintf("#%d", sid))
+	require.NotEmpty(t, headerLine, "header line found")
+	assert.Contains(t, headerLine, "!testchat", "header shows trigger+command like the list view")
+	assert.Contains(t, headerLine, "gpt-4o", "header shows the live config's model")
+	assert.Contains(t, headerLine, "svc1", "header shows the service")
+	assert.Contains(t, headerLine, sess.CreatedAt.Format("Jan 02"), "header shows the start date")
+	assert.Contains(t, headerLine, "2 msgs live (1 archived)",
+		"live count lives on the header line; suffix mirrors the list view; excludes archived rows")
+	assert.Contains(t, headerLine, fmt.Sprintf("cloned from #%d by dave", srcSID), "cloned-from tag renders like the list view")
+
+	usageLine := findLine("prompt 6500")
+	require.NotEmpty(t, usageLine, "combined usage line found")
+	assert.Contains(t, usageLine, "prompt 6500 (cached 3000) · completion 800 · reasoning 400",
+		"provider last-turn numbers with the reasoning fragment when reasoning exists")
+	assert.Contains(t, usageLine, "41% of 16k (auto-compacts at 80%)",
+		"context pressure shares the usage line: provider prompt tokens vs the resolved window, threshold fragment when auto-compaction is enabled")
+	assert.NotContains(t, usageLine, "compacted", "no compaction events yet — fragment omitted")
+	assert.NotContains(t, usageLine, "responses chain", "no ResponseID — chain fragment omitted")
 }
 
 // TestHistorySessionCurrent_Omissions pins the conditional lines: with no
@@ -637,8 +654,9 @@ func TestHistorySessionCurrent_Omissions(t *testing.T) {
 	joined := strings.Join(lines, "\n")
 
 	assert.Contains(t, joined, fmt.Sprintf("#%d", sid), "header still shows")
-	assert.Contains(t, joined, "2 msgs live", "message count still shows")
+	assert.Contains(t, joined, "2 msgs live", "message count still shows (on the header)")
 	assert.Contains(t, joined, "hi", "starter preview still shows")
+	assert.Len(t, lines, 2, "no usage rows and no window — header + starter only")
 	assert.NotContains(t, joined, "prompt", "no usage rows — provider line omitted")
 	assert.NotContains(t, joined, "Context:", "no resolvable window — context line omitted")
 }
@@ -707,12 +725,19 @@ func TestHistorySessionCurrent_Fragments(t *testing.T) {
 	lines := runHistoryCommand(t, func(ctx context.Context, output chan<- string) {
 		historySessionCurrent(network, client, e, ctx, output)
 	}, 10)
-	joined := strings.Join(lines, "\n")
 
-	assert.Contains(t, joined, "50% of 8k", "context percentage present")
-	assert.Contains(t, joined, "auto-compacts at 70%", "unset threshold displays the ApplyDefaults 0.7 — the enforced value")
-	assert.Contains(t, joined, "compacted 2×", "compaction count fragment present")
-	assert.Contains(t, joined, "responses chain", "responses-chain fragment present")
+	var usageLine string
+	for _, l := range lines {
+		if strings.Contains(l, "prompt 4000") {
+			usageLine = l
+			break
+		}
+	}
+	require.NotEmpty(t, usageLine, "combined usage/context line found")
+	assert.Contains(t, usageLine, "50% of 8k", "context percentage present")
+	assert.Contains(t, usageLine, "auto-compacts at 70%", "unset threshold displays the ApplyDefaults 0.7 — the enforced value")
+	assert.Contains(t, usageLine, "compacted 2×", "compaction count fragment present")
+	assert.Contains(t, usageLine, "responses chain", "responses-chain fragment present")
 }
 
 // TestHistorySessionCurrent_WrapsLongLines pins sibling parity: every
@@ -780,6 +805,9 @@ func TestHistorySessionCurrent_NoticesDefaults(t *testing.T) {
 		"notices.toml": `
 [sessions]
 header = "custom header"
+# A file customized from the pre-3-line example block still carries the
+# removed key — the non-strict decode must ignore it, not error.
+current_messages = "custom"
 `,
 	})
 	defer os.RemoveAll(dir)
@@ -789,12 +817,11 @@ header = "custom header"
 
 	assert.Equal(t, "custom header", cfg.Notices.Sessions.Header, "keys present in the file win")
 	for name, key := range map[string]string{
-		"current_none":     cfg.Notices.Sessions.CurrentNone,
-		"current_header":   cfg.Notices.Sessions.CurrentHeader,
-		"current_starter":  cfg.Notices.Sessions.CurrentStarter,
-		"current_messages": cfg.Notices.Sessions.CurrentMessages,
-		"current_usage":    cfg.Notices.Sessions.CurrentUsage,
-		"current_context":  cfg.Notices.Sessions.CurrentContext,
+		"current_none":    cfg.Notices.Sessions.CurrentNone,
+		"current_header":  cfg.Notices.Sessions.CurrentHeader,
+		"current_starter": cfg.Notices.Sessions.CurrentStarter,
+		"current_usage":   cfg.Notices.Sessions.CurrentUsage,
+		"current_context": cfg.Notices.Sessions.CurrentContext,
 	} {
 		assert.NotEmpty(t, key, "stale notices.toml missing %s must fall back to the default", name)
 	}

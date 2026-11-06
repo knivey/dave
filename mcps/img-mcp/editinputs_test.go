@@ -111,9 +111,10 @@ func TestResolveEditInputsDispatch(t *testing.T) {
 	refs, err := resolveEditInputs(context.Background(), db, cfg, "jj1", []string{
 		"data:image/jpeg;base64," + base64.StdEncoding.EncodeToString([]byte("USERBYTES")),
 		"gen_g1",
+		"data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("PNGBYTES")),
 	})
 	require.NoError(t, err)
-	require.Len(t, refs, 2)
+	require.Len(t, refs, 3)
 	assert.Equal(t, "data:image/jpeg;base64,VVNFUkJZVEVT", refs[0].Ref, "data-URI entry keeps its full original string for provenance")
 	assert.Equal(t, "gen_g1", refs[1].Ref)
 
@@ -121,8 +122,10 @@ func TestResolveEditInputsDispatch(t *testing.T) {
 	defer mu.Unlock()
 	assert.Equal(t, "USERBYTES", uploads["edit_jj1_0.jpg"], "data-URI bytes uploaded with per-entry filename + mime-derived ext")
 	assert.Equal(t, "GENBYTES", uploads["edit_jj1_1.png"], "gen_ bytes fetched from /view then uploaded")
+	assert.Equal(t, "PNGBYTES", uploads["edit_jj1_2.png"], "png data-URI ext comes from the mime type, not the .jpg default")
 	assert.Equal(t, "edit_jj1_0.jpg", refs[0].Comfy.Filename, "echoed upload name becomes the Comfy coordinate")
 	assert.Equal(t, "edit_jj1_1.png", refs[1].Comfy.Filename)
+	assert.Equal(t, "edit_jj1_2.png", refs[2].Comfy.Filename, "png data-URI entry must not fall to the .jpg default")
 }
 
 func TestResolveEditInputsRejectsUnknownEntry(t *testing.T) {

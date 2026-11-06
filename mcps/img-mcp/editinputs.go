@@ -25,9 +25,16 @@ type InputImageRef struct {
 }
 
 // extForDataMIME maps a data-URI mime to a filename extension ComfyUI's
-// picker recognizes.
+// picker recognizes. The mime segment arrives with its parameters intact
+// ("data:image/png;base64"), so strip everything from the ';' before
+// matching or every real data URI (they all carry ;base64) would fall to
+// the .jpg default.
 func extForDataMIME(mime string) string {
-	switch strings.TrimPrefix(mime, "data:") {
+	mime = strings.TrimPrefix(mime, "data:")
+	if i := strings.Index(mime, ";"); i >= 0 {
+		mime = mime[:i]
+	}
+	switch mime {
 	case "image/png":
 		return ".png"
 	case "image/webp":

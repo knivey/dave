@@ -47,6 +47,11 @@ type UploadMeta struct {
 	// defaults to unknown and the site rejects any other value as a bad
 	// request, so an unfiltered pass-through would 400 the upload.
 	Safety string `json:"safety,omitempty"`
+	// EditedFrom/Strength are edit-job provenance mirroring the prompt
+	// note payload's fields (the ORIGINAL input ref strings + the denoise
+	// strength); omitted for generation jobs.
+	EditedFrom []string `json:"edited_from,omitempty"`
+	Strength   *float64 `json:"strength,omitempty"`
 }
 
 // uploadResponse is the JSON body of imgsite's 201 answer.

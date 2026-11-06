@@ -32,6 +32,8 @@ func TestInjectLLMGeneratedNotRequired(t *testing.T) {
 		"GenerateImageAsyncInput":      func() (*jsonschema.Schema, error) { return jsonschema.For[GenerateImageAsyncInput](nil) },
 		"EnhanceAndGenerateInput":      func() (*jsonschema.Schema, error) { return jsonschema.For[EnhanceAndGenerateInput](nil) },
 		"EnhanceAndGenerateAsyncInput": func() (*jsonschema.Schema, error) { return jsonschema.For[EnhanceAndGenerateAsyncInput](nil) },
+		"EditImageInput":               func() (*jsonschema.Schema, error) { return jsonschema.For[EditImageInput](nil) },
+		"EditImageAsyncInput":          func() (*jsonschema.Schema, error) { return jsonschema.For[EditImageAsyncInput](nil) },
 		"EnhancePromptInput":           func() (*jsonschema.Schema, error) { return jsonschema.For[EnhancePromptInput](nil) },
 	} {
 		s, err := infer()
@@ -44,6 +46,8 @@ func TestInjectLLMGeneratedNotRequired(t *testing.T) {
 		"GenerateImageAsyncInput":      true,
 		"EnhanceAndGenerateInput":      true,
 		"EnhanceAndGenerateAsyncInput": true,
+		"EditImageInput":               true,
+		"EditImageAsyncInput":          true,
 		"EnhancePromptInput":           false,
 	}
 	// channel/nick provenance rides the same 4 generation inputs as
@@ -53,6 +57,8 @@ func TestInjectLLMGeneratedNotRequired(t *testing.T) {
 		"GenerateImageAsyncInput":      true,
 		"EnhanceAndGenerateInput":      true,
 		"EnhanceAndGenerateAsyncInput": true,
+		"EditImageInput":               true,
+		"EditImageAsyncInput":          true,
 		"EnhancePromptInput":           false,
 	}
 	for name, s := range schemas {
@@ -416,7 +422,15 @@ func TestToolHandlersResolveWorkflow_AfterConfigSwap(t *testing.T) {
 // queued and inspectable.
 func queuedTestQueue(t *testing.T) *JobQueue {
 	t.Helper()
-	cfg := testConfig("http://127.0.0.1:0")
+	return queuedTestQueueWithConfig(t, testConfig("http://127.0.0.1:0"))
+}
+
+// queuedTestQueueWithConfig is queuedTestQueue for tests whose handlers
+// resolve workflows the default test config does not carry (e.g. the edit
+// workflow): Submit validates the workflow name against the QUEUE's config,
+// so handler and queue must agree.
+func queuedTestQueueWithConfig(t *testing.T, cfg Config) *JobQueue {
+	t.Helper()
 	cfg.Queue.MaxWorkers = 0
 	db := setupTestDB(t)
 	_, cancel := context.WithCancel(context.Background())
@@ -625,4 +639,72 @@ func TestApplyNetworkPolicy(t *testing.T) {
 			assert.Equal(t, tt.expectJobType, jobType, "jobType")
 		})
 	}
+}
+
+// floatPtr is the *float64 test helper for edit strength (nil pointer =
+// "workflow default" is part of the tool contract, so the field is a
+// pointer everywhere).
+func floatPtr(f float64) *float64 { return &f }
+
+// TestHandleEditImageValidates pins the edit tool's pre-Submit validation:
+// input_images is required and strength must sit in (0, 1] — errors surface
+// as tool errors BEFORE any job is queued, so the model can correct itself.
+func TestHandleEditImageValidates(t *testing.T) {
+	h := NewToolHandlers(testConfig("http://127.0.0.1:0"), queuedTestQueue(t))
+	cases := []struct {
+		name string
+		args EditImageInput
+		want string
+	}{
+		{"no inputs", EditImageInput{Prompt: "p"}, "input_images"},
+		{"bad strength low", EditImageInput{Prompt: "p", InputImages: []string{"gen_a"}, Strength: floatPtr(0)}, "strength"},
+		{"bad strength high", EditImageInput{Prompt: "p", InputImages: []string{"gen_a"}, Strength: floatPtr(1.5)}, "strength"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := h.handleEditImage(context.Background(), nil, tc.args)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
+// TestHandleEditImageRequiresImageNodes pins the workflow gate: an edit
+// must land on a workflow with image_nodes configured (a txt2img default
+// workflow can never accept input images). Presence-only by design —
+// over-supply is caught later by prepareComfyEditWorkflow's count guard,
+// which knows the workflow file's real node list.
+func TestHandleEditImageRequiresImageNodes(t *testing.T) {
+	// testConfig's only workflow ("test") has no image_nodes.
+	h := NewToolHandlers(testConfig("http://127.0.0.1:0"), queuedTestQueue(t))
+	_, _, err := h.handleEditImage(context.Background(), nil, EditImageInput{Prompt: "p", InputImages: []string{"gen_a"}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "image_nodes")
+}
+
+// TestEditToolsPassRawInputs pins the handler wiring the processJob tests
+// cannot see (they build JobInput directly): the model's input_images
+// entries ride JobInput.RawInputImages untouched for processJob-time
+// resolution, the strength pointer survives, and the job lands under
+// JobTypeEdit on the named workflow.
+func TestEditToolsPassRawInputs(t *testing.T) {
+	cfg := editTestConfig(t)
+	h := NewToolHandlers(cfg, queuedTestQueueWithConfig(t, cfg))
+	strength := 0.6
+	_, out, err := h.handleEditImageAsync(context.Background(), nil, EditImageAsyncInput{
+		Prompt:      "make it blue",
+		Workflow:    "edit",
+		InputImages: []string{"gen_a", "usr_1"},
+		Strength:    &strength,
+	})
+	require.NoError(t, err, "handler")
+
+	job, ok := h.queue.Get(out.JobID)
+	require.True(t, ok, "job should be findable in queue")
+	assert.Equal(t, JobTypeEdit, job.Type)
+	assert.Equal(t, "edit", job.Workflow)
+	assert.Equal(t, []string{"gen_a", "usr_1"}, job.Input.RawInputImages,
+		"the model's entries pass through verbatim — resolution is processJob's job")
+	assert.Equal(t, &strength, job.Input.Strength)
+	assert.Empty(t, job.Input.InputImages, "nothing is resolved at handler time")
 }

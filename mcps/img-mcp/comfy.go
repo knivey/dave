@@ -230,16 +230,36 @@ func truncateForPromptNote(reasoning string) string {
 //     neither field = never enhanced (direct tools). skip_networks jobs
 //     never carry the flag — the whole classification machinery, first pass
 //     included, is skipped there.
+//   - EditedFrom/Strength are edit-job provenance: the ORIGINAL ref strings
+//     the caller supplied (a data URI keeps its full string, a gen_ ref its
+//     compact id — never the uploaded ComfyUI filename) and the denoise
+//     strength actually used. Both rebuild identically at rewrite time
+//     because they derive from the job row (input_images/strength columns),
+//     so a crash-recovered edit keeps its provenance with no extra
+//     plumbing. Omitted for generation jobs via omitempty.
 type promptNotePayload struct {
-	Prompt               string `json:"prompt"`
-	LLMGenerated         bool   `json:"llm_generated"`
-	JobID                string `json:"job_id"`
-	EnhancementReasoning string `json:"enhancement_reasoning,omitempty"`
-	NSFW                 bool   `json:"nsfw,omitempty"`
-	Network              string `json:"network,omitempty"`
-	Channel              string `json:"channel,omitempty"`
-	Nick                 string `json:"nick,omitempty"`
-	Safety               string `json:"safety,omitempty"`
+	Prompt               string   `json:"prompt"`
+	LLMGenerated         bool     `json:"llm_generated"`
+	JobID                string   `json:"job_id"`
+	EnhancementReasoning string   `json:"enhancement_reasoning,omitempty"`
+	NSFW                 bool     `json:"nsfw,omitempty"`
+	Network              string   `json:"network,omitempty"`
+	Channel              string   `json:"channel,omitempty"`
+	Nick                 string   `json:"nick,omitempty"`
+	Safety               string   `json:"safety,omitempty"`
+	EditedFrom           []string `json:"edited_from,omitempty"`
+	Strength             *float64 `json:"strength,omitempty"`
+}
+
+// editedFromRefs extracts the original ref strings from resolved edit
+// inputs — the provenance shared by the prompt note and the upload meta.
+// Nil for generation jobs so omitempty drops the key.
+func editedFromRefs(input JobInput) []string {
+	var refs []string
+	for _, r := range input.InputImages {
+		refs = append(refs, r.Ref)
+	}
+	return refs
 }
 
 // buildPromptNote assembles the submit-time note: everything known when the
@@ -270,6 +290,8 @@ func buildPromptNoteWithSafety(job *Job, enhancementReasoning, safety string, ns
 		Channel:              job.Input.Channel,
 		Nick:                 job.Input.Nick,
 		Safety:               reportableSafety(safety),
+		EditedFrom:           editedFromRefs(job.Input),
+		Strength:             job.Input.Strength,
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshaling prompt note: %w", err)

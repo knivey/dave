@@ -36,6 +36,11 @@ func createSyncServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 	}, handlers.handleEnhanceAndGenerate)
 
 	mcp.AddTool(server, &mcp.Tool{
+		Name:        "edit_image",
+		Description: "Edit one or more images using an img2img workflow. Pass image references in input_images — the ref ids shown next to images in the conversation (usr_/web_) or gen_ refs from generation results. strength controls how much to change (0-1). Blocks until the edit completes and returns the image result directly. Uses the default workflow if workflow is empty or 'default'.",
+	}, handlers.handleEditImage)
+
+	mcp.AddTool(server, &mcp.Tool{
 		Name:        "upload_image",
 		Description: "Upload base64-encoded image data to the configured file host and return the URL.",
 	}, handlers.handleUploadImage)
@@ -81,6 +86,11 @@ func createAsyncServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 		Name:        "enhance_and_generate_async",
 		Description: "Enhance a prompt via LLM and queue a ComfyUI image generation job in one step. Returns a job_id immediately without waiting. Uses the 'default' enhancement profile unless a different one is specified. Uses the default workflow if workflow is empty or 'default'.",
 	}, handlers.handleEnhanceAndGenerateAsync)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "edit_image_async",
+		Description: "Edit one or more images using an img2img workflow. Pass image references in input_images — the ref ids shown next to images in the conversation (usr_/web_) or gen_ refs from generation results. strength controls how much to change (0-1). Queues the edit job and returns a job_id immediately without waiting. Uses the default workflow if workflow is empty or 'default'.",
+	}, handlers.handleEditImageAsync)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "wait_for_job",
@@ -153,6 +163,16 @@ func createFullServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 		Name:        "enhance_and_generate_async",
 		Description: "Enhance a prompt via LLM and queue a ComfyUI image generation job in one step. Returns a job_id immediately without waiting. Uses the 'default' enhancement profile unless a different one is specified. Uses the default workflow if workflow is empty or 'default'.",
 	}, handlers.handleEnhanceAndGenerateAsync)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "edit_image",
+		Description: "Edit one or more images using an img2img workflow. Pass image references in input_images — the ref ids shown next to images in the conversation (usr_/web_) or gen_ refs from generation results. strength controls how much to change (0-1). Blocks until the edit completes and returns the image result directly. Uses the default workflow if workflow is empty or 'default'.",
+	}, handlers.handleEditImage)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "edit_image_async",
+		Description: "Edit one or more images using an img2img workflow. Pass image references in input_images — the ref ids shown next to images in the conversation (usr_/web_) or gen_ refs from generation results. strength controls how much to change (0-1). Queues the edit job and returns a job_id immediately without waiting. Uses the default workflow if workflow is empty or 'default'.",
+	}, handlers.handleEditImageAsync)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "wait_for_job",

@@ -125,6 +125,11 @@ type JobInput struct {
 	// same uploaded names without re-uploading.
 	InputImages []InputImageRef
 	Strength    *float64
+	// RawInputImages carries the model's input_images entries (data URIs,
+	// gen_ refs) exactly as the edit tool received them. NOT persisted:
+	// processJob resolves them into uploaded ComfyUI coordinates and
+	// persists THOSE (InputImages above) — the recovery re-submit seam.
+	RawInputImages []string
 }
 
 type JobResult struct {
@@ -151,6 +156,10 @@ type ImageData struct {
 // affirmative values leave the process (reportableSafety) — "" and "unknown"
 // are omitted so imgsite's unknown-defaulted column stays unknown instead of
 // the upload being rejected for a value the site refuses.
+//
+// EditedFrom/Strength are edit-job provenance, populated from the resolved
+// InputImages (the ORIGINAL ref strings, not the uploaded names) and the
+// recorded strength; both drop out via omitempty for generation jobs.
 func buildUploadMeta(job *Job, finalPrompt, finalNegative, reasoning, safety string) UploadMeta {
 	return UploadMeta{
 		JobID:          job.ID,
@@ -164,6 +173,8 @@ func buildUploadMeta(job *Job, finalPrompt, finalNegative, reasoning, safety str
 		Channel:        job.Input.Channel,
 		Nick:           job.Input.Nick,
 		Safety:         reportableSafety(safety),
+		EditedFrom:     editedFromRefs(job.Input),
+		Strength:       job.Input.Strength,
 	}
 }
 
@@ -798,9 +809,42 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 		return
 	}
 
-	workflow, err := prepareComfyWorkflow(cfg, job.Workflow, prompt, negativePrompt, job.Input.Seed, promptNote)
-	if err != nil {
-		q.failJob(job, fmt.Sprintf("workflow preparation failed: %v", err))
+	// Edit jobs resolve their input references into uploaded ComfyUI
+	// coordinates here — INSIDE processJob, not the tool handler — so a
+	// restart-recovered job finds its coordinates already persisted
+	// (InputImages, stamped by dbUpdateJobInputImages below) and skips the
+	// resolution/upload entirely. If ComfyUI's input dir was cleaned since,
+	// the submit/monitor fails with a readable error (accepted).
+	var editImages []ComfyImage
+	if job.Type == JobTypeEdit {
+		if len(job.Input.InputImages) == 0 {
+			refs, err := resolveEditInputs(jobCtx, q.db, cfg, job.ID, job.Input.RawInputImages)
+			if err != nil {
+				q.failJob(job, fmt.Sprintf("edit inputs failed: %v", err))
+				return
+			}
+			job.Input.InputImages = refs
+			if q.db != nil {
+				if uerr := dbUpdateJobInputImages(q.db, job.ID, refs); uerr != nil {
+					loggerQueue.Warn("persisting edit input coords failed (recovery will re-resolve)",
+						"job_id", job.ID, "error", uerr.Error())
+				}
+			}
+		}
+		for _, r := range job.Input.InputImages {
+			editImages = append(editImages, r.Comfy)
+		}
+	}
+
+	var workflow ComfyWorkflow
+	var werr error
+	if job.Type == JobTypeEdit {
+		workflow, werr = prepareComfyEditWorkflow(cfg, job.Workflow, prompt, negativePrompt, job.Input.Seed, promptNote, editImages, job.Input.Strength)
+	} else {
+		workflow, werr = prepareComfyWorkflow(cfg, job.Workflow, prompt, negativePrompt, job.Input.Seed, promptNote)
+	}
+	if werr != nil {
+		q.failJob(job, fmt.Sprintf("workflow preparation failed: %v", werr))
 		return
 	}
 

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -532,6 +534,30 @@ func TestBuildUploadMeta(t *testing.T) {
 				WorkflowName:   "zimage",
 			},
 			expectJSONEq: `{"job_id":"barejob","original_prompt":"a cat","enhanced_prompt":"a cat","workflow_name":"zimage"}`,
+		},
+		{
+			name: "edit job: original input refs + strength ride the meta",
+			job: &Job{ID: "editjob", Type: JobTypeEdit, Workflow: "edit", Input: JobInput{
+				Prompt:   "make it blue",
+				Strength: floatPtr(0.5),
+				InputImages: []InputImageRef{
+					{Ref: "usr_1", Comfy: ComfyImage{Filename: "edit_editjob_0.jpg"}},
+					{Ref: "gen_abc", Comfy: ComfyImage{Filename: "edit_editjob_1.png"}},
+				},
+				Network: "libera",
+			}},
+			finalPrompt: "make it blue",
+			expect: UploadMeta{
+				JobID:          "editjob",
+				OriginalPrompt: "make it blue",
+				EnhancedPrompt: "make it blue",
+				WorkflowName:   "edit",
+				Network:        "libera",
+				EditedFrom:     []string{"usr_1", "gen_abc"},
+				Strength:       floatPtr(0.5),
+			},
+			expectJSONEq: `{"job_id":"editjob","original_prompt":"make it blue","enhanced_prompt":"make it blue",
+				"workflow_name":"edit","network":"libera","edited_from":["usr_1","gen_abc"],"strength":0.5}`,
 		},
 	}
 	for _, tt := range tests {
@@ -1783,4 +1809,109 @@ func TestRecoverRunningJobRewritesNoteWithPersistedSafety(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(up.gotMetaRaw), &meta))
 	assert.Equal(t, safetyVerdictUnsafe, meta.Safety,
 		"the recovery path's buildUploadMeta must consume the jobSafety verdict too")
+}
+
+// editQueueConfig wraps testConfig with the shared edit fixture (prompt
+// node "6", image node "40", denoise node "3") plus an imgsite upload mock
+// — processJob uploads every completed image, so without the mock the job
+// would fail at the upload step before any assertion could run.
+func editQueueConfig(t *testing.T, comfyURL string) Config {
+	t.Helper()
+	cfg := testConfig(comfyURL)
+	cfg.Workflows["edit"] = WorkflowConfig{
+		WorkflowPath: mustWriteWorkflowString(t, editTestWorkflowJSON(t)),
+		ClientID:     "test-client", OutputNode: "output-node", PromptNode: "6",
+		ImageNodes:  []string{"40"},
+		DenoiseNode: "3",
+		Timeout:     60,
+	}
+	cfg.Upload.URL = newFakeUploadServer(t).server.URL
+	return cfg
+}
+
+// TestProcessJobEditSubmitsUploadedInputs runs an edit job whose inputs are
+// already resolved (the recovery shape) end to end and pins the workflow
+// wiring: uploaded coordinates land in the image node, strength in the
+// denoise node, the prompt in the text node.
+func TestProcessJobEditSubmitsUploadedInputs(t *testing.T) {
+	mockComfy := newMockComfyFlowServer(t)
+	cfg := editQueueConfig(t, mockComfy.URL())
+	q, stop := setupTestQueue(t, cfg)
+	defer stop()
+	strength := 0.65
+	inputs := []InputImageRef{{Ref: "web_aa", Comfy: ComfyImage{Filename: "in0.jpg"}}}
+	job, err := q.Submit(JobTypeEdit, "edit", JobInput{Prompt: "edit it", InputImages: inputs, Strength: &strength})
+	require.NoError(t, err)
+	result := q.WaitForJob(job.ID, 30*time.Second)
+	require.NotNil(t, result)
+	require.Empty(t, result.Error, "job must succeed: %s", result.Error)
+
+	prompts := mockComfy.submittedPrompts()
+	require.Len(t, prompts, 1)
+	wf := prompts[0].Prompt
+	assert.Equal(t, "in0.jpg", wf["40"].Inputs["image"], "uploaded name wired into image node")
+	assert.Equal(t, 0.65, wf["3"].Inputs["denoise"], "strength wired into denoise node")
+	assert.Equal(t, "edit it", wf["6"].Inputs["text"])
+}
+
+// TestEditJobRecoveryReusesPersistedUploadNames proves the recovery seam:
+// a fresh edit job (RawInputImages, no resolved coords) resolves+uploads
+// exactly once, and a job whose InputImages were already persisted (the
+// jobFromDBJob reconstruction a restart produces) re-submits the SAME
+// uploaded name with zero further /upload/image hits.
+func TestEditJobRecoveryReusesPersistedUploadNames(t *testing.T) {
+	// A counting front-proxy over the flow mock: recovery must re-submit
+	// the SAME uploaded name without a second /upload/image hit.
+	var uploads int32
+	mockComfy := newMockComfyFlowServer(t)
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/upload/image" {
+			atomic.AddInt32(&uploads, 1)
+		}
+		mockComfy.ServeHTTP(w, r)
+	}))
+	defer proxy.Close()
+	cfg := editQueueConfig(t, proxy.URL)
+	q, stop := setupTestQueue(t, cfg)
+	defer stop()
+
+	// Fresh edit job (RawInputImages set, no resolved coords): resolution
+	// uploads once (via a data-URI entry pointing at the proxy's /upload).
+	strength := 0.5
+	dataURI := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("PNG"))
+	job, err := q.Submit(JobTypeEdit, "edit", JobInput{Prompt: "p", RawInputImages: []string{dataURI}, Strength: &strength})
+	require.NoError(t, err)
+	res := q.WaitForJob(job.ID, 30*time.Second)
+	require.NotNil(t, res)
+	require.Empty(t, res.Error)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&uploads), "fresh run uploads exactly once")
+	firstAny := mockComfy.submittedPrompts()[0].Prompt["40"].Inputs["image"]
+	first, ok := firstAny.(string)
+	require.True(t, ok, "the image node input must decode back as a string, got %T", firstAny)
+
+	// Recovery shape: a NEW queue (simulated restart) processing a job
+	// whose InputImages were already persisted (jobFromDBJob
+	// reconstruction). Re-submit the completed job's resolved coords
+	// through a queued Job:
+	recJob, err := q.Submit(JobTypeEdit, "edit", JobInput{
+		Prompt: "p", Strength: &strength,
+		InputImages: []InputImageRef{{Ref: dataURI, Comfy: ComfyImage{Filename: filepathFromInputName(t, first)}}},
+	})
+	require.NoError(t, err)
+	res2 := q.WaitForJob(recJob.ID, 30*time.Second)
+	require.NotNil(t, res2)
+	require.Empty(t, res2.Error)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&uploads), "recovered job re-submits WITHOUT re-uploading")
+	submitted := mockComfy.submittedPrompts()
+	assert.Equal(t, first, submitted[len(submitted)-1].Prompt["40"].Inputs["image"], "same uploaded name re-used")
+}
+
+// filepathFromInputName strips a possible subfolder prefix for the Comfy
+// coordinate used in the recovery assertion.
+func filepathFromInputName(t *testing.T, in string) string {
+	t.Helper()
+	if i := strings.LastIndex(in, "/"); i >= 0 {
+		return in[i+1:]
+	}
+	return in
 }

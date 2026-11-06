@@ -740,6 +740,19 @@ func TestBuildPromptNote(t *testing.T) {
 			nsfw:      true,
 			want:      `{"prompt":"a cat","llm_generated":false,"job_id":"j_6","enhancement_reasoning":"the user wants a cat","nsfw":true}`,
 		},
+		{
+			name: "edit job carries edited_from refs + strength",
+			job: &Job{ID: "j_7", Input: JobInput{
+				Prompt:   "make it blue",
+				Strength: floatPtr(0.65),
+				InputImages: []InputImageRef{
+					{Ref: "data:image/png;base64,AAA", Comfy: ComfyImage{Filename: "edit_j7_0.png"}},
+					{Ref: "gen_abc", Comfy: ComfyImage{Filename: "edit_j7_1.png"}},
+				},
+			}},
+			want: `{"prompt":"make it blue","llm_generated":false,"job_id":"j_7",` +
+				`"edited_from":["data:image/png;base64,AAA","gen_abc"],"strength":0.65}`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -798,8 +811,10 @@ func TestBuildPromptNoteTruncatesReasoning(t *testing.T) {
 
 // mockComfyFlowServer stands in for ComfyUI's HTTP+WS API: it records every
 // workflow submitted to /prompt, reports a completed history entry for the
-// prompt it handed out, serves /view bytes, and accepts+immediately closes
-// the /ws monitor socket so monitorComfyGeneration falls back to history.
+// prompt it handed out, serves /view bytes, accepts /upload/image by echoing
+// the uploaded filename back as the stored name (the edit path's input
+// coordinates), and accepts+immediately closes the /ws monitor socket so
+// monitorComfyGeneration falls back to history.
 type mockComfyFlowServer struct {
 	server      *httptest.Server
 	mu          sync.Mutex
@@ -858,6 +873,24 @@ func newMockComfyFlowServer(t *testing.T) *mockComfyFlowServer {
 		}
 		w.Write(data)
 	})
+	mux.HandleFunc("/upload/image", func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(8 << 20); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		f, hdr, err := r.FormFile("image")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		f.Close()
+		// Echo the uploaded filename back as the stored name (no
+		// subfolder): the edit path's coordinates round-trip as
+		// "edit_<job>_<i>.<ext>", which is what the workflow's image
+		// nodes receive.
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"name":%q,"subfolder":"","type":"input"}`, hdr.Filename)
+	})
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		m.mu.Lock()
 		m.wsClientIDs = append(m.wsClientIDs, r.URL.Query().Get("clientId"))
@@ -899,6 +932,13 @@ func (m *mockComfyFlowServer) wsClientIDList() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return append([]string{}, m.wsClientIDs...)
+}
+
+// ServeHTTP delegates to the mock's mux so tests can front it with a
+// wrapping proxy — e.g. the edit-recovery test counts /upload/image hits
+// through one before delegating here.
+func (m *mockComfyFlowServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	m.server.Config.Handler.ServeHTTP(w, r)
 }
 
 func (m *mockComfyFlowServer) URL() string {

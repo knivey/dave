@@ -388,8 +388,11 @@ func prepareComfyEditWorkflow(cfg Config, workflowName, prompt, negativePrompt s
 	}
 	for i, nodeID := range wc.ImageNodes {
 		node, ok := workflow[nodeID]
-		if !ok || node.Inputs == nil {
+		if !ok {
 			return nil, fmt.Errorf("image node %q not found in workflow %q", nodeID, wc.WorkflowPath)
+		}
+		if node.Inputs == nil {
+			return nil, fmt.Errorf("image node %q in workflow %q has no inputs map", nodeID, wc.WorkflowPath)
 		}
 		if i < len(images) {
 			node.Inputs["image"] = comfyImageInputName(images[i].Filename, images[i].Subfolder)
@@ -397,8 +400,11 @@ func prepareComfyEditWorkflow(cfg Config, workflowName, prompt, negativePrompt s
 	}
 	if strength != nil && wc.DenoiseNode != "" {
 		node, ok := workflow[wc.DenoiseNode]
-		if !ok || node.Inputs == nil {
+		if !ok {
 			return nil, fmt.Errorf("denoise node %q not found in workflow %q", wc.DenoiseNode, wc.WorkflowPath)
+		}
+		if node.Inputs == nil {
+			return nil, fmt.Errorf("denoise node %q in workflow %q has no inputs map", wc.DenoiseNode, wc.WorkflowPath)
 		}
 		node.Inputs["denoise"] = *strength
 	}

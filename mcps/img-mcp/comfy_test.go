@@ -565,12 +565,20 @@ func mustWriteWorkflowString(t *testing.T, jsonStr string) string {
 	return path
 }
 
-func editTestWorkflowJSON(t *testing.T) string {
+func editTestWorkflowJSON(t *testing.T, nilInputs ...string) string {
 	t.Helper()
 	wf := ComfyWorkflow{
 		"6":  {Inputs: map[string]interface{}{"text": "orig"}, Class: "CLIPTextEncode"},
 		"40": {Inputs: map[string]interface{}{"image": "placeholder.png"}, Class: "LoadImage"},
 		"3":  {Inputs: map[string]interface{}{"denoise": 1.0, "seed": 1}, Class: "KSampler"},
+	}
+	// Guard-fixture support: strip the named nodes' inputs maps so they
+	// marshal as "inputs": null, which unmarshals back to a nil Inputs map
+	// — the exact shape the nil-map guards must reject.
+	for _, id := range nilInputs {
+		node := wf[id]
+		node.Inputs = nil
+		wf[id] = node
 	}
 	b, err := json.Marshal(wf)
 	require.NoError(t, err)
@@ -610,17 +618,83 @@ func TestPrepareComfyEditWorkflowWiresImagesAndDenoise(t *testing.T) {
 	assert.Equal(t, "make it blue", wf["6"].Inputs["text"], "prompt wiring inherited from prepareComfyWorkflow")
 }
 
+// TestPrepareComfyEditWorkflowMissingNodeErrors pins every guard error
+// prepareComfyEditWorkflow can return: later tasks surface these exact
+// strings as user-facing tool results, so deleting a guard must break a
+// test here.
 func TestPrepareComfyEditWorkflowMissingNodeErrors(t *testing.T) {
-	cfg := editTestConfig(t)
-	// Map values are not addressable: copy, mutate, store back (the same
-	// pattern the prepareComfyWorkflow tests use).
-	wc := cfg.Workflows["edit"]
-	wc.ImageNodes = []string{"999"}
-	cfg.Workflows["edit"] = wc
-	_, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.jpg"}}, nil)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "999")
-	assert.Contains(t, err.Error(), "edit", "error names the node and workflow")
+	// editConfig writes wfJSON to a temp file and wraps it in the shared
+	// edit fixture (prompt node "6", image node "40", given denoise node).
+	editConfig := func(wfJSON, denoiseNode string) Config {
+		cfg := testConfig("")
+		cfg.Workflows["edit"] = WorkflowConfig{
+			WorkflowPath: mustWriteWorkflowString(t, wfJSON),
+			ClientID:     "test-client", OutputNode: "output-node", PromptNode: "6",
+			ImageNodes:  []string{"40"},
+			DenoiseNode: denoiseNode,
+			Timeout:     60,
+		}
+		return cfg
+	}
+
+	t.Run("missing image node", func(t *testing.T) {
+		cfg := editConfig(editTestWorkflowJSON(t), "3")
+		// Map values are not addressable: copy, mutate, store back (the
+		// same pattern the prepareComfyWorkflow tests use).
+		wc := cfg.Workflows["edit"]
+		wc.ImageNodes = []string{"999"}
+		cfg.Workflows["edit"] = wc
+		_, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.jpg"}}, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "999")
+		assert.Contains(t, err.Error(), "not found in workflow")
+		assert.Contains(t, err.Error(), "edit", "error names the node and workflow")
+	})
+
+	t.Run("image node without inputs map", func(t *testing.T) {
+		cfg := editConfig(editTestWorkflowJSON(t, "40"), "3")
+		_, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.jpg"}}, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "40")
+		assert.Contains(t, err.Error(), "has no inputs map")
+	})
+
+	t.Run("no image_nodes configured", func(t *testing.T) {
+		cfg := editConfig(editTestWorkflowJSON(t), "3")
+		wc := cfg.Workflows["edit"]
+		wc.ImageNodes = nil
+		cfg.Workflows["edit"] = wc
+		_, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.jpg"}}, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no image_nodes")
+		assert.Contains(t, err.Error(), "edit", "error names the workflow")
+	})
+
+	t.Run("too many images", func(t *testing.T) {
+		cfg := editConfig(editTestWorkflowJSON(t), "3")
+		_, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n",
+			[]ComfyImage{{Filename: "a.jpg"}, {Filename: "b.jpg"}}, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "accepts 1 input image(s), got 2")
+	})
+
+	t.Run("missing denoise node", func(t *testing.T) {
+		cfg := editConfig(editTestWorkflowJSON(t), "777")
+		strength := 0.5
+		_, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.jpg"}}, &strength)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "777")
+		assert.Contains(t, err.Error(), "not found in workflow")
+	})
+
+	t.Run("denoise node without inputs map", func(t *testing.T) {
+		cfg := editConfig(editTestWorkflowJSON(t, "3"), "3")
+		strength := 0.5
+		_, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.jpg"}}, &strength)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "denoise node")
+		assert.Contains(t, err.Error(), "has no inputs map")
+	})
 }
 
 func TestBuildPromptNote(t *testing.T) {

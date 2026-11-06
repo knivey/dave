@@ -289,6 +289,25 @@ func dbLoadJobImages(db *sqlx.DB, jobID string) ([]dbJobImage, error) {
 	return images, err
 }
 
+// dbGetJobImage returns the nth (0-based) job_images row for a job — the
+// ComfyUI /view coordinates plus the imgsite fallback URL.
+func dbGetJobImage(db *sqlx.DB, jobID string, ordinal int) (ComfyImage, string, error) {
+	var row struct {
+		Filename  string `db:"filename"`
+		Subfolder string `db:"subfolder"`
+		ImgType   string `db:"img_type"`
+		URL       string `db:"url"`
+	}
+	err := db.Get(&row, `SELECT filename, subfolder, img_type, url FROM job_images WHERE job_id = ? AND ordinal = ?`, jobID, ordinal)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ComfyImage{}, "", fmt.Errorf("no image %d for job %q", ordinal, jobID)
+		}
+		return ComfyImage{}, "", err
+	}
+	return ComfyImage{Filename: row.Filename, Subfolder: row.Subfolder, Type: row.ImgType}, row.URL, nil
+}
+
 func dbGetJob(db *sqlx.DB, jobID string) (*dbJob, error) {
 	var job dbJob
 	err := db.Get(&job, `SELECT * FROM jobs WHERE job_id = ?`, jobID)

@@ -8,10 +8,14 @@ import (
 	"io"
 	"math"
 	"math/rand"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptrace"
+	"net/textproto"
 	"os"
 	"regexp"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -953,4 +957,77 @@ func mbPerSecond(bytes, ms int64) float64 {
 		ms = 1
 	}
 	return float64(bytes) / (1 << 20) / (float64(ms) / 1000)
+}
+
+// uploadComfyImage POSTs input bytes to ComfyUI's /upload/image (multipart
+// "image" file part + overwrite=true so repeated edits of the same ref
+// replace cleanly) and returns the stored coordinates for a LoadImage node.
+func uploadComfyImage(ctx context.Context, baseURL string, data []byte, filename string) (ComfyImage, error) {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	h := textproto.MIMEHeader{}
+	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="image"; filename="%s"`, filename))
+	h.Set("Content-Type", "application/octet-stream")
+	fw, err := mw.CreatePart(h)
+	if err != nil {
+		return ComfyImage{}, fmt.Errorf("building multipart: %w", err)
+	}
+	if _, err := fw.Write(data); err != nil {
+		return ComfyImage{}, fmt.Errorf("writing multipart: %w", err)
+	}
+	if err := mw.WriteField("overwrite", "true"); err != nil {
+		return ComfyImage{}, fmt.Errorf("building multipart: %w", err)
+	}
+	if err := mw.Close(); err != nil {
+		return ComfyImage{}, fmt.Errorf("closing multipart: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/upload/image", &buf)
+	if err != nil {
+		return ComfyImage{}, err
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return ComfyImage{}, fmt.Errorf("uploading image to comfy: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return ComfyImage{}, fmt.Errorf("comfy /upload/image returned %d: %s", resp.StatusCode, string(body))
+	}
+	var out struct {
+		Name      string `json:"name"`
+		Subfolder string `json:"subfolder"`
+		Type      string `json:"type"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return ComfyImage{}, fmt.Errorf("parsing /upload/image response: %w", err)
+	}
+	if out.Name == "" {
+		return ComfyImage{}, fmt.Errorf("comfy /upload/image returned empty name")
+	}
+	if out.Type == "" {
+		out.Type = "input"
+	}
+	return ComfyImage{Filename: out.Name, Subfolder: out.Subfolder, Type: out.Type}, nil
+}
+
+// parseGenRef parses gen_<jobid> (ordinal 0) and gen_<jobid>_<n>.
+func parseGenRef(s string) (string, int, bool) {
+	rest, ok := strings.CutPrefix(s, "gen_")
+	if !ok || rest == "" {
+		return "", 0, false
+	}
+	job, n, hasN := strings.Cut(rest, "_")
+	if job == "" {
+		return "", 0, false
+	}
+	if !hasN {
+		return job, 0, true
+	}
+	ord, err := strconv.Atoi(n)
+	if err != nil || ord < 0 {
+		return "", 0, false
+	}
+	return job, ord, true
 }

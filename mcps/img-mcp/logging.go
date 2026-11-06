@@ -55,6 +55,9 @@ func initLogger(exeDir string) {
 
 	loggerComfy = logxi.NewLogger(writer, "comfy")
 	loggerComfy.SetLevel(logxi.LevelAll)
+
+	loggerEditInputs = logxi.NewLogger(writer, "editinputs")
+	loggerEditInputs.SetLevel(logxi.LevelAll)
 }
 
 func closeLogger() {

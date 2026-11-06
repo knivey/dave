@@ -1262,3 +1262,44 @@ func TestProcessJobEnhanceUsesWorkflowInstructions(t *testing.T) {
 	assert.NotContains(t, submitted[0].Prompt, daveEnhancementInstructionsNodeID,
 		"instructions node must be stripped from the submitted workflow")
 }
+
+func TestUploadComfyImage(t *testing.T) {
+	var gotName, gotOverwrite string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/upload/image", func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseMultipartForm(8<<20))
+		f, hdr, err := r.FormFile("image")
+		require.NoError(t, err)
+		defer f.Close()
+		gotName = hdr.Filename
+		gotOverwrite = r.FormValue("overwrite")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"name":"stored.png","subfolder":"dave","type":"input"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	img, err := uploadComfyImage(context.Background(), srv.URL, []byte("pngbytes"), "edit_1_0.jpg")
+	require.NoError(t, err)
+	assert.Equal(t, "stored.png", img.Filename)
+	assert.Equal(t, "dave", img.Subfolder)
+	assert.Equal(t, "input", img.Type)
+	assert.Equal(t, "edit_1_0.jpg", gotName, "multipart file part carries the filename")
+	assert.Equal(t, "true", gotOverwrite, "overwrite=true so re-edits replace cleanly")
+}
+
+func TestParseGenRef(t *testing.T) {
+	job, ord, ok := parseGenRef("gen_abc12345")
+	require.True(t, ok)
+	assert.Equal(t, "abc12345", job)
+	assert.Equal(t, 0, ord)
+	job, ord, ok = parseGenRef("gen_abc12345_2")
+	require.True(t, ok)
+	assert.Equal(t, 2, ord)
+	_, _, ok = parseGenRef("usr_abc")
+	assert.False(t, ok)
+	_, _, ok = parseGenRef("gen_")
+	assert.False(t, ok)
+	_, _, ok = parseGenRef("https://img.example.com/x")
+	assert.False(t, ok)
+}

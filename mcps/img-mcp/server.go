@@ -84,7 +84,7 @@ func createAsyncServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "wait_for_job",
-		Description: "Block until an image generation job completes, fails, or times out. Returns the full result including image URLs or base64 data.",
+		Description: "Block until an image generation job completes, fails, or times out. Returns the full result including image URLs.",
 	}, handlers.handleWaitForJob)
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -156,7 +156,7 @@ func createFullServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "wait_for_job",
-		Description: "Block until an image generation job completes, fails, or times out. Returns the full result including image URLs or base64 data.",
+		Description: "Block until an image generation job completes, fails, or times out. Returns the full result including image URLs.",
 	}, handlers.handleWaitForJob)
 
 	mcp.AddTool(server, &mcp.Tool{

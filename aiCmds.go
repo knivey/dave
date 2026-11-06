@@ -273,6 +273,10 @@ type chatRunner struct {
 	// 0 (a no-op in the apiLogger, and load-bearing for usage
 	// attribution), so each run gets its own api-log session instead.
 	apiLogSessionID int64
+	// llamaService marks a type = "llama" service (llama.cpp / router):
+	// streaming turns attach the X-Conversation-Id session and release it
+	// on exit — see llamastream.go for the whole story.
+	llamaService bool
 }
 
 func newChatRunner(network Network, client *girc.Client, cfg AIConfig) *chatRunner {
@@ -314,6 +318,7 @@ func newChatRunner(network Network, client *girc.Client, cfg AIConfig) *chatRunn
 		network:      network,
 		client:       client,
 		logger:       logger,
+		llamaService: svc.Type == "llama",
 	}
 }
 
@@ -975,7 +980,18 @@ func (cr *chatRunner) runTurnResponsesStream(
 }
 
 func (cr *chatRunner) runTurnStream(ctx context.Context, params openai.ChatCompletionNewParams, turn *turnContext, iterations, emptyRetries, maxEmptyRetries int) (bool, int) {
-	stream := cr.openaiClient.Chat.Completions.NewStreaming(ctx, params)
+	// llama.cpp stream sessions (llamastream.go): attach the conversation
+	// header to THIS request only (non-streaming turns must stay
+	// socket-bound — see the scope note there), and release the server-side
+	// session on every exit path of this call — cancel, error, timeout,
+	// and completion alike. Tool-loop iterations re-register on each POST,
+	// so a per-iteration release is safe.
+	var streamOpts []option.RequestOption
+	if cr.llamaStreamSession() {
+		streamOpts = append(streamOpts, option.WithHeader(llamaConversationIDHeader, cr.convID))
+		defer cr.releaseLlamaStream()
+	}
+	stream := cr.openaiClient.Chat.Completions.NewStreaming(ctx, params, streamOpts...)
 	apiStart := time.Now()
 
 	fullContent := ""

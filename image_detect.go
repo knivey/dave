@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"image"
@@ -640,4 +641,81 @@ func buildImageMessage(text string, imageUrls []string, maxImages int, format st
 		Role:         RoleUser,
 		MultiContent: parts,
 	}, nil
+}
+
+const viewImageToolName = "view_image"
+
+// rootMaxImagePixels reads the root maximagepixels knob (0 -> default).
+func rootMaxImagePixels() int {
+	var v int
+	readConfig(func() { v = config.MaxImagePixels })
+	if v <= 0 {
+		return defaultMaxImagePixels
+	}
+	return v
+}
+
+// handleViewImage implements the view_image builtin: pull an image URL into
+// the conversation as vision input. The image rides a labeled RoleUser
+// message queued after the tool result (flushed by executeToolCalls after
+// ALL results of the round) — the ONLY way images enter context besides
+// user pastes. Generated-image URLs are NEVER auto-injected (owner
+// directive: context economy — the model views them explicitly through
+// this tool); every failure is tool-result text the model can act on.
+func (cr *chatRunner) handleViewImage(turn *turnContext, call ToolCall) bool {
+	var args struct {
+		URL string `json:"url"`
+	}
+	if err := json.Unmarshal([]byte(call.Function.Arguments), &args); err != nil {
+		turn.Add(toolResultMsg(call.ID, "error: failed to parse arguments: "+err.Error()))
+		return false
+	}
+	if turn.ephemeral {
+		// Ephemeral (generator) turns never advertise view_image; a
+		// hallucinated call errors like the generator tools' !ephemeral
+		// guards do in reverse.
+		turn.Add(toolResultMsg(call.ID, "error: view_image is not available on this command"))
+		return false
+	}
+	if args.URL == "" {
+		turn.Add(toolResultMsg(call.ID, "error: url is required"))
+		return false
+	}
+	u, err := neturl.Parse(args.URL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		turn.Add(toolResultMsg(call.ID, "error: url must be an http(s) URL"))
+		return false
+	}
+	remaining := cr.cfg.MaxContextImages - countContextImages(turn.Messages())
+	if remaining <= 0 {
+		turn.Add(toolResultMsg(call.ID, fmt.Sprintf(
+			"error: context image budget reached (max %d images in the conversation). Tell the user to start a new session.",
+			cr.cfg.MaxContextImages)))
+		return false
+	}
+	fi, err := fetchAndConvertImage(args.URL, cr.cfg.ImageFormat, cr.cfg.ImageQuality, cr.cfg.MaxImageWidth, cr.cfg.MaxImageHeight, rootMaxImagePixels())
+	if err != nil {
+		turn.Add(toolResultMsg(call.ID, "error: "+err.Error()))
+		return false
+	}
+	ref, refErr := registerImageRef(cr.sessionID, "view", args.URL, fi.MIME, fi.Width, fi.Height, fi.Encoded)
+	if refErr != nil {
+		cr.logger.Warn("image ref registration failed (image still attached)", "url", args.URL, "error", refErr.Error())
+	}
+	if ref == "" {
+		ref = "unregistered"
+	}
+	turn.Add(toolResultMsg(call.ID, fmt.Sprintf(
+		"Image loaded and attached in the next message — ref: %s. Source: %s (%dx%d).",
+		ref, args.URL, fi.Width, fi.Height)))
+	cr.pendingInjections = append(cr.pendingInjections, ChatMessage{
+		Role: RoleUser,
+		MultiContent: []MessagePart{
+			// Label PRECEDES the image — the ref-pairing contract: the model
+			// visually maps ref -> image (old image-editing plan).
+			{Type: PartTypeText, Text: fmt.Sprintf("[image — ref: %s — source: %s]", ref, args.URL)},
+			{Type: PartTypeImageURL, ImageURL: &ImageURL{URL: fi.DataURI, Detail: ImageDetailAuto}},
+		},
+	})
+	return false
 }

@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"hash/crc32"
 	"image"
@@ -17,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	logxi "github.com/mgutz/logxi/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/image/bmp"
@@ -1177,4 +1180,166 @@ func TestHeaderDimensionsClampsMalformedGIFFrames(t *testing.T) {
 	assert.Equal(t, 1, w, "width")
 	assert.Equal(t, 1, h, "height")
 	assert.Equal(t, 1, frames, "frame count must clamp to at least 1")
+}
+
+func newImageViewTestRunner(t *testing.T, cfg AIConfig, sid int64) *chatRunner {
+	t.Helper()
+	setupNoticesDefaults(t)
+	logger := logxi.New("test")
+	logger.SetLevel(logxi.LevelAll)
+	return &chatRunner{
+		cfg:       cfg,
+		network:   Network{Name: "testnet"},
+		channel:   "#101",
+		nick:      "shrew",
+		userID:    ensureTestUser(t, "testnet", "shrew"),
+		sessionID: sid,
+		logger:    logger,
+		ctx:       context.Background(),
+		outputCh:  make(chan string, 100),
+	}
+}
+
+func TestExecuteToolCallsViewImageInjectsLabeledMessage(t *testing.T) {
+	setupTestDB(t)
+	config.ImagesDir = t.TempDir()
+	t.Cleanup(func() { config.ImagesDir = "" })
+	config.TrustedImageHosts = []string{"127.0.0.1"}
+	t.Cleanup(func() { config.TrustedImageHosts = nil })
+
+	srv := newTestImageServer(t)
+	defer srv.Close()
+
+	cr := newImageViewTestRunner(t, AIConfig{DetectImages: true, MaxContextImages: 5, ImageFormat: "jpg", ImageQuality: 75}, 9)
+	turn := newTurnContext(9, nil)
+	args, _ := json.Marshal(map[string]string{"url": srv.URL + "/pic.jpg"})
+	cr.executeToolCalls(turn, []ToolCall{{
+		ID: "call_1", Type: "function",
+		Function: FunctionCall{Name: viewImageToolName, Arguments: string(args)},
+	}})
+
+	msgs := turn.Messages()
+	require.GreaterOrEqual(t, len(msgs), 2)
+	toolMsg := msgs[len(msgs)-2]
+	injected := msgs[len(msgs)-1]
+	assert.Equal(t, RoleTool, toolMsg.Role)
+	assert.Contains(t, toolMsg.Content, "Image loaded")
+	assert.Contains(t, toolMsg.Content, "ref: web_")
+
+	assert.Equal(t, RoleUser, injected.Role)
+	require.Len(t, injected.MultiContent, 2)
+	assert.Equal(t, PartTypeText, injected.MultiContent[0].Type)
+	assert.Regexp(t, `^\[image — ref: web_[0-9a-f]{12} —`, injected.MultiContent[0].Text)
+	assert.Contains(t, injected.MultiContent[0].Text, srv.URL)
+	assert.Equal(t, PartTypeImageURL, injected.MultiContent[1].Type)
+	assert.Contains(t, injected.MultiContent[1].ImageURL.URL, "data:image/jpeg;base64,")
+
+	// Persisted (non-ephemeral turn) + registered in the store.
+	var refCount int64
+	require.NoError(t, theDB.Model(&ImageRef{}).Where("session_id = ? AND origin = ?", 9, "view").Count(&refCount).Error)
+	assert.Equal(t, int64(1), refCount)
+	dbMsgs, err := sessionMgr.GetMessages(9)
+	require.NoError(t, err)
+	assert.Equal(t, RoleUser, dbMsgs[len(dbMsgs)-1].Role, "injection persisted to the session")
+}
+
+func TestExecuteToolCallsFlushesInjectionAfterAllResults(t *testing.T) {
+	setupTestDB(t)
+	config.ImagesDir = t.TempDir()
+	t.Cleanup(func() { config.ImagesDir = "" })
+	config.TrustedImageHosts = []string{"127.0.0.1"}
+	t.Cleanup(func() { config.TrustedImageHosts = nil })
+
+	srv := newTestImageServer(t)
+	defer srv.Close()
+
+	cr := newImageViewTestRunner(t, AIConfig{DetectImages: true, MaxContextImages: 5, ImageFormat: "jpg", ImageQuality: 75}, 9)
+	turn := newTurnContext(9, nil)
+	turn.Add(ChatMessage{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "call_1"}, {ID: "call_2"}}})
+
+	viewArgs, _ := json.Marshal(map[string]string{"url": srv.URL + "/pic.jpg"})
+	cr.executeToolCalls(turn, []ToolCall{
+		{ID: "call_1", Type: "function", Function: FunctionCall{Name: viewImageToolName, Arguments: string(viewArgs)}},
+		{ID: "call_2", Type: "function", Function: FunctionCall{Name: "unknown_tool_zz", Arguments: "{}"}},
+	})
+
+	msgs := turn.Messages()
+	require.GreaterOrEqual(t, len(msgs), 3)
+	assert.Equal(t, RoleTool, msgs[len(msgs)-3].Role, "first tool result")
+	assert.Equal(t, RoleTool, msgs[len(msgs)-2].Role, "second tool result — injection must not sit between tool results")
+	assert.Equal(t, RoleUser, msgs[len(msgs)-1].Role, "injection flushed after ALL results")
+}
+
+func TestHandleViewImageBudgetRefusal(t *testing.T) {
+	setupTestDB(t)
+	cr := newImageViewTestRunner(t, AIConfig{DetectImages: true, MaxContextImages: 2, ImageFormat: "jpg"}, 9)
+	turn := newTurnContext(9, []ChatMessage{{Role: RoleSystem, Content: "s"}})
+	turn.Add(ChatMessage{Role: RoleUser, MultiContent: []MessagePart{
+		{Type: PartTypeImageURL, ImageURL: &ImageURL{URL: "data:image/jpeg;base64,AAA"}},
+		{Type: PartTypeImageURL, ImageURL: &ImageURL{URL: "data:image/jpeg;base64,BBB"}},
+	}})
+	args, _ := json.Marshal(map[string]string{"url": "https://img.example.com/x.jpg"})
+	cr.executeToolCalls(turn, []ToolCall{{ID: "c1", Type: "function", Function: FunctionCall{Name: viewImageToolName, Arguments: string(args)}}})
+
+	last := turn.Messages()[len(turn.Messages())-1]
+	assert.Equal(t, RoleTool, last.Role, "over budget: tool result refusal, no injection")
+	assert.Contains(t, last.Content, "budget reached")
+	assert.Empty(t, cr.pendingInjections)
+}
+
+func TestHandleViewImageEphemeralRejected(t *testing.T) {
+	setupTestDB(t)
+	cr := newImageViewTestRunner(t, AIConfig{DetectImages: true, MaxContextImages: 5}, 0)
+	turn := newEphemeralTurnContext(nil)
+	args, _ := json.Marshal(map[string]string{"url": "https://img.example.com/x.jpg"})
+	cr.executeToolCalls(turn, []ToolCall{{ID: "c1", Type: "function", Function: FunctionCall{Name: viewImageToolName, Arguments: string(args)}}})
+	last := turn.Messages()[len(turn.Messages())-1]
+	assert.Equal(t, RoleTool, last.Role)
+	assert.Contains(t, last.Content, "not available")
+}
+
+func TestHandleViewImageConvertFailure(t *testing.T) {
+	setupTestDB(t)
+	// Serves image content-type with garbage bytes: download passes, decode fails.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Write([]byte("this is not a png"))
+	}))
+	defer srv.Close()
+	config.TrustedImageHosts = []string{"127.0.0.1"}
+	t.Cleanup(func() { config.TrustedImageHosts = nil })
+
+	cr := newImageViewTestRunner(t, AIConfig{DetectImages: true, MaxContextImages: 5, ImageFormat: "jpg"}, 9)
+	turn := newTurnContext(9, nil)
+	args, _ := json.Marshal(map[string]string{"url": srv.URL + "/bad.png"})
+	cr.executeToolCalls(turn, []ToolCall{{ID: "c1", Type: "function", Function: FunctionCall{Name: viewImageToolName, Arguments: string(args)}}})
+	last := turn.Messages()[len(turn.Messages())-1]
+	assert.Equal(t, RoleTool, last.Role, "convert failure surfaces as tool result, never a panic")
+	assert.Contains(t, last.Content, "error:")
+	assert.Empty(t, cr.pendingInjections)
+}
+
+func TestGetBuiltinToolDefsViewImageGatedOnDetectImages(t *testing.T) {
+	with := getBuiltinToolDefs(AIConfig{DetectImages: true}, nil)
+	found := false
+	for _, tl := range with {
+		if tl.Function != nil && tl.Function.Name == viewImageToolName {
+			found = true
+		}
+	}
+	assert.True(t, found, "offered on vision commands")
+
+	without := getBuiltinToolDefs(AIConfig{DetectImages: false}, nil)
+	for _, tl := range without {
+		if tl.Function != nil {
+			assert.NotEqual(t, viewImageToolName, tl.Function.Name, "not offered on non-vision commands")
+		}
+	}
+
+	disabled := getBuiltinToolDefs(AIConfig{DetectImages: true}, []string{viewImageToolName})
+	for _, tl := range disabled {
+		if tl.Function != nil {
+			assert.NotEqual(t, viewImageToolName, tl.Function.Name, "disabled_builtin_tools opts out")
+		}
+	}
 }

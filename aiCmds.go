@@ -261,6 +261,11 @@ type chatRunner struct {
 	// response is acceptable while a delivery is pending because the async
 	// delivery guarantees a future user-visible interaction.
 	deliveryPending bool
+	// pendingInjections collects tool-loop messages (view_image's labeled
+	// image message) that must land AFTER all tool results of the round —
+	// a tool result after an injected user message breaks providers'
+	// tool_calls ordering. Flushed by executeToolCalls when the loop ends.
+	pendingInjections []ChatMessage
 	// apiLogSessionID overrides the id the apiLogger logs this runner's
 	// traffic under. Zero (the default) means "log under sessionID" —
 	// normal turns never touch it. Ephemeral (generator) runs set it to
@@ -1535,6 +1540,12 @@ func (cr *chatRunner) executeToolCalls(turn *turnContext, toolCalls []ToolCall) 
 		toolMsg := toolResultMsg(tc.ID, toolText)
 		turn.Add(toolMsg)
 	}
+	// Tool-loop image injections (view_image) flush AFTER all tool results
+	// of the round — never between them (see pendingInjections).
+	for _, msg := range cr.pendingInjections {
+		turn.Add(msg)
+	}
+	cr.pendingInjections = nil
 	return registeredJob
 }
 
@@ -2413,6 +2424,29 @@ var builtinTools = map[string]builtinToolEntry{
 			},
 		},
 	},
+	viewImageToolName: {
+		handler: func(cr *chatRunner, turn *turnContext, call ToolCall) bool {
+			cr.handleViewImage(turn, call)
+			return false
+		},
+		def: Tool{
+			Type: "function",
+			Function: &FunctionDefinition{
+				Name:        viewImageToolName,
+				Description: "Download an image from a URL and view it. Use for images found in fetched pages or image links (including generated image pages). Each call views one image; the image is attached in the message right after the tool result, labeled with a reference ID. Subject to the context image budget.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"url": map[string]any{
+							"type":        "string",
+							"description": "The http(s) URL of the image to view",
+						},
+					},
+					"required": []string{"url"},
+				},
+			},
+		},
+	},
 }
 
 func isToolDisabled(toolName string, disabled []string) bool {
@@ -2470,6 +2504,12 @@ disabledLoop:
 			if t.Function.Name == d {
 				continue disabledLoop
 			}
+		}
+		if t.Function.Name == viewImageToolName && !cfg.DetectImages {
+			// view_image presupposes a vision-capable command; detectimages
+			// is the admin's existing declaration of that. Offering it on a
+			// non-vision command would attach images the model cannot see.
+			continue
 		}
 		if t.Function.Name == backgroundJobToolName {
 			jobDef := *t.Function

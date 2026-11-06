@@ -176,6 +176,20 @@ seed_nodes = ["3"]
 # Expected generation time for ETA calculations
 typical_time = "30s"
 
+# Example EDIT workflow (img2img): uncomment and adjust. The workflow name
+# (e.g., "zimage-edit") is what callers pass to edit_image/edit_image_async.
+# image_nodes/denoise_node are only consulted by the edit tools.
+# [workflow.zimage-edit]
+# workflow_path = "workflows/z_image_turbo-edit.json"
+# clientid = "img-mcp-edit"
+# output_node = "28"
+# prompt_node = "6"
+# negative_prompt_node = "7"
+# seed_nodes = ["3"]
+# image_nodes = ["40"]      # LoadImage node ids receiving uploaded inputs
+# denoise_node = "3"        # node whose inputs.denoise = strength (optional)
+# timeout = 300
+
 # Add more [workflow.*] sections for additional workflows
 # The workflow name (e.g., "zimage") is what you'll use in tool calls
 

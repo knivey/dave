@@ -1,7 +1,7 @@
 # Image Editing — img-mcp edit tools, ref interception, gen_ refs
 
 Date: 2026-11-06
-Status: approved design (brainstorm 2026-11-06), pending implementation plan
+Status: implemented (2026-11-06) — plan `docs/superpowers/plans/2026-11-06-image-editing.md`, tasks 1-8 landed
 Builds on: `docs/superpowers/specs/2026-11-06-conversation-images-design.md` (view_image + ref store — shipped)
 
 ## Context

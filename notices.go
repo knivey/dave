@@ -76,6 +76,16 @@ type SessionNotices struct {
 	OtherHeader  string `toml:"other_header"`
 	OtherNone    string `toml:"other_none"`
 	AllHeader    string `toml:"all_header"`
+
+	// Current-session detail view (`-session`): the single-session
+	// counterpart to the list above, carrying stats that don't fit a
+	// list row (provider usage, context pressure).
+	CurrentNone     string `toml:"current_none"`
+	CurrentHeader   string `toml:"current_header"`
+	CurrentStarter  string `toml:"current_starter"`
+	CurrentMessages string `toml:"current_messages"`
+	CurrentUsage    string `toml:"current_usage"`
+	CurrentContext  string `toml:"current_context"`
 }
 
 type DBNotices struct {
@@ -305,6 +315,24 @@ func setNoticesDefaults(n *NoticesConfig) {
 	}
 	if n.Sessions.AllHeader == "" {
 		n.Sessions.AllHeader = "\x02All sessions in {channel} on {network}:\x02"
+	}
+	if n.Sessions.CurrentNone == "" {
+		n.Sessions.CurrentNone = "No active session — start a chat first."
+	}
+	if n.Sessions.CurrentHeader == "" {
+		n.Sessions.CurrentHeader = "{icon} \x02#{id} ▸ {trigger}{command}\x0F ({model} @ {service}) — started {date} ({started_ago}), active {active_ago}{cloned_from}"
+	}
+	if n.Sessions.CurrentStarter == "" {
+		n.Sessions.CurrentStarter = "  ▸ {preview}"
+	}
+	if n.Sessions.CurrentMessages == "" {
+		n.Sessions.CurrentMessages = "  {live} msgs live{archived_suffix}"
+	}
+	if n.Sessions.CurrentUsage == "" {
+		n.Sessions.CurrentUsage = "  Provider last turn: prompt {prompt} (cached {cached}) · completion {completion}{reasoning_note}"
+	}
+	if n.Sessions.CurrentContext == "" {
+		n.Sessions.CurrentContext = "  Context: {note}"
 	}
 	if n.DB.NotAvailable == "" {
 		n.DB.NotAvailable = "database not available"

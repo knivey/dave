@@ -274,6 +274,7 @@ func resolvedUserFromCtx(ctx context.Context) *User {
 var stop_re = regexp.MustCompile("^stop$")
 var help_re = regexp.MustCompile("^help(?:\\s+(.+))?$")
 var sessions_re = regexp.MustCompile("^sessions(?:\\s+(\\S+))?\\s*$") // \s*$ tolerates trailing space from tab nick-completion
+var session_re = regexp.MustCompile("^session\\s*$")                  // bare only — current session detail view; "sessions" (plural) is the list
 var history_re = regexp.MustCompile("^history(?:\\s+(.+))?$")
 var stats_re = regexp.MustCompile("^mystats$")
 var delete_re = regexp.MustCompile("^delete\\s+(\\d+)\\s*$") // \s*$ tolerates trailing space from tab nick-completion
@@ -328,6 +329,9 @@ var builtInCmds = CmdMap{
 	sessions_re: func(n Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, s ...string) {
 		historySessions(n, c, e, ctx, output, s...)
 	},
+	session_re: func(n Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, s ...string) {
+		historySessionCurrent(n, c, e, ctx, output, s...)
+	},
 	history_re: func(n Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, s ...string) {
 		historyShow(n, c, e, ctx, output, s...)
 	},
@@ -366,7 +370,7 @@ var configCmdTakesArgs map[string]bool
 var configCmdOptionalArgs map[string]bool
 
 var builtinCommandNames = []string{
-	"stop", "help", "sessions", "history",
+	"stop", "help", "sessions", "session", "history",
 	"mystats", "delete", "resume", "jobs",
 	"support", "compact", "clone",
 }
@@ -375,6 +379,7 @@ var builtInNames = map[*regexp.Regexp]string{
 	stop_re:     "stop",
 	help_re:     "help",
 	sessions_re: "sessions",
+	session_re:  "session",
 	history_re:  "history",
 	stats_re:    "mystats",
 	delete_re:   "delete",

@@ -54,6 +54,12 @@ func TestHistoryRegexesTolerateTrailingWhitespace(t *testing.T) {
 		{name: "sessions nick trailing space", re: sessions_re, input: "sessions alice ", want: true, wantArg: "alice"},
 		{name: "sessions bare trailing space", re: sessions_re, input: "sessions ", want: true, wantArg: ""},
 		{name: "sessions multi word", re: sessions_re, input: "sessions alice bob", want: false},
+
+		{name: "session bare", re: session_re, input: "session", want: true, wantArg: ""},
+		{name: "session trailing space", re: session_re, input: "session ", want: true, wantArg: ""},
+		{name: "session with arg rejected", re: session_re, input: "session 12", want: false},
+		{name: "sessions does not match session_re", re: session_re, input: "sessions", want: false},
+		{name: "session does not match sessions_re", re: sessions_re, input: "session", want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -487,5 +493,185 @@ func TestHistoryShow_DoesNotShowSupersededRows(t *testing.T) {
 	for _, m := range visible {
 		assert.False(t, m.Superseded,
 			"loadDBSessionMessagesAll must not return superseded rows")
+	}
+}
+
+// runHistoryCommand drives an output-channel history command to completion
+// and returns the lines it emitted (the goroutine/close/drain dance every
+// handler test repeats). The handler receives REAL ctx/output channels —
+// sendOrDone deadlocks on nil channels.
+func runHistoryCommand(t *testing.T, fn func(ctx context.Context, output chan<- string), maxLines int) []string {
+	t.Helper()
+	output := make(chan string, maxLines)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	go func() {
+		fn(ctx, output)
+		close(output)
+	}()
+	lines := drainOutput(t, output, maxLines, 2*time.Second)
+	return lines
+}
+
+// TestHistorySessionCurrent_NoActiveSession pins the empty case: a user
+// with no active session in the channel gets the current_none notice, not
+// an error.
+func TestHistorySessionCurrent_NoActiveSession(t *testing.T) {
+	setupBotTest(t)
+
+	network := Network{Name: "testnet", Trigger: "!"}
+	client := bots["testnet"].Client
+	e := makeHistoryEvent("#test", "testuser")
+
+	lines := runHistoryCommand(t, func(ctx context.Context, output chan<- string) {
+		historySessionCurrent(network, client, e, ctx, output)
+	}, 4)
+	joined := strings.Join(lines, "\n")
+	assert.Contains(t, joined, "No active session", "empty case must get the current_none notice")
+}
+
+// TestHistorySessionCurrent_Full pins the full detail view: header with
+// date/ago/model/service, starter preview, live/archived counts (archived
+// suffix mirroring the list view), provider last-turn usage with the
+// reasoning fragment, context pressure from provider prompt tokens vs the
+// resolved window, and the cloned-from tag rendered like the list view.
+func TestHistorySessionCurrent_Full(t *testing.T) {
+	setupBotTest(t)
+
+	prevChats := config.Commands.Chats
+	prevCompaction := config.Compaction
+	config.Commands.Chats = map[string]AIConfig{
+		"testchat": {Service: "svc1", Model: "gpt-4o", ContextWindow: 16000},
+	}
+	config.Compaction = CompactionConfig{Enabled: true, AutoEnabled: true, AutoThreshold: 0.8}
+	defer func() {
+		config.Commands.Chats = prevChats
+		config.Compaction = prevCompaction
+	}()
+
+	network := Network{Name: "testnet", Trigger: "!"}
+	channel := "#test"
+	// Source session for the clone tag, owned by another user.
+	srcSID := createTestSession(t, network.Name, channel, "dave", "oldchat", "svc1", "m1")
+	sid := createTestSession(t, network.Name, channel, "testuser", "testchat", "svc1", "gpt-4o")
+	starter := "explain the queue system in detail"
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: starter}))
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleAssistant, Content: "ok"}))
+
+	// Archive one row so the archived suffix shows (same shape the list
+	// view counts: archived=true, superseded=false).
+	var rows []Message
+	require.NoError(t, theDB.Where("session_id = ?", sid).Order("id ASC").Find(&rows).Error)
+	require.NoError(t, theDB.Model(&Message{}).Where("id = ?", rows[0].ID).Update("archived", true).Error)
+
+	// Cloned-from tag material.
+	require.NoError(t, theDB.Model(&Session{}).Where("id = ?", sid).
+		Updates(map[string]any{"cloned_from_id": srcSID, "cloned_from_nick": "dave"}).Error)
+
+	// Provider usage row: 6500/16000 = 40.625 → 41%.
+	require.NoError(t, theDB.Create(&TurnUsage{
+		SessionID: sid, PromptTokens: 6500, CachedTokens: 3000,
+		CompletionTokens: 800, ReasoningTokens: 400, APIPath: "x",
+	}).Error)
+
+	client := bots["testnet"].Client
+	e := makeHistoryEvent(channel, "testuser")
+
+	lines := runHistoryCommand(t, func(ctx context.Context, output chan<- string) {
+		historySessionCurrent(network, client, e, ctx, output)
+	}, 12)
+	joined := strings.Join(lines, "\n")
+
+	var sess Session
+	require.NoError(t, theDB.Where("id = ?", sid).First(&sess).Error)
+
+	assert.Contains(t, joined, fmt.Sprintf("#%d", sid), "header names the session id")
+	assert.Contains(t, joined, "!testchat", "header shows trigger+command like the list view")
+	assert.Contains(t, joined, "gpt-4o", "header shows the live config's model")
+	assert.Contains(t, joined, "svc1", "header shows the service")
+	assert.Contains(t, joined, sess.CreatedAt.Format("Jan 02"), "header shows the start date")
+	assert.Contains(t, joined, starter, "starter preview line shows the first message")
+	assert.Contains(t, joined, "2 msgs live (1 archived)", "live count excludes the archived row; suffix mirrors the list view")
+	assert.Contains(t, joined, "prompt 6500 (cached 3000) · completion 800 · reasoning 400",
+		"provider last-turn line with the reasoning fragment when reasoning exists")
+	assert.Contains(t, joined, "41% of 16k", "context pressure from provider prompt tokens vs the resolved window")
+	assert.Contains(t, joined, "auto-compacts at 80%", "threshold fragment when auto-compaction is enabled")
+	assert.Contains(t, joined, fmt.Sprintf("cloned from #%d by dave", srcSID), "cloned-from tag renders like the list view")
+	assert.NotContains(t, joined, "compacted", "no compaction events yet — fragment omitted")
+	assert.NotContains(t, joined, "responses chain", "no ResponseID — chain fragment omitted")
+}
+
+// TestHistorySessionCurrent_Omissions pins the conditional lines: with no
+// provider usage rows and no resolvable context window, the usage and
+// context lines drop entirely while the header/starter/counts remain.
+func TestHistorySessionCurrent_Omissions(t *testing.T) {
+	setupBotTest(t)
+
+	prevChats := config.Commands.Chats
+	prevCompaction := config.Compaction
+	config.Commands.Chats = map[string]AIConfig{
+		"testchat": {Service: "svc1", Model: "gpt-4o"}, // no ContextWindow
+	}
+	config.Compaction = CompactionConfig{} // no window fallback either
+	defer func() {
+		config.Commands.Chats = prevChats
+		config.Compaction = prevCompaction
+	}()
+
+	network := Network{Name: "testnet", Trigger: "!"}
+	sid := createTestSession(t, network.Name, "#test", "testuser", "testchat", "svc1", "gpt-4o")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "hi"}))
+
+	client := bots["testnet"].Client
+	e := makeHistoryEvent("#test", "testuser")
+
+	lines := runHistoryCommand(t, func(ctx context.Context, output chan<- string) {
+		historySessionCurrent(network, client, e, ctx, output)
+	}, 8)
+	joined := strings.Join(lines, "\n")
+
+	assert.Contains(t, joined, fmt.Sprintf("#%d", sid), "header still shows")
+	assert.Contains(t, joined, "2 msgs live", "message count still shows")
+	assert.Contains(t, joined, "hi", "starter preview still shows")
+	assert.NotContains(t, joined, "prompt", "no usage rows — provider line omitted")
+	assert.NotContains(t, joined, "Context:", "no resolvable window — context line omitted")
+}
+
+// TestHistorySessionCurrent_CommandGone pins the dead-config path: the
+// session's chat command no longer exists → the shared command_gone error.
+func TestHistorySessionCurrent_CommandGone(t *testing.T) {
+	setupBotTest(t)
+
+	prevChats := config.Commands.Chats
+	config.Commands.Chats = map[string]AIConfig{}
+	defer func() { config.Commands.Chats = prevChats }()
+
+	network := Network{Name: "testnet", Trigger: "!"}
+	sid := createTestSession(t, network.Name, "#test", "testuser", "testchat", "svc1", "gpt-4o")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "hi"}))
+
+	client := bots["testnet"].Client
+	e := makeHistoryEvent("#test", "testuser")
+
+	lines := runHistoryCommand(t, func(ctx context.Context, output chan<- string) {
+		historySessionCurrent(network, client, e, ctx, output)
+	}, 4)
+	joined := strings.Join(lines, "\n")
+	assert.Contains(t, joined, "no longer exists", "command_gone error surfaces")
+}
+
+// TestHistorySessionCurrent_NoticesDefaults pins that the new notice keys
+// survive a stale notices.toml (missing keys fall back to defaults) — the
+// same contract every other notice key follows.
+func TestHistorySessionCurrent_NoticesDefaults(t *testing.T) {
+	var n NoticesConfig
+	setNoticesDefaults(&n)
+	for _, key := range []string{
+		n.Sessions.CurrentNone, n.Sessions.CurrentHeader, n.Sessions.CurrentStarter,
+		n.Sessions.CurrentMessages, n.Sessions.CurrentUsage, n.Sessions.CurrentContext,
+	} {
+		assert.NotEmpty(t, key)
 	}
 }

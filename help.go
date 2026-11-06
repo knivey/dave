@@ -59,6 +59,7 @@ func buildHelpText(botnick, trigger string, network Network) string {
 			line string
 		}{
 			{"sessions", fmt.Sprintf("  %ssessions [nick|*] \u2014 List sessions (yours, another user's, or all)", trigger)},
+			{"session", fmt.Sprintf("  %ssession \u2014 Show your current session (usage + context stats)", trigger)},
 			{"history", fmt.Sprintf("  %shistory <id> \u2014 Show messages from a session", trigger)},
 			{"resume", fmt.Sprintf("  %sresume <id> \u2014 Resume a previous session", trigger)},
 			{"delete", fmt.Sprintf("  %sdelete <id> \u2014 Delete a session", trigger)},
@@ -287,6 +288,7 @@ func buildPastebinHelpText(botnick, trigger string, network Network) string {
 			line string
 		}{
 			{"sessions", fmt.Sprintf("%s | %s", pastebinCmd(trigger+"sessions [nick|*]"), escapeDescPipe("List sessions (yours, another user's, or all)"))},
+			{"session", fmt.Sprintf("%s | %s", pastebinCmd(trigger+"session"), escapeDescPipe("Show your current session (usage + context stats)"))},
 			{"history", fmt.Sprintf("%s | %s", pastebinCmd(trigger+"history <id>"), escapeDescPipe("Show messages from a session"))},
 			{"resume", fmt.Sprintf("%s | %s", pastebinCmd(trigger+"resume <id>"), escapeDescPipe("Resume a previous session"))},
 			{"delete", fmt.Sprintf("%s | %s", pastebinCmd(trigger+"delete <id>"), escapeDescPipe("Delete a session"))},
@@ -558,6 +560,7 @@ var builtinHelpEntries = map[string]struct {
 }{
 	"stop":     {"stop", "Stop text generation (including this help message)"},
 	"sessions": {"sessions [nick|*]", "List sessions. No args = yours, <nick> = another user's, * = all in channel"},
+	"session":  {"session", "Show your current active session — id, model, starter message, message counts, provider token usage, and context pressure"},
 	"history":  {"history <session-id>", "Show messages from a session (first/last 2 with ... in between, tool calls hidden)"},
 	"resume":   {"resume <session-id>", "Resume a previous session, pausing any current active session"},
 	"delete":   {"delete <session-id>", "Delete a session and its messages"},

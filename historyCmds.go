@@ -203,6 +203,173 @@ func historySessions(network Network, c *girc.Client, e girc.Event, ctx context.
 	sendSessionsLinesSelf(output, ctx, sessions, network.Trigger)
 }
 
+// formatWindowTokens renders a context window for the -session context
+// line: 16000 → "16k", 128000 → "128k", small values verbatim.
+func formatWindowTokens(w int) string {
+	if w >= 1000 {
+		return fmt.Sprintf("%.0fk", float64(w)/1000)
+	}
+	return fmt.Sprintf("%d", w)
+}
+
+// historySessionCurrent is the IRC `^session$` handler: a detail view of
+// the calling user's ACTIVE session in the current channel — the
+// single-session counterpart to the -sessions list, carrying the stats
+// that don't fit a list row (starter message, dates, provider last-turn
+// usage, context pressure). Token numbers deliberately come from the
+// PROVIDER's turn_usage rows, not dave's own tokenizer estimate: the
+// auto-compaction trigger compares the same provider prompt_tokens
+// against the same window, so "% of context" here is the number that
+// actually predicts compaction.
+func historySessionCurrent(network Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, args ...string) {
+	n := getNotices()
+	if !dbGuard(output, ctx) {
+		return
+	}
+
+	channel := normalizeIRC(e.Params[0], getCasemapping(network.Name))
+	resolvedUser, err := resolveIRCUser(network, c, e)
+	if err != nil || resolvedUser == nil {
+		sendOrDone(ctx, output, errorMsg(n.Sessions.CurrentNone))
+		return
+	}
+	session, err := sessionMgr.GetActiveSession(network.Name, channel, resolvedUser.ID)
+	if err != nil {
+		sendOrDone(ctx, output, errorNotice(n.DB.QuerySessions, map[string]string{"error": err.Error()}))
+		return
+	}
+	if session == nil {
+		sendOrDone(ctx, output, errorMsg(n.Sessions.CurrentNone))
+		return
+	}
+
+	// The LIVE config drives model/service display and the window below:
+	// the session's own Model/Service columns are creation-time
+	// provenance and can be stale after /reload (session settings are
+	// never runtime overrides).
+	cfg, cfgOk := getSessionConfig(session)
+	if !cfgOk {
+		sendOrDone(ctx, output, errorNotice(n.Sessions.CommandGone, map[string]string{"command": session.ChatCommand}))
+		return
+	}
+
+	msgs, err := sessionMgr.GetMessages(session.ID)
+	if err != nil {
+		sendOrDone(ctx, output, errorNotice(n.DB.LoadMessages, map[string]string{"error": err.Error()}))
+		return
+	}
+
+	// Archived count mirrors the list view's query: archived=true,
+	// superseded=false (superseded tail-copies duplicate content an
+	// earlier summary already covers — see compaction.go).
+	var archivedMsgs int64
+	theDB.Model(&Message{}).
+		Where("session_id = ? AND archived = ? AND superseded = ?", session.ID, true, false).
+		Count(&archivedMsgs)
+
+	// Starter preview, same truncation as the list view.
+	preview := strings.ReplaceAll(session.FirstMessage, "\n", " ")
+	if len(preview) > 80 {
+		preview = preview[:77] + "..."
+	}
+
+	clonedFrom := ""
+	if session.ClonedFromID != nil {
+		clonedFrom = formatClonedFrom(*session, resolveClonedFromNicks([]Session{*session}))
+	}
+
+	if !sendOrDone(ctx, output, expandNotice(n.Sessions.CurrentHeader, map[string]string{
+		"icon":        "\x0303●\x0F",
+		"id":          fmt.Sprintf("%d", session.ID),
+		"trigger":     network.Trigger,
+		"command":     session.ChatCommand,
+		"model":       cfg.Model,
+		"service":     cfg.Service,
+		"date":        session.CreatedAt.Format("Jan 02"),
+		"started_ago": formatTimeAgo(session.CreatedAt),
+		"active_ago":  formatTimeAgo(session.LastActive),
+		"cloned_from": clonedFrom,
+	})) {
+		return
+	}
+	if preview != "" {
+		if !sendOrDone(ctx, output, expandNotice(n.Sessions.CurrentStarter, map[string]string{"preview": preview})) {
+			return
+		}
+	}
+	archivedSuffix := ""
+	if archivedMsgs > 0 {
+		archivedSuffix = fmt.Sprintf(" (%d archived)", archivedMsgs)
+	}
+	if !sendOrDone(ctx, output, expandNotice(n.Sessions.CurrentMessages, map[string]string{
+		"live":            fmt.Sprintf("%d", len(msgs)),
+		"archived_suffix": archivedSuffix,
+	})) {
+		return
+	}
+
+	// The provider's own numbers for the last recorded turn. Omitted
+	// entirely when the session has no usage rows yet (before the first
+	// reply completes).
+	lastUsage, err := getLastTurnUsageForSession(session.ID)
+	if err != nil {
+		lastUsage = nil
+	}
+	if lastUsage != nil {
+		reasoningNote := ""
+		if reasoningAll, _, rErr := sumSessionReasoningTokens(session.ID); rErr == nil && reasoningAll > 0 {
+			reasoningNote = fmt.Sprintf(" · reasoning %d", reasoningAll)
+		}
+		if !sendOrDone(ctx, output, expandNotice(n.Sessions.CurrentUsage, map[string]string{
+			"prompt":         fmt.Sprintf("%d", lastUsage.PromptTokens),
+			"cached":         fmt.Sprintf("%d", lastUsage.CachedTokens),
+			"completion":     fmt.Sprintf("%d", lastUsage.CompletionTokens),
+			"reasoning_note": reasoningNote,
+		})) {
+			return
+		}
+	}
+
+	// Context pressure, only when a window resolves (command > service >
+	// [compaction] fallback — effectiveContextWindow). The percentage is
+	// provider prompt_tokens ÷ window: exactly the comparand
+	// ShouldAutoCompact uses, so the number predicts compaction.
+	window, _ := effectiveContextWindow(cfg)
+	if window <= 0 {
+		return
+	}
+	var ccfg CompactionConfig
+	readConfig(func() { ccfg = config.Compaction })
+	autoOn := ccfg.Enabled && ccfg.AutoEnabled
+	threshold := ccfg.AutoThreshold
+	if threshold <= 0 {
+		threshold = 0.7 // mirrors CompactionConfig.ApplyDefaults
+	}
+	windowStr := formatWindowTokens(window)
+	var parts []string
+	switch {
+	case lastUsage != nil && lastUsage.PromptTokens > 0:
+		part := fmt.Sprintf("%.0f%% of %s", float64(lastUsage.PromptTokens)/float64(window)*100, windowStr)
+		if autoOn {
+			part += fmt.Sprintf(" (auto-compacts at %.0f%%)", threshold*100)
+		}
+		parts = append(parts, part)
+	case autoOn:
+		parts = append(parts, fmt.Sprintf("window %s (auto-compacts at %.0f%%)", windowStr, threshold*100))
+	default:
+		parts = append(parts, fmt.Sprintf("window %s", windowStr))
+	}
+	if comps, cErr := getCompactionsForSession(session.ID); cErr == nil && len(comps) > 0 {
+		parts = append(parts, fmt.Sprintf("compacted %d×", len(comps)))
+	}
+	if session.ResponseID != nil {
+		parts = append(parts, "responses chain")
+	}
+	sendOrDone(ctx, output, expandNotice(n.Sessions.CurrentContext, map[string]string{
+		"note": strings.Join(parts, " · "),
+	}))
+}
+
 func sendSessionsLinesSelf(output chan<- string, ctx context.Context, sessions []Session, trigger string) {
 	var swu []SessionWithUser
 	for _, s := range sessions {

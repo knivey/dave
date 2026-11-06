@@ -668,6 +668,10 @@ func createTestJPEG(t *testing.T) []byte {
 }
 
 func TestBuildImageMessageNonImageURLPreserved(t *testing.T) {
+	setupTestDB(t)
+	config.ImagesDir = t.TempDir()
+	t.Cleanup(func() { config.ImagesDir = "" })
+
 	origClient := imageHTTPClient
 	imageHTTPClient = &http.Client{Timeout: 30 * time.Second}
 	defer func() { imageHTTPClient = origClient }()
@@ -988,6 +992,10 @@ func TestCountGIFFrames(t *testing.T) {
 }
 
 func TestBuildImageMessageSkipsPixelBombNonFatal(t *testing.T) {
+	setupTestDB(t)
+	config.ImagesDir = t.TempDir()
+	t.Cleanup(func() { config.ImagesDir = "" })
+
 	origClient := imageHTTPClient
 	imageHTTPClient = &http.Client{Timeout: 30 * time.Second}
 	defer func() { imageHTTPClient = origClient }()

@@ -971,3 +971,30 @@ func TestIsResponseIDErrorSDKErrorShapes(t *testing.T) {
 		assert.NotContains(t, err.Error(), "previous_response_id", "unwrapped body never reaches the error string")
 	})
 }
+
+// TestMessagesToResponseInputItemsMergesConsecutiveSystem is the
+// incident-2026-11-06 regression pin for the Responses path: the
+// post-compaction summary row (second consecutive RoleSystem) must
+// serialize into ONE leading system message — strict templates (Qwen via
+// llama.cpp) reject a non-first system message. See
+// TestMessagesToChatCompletionParamsMergesConsecutiveSystem for the chat
+// twin.
+func TestMessagesToResponseInputItemsMergesConsecutiveSystem(t *testing.T) {
+	msgs := buildPostCompactionHistory()
+
+	items := marshalInputItems(messagesToResponseInputItems(msgs, ReasoningReplayOff, ReasoningReplayFormatText))
+
+	require.Len(t, items, len(msgs)-1, "two system rows merge into one item")
+	// EasyInputMessage items serialize flat: {"content":…,"role":"system"}.
+	var first map[string]any
+	require.NoError(t, json.Unmarshal(items[0], &first))
+	assert.Equal(t, RoleSystem, first["role"])
+	assert.Equal(t, "You are dave, a chatbot on IRC\n\n[CONVERSATION SUMMARY — covers 69 earlier messages] User asked about AV1 encoding.", first["content"])
+
+	// No other item may carry the system role.
+	for i, raw := range items[1:] {
+		var m map[string]any
+		require.NoError(t, json.Unmarshal(raw, &m))
+		assert.NotEqual(t, RoleSystem, m["role"], "item %d is a second system message", i+1)
+	}
+}

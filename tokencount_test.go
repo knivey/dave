@@ -571,3 +571,27 @@ func TestMessagesToChat(t *testing.T) {
 	b := countMessageTokens("gpt-4o", messagesToChat(msgs))
 	assert.Equal(t, a, b)
 }
+
+// TestCountMessageTokensMergesConsecutiveSystem pins the accounting parity
+// of the wire merge: a post-compaction [system, system(summary), user]
+// history counts EXACTLY like its merged [system(prompt\n\nsummary), user]
+// serialization — dave's neutral count stays "exactly the payload it
+// sends" (the serializer collapses consecutive system rows; see
+// mergeConsecutiveSystemMessages).
+func TestCountMessageTokensMergesConsecutiveSystem(t *testing.T) {
+	split := []ChatMessage{
+		{Role: RoleSystem, Content: "You are dave, a chatbot on IRC"},
+		{Role: RoleSystem, Content: "[CONVERSATION SUMMARY] User asked about AV1 encoding."},
+		{Role: RoleUser, Content: "hello"},
+	}
+	merged := []ChatMessage{
+		{Role: RoleSystem, Content: "You are dave, a chatbot on IRC\n\n[CONVERSATION SUMMARY] User asked about AV1 encoding."},
+		{Role: RoleUser, Content: "hello"},
+	}
+
+	gotSplit := countMessageTokens("gpt-4o", split)
+	gotMerged := countMessageTokens("gpt-4o", merged)
+
+	assert.Equal(t, gotMerged.Tokens, gotSplit.Tokens,
+		"split system rows must count exactly like the merged wire form")
+}

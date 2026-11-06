@@ -71,6 +71,80 @@ type ReasoningDetail struct {
 	Index     int    `json:"index,omitempty"`
 }
 
+// mergeConsecutiveSystemMessages returns messages with every run of two or
+// more adjacent RoleSystem rows collapsed into a single RoleSystem row
+// (content = the run's non-empty contents joined with a blank line), at
+// their original position. Wire normalization ONLY — the stored session
+// keeps separate rows.
+//
+// WHY (incident 2026-11-06, prod session 2991): compaction inserts the
+// summary as a SECOND consecutive RoleSystem row after the fresh system
+// prompt — the live shape of every compacted session is
+// [system, system(summary), user, …]. Both serializers used to emit one
+// wire system message per row, and strict chat templates reject that
+// shape: Qwen's (llama.cpp) raises
+//
+//	Jinja Exception: System message must be at the beginning
+//
+// for any system message that is not messages[0] (gemma-4 and
+// OpenAI-style providers tolerate consecutive system rows, which is why
+// this only surfaced when a Qwen service first compacted). Merging at
+// SERIALIZATION time — instead of storing one pre-merged row — keeps the
+// rolling-summary folding (the prior compaction's summary is identified as
+// its own row), the history viewer, and the compactions.summary_message_id
+// audit intact, AND rescues already-broken sessions without data surgery:
+// existing [system, system(summary), …] rows become sendable the moment
+// this code runs.
+//
+// Scope is deliberately RoleSystem runs only. RoleDeveloper is a distinct
+// wire role (guidance Knob 1) and guidance rows are appended at the tail
+// of history, never adjacent to the head prompt — merging one would
+// silently change its wire role. A LONE mid-chain system row (an injected
+// async result under injection_role = "system") is also left alone:
+// position is the point on templates that render mid-chain system in place
+// (gemma-4); services whose templates reject it must set
+// injection_role = "user" (see chats.toml). System rows carry only Content
+// on the wire in both serializers, so the collapsed row loses nothing.
+func mergeConsecutiveSystemMessages(messages []ChatMessage) []ChatMessage {
+	// Fast path: no adjacent system pair — hand back the input slice
+	// untouched (callers reuse live turn state; no copy in the hot path).
+	needsMerge := false
+	for i := 1; i < len(messages); i++ {
+		if messages[i].Role == RoleSystem && messages[i-1].Role == RoleSystem {
+			needsMerge = true
+			break
+		}
+	}
+	if !needsMerge {
+		return messages
+	}
+
+	out := make([]ChatMessage, 0, len(messages))
+	for i := 0; i < len(messages); {
+		if messages[i].Role != RoleSystem {
+			out = append(out, messages[i])
+			i++
+			continue
+		}
+		// One run of consecutive system rows → one row. Empty contents
+		// drop out of the join (an empty system message contributes
+		// nothing); a run of all-empties still keeps one system row.
+		parts := make([]string, 0, 2)
+		if messages[i].Content != "" {
+			parts = append(parts, messages[i].Content)
+		}
+		j := i + 1
+		for ; j < len(messages) && messages[j].Role == RoleSystem; j++ {
+			if messages[j].Content != "" {
+				parts = append(parts, messages[j].Content)
+			}
+		}
+		out = append(out, ChatMessage{Role: RoleSystem, Content: strings.Join(parts, "\n\n")})
+		i = j
+	}
+	return out
+}
+
 type extendedStreamDelta struct {
 	ReasoningDetails []ReasoningDetail `json:"reasoning_details,omitempty"`
 }

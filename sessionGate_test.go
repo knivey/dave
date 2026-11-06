@@ -898,3 +898,89 @@ func TestDeliverAsyncResultGateAbort(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, jobs, 1, "completed job must stay pending for a later recovery path")
 }
+
+// TestChatPostCompactionSendsSingleSystemMessage is the end-to-end wire
+// guard for incident 2026-11-06 (prod session 2991): a session whose LIVE
+// history carries the post-compaction shape — fresh system prompt + summary
+// as a SECOND consecutive RoleSystem row — must put exactly ONE system
+// message on the wire (first position, both contents) when the next turn
+// runs. Qwen's chat template (llama.cpp) raised "System message must be at
+// the beginning" for the two-system shape; the fix is at serialization
+// time only, so this also pins the RESCUE property: stored rows are NOT
+// rewritten (an already-broken session becomes sendable the moment the
+// fixed binary runs — no data surgery).
+func TestChatPostCompactionSendsSingleSystemMessage(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	userID := ensureTestUser(t, "testnet", "gateuser")
+	resolved := chatGateUser(userID, "gateuser")
+
+	bodyCh := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		select {
+		case bodyCh <- string(raw):
+		default:
+		}
+		chatGateCompletion(w, "ok, making the paste")
+	}))
+	t.Cleanup(func() { server.Close() })
+	setChatGateServices(t, server.URL+"/v1")
+
+	// Seed a session in the exact post-compaction live shape.
+	sid, err := sessionMgr.CreateSession("testnet", "#gate", userID, "testchat", "testsvc", "test-model")
+	require.NoError(t, err)
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "You are dave, a chatbot on IRC"}))
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "[CONVERSATION SUMMARY — covers 69 earlier messages] User asked about AV1 encoding."}))
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "search recent CVE PoCs"}))
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleAssistant, Content: "found some"}))
+
+	network := Network{Name: "testnet"}
+	client := chatGateClient()
+	cfg := makeTestAIConfig()
+
+	out := make(chan string, 50)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer close(out)
+		chat(network, client, chatGateEvent("gateuser", "#gate"), cfg, context.Background(), out, resolved, "nevermind all that just use the create_paste tool")
+	}()
+
+	var body string
+	select {
+	case body = <-bodyCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("turn never reached the API")
+	}
+
+	var req struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &req))
+
+	var roles []string
+	for _, m := range req.Messages {
+		roles = append(roles, m.Role)
+	}
+	assert.Equal(t, []string{"system", "user", "assistant", "user"}, roles,
+		"post-compaction wire must carry exactly one (leading) system message")
+	assert.Contains(t, req.Messages[0].Content, "You are dave, a chatbot on IRC")
+	assert.Contains(t, req.Messages[0].Content, "[CONVERSATION SUMMARY — covers 69 earlier messages]")
+
+	<-done
+
+	// RESCUE property: the fix is emission-only — the stored session keeps
+	// its two system rows (rolling-summary folding, history viewer, and the
+	// compactions.summary_message_id audit all depend on the row staying).
+	msgs, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	require.Len(t, msgs, 6)
+	assert.Equal(t, RoleSystem, msgs[0].Role)
+	assert.Equal(t, RoleSystem, msgs[1].Role, "summary row must remain a separate stored row")
+	assert.Contains(t, msgs[1].Content, "[CONVERSATION SUMMARY")
+}

@@ -200,3 +200,41 @@ func TestMessagesToChatCompletionParamsNoReasoning(t *testing.T) {
 		assert.False(t, ok, "row %d", i)
 	}
 }
+
+// TestMessagesToChatCompletionParamsMergesConsecutiveSystem is the
+// incident-2026-11-06 regression pin (prod session 2991, Qwen3.8 via
+// llama.cpp): the post-compaction live history carries the summary as a
+// second consecutive RoleSystem row, and the serializer must NOT put two
+// system messages on the wire — strict chat templates (Qwen's) raise
+// "System message must be at the beginning" for any system message that is
+// not messages[0]. The rows merge into ONE leading system message at
+// serialization time; the stored session shape is untouched.
+func TestMessagesToChatCompletionParamsMergesConsecutiveSystem(t *testing.T) {
+	msgs := buildPostCompactionHistory()
+
+	serialized := marshalChatParams(t, messagesToChatCompletionParams(msgs, ReasoningReplayOff, ReasoningReplayFormatText))
+
+	// Exactly one system message, first on the wire, carrying both parts.
+	systemIdx := []int{}
+	for i, m := range serialized {
+		if m["role"] == RoleSystem {
+			systemIdx = append(systemIdx, i)
+		}
+	}
+	require.Len(t, systemIdx, 1, "consecutive system rows must serialize as ONE system message, got roles %v", rolesOf(serialized))
+	assert.Equal(t, 0, systemIdx[0], "the merged system message must be the first wire message")
+	assert.Equal(t, "You are dave, a chatbot on IRC\n\n[CONVERSATION SUMMARY — covers 69 earlier messages] User asked about AV1 encoding.", serialized[0]["content"])
+
+	// Everything after the head is untouched: one fewer param than rows
+	// (two system rows merged), same order.
+	assert.Len(t, serialized, len(msgs)-1)
+	assert.Equal(t, []string{"system", "user", "assistant", "tool", "user"}, rolesOf(serialized))
+}
+
+func rolesOf(serialized []map[string]any) []string {
+	roles := make([]string, 0, len(serialized))
+	for _, m := range serialized {
+		roles = append(roles, m["role"].(string))
+	}
+	return roles
+}

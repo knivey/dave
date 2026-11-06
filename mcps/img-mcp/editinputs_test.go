@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -73,4 +76,60 @@ func TestFetchGenRefBytesViewPrimaryImgsiteFallback(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), imgsiteHits.Load())
 	assert.Equal(t, []byte("IMGSITEBYTES"), b, "fallback bytes come from the imgsite url")
+}
+
+func TestResolveEditInputsDispatch(t *testing.T) {
+	db := setupTestDB(t)
+	// gen_ source: seed a job + image whose /view bytes are servable.
+	_, err := db.Exec(`INSERT INTO jobs (job_id, type, status, workflow, prompt) VALUES ('g1','generate','completed','w','p')`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO job_images (job_id, url, filename, subfolder, img_type, mime_type, ordinal) VALUES ('g1','','gen1.png','','output','image/png',0)`)
+	require.NoError(t, err)
+
+	var mu sync.Mutex
+	uploads := map[string]string{} // uploaded filename -> decoded bytes
+	mux := http.NewServeMux()
+	mux.HandleFunc("/view", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "GENBYTES")
+	})
+	mux.HandleFunc("/upload/image", func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseMultipartForm(8<<20))
+		f, hdr, err := r.FormFile("image")
+		require.NoError(t, err)
+		defer f.Close()
+		b, _ := io.ReadAll(f)
+		mu.Lock()
+		uploads[hdr.Filename] = string(b)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"name":%q,"subfolder":"","type":"input"}`, hdr.Filename)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	cfg := testConfig(srv.URL)
+
+	refs, err := resolveEditInputs(context.Background(), db, cfg, "jj1", []string{
+		"data:image/jpeg;base64," + base64.StdEncoding.EncodeToString([]byte("USERBYTES")),
+		"gen_g1",
+	})
+	require.NoError(t, err)
+	require.Len(t, refs, 2)
+	assert.Equal(t, "data:image/jpeg;base64,VVNFUkJZVEVT", refs[0].Ref, "data-URI entry keeps its full original string for provenance")
+	assert.Equal(t, "gen_g1", refs[1].Ref)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, "USERBYTES", uploads["edit_jj1_0.jpg"], "data-URI bytes uploaded with per-entry filename + mime-derived ext")
+	assert.Equal(t, "GENBYTES", uploads["edit_jj1_1.png"], "gen_ bytes fetched from /view then uploaded")
+	assert.Equal(t, "edit_jj1_0.jpg", refs[0].Comfy.Filename, "echoed upload name becomes the Comfy coordinate")
+	assert.Equal(t, "edit_jj1_1.png", refs[1].Comfy.Filename)
+}
+
+func TestResolveEditInputsRejectsUnknownEntry(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig("")
+	_, err := resolveEditInputs(context.Background(), db, cfg, "jj1", []string{"https://img.example.com/some.png"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "view_image")
+	assert.Contains(t, err.Error(), "https://img.example.com/some.png", "error names the offending entry")
 }

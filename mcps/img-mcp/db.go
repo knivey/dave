@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -54,12 +55,21 @@ type dbJob struct {
 	// dbUpdateJobSafety when the verdict resolves; recovery-read so
 	// restarts never re-vet. Like the provenance columns it stays out of
 	// every terminal-fenced statement.
-	Safety        string  `db:"safety"`
-	Error         *string `db:"error"`
-	ComfyPromptID *string `db:"comfy_prompt_id"`
-	CreatedAt     string  `db:"created_at"`
-	StartedAt     *string `db:"started_at"`
-	CompletedAt   *string `db:"completed_at"`
+	Safety string `db:"safety"`
+	// InputImages is the JSON of resolved edit-input upload coordinates
+	// (InputImageRef) stamped by dbUpdateJobInputImages after processJob
+	// uploads them; empty = never resolved (non-edit jobs, or a crash
+	// before the uploads). Insert/recovery-only column: no terminal
+	// UPDATE statement touches it.
+	InputImages string `db:"input_images"`
+	// Strength is the edit denoise strength; NULL = not an edit job (or
+	// none supplied). Same insert/recovery-only shape as InputImages.
+	Strength      *float64 `db:"strength"`
+	Error         *string  `db:"error"`
+	ComfyPromptID *string  `db:"comfy_prompt_id"`
+	CreatedAt     string   `db:"created_at"`
+	StartedAt     *string  `db:"started_at"`
+	CompletedAt   *string  `db:"completed_at"`
 }
 
 type dbJobImage struct {
@@ -117,13 +127,27 @@ func dbInsertJob(db *sqlx.DB, job *Job) error {
 	// was removed from JobInput (owner ruling — never used, results are
 	// always url), so new rows take the column's 'url' DEFAULT. The column
 	// itself stays for old rows; dbJob still scans it as a vestige.
+	//
+	// input_images starts empty (the column's DEFAULT is '' anyway, but the
+	// insert carries it explicitly so a job submitted with pre-resolved refs
+	// — a future path — lands complete) and strength rides the *float64 so
+	// nil writes NULL.
+	inputImages := ""
+	if len(job.Input.InputImages) > 0 {
+		b, err := json.Marshal(job.Input.InputImages)
+		if err != nil {
+			return fmt.Errorf("marshaling input_images: %w", err)
+		}
+		inputImages = string(b)
+	}
 	_, err := db.Exec(
-		`INSERT INTO jobs (job_id, type, status, workflow, prompt, negative_prompt, enhancement, seed, llm_generated, network, channel, nick)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO jobs (job_id, type, status, workflow, prompt, negative_prompt, enhancement, seed, llm_generated, network, channel, nick, input_images, strength)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		job.ID, string(job.Type), string(job.Status), job.Workflow,
 		job.Input.Prompt, job.Input.NegativePrompt, job.Input.Enhancement,
 		job.Input.Seed, job.Input.LLMGenerated,
 		job.Input.Network, job.Input.Channel, job.Input.Nick,
+		inputImages, job.Input.Strength,
 	)
 	return err
 }
@@ -166,6 +190,19 @@ func dbUpdateJobSafety(db *sqlx.DB, jobID, safety string) error {
 		`UPDATE jobs SET safety = ? WHERE job_id = ?`,
 		safety, jobID,
 	)
+	return err
+}
+
+// dbUpdateJobInputImages persists resolved edit-input upload coordinates
+// after processJob uploads them — the recovery re-submit seam. Deliberately
+// unfenced like jobs.safety: it touches only these columns and can never
+// contend with a terminal status write.
+func dbUpdateJobInputImages(db *sqlx.DB, jobID string, imgs []InputImageRef) error {
+	b, err := json.Marshal(imgs)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`UPDATE jobs SET input_images = ? WHERE job_id = ?`, string(b), jobID)
 	return err
 }
 
@@ -353,8 +390,21 @@ func jobFromDBJob(dbj *dbJob) *Job {
 			Network:        dbj.Network,
 			Channel:        dbj.Channel,
 			Nick:           dbj.Nick,
+			Strength:       dbj.Strength,
 		},
 		Error: ptrStr(dbj.Error),
+	}
+
+	// Resolved edit inputs: empty = never resolved (non-edit jobs, or a
+	// crash before the uploads) — leave nil so recovery treats the job as
+	// having nothing to re-submit.
+	if dbj.InputImages != "" {
+		var imgs []InputImageRef
+		if err := json.Unmarshal([]byte(dbj.InputImages), &imgs); err != nil {
+			loggerDB.Warn("unmarshaling persisted input_images", "job", dbj.JobID, "error", err.Error())
+		} else {
+			job.Input.InputImages = imgs
+		}
 	}
 
 	if dbj.CreatedAt != "" {

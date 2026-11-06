@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/jmoiron/sqlx"
 	logxi "github.com/mgutz/logxi/v1"
@@ -13,6 +15,74 @@ import (
 // loggerEditInputs is assigned in initLogger (logging.go) alongside the other
 // package loggers so every channel shares the same writer.
 var loggerEditInputs logxi.Logger
+
+// InputImageRef pairs the caller's original reference string (usr_/web_/gen_
+// or the data URI — provenance for the note + upload meta) with the ComfyUI
+// upload coordinates the bytes landed at.
+type InputImageRef struct {
+	Ref   string     `json:"ref"`
+	Comfy ComfyImage `json:"comfy"`
+}
+
+// extForDataMIME maps a data-URI mime to a filename extension ComfyUI's
+// picker recognizes.
+func extForDataMIME(mime string) string {
+	switch strings.TrimPrefix(mime, "data:") {
+	case "image/png":
+		return ".png"
+	case "image/webp":
+		return ".webp"
+	case "image/gif":
+		return ".gif"
+	case "image/bmp":
+		return ".bmp"
+	default:
+		return ".jpg"
+	}
+}
+
+// resolveEditInputs turns edit tool input_images entries into uploaded
+// ComfyUI coordinates: data URIs (dave-resolved usr_/web_ refs) decode and
+// upload; gen_ refs fetch from ComfyUI/imgsite and upload; anything else is
+// an error teaching the model the ref loop. Entries are resolved in order.
+func resolveEditInputs(ctx context.Context, db *sqlx.DB, cfg Config, jobID string, entries []string) ([]InputImageRef, error) {
+	var out []InputImageRef
+	for i, entry := range entries {
+		var (
+			data []byte
+			ext  = ".jpg"
+			ref  = entry
+		)
+		if strings.HasPrefix(entry, "data:") {
+			comma := strings.Index(entry, ",")
+			if comma < 0 {
+				return nil, fmt.Errorf("input_images[%d]: malformed data URI", i)
+			}
+			b64 := entry[comma+1:]
+			raw, err := base64.StdEncoding.DecodeString(b64)
+			if err != nil {
+				return nil, fmt.Errorf("input_images[%d]: decoding data URI: %v", i, err)
+			}
+			data = raw
+			ext = extForDataMIME(entry[:comma])
+		} else if _, _, ok := parseGenRef(entry); ok {
+			raw, err := fetchGenRefBytes(ctx, db, cfg.Comfy.BaseURL, entry)
+			if err != nil {
+				return nil, fmt.Errorf("input_images[%d]: %v", i, err)
+			}
+			data = raw
+			ext = ".png"
+		} else {
+			return nil, fmt.Errorf("input_images[%d]: %q is not an image ref — view the image first (view_image) and pass its ref (usr_/web_) or a gen_ ref from a generation result", i, entry)
+		}
+		comfy, err := uploadComfyImage(ctx, cfg.Comfy.BaseURL, data, fmt.Sprintf("edit_%s_%d%s", jobID, i, ext))
+		if err != nil {
+			return nil, fmt.Errorf("input_images[%d]: %v", i, err)
+		}
+		out = append(out, InputImageRef{Ref: ref, Comfy: comfy})
+	}
+	return out, nil
+}
 
 // fetchGenRefBytes resolves a gen_<jobid>_<n> ref to bytes: the job_images
 // row's ComfyUI /view coordinates first, the imgsite URL as fallback (WARN)

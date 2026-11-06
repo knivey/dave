@@ -27,6 +27,7 @@ type JobType string
 const (
 	JobTypeGenerate        JobType = "generate"
 	JobTypeEnhanceGenerate JobType = "enhance_generate"
+	JobTypeEdit            JobType = "edit"
 )
 
 type Job struct {
@@ -118,6 +119,12 @@ type JobInput struct {
 	Network string
 	Channel string
 	Nick    string
+	// InputImages carries the RESOLVED edit inputs (uploaded ComfyUI
+	// coordinates + the original ref strings for provenance) and Strength the
+	// edit denoise. Persisted (migration 005) so recovery re-submits with the
+	// same uploaded names without re-uploading.
+	InputImages []InputImageRef
+	Strength    *float64
 }
 
 type JobResult struct {

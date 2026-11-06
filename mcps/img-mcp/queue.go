@@ -139,6 +139,11 @@ type JobResult struct {
 type ImageData struct {
 	URL      string `json:"url,omitempty"`
 	MIMEType string `json:"mime_type"`
+	// Ref is the re-edit handle: gen_<jobid>_<ordinal> (output order).
+	// The model passes it back in edit_image's input_images to chain a
+	// result into the next edit. omitempty keeps non-job contexts clean —
+	// e.g. the edit tool's input echo and hand-built tool results.
+	Ref string `json:"ref,omitempty"`
 }
 
 // buildUploadMeta assembles the imgsite upload meta payload for a job.
@@ -960,6 +965,9 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 	for i, img := range comfyResult.Images {
 		imgData := ImageData{
 			MIMEType: guessMIMEType(img.Filename, "image/png"),
+			// gen_ ref: the model's re-edit handle for this image
+			// (passed back via edit_image's input_images).
+			Ref: fmt.Sprintf("gen_%s_%d", job.ID, i),
 		}
 
 		if rewriteNote != "" {
@@ -1332,6 +1340,9 @@ func (q *JobQueue) recoverRunningJob(_ context.Context, job *Job, comfyPromptID 
 	for i, img := range comfyResult.Images {
 		imgData := ImageData{
 			MIMEType: guessMIMEType(img.Filename, "image/png"),
+			// Same gen_ ref contract as processJob: a recovered job's
+			// results stay re-editable through the identical handles.
+			Ref: fmt.Sprintf("gen_%s_%d", job.ID, i),
 		}
 
 		if rewriteNote != "" {

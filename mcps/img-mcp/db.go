@@ -448,6 +448,9 @@ func buildJobResultFromDB(db *sqlx.DB, jobID string) (*JobResult, []ComfyImage, 
 		result.Images = append(result.Images, ImageData{
 			URL:      img.URL,
 			MIMEType: img.MIMEType,
+			// Same gen_ handles the live path stamped: the DB-rebuilt
+			// result (restart recovery / TTL path) stays re-editable.
+			Ref: fmt.Sprintf("gen_%s_%d", jobID, img.Ordinal),
 		})
 		comfyImages = append(comfyImages, ComfyImage{
 			Filename:  img.Filename,

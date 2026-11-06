@@ -399,3 +399,20 @@ func TestJobInputImagesRoundTrip(t *testing.T) {
 	require.NotNil(t, got.Input.Strength)
 	assert.Equal(t, 0.55, *got.Input.Strength)
 }
+
+// TestBuildJobResultFromDBIncludesRefs pins the DB-rebuild half of the
+// gen_ ref contract: a result reconstructed from persisted job_images rows
+// (the restart/TTL path WaitForJob-after-restart and result_getter take)
+// carries the same gen_<jobid>_<ordinal> handles the live path set, so a
+// result stays re-editable across a restart.
+func TestBuildJobResultFromDBIncludesRefs(t *testing.T) {
+	db := setupTestDB(t)
+	_, err := db.Exec(`INSERT INTO jobs (job_id, type, status, workflow, prompt) VALUES ('r1','generate','completed','w','p')`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO job_images (job_id, url, filename, subfolder, img_type, mime_type, ordinal) VALUES ('r1','https://img/a','a.png','','output','image/png',0)`)
+	require.NoError(t, err)
+	res, _, err := buildJobResultFromDB(db, "r1")
+	require.NotNil(t, res)
+	require.Len(t, res.Images, 1)
+	assert.Equal(t, "gen_r1_0", res.Images[0].Ref)
+}

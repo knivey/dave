@@ -1956,3 +1956,31 @@ func TestEditJobWithoutInputsFailsReadably(t *testing.T) {
 	assert.Contains(t, res.Error, "retry the edit")
 	assert.Empty(t, mockComfy.submittedPrompts(), "nothing must reach comfy — a default-image edit is worse than a failure")
 }
+
+// TestResultsCarryGenRefs pins the re-edit handle contract: every completed
+// image's result entry carries Ref = gen_<jobid>_<ordinal> (output order),
+// so the model can pass a prior result back into edit_image's input_images
+// without scraping URLs. This is also the sync generate_image path's only
+// exposure of its job identity.
+func TestResultsCarryGenRefs(t *testing.T) {
+	mockComfy := newMockComfyFlowServer(t)
+	mockComfy.serveHistoryImages(2)
+	up := newFakeUploadServer(t)
+	cfg := testConfig(mockComfy.URL())
+	wc := cfg.Workflows["test"]
+	wc.WorkflowPath = mustWriteWorkflow(t, t.TempDir())
+	cfg.Workflows["test"] = wc
+	cfg.Upload.URL = up.server.URL
+	q, stop := setupTestQueue(t, cfg)
+	defer stop()
+
+	job, err := q.Submit(JobTypeGenerate, "test", JobInput{Prompt: "a cat"})
+	require.NoError(t, err, "Submit")
+
+	result := q.WaitForJob(job.ID, 30*time.Second)
+	require.NotNil(t, result)
+	require.Empty(t, result.Error)
+	require.Len(t, result.Result.Images, 2)
+	assert.Equal(t, "gen_"+job.ID+"_0", result.Result.Images[0].Ref)
+	assert.Equal(t, "gen_"+job.ID+"_1", result.Result.Images[1].Ref)
+}

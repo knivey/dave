@@ -296,8 +296,22 @@ var imageHTTPClient = &http.Client{
 // imageHTTPClientTrusted skips ONLY the SSRF private-IP dial block, for
 // hosts the admin explicitly listed in trusted_image_hosts (imgsite
 // typically resolves privately). Every other download guarantee stays:
-// scheme, redirects, 30s timeout, size cap, content-type check.
-var imageHTTPClientTrusted = &http.Client{Timeout: 30 * time.Second}
+// scheme, 30s timeout, size cap, content-type check — and redirects are
+// NOT followed blind: the guarded client re-enters its checked dial on
+// every hop, so the trusted one must too — each redirect target's host
+// is re-checked against trusted_image_hosts (view_image URLs are
+// model-chosen, i.e. prompt-injectable via fetched pages; a bare client
+// would follow up to 10 hops to ANY host, private ranges included,
+// widening the bypass beyond what the admin listed).
+var imageHTTPClientTrusted = &http.Client{
+	Timeout: 30 * time.Second,
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if !trustedImageHost(req.URL.Hostname()) {
+			return fmt.Errorf("redirect to untrusted host %q blocked", req.URL.Host)
+		}
+		return nil
+	},
+}
 
 // trustedImageHost reports whether host exactly (case-insensitively) matches
 // a trusted_image_hosts entry. No wildcards, no suffix matching — a wildcard
@@ -686,7 +700,15 @@ func (cr *chatRunner) handleViewImage(turn *turnContext, call ToolCall) bool {
 		turn.Add(toolResultMsg(call.ID, "error: url must be an http(s) URL"))
 		return false
 	}
-	remaining := cr.cfg.MaxContextImages - countContextImages(turn.Messages())
+	// Budget check against the live turn. Tool results of this round are
+	// no concern — each call turn.Add's its own result inside the
+	// executeToolCalls loop, so countContextImages sees them. The ONLY
+	// lagging state is pendingInjections: view_image calls earlier in
+	// this same round have queued their image but it is not in
+	// turn.Messages() until the round's flush — without counting them,
+	// N parallel calls each check the same stale snapshot and exceed the
+	// cap by N-1 (persisted into the session until compaction).
+	remaining := cr.cfg.MaxContextImages - countContextImages(turn.Messages()) - len(cr.pendingInjections)
 	if remaining <= 0 {
 		turn.Add(toolResultMsg(call.ID, fmt.Sprintf(
 			"error: context image budget reached (max %d images in the conversation). Tell the user to start a new session.",

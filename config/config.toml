@@ -5,12 +5,13 @@
 #   quitmsg             (string)              Default quit message
 #   max_queue_depth     (int, default: 5)     Max queued requests per network
 #   maximagepixels      (int, default: 50000000) Max total pixels (width*height*framecount) for downloaded images; larger claims are skipped before decode (decompression-bomb guard)
-# trusted_image_hosts (string list, default []) — exact hostnames (no wildcards,
-#   case-insensitive) whose image downloads bypass the SSRF private-IP block.
-#   Needed when imgsite resolves privately (LAN/localhost) so dave can fetch its
-#   own gallery for view_image. Scheme, size and content-type checks still apply.
-# images_dir (string, default "data/images") — where conversation-image ref files
-#   are stored (view_image + user pastes).
+#   trusted_image_hosts (string list, default []) — exact hostnames (no wildcards,
+#     case-insensitive) whose image downloads bypass the SSRF private-IP block.
+#     Needed when imgsite resolves privately (LAN/localhost) so dave can fetch its
+#     own gallery for view_image. Scheme, size and content-type checks still apply,
+#     and redirect targets must also be trusted hosts.
+#   images_dir (string, default "data/images") — where conversation-image ref files
+#     are stored (view_image + user pastes).
 #   sessions_display_limit (int, default: 10) Max sessions shown in sessions list command
 #   hidden_tools        (string array)        Tool names to hide from IRC notifications (default: ["register_background_job", "check_ban_history", "query_channel_logs", "respond"])
 #   disabled_builtins   (string array)        Builtin commands to disable (e.g. ["support", "mystats"])

@@ -15,6 +15,7 @@ import (
 	"image/png"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
 	"strings"
 	"testing"
 	"time"
@@ -808,6 +809,31 @@ func TestTrustedImageHostCaseInsensitive(t *testing.T) {
 	assert.False(t, trustedImageHost("sub.img.example.com"), "no suffix matching")
 }
 
+func TestImageHTTPClientTrustedRedirectCheck(t *testing.T) {
+	// The trusted client skips ONLY the private-IP dial block for the
+	// FIRST URL's host; every redirect hop must re-qualify against
+	// trusted_image_hosts or the bypass widens to a chain of arbitrary
+	// hosts (view_image URLs are model-chosen, i.e. prompt-injectable via
+	// fetched pages). Both httptest servers share the loopback host, so no
+	// e2e redirect test can discriminate trusted from untrusted — pin the
+	// CheckRedirect hook directly with synthetic requests instead.
+	check := imageHTTPClientTrusted.CheckRedirect
+	require.NotNil(t, check, "trusted client must re-check redirect targets")
+
+	config.TrustedImageHosts = nil
+	err := check(&http.Request{URL: &neturl.URL{Scheme: "http", Host: "other.example"}}, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "redirect to untrusted host")
+	assert.Contains(t, err.Error(), "other.example")
+
+	config.TrustedImageHosts = []string{"img.example.com"}
+	t.Cleanup(func() { config.TrustedImageHosts = nil })
+	assert.NoError(t, check(&http.Request{URL: &neturl.URL{Scheme: "http", Host: "img.example.com"}}, nil))
+	// Hostname identity, same as the dial-time check: case-insensitive,
+	// port-insensitive.
+	assert.NoError(t, check(&http.Request{URL: &neturl.URL{Scheme: "http", Host: "IMG.Example.com:8443"}}, nil))
+}
+
 func TestFetchAndConvertImage(t *testing.T) {
 	srv := newTestImageServer(t)
 	defer srv.Close()
@@ -1285,6 +1311,57 @@ func TestHandleViewImageBudgetRefusal(t *testing.T) {
 	assert.Equal(t, RoleTool, last.Role, "over budget: tool result refusal, no injection")
 	assert.Contains(t, last.Content, "budget reached")
 	assert.Empty(t, cr.pendingInjections)
+}
+
+func TestHandleViewImageSameRoundBudgetRefusal(t *testing.T) {
+	// N view_image calls in ONE executeToolCalls round all snapshot the
+	// same turn.Messages() — the queued-but-unflushed injections live only
+	// in cr.pendingInjections until the round's flush. The budget check
+	// must count them or the round exceeds MaxContextImages by N-1 (and
+	// the overage persists in the session until compaction).
+	setupTestDB(t)
+	config.ImagesDir = t.TempDir()
+	t.Cleanup(func() { config.ImagesDir = "" })
+	config.TrustedImageHosts = []string{"127.0.0.1"}
+	t.Cleanup(func() { config.TrustedImageHosts = nil })
+
+	srv := newTestImageServer(t)
+	defer srv.Close()
+
+	// Cap 2 with one pre-existing image: the first call fits (2-1-0=1),
+	// the second must be refused (2-1-1=0) — its only signal that the
+	// first queued an image is pendingInjections.
+	cr := newImageViewTestRunner(t, AIConfig{DetectImages: true, MaxContextImages: 2, ImageFormat: "jpg", ImageQuality: 75}, 9)
+	turn := newTurnContext(9, nil)
+	turn.Add(ChatMessage{Role: RoleUser, MultiContent: []MessagePart{
+		{Type: PartTypeImageURL, ImageURL: &ImageURL{URL: "data:image/jpeg;base64,AAA"}},
+	}})
+	args, _ := json.Marshal(map[string]string{"url": srv.URL + "/pic.jpg"})
+	cr.executeToolCalls(turn, []ToolCall{
+		{ID: "c1", Type: "function", Function: FunctionCall{Name: viewImageToolName, Arguments: string(args)}},
+		{ID: "c2", Type: "function", Function: FunctionCall{Name: viewImageToolName, Arguments: string(args)}},
+	})
+
+	successes, refusals := 0, 0
+	for _, msg := range turn.Messages() {
+		if msg.Role != RoleTool {
+			continue
+		}
+		switch {
+		case strings.Contains(msg.Content, "Image loaded"):
+			successes++
+		case strings.Contains(msg.Content, "budget reached"):
+			refusals++
+		}
+	}
+	assert.Equal(t, 1, successes, "first call fits the remaining budget")
+	assert.Equal(t, 1, refusals, "second call must see the first's pending injection")
+
+	// Exactly one image entered the context: the cap holds end-of-round.
+	assert.Equal(t, 2, countContextImages(turn.Messages()), "pre-existing 1 + injected 1 = cap")
+	assert.Empty(t, cr.pendingInjections, "the one queued injection was flushed")
+	last := turn.Messages()[len(turn.Messages())-1]
+	assert.Equal(t, RoleUser, last.Role, "flushed injection is the final message")
 }
 
 func TestHandleViewImageEphemeralRejected(t *testing.T) {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -1685,15 +1686,24 @@ trusted_image_hosts = ["img.example.com", "IMG.other.host"]
 }
 
 func TestLoadConfigDirRejectsWildcardTrustedImageHost(t *testing.T) {
-	for _, host := range []string{"*.example.com", "img.*.com", "?"} {
-		t.Run(host, func(t *testing.T) {
-			dir := createTestConfigDir(t, "trusted_image_hosts = [\""+host+"\"]\n", nil)
+	for _, tc := range []struct {
+		entry   string
+		wantErr string
+	}{
+		{entry: "*.example.com", wantErr: "wildcard"},
+		{entry: "img.*.com", wantErr: "wildcard"},
+		{entry: "?", wantErr: "wildcard"},
+		{entry: "", wantErr: "empty hostname"},
+		{entry: "   ", wantErr: "empty hostname"},
+	} {
+		t.Run(fmt.Sprintf("entry %q", tc.entry), func(t *testing.T) {
+			dir := createTestConfigDir(t, "trusted_image_hosts = [\""+tc.entry+"\"]\n", nil)
 			defer os.RemoveAll(dir)
 
 			_, err := loadConfigDir(dir)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "trusted_image_hosts")
-			assert.Contains(t, err.Error(), "wildcard")
+			assert.Contains(t, err.Error(), tc.wantErr)
 		})
 	}
 }

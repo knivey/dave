@@ -420,6 +420,18 @@ func TestMergeConsecutiveSystemMessages(t *testing.T) {
 			},
 		},
 		{
+			name: "run of all-empty contents keeps one empty system row",
+			in: []ChatMessage{
+				{Role: RoleSystem, Content: ""},
+				{Role: RoleSystem, Content: ""},
+				{Role: RoleUser, Content: "u"},
+			},
+			want: []ChatMessage{
+				{Role: RoleSystem, Content: ""},
+				{Role: RoleUser, Content: "u"},
+			},
+		},
+		{
 			name: "developer rows never merge (distinct wire role)",
 			in: []ChatMessage{
 				{Role: RoleSystem, Content: "sys"},

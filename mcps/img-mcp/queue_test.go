@@ -776,7 +776,7 @@ func TestCancelDuringUploadKeepsJobCancelled(t *testing.T) {
 	q, cleanup := setupTestQueue(t, cfg) // single real worker
 	defer cleanup()
 
-	job, err := q.Submit(JobTypeGenerate, "test", JobInput{Prompt: "a cat", OutputFormat: "url"})
+	job, err := q.Submit(JobTypeGenerate, "test", JobInput{Prompt: "a cat"})
 	require.NoError(t, err, "Submit")
 
 	select {
@@ -790,7 +790,7 @@ func TestCancelDuringUploadKeepsJobCancelled(t *testing.T) {
 	// Drain the parked upload, then prove the worker finished job's
 	// processing by completing a canary behind it (one worker ⇒ serial).
 	close(up.release)
-	canary, err := q.Submit(JobTypeGenerate, "test", JobInput{Prompt: "a dog", OutputFormat: "base64"})
+	canary, err := q.Submit(JobTypeGenerate, "test", JobInput{Prompt: "a dog"})
 	require.NoError(t, err, "Submit canary")
 	waitForJobDone(t, canary, 15*time.Second)
 	assertJobStatus(t, q, canary.ID, StatusCompleted)
@@ -822,7 +822,7 @@ func TestRecoverRunningJobUploadFailureClosesDone(t *testing.T) {
 	cfg.Queue.MaxWorkers = 0
 	q := manualQueueLiteral(t, cfg)
 
-	job := submitTestJob(t, q) // OutputFormat "" -> url -> upload fails
+	job := submitTestJob(t, q) // results are always url -> the 500 upload fails
 	markRunningInMemoryAndDB(t, q, job, "test-prompt-1")
 
 	q.wg.Add(1)
@@ -945,9 +945,8 @@ func TestProcessJobVetOverlapsGenerationAndUploadAwaitsIt(t *testing.T) {
 	defer cleanup()
 
 	job, err := q.Submit(JobTypeGenerate, "test", JobInput{
-		Prompt:       "a cat sitting on a mat",
-		Network:      "graped",
-		OutputFormat: "url",
+		Prompt:  "a cat sitting on a mat",
+		Network: "graped",
 	})
 	require.NoError(t, err, "Submit")
 
@@ -1017,9 +1016,8 @@ func TestProcessJobVetFailureStillCompletesJob(t *testing.T) {
 	defer cleanup()
 
 	job, err := q.Submit(JobTypeGenerate, "test", JobInput{
-		Prompt:       "a cat sitting on a mat",
-		Network:      "graped",
-		OutputFormat: "url",
+		Prompt:  "a cat sitting on a mat",
+		Network: "graped",
 	})
 	require.NoError(t, err, "Submit")
 
@@ -1098,16 +1096,17 @@ func TestProcessJobPersistsSafetyVerdict(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mockComfy := newMockComfyFlowServer(t)
+			up := newFakeUploadServer(t)
 			vet := newVetStubServer(t, tt.vetStatus, tt.vetContent)
 			cfg := safetyQueueConfig(t, mockComfy.URL(), vet, tt.skipNetworks)
+			cfg.Upload.URL = up.server.URL
 
 			q, cleanup := setupTestQueue(t, cfg)
 			defer cleanup()
 
 			job, err := q.Submit(JobTypeGenerate, "test", JobInput{
-				Prompt:       "a cat sitting on a mat",
-				Network:      tt.network,
-				OutputFormat: "base64", // upload is not under test here
+				Prompt:  "a cat sitting on a mat",
+				Network: tt.network,
 			})
 			require.NoError(t, err, "Submit")
 
@@ -1142,13 +1141,15 @@ func restartRecoverJob(t *testing.T, q *JobQueue, jobID string) *Job {
 // final: "vetted but unresolved" must not be re-classified either).
 func TestRecoverRunningJobUsesPersistedSafety(t *testing.T) {
 	mockComfy := newMockComfyFlowServer(t)
+	up := newFakeUploadServer(t)
 	vet := newVetStubServer(t, http.StatusOK, `{"safe":true,"reason":"fine"}`) // would say safe...
 	cfg := safetyQueueConfig(t, mockComfy.URL(), vet, nil)
+	cfg.Upload.URL = up.server.URL
 	cfg.Queue.MaxWorkers = 0
 	q := manualQueueLiteral(t, cfg)
 
 	job, err := q.Submit(JobTypeGenerate, "test", JobInput{
-		Prompt: "a cat", Network: "graped", OutputFormat: "base64",
+		Prompt: "a cat", Network: "graped",
 	})
 	require.NoError(t, err, "Submit")
 	markRunningInMemoryAndDB(t, q, job, "test-prompt-1")
@@ -1179,13 +1180,15 @@ func TestRecoverRunningJobReVetsWhenUnresolved(t *testing.T) {
 	mockComfy := newMockComfyFlowServer(t)
 	const enhancedPrompt = "an enhanced majestic cat, studio lighting"
 	mockComfy.serveViewData(exifWebPWithPrompt(t, enhancedPrompt))
+	up := newFakeUploadServer(t)
 	vet := newVetStubServer(t, http.StatusOK, `{"safe":true,"reason":"fine"}`)
 	cfg := safetyQueueConfig(t, mockComfy.URL(), vet, nil)
+	cfg.Upload.URL = up.server.URL
 	cfg.Queue.MaxWorkers = 0
 	q := manualQueueLiteral(t, cfg)
 
 	job, err := q.Submit(JobTypeGenerate, "test", JobInput{
-		Prompt: "a cat", Network: "graped", OutputFormat: "base64",
+		Prompt: "a cat", Network: "graped",
 	})
 	require.NoError(t, err, "Submit")
 	markRunningInMemoryAndDB(t, q, job, "test-prompt-1")
@@ -1217,13 +1220,15 @@ func TestRecoverRunningJobReVetsWhenUnresolved(t *testing.T) {
 // allowed_networks rule, not a verdict.
 func TestRecoverRunningJobSkipNetworksDoesNotReVet(t *testing.T) {
 	mockComfy := newMockComfyFlowServer(t)
+	up := newFakeUploadServer(t)
 	vet := newVetStubServer(t, http.StatusOK, `{"safe":true,"reason":"fine"}`)
 	cfg := safetyQueueConfig(t, mockComfy.URL(), vet, []string{"libera"})
+	cfg.Upload.URL = up.server.URL
 	cfg.Queue.MaxWorkers = 0
 	q := manualQueueLiteral(t, cfg)
 
 	job, err := q.Submit(JobTypeGenerate, "test", JobInput{
-		Prompt: "a cat", Network: "Libera", OutputFormat: "base64",
+		Prompt: "a cat", Network: "Libera",
 	})
 	require.NoError(t, err, "Submit")
 	markRunningInMemoryAndDB(t, q, job, "test-prompt-1")
@@ -1269,7 +1274,6 @@ func TestProcessJobRewritesNoteBeforeUpload(t *testing.T) {
 		Network:      "graped",
 		Channel:      "#test",
 		Nick:         "user1",
-		OutputFormat: "url",
 	})
 	require.NoError(t, err, "Submit")
 
@@ -1355,9 +1359,8 @@ func TestProcessJobRewritesEveryImageNote(t *testing.T) {
 	defer cleanup()
 
 	job, err := q.Submit(JobTypeGenerate, "test", JobInput{
-		Prompt:       "a cat",
-		Network:      "graped",
-		OutputFormat: "url",
+		Prompt:  "a cat",
+		Network: "graped",
 	})
 	require.NoError(t, err, "Submit")
 
@@ -1409,7 +1412,7 @@ func TestProcessJobNoteRewriteSkipsNonWebp(t *testing.T) {
 	defer cleanup()
 
 	job, err := q.Submit(JobTypeGenerate, "test", JobInput{
-		Prompt: "a cat", Network: "graped", OutputFormat: "url",
+		Prompt: "a cat", Network: "graped",
 	})
 	require.NoError(t, err, "Submit")
 
@@ -1472,9 +1475,8 @@ func TestProcessJobNoteRewriteCarriesNSFWFirstPass(t *testing.T) {
 	defer cleanup()
 
 	job, err := q.Submit(JobTypeEnhanceGenerate, "test", JobInput{
-		Prompt:       "a cat",
-		Network:      "graped",
-		OutputFormat: "url",
+		Prompt:  "a cat",
+		Network: "graped",
 	})
 	require.NoError(t, err, "Submit")
 
@@ -1557,9 +1559,8 @@ func TestProcessJobNoteRewriteSkipNetworksOmitsNSFW(t *testing.T) {
 	defer cleanup()
 
 	job, err := q.Submit(JobTypeEnhanceGenerate, "test", JobInput{
-		Prompt:       "a cat",
-		Network:      "Libera",
-		OutputFormat: "url",
+		Prompt:  "a cat",
+		Network: "Libera",
 	})
 	require.NoError(t, err, "Submit")
 
@@ -1626,7 +1627,6 @@ func TestRecoverRunningJobCarriesNSFWFlagAcrossRewrite(t *testing.T) {
 		Network:      "graped",
 		Channel:      "#test",
 		Nick:         "user1",
-		OutputFormat: "url",
 	})
 	require.NoError(t, err, "Submit")
 	markRunningInMemoryAndDB(t, q, job, "test-prompt-1")
@@ -1695,7 +1695,7 @@ func TestProcessJobNoteRewriteOmitsUnresolvedSafety(t *testing.T) {
 			defer cleanup()
 
 			job, err := q.Submit(JobTypeGenerate, "test", JobInput{
-				Prompt: "a cat", Network: tt.network, OutputFormat: "url",
+				Prompt: "a cat", Network: tt.network,
 			})
 			require.NoError(t, err, "Submit")
 
@@ -1751,7 +1751,6 @@ func TestRecoverRunningJobRewritesNoteWithPersistedSafety(t *testing.T) {
 		Network:      "graped",
 		Channel:      "#test",
 		Nick:         "user1",
-		OutputFormat: "url",
 	})
 	require.NoError(t, err, "Submit")
 	markRunningInMemoryAndDB(t, q, job, "test-prompt-1")

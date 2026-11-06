@@ -765,17 +765,18 @@ func (m *mockComfyFlowServer) URL() string {
 
 func TestProcessJobSubmitsPromptNote(t *testing.T) {
 	mockComfy := newMockComfyFlowServer(t)
+	up := newFakeUploadServer(t)
 	cfg := testConfig(mockComfy.URL())
 	wc := cfg.Workflows["test"]
 	wc.WorkflowPath = mustWriteWorkflow(t, t.TempDir())
 	cfg.Workflows["test"] = wc
+	cfg.Upload.URL = up.server.URL
 	q, cleanup := setupTestQueue(t, cfg)
 	defer cleanup()
 
 	job, err := q.Submit(JobTypeGenerate, "test", JobInput{
 		Prompt:       "a cat sitting on a mat",
 		LLMGenerated: true,
-		OutputFormat: "base64",
 	})
 	require.NoError(t, err, "Submit")
 
@@ -845,12 +846,14 @@ func newMockEnhanceServer(t *testing.T) *httptest.Server {
 
 func TestProcessJobEnhanceKeepsOriginalPromptInNote(t *testing.T) {
 	mockComfy := newMockComfyFlowServer(t)
+	up := newFakeUploadServer(t)
 	enhServer := newMockEnhanceServer(t)
 
 	cfg := testConfig(mockComfy.URL())
 	wc := cfg.Workflows["test"]
 	wc.WorkflowPath = mustWriteWorkflow(t, t.TempDir())
 	cfg.Workflows["test"] = wc
+	cfg.Upload.URL = up.server.URL
 	cfg.Enhancements = map[string]EnhancementConfig{
 		"default": {
 			BaseURL:      enhServer.URL,
@@ -865,7 +868,6 @@ func TestProcessJobEnhanceKeepsOriginalPromptInNote(t *testing.T) {
 	job, err := q.Submit(JobTypeEnhanceGenerate, "test", JobInput{
 		Prompt:       "a cat sitting on a mat",
 		LLMGenerated: false,
-		OutputFormat: "base64",
 	})
 	require.NoError(t, err, "Submit")
 
@@ -908,9 +910,11 @@ func TestProcessJobEnhanceEmbedsReasoningInNote(t *testing.T) {
 	})
 
 	cfg := testConfig(mockComfy.URL())
+	up := newFakeUploadServer(t)
 	wc := cfg.Workflows["test"]
 	wc.WorkflowPath = mustWriteWorkflow(t, t.TempDir())
 	cfg.Workflows["test"] = wc
+	cfg.Upload.URL = up.server.URL
 	cfg.Enhancements = map[string]EnhancementConfig{
 		"default": {
 			BaseURL:      enhServer.URL + "/v1",
@@ -925,8 +929,7 @@ func TestProcessJobEnhanceEmbedsReasoningInNote(t *testing.T) {
 	defer cleanup()
 
 	job, err := q.Submit(JobTypeEnhanceGenerate, "test", JobInput{
-		Prompt:       "a cat sitting on a mat",
-		OutputFormat: "base64",
+		Prompt: "a cat sitting on a mat",
 	})
 	require.NoError(t, err, "Submit")
 
@@ -1058,6 +1061,7 @@ func TestPrepareComfyWorkflowStripsEnhancementInstructions(t *testing.T) {
 // line, and prepareComfyWorkflow strips the node before submission.
 func TestProcessJobEnhanceUsesWorkflowInstructions(t *testing.T) {
 	mockComfy := newMockComfyFlowServer(t)
+	up := newFakeUploadServer(t)
 	enhServer, rec := newEnhancementStubServer(t, EnhancementResponse{
 		EnhancedPrompt: "a majestic cat, studio lighting, 4k",
 		NegativePrompt: "blurry",
@@ -1079,6 +1083,7 @@ func TestProcessJobEnhanceUsesWorkflowInstructions(t *testing.T) {
 	wc.WorkflowPath = filepath.Join(dir, "wf.json")
 	require.NoError(t, os.WriteFile(wc.WorkflowPath, data, 0644))
 	cfg.Workflows["test"] = wc
+	cfg.Upload.URL = up.server.URL
 	cfg.Enhancements = map[string]EnhancementConfig{
 		"default": {
 			BaseURL:      enhServer.URL + "/v1",
@@ -1092,8 +1097,7 @@ func TestProcessJobEnhanceUsesWorkflowInstructions(t *testing.T) {
 	defer cleanup()
 
 	job, err := q.Submit(JobTypeEnhanceGenerate, "test", JobInput{
-		Prompt:       "a cat sitting on a mat",
-		OutputFormat: "base64",
+		Prompt: "a cat sitting on a mat",
 	})
 	require.NoError(t, err, "Submit")
 

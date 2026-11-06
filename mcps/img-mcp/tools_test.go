@@ -104,7 +104,7 @@ func TestCallGenerationToolsWithoutInjectFields(t *testing.T) {
 		t.Run(tool, func(t *testing.T) {
 			res, err := cs.CallTool(ctx, &mcp.CallToolParams{
 				Name:      tool,
-				Arguments: map[string]any{"prompt": "a cat", "output_format": "base64"},
+				Arguments: map[string]any{"prompt": "a cat"},
 			})
 			require.NoError(t, err, "tool call must pass schema validation without inject fields")
 			var texts []string
@@ -114,6 +114,58 @@ func TestCallGenerationToolsWithoutInjectFields(t *testing.T) {
 				}
 			}
 			require.False(t, res.IsError, "tool call should not return an error result: %s", strings.Join(texts, "; "))
+		})
+	}
+}
+
+// toolInputSchemaForTest returns the ADVERTISED input schema of the named
+// tool — the wire-level map an MCP client receives from ListTools, not the
+// struct-level jsonschema inference. The server is built through the same
+// createFullServer path production uses (the one flavor that registers all
+// four generation tools) and served over in-memory transports, mirroring
+// TestCallGenerationToolsWithoutInjectFields.
+func toolInputSchemaForTest(t *testing.T, name string) map[string]any {
+	t.Helper()
+	cfg := testConfig("http://127.0.0.1:0")
+	h := NewToolHandlers(cfg, queuedTestQueue(t))
+	server := createFullServer(cfg, h)
+
+	ct, st := mcp.NewInMemoryTransports()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go server.Run(ctx, st)
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	require.NoError(t, err, "connect")
+	t.Cleanup(func() { cs.Close() })
+
+	res, err := cs.ListTools(ctx, nil)
+	require.NoError(t, err, "ListTools")
+	for _, tool := range res.Tools {
+		if tool.Name == name {
+			schema, ok := tool.InputSchema.(map[string]any)
+			require.True(t, ok, "tool %s: advertised input schema must be a map (got %T)", name, tool.InputSchema)
+			return schema
+		}
+	}
+	t.Fatalf("tool %q not found in the full server's tool list", name)
+	return nil
+}
+
+// TestGenerationToolsHaveNoOutputFormat pins the owner ruling: output_format
+// (result delivery: url/base64/both) was never once used by any caller, so
+// it is dropped from every generation tool's advertised input — results are
+// always URLs.
+func TestGenerationToolsHaveNoOutputFormat(t *testing.T) {
+	for _, name := range []string{"generate_image", "generate_image_async", "enhance_and_generate", "enhance_and_generate_async"} {
+		t.Run(name, func(t *testing.T) {
+			schema := toolInputSchemaForTest(t, name)
+			props, ok := schema["properties"].(map[string]any)
+			require.True(t, ok, "tool %s must declare properties", name)
+			assert.NotContains(t, props, "output_format",
+				"output_format is dropped from generation tools (owner ruling, never used)")
+			assert.NotContains(t, props, "base64")
 		})
 	}
 }
@@ -173,7 +225,7 @@ func TestJobReadersRaceFreeWhileCompleting(t *testing.T) {
 		q.mu.Unlock()
 
 		q.mu.Lock()
-		job.Result = &JobResult{Images: []ImageData{{MIMEType: "image/png", Base64: "eA=="}}}
+		job.Result = &JobResult{Images: []ImageData{{MIMEType: "image/png", URL: "https://img.example.com/img.png"}}}
 		job.Status = StatusCompleted
 		job.CompletedAt = &now
 		q.mu.Unlock()
@@ -261,7 +313,7 @@ func TestGenerateToolsSyncPassProvenance(t *testing.T) {
 			name: "generate_image",
 			call: func(t *testing.T, h *ToolHandlers) error {
 				_, out, err := h.handleGenerateImage(context.Background(), nil,
-					GenerateImageInput{Prompt: "a cat", Network: "libera", Channel: "#dave", Nick: "knivey", OutputFormat: "base64"})
+					GenerateImageInput{Prompt: "a cat", Network: "libera", Channel: "#dave", Nick: "knivey"})
 				assert.Equal(t, "completed", out.Status)
 				return err
 			},
@@ -270,7 +322,7 @@ func TestGenerateToolsSyncPassProvenance(t *testing.T) {
 			name: "enhance_and_generate",
 			call: func(t *testing.T, h *ToolHandlers) error {
 				_, out, err := h.handleEnhanceAndGenerate(context.Background(), nil,
-					EnhanceAndGenerateInput{Prompt: "a cat", Network: "libera", Channel: "#dave", Nick: "knivey", OutputFormat: "base64"})
+					EnhanceAndGenerateInput{Prompt: "a cat", Network: "libera", Channel: "#dave", Nick: "knivey"})
 				assert.Equal(t, "completed", out.Status)
 				return err
 			},
@@ -282,6 +334,7 @@ func TestGenerateToolsSyncPassProvenance(t *testing.T) {
 			wc := cfg.Workflows["test"]
 			wc.WorkflowPath = mustWriteWorkflow(t, t.TempDir())
 			cfg.Workflows["test"] = wc
+			cfg.Upload.URL = newFakeUploadServer(t).server.URL
 			cfg.Enhancements = map[string]EnhancementConfig{
 				"default": {
 					BaseURL:      newMockEnhanceServer(t).URL,
@@ -428,7 +481,7 @@ func TestGenerateToolsSyncPassLLMGeneratedFlag(t *testing.T) {
 			name: "generate_image",
 			call: func(t *testing.T, h *ToolHandlers) error {
 				_, out, err := h.handleGenerateImage(context.Background(), nil,
-					GenerateImageInput{Prompt: "a cat", LLMGenerated: true, OutputFormat: "base64"})
+					GenerateImageInput{Prompt: "a cat", LLMGenerated: true})
 				assert.Equal(t, "completed", out.Status)
 				return err
 			},
@@ -437,7 +490,7 @@ func TestGenerateToolsSyncPassLLMGeneratedFlag(t *testing.T) {
 			name: "enhance_and_generate",
 			call: func(t *testing.T, h *ToolHandlers) error {
 				_, out, err := h.handleEnhanceAndGenerate(context.Background(), nil,
-					EnhanceAndGenerateInput{Prompt: "a cat", LLMGenerated: true, OutputFormat: "base64"})
+					EnhanceAndGenerateInput{Prompt: "a cat", LLMGenerated: true})
 				assert.Equal(t, "completed", out.Status)
 				return err
 			},
@@ -449,6 +502,7 @@ func TestGenerateToolsSyncPassLLMGeneratedFlag(t *testing.T) {
 			wc := cfg.Workflows["test"]
 			wc.WorkflowPath = mustWriteWorkflow(t, t.TempDir())
 			cfg.Workflows["test"] = wc
+			cfg.Upload.URL = newFakeUploadServer(t).server.URL
 			cfg.Enhancements = map[string]EnhancementConfig{
 				"default": {
 					BaseURL:      newMockEnhanceServer(t).URL,

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -289,8 +288,4 @@ func guessMIMEType(filename string, fallback string) string {
 		return fallback
 	}
 	return mt
-}
-
-func encodeBase64(data []byte) string {
-	return base64.StdEncoding.EncodeToString(data)
 }

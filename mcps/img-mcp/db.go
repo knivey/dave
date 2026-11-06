@@ -36,8 +36,11 @@ type dbJob struct {
 	NegativePrompt string `db:"negative_prompt"`
 	Enhancement    string `db:"enhancement"`
 	Seed           *int64 `db:"seed"`
-	OutputFormat   string `db:"output_format"`
-	LLMGenerated   bool   `db:"llm_generated"`
+	// Vestige: the jobs.output_format column is no longer written (removed
+	// from JobInput — results are always url; new rows take the 'url'
+	// DEFAULT) but old rows still carry values, so the scan stays.
+	OutputFormat string `db:"output_format"`
+	LLMGenerated bool   `db:"llm_generated"`
 	// Network/Channel/Nick are IRC provenance for the imgsite upload meta.
 	// Insert/recovery-only columns: no terminal UPDATE statement touches
 	// them, so they cannot interfere with the terminal-update fencing.
@@ -110,12 +113,16 @@ func closeDB(db *sqlx.DB) {
 }
 
 func dbInsertJob(db *sqlx.DB, job *Job) error {
+	// output_format is deliberately absent from the column list: the field
+	// was removed from JobInput (owner ruling — never used, results are
+	// always url), so new rows take the column's 'url' DEFAULT. The column
+	// itself stays for old rows; dbJob still scans it as a vestige.
 	_, err := db.Exec(
-		`INSERT INTO jobs (job_id, type, status, workflow, prompt, negative_prompt, enhancement, seed, output_format, llm_generated, network, channel, nick)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO jobs (job_id, type, status, workflow, prompt, negative_prompt, enhancement, seed, llm_generated, network, channel, nick)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		job.ID, string(job.Type), string(job.Status), job.Workflow,
 		job.Input.Prompt, job.Input.NegativePrompt, job.Input.Enhancement,
-		job.Input.Seed, job.Input.OutputFormat, job.Input.LLMGenerated,
+		job.Input.Seed, job.Input.LLMGenerated,
 		job.Input.Network, job.Input.Channel, job.Input.Nick,
 	)
 	return err
@@ -323,7 +330,6 @@ func jobFromDBJob(dbj *dbJob) *Job {
 			NegativePrompt: dbj.NegativePrompt,
 			Enhancement:    dbj.Enhancement,
 			Seed:           dbj.Seed,
-			OutputFormat:   dbj.OutputFormat,
 			LLMGenerated:   dbj.LLMGenerated,
 			Network:        dbj.Network,
 			Channel:        dbj.Channel,

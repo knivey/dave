@@ -105,7 +105,6 @@ type JobInput struct {
 	NegativePrompt string
 	Enhancement    string
 	Seed           *int64
-	OutputFormat   string
 	// LLMGenerated records whether the prompt was composed by an LLM tool
 	// call (dave injects _dave_inject_llm_generated=true on that path)
 	// versus typed directly by the IRC user. Persisted so restart-recovered
@@ -127,7 +126,6 @@ type JobResult struct {
 
 type ImageData struct {
 	URL      string `json:"url,omitempty"`
-	Base64   string `json:"base64,omitempty"`
 	MIMEType string `json:"mime_type"`
 }
 
@@ -845,16 +843,10 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 		return
 	}
 
-	outputFormat := job.Input.OutputFormat
-	if outputFormat == "" {
-		outputFormat = "url"
-	}
-
 	loggerQueue.Info("generation complete",
 		"job_id", job.ID,
 		"prompt_id", promptID,
 		"images", len(comfyResult.Images),
-		"output_format", outputFormat,
 	)
 
 	jobResult := &JobResult{}
@@ -887,9 +879,7 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 	// submit-time fields plus the now-resolved verdict — and baked into the
 	// image bytes BEFORE hashing/uploading, so the bytes imgsite receives,
 	// stores, and sha256-dedups are the enriched bytes (rewrite → sha256 →
-	// upload; the site computes the hash from what it receives). Applied to
-	// every output format, not just uploads: base64 deliveries carry the same
-	// enriched artifact the gallery would.
+	// upload; the site computes the hash from what it receives).
 	rewriteNote, noteErr := buildPromptNoteWithSafety(job, enhancementReasoning, jobSafety, noteNSFW)
 	if noteErr != nil {
 		// Unreachable in practice (marshaling plain strings); degrade like
@@ -911,25 +901,12 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 			comfyImgs = append(comfyImgs, comfyResult.ComfyImages[i])
 		}
 
-		switch outputFormat {
-		case "url":
-			url, err := uploadImage(cfg, img.Data, img.Filename, uploadMeta)
-			if err != nil {
-				q.failJob(job, fmt.Sprintf("upload failed: %v", err))
-				return
-			}
-			imgData.URL = url
-		case "base64":
-			imgData.Base64 = encodeBase64(img.Data)
-		case "both":
-			url, err := uploadImage(cfg, img.Data, img.Filename, uploadMeta)
-			if err != nil {
-				q.failJob(job, fmt.Sprintf("upload failed: %v", err))
-				return
-			}
-			imgData.URL = url
-			imgData.Base64 = encodeBase64(img.Data)
+		url, err := uploadImage(cfg, img.Data, img.Filename, uploadMeta)
+		if err != nil {
+			q.failJob(job, fmt.Sprintf("upload failed: %v", err))
+			return
 		}
+		imgData.URL = url
 
 		jobResult.Images = append(jobResult.Images, imgData)
 	}
@@ -1211,11 +1188,6 @@ func (q *JobQueue) recoverRunningJob(_ context.Context, job *Job, comfyPromptID 
 		return
 	}
 
-	outputFormat := job.Input.OutputFormat
-	if outputFormat == "" {
-		outputFormat = "url"
-	}
-
 	// Safety verdict on the recovery path (same jobSafety shape processJob
 	// produces for the EXIF rewrite / upload meta): a verdict persisted
 	// before the crash is reused as-is — never re-vetted, an "unknown" as
@@ -1301,25 +1273,12 @@ func (q *JobQueue) recoverRunningJob(_ context.Context, job *Job, comfyPromptID 
 			comfyImgs = append(comfyImgs, comfyResult.ComfyImages[i])
 		}
 
-		switch outputFormat {
-		case "url":
-			url, err := uploadImage(cfg, img.Data, img.Filename, uploadMeta)
-			if err != nil {
-				q.failJob(job, fmt.Sprintf("upload failed during recovery: %v", err))
-				return
-			}
-			imgData.URL = url
-		case "base64":
-			imgData.Base64 = encodeBase64(img.Data)
-		case "both":
-			url, err := uploadImage(cfg, img.Data, img.Filename, uploadMeta)
-			if err != nil {
-				q.failJob(job, fmt.Sprintf("upload failed during recovery: %v", err))
-				return
-			}
-			imgData.URL = url
-			imgData.Base64 = encodeBase64(img.Data)
+		url, err := uploadImage(cfg, img.Data, img.Filename, uploadMeta)
+		if err != nil {
+			q.failJob(job, fmt.Sprintf("upload failed during recovery: %v", err))
+			return
 		}
+		imgData.URL = url
 
 		jobResult.Images = append(jobResult.Images, imgData)
 	}

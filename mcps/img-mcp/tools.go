@@ -29,7 +29,6 @@ type GenerateImageAsyncInput struct {
 	NegativePrompt string `json:"negative_prompt,omitempty" jsonschema:"optional negative prompt"`
 	Workflow       string `json:"workflow,omitempty" jsonschema:"name of the workflow config to use (empty or 'default' uses the default workflow)"`
 	Seed           *int64 `json:"seed,omitempty" jsonschema:"optional fixed seed for reproducibility"`
-	OutputFormat   string `json:"output_format,omitempty" jsonschema:"output format: url (default), base64, or both"`
 	Network        string `json:"_dave_inject_network,omitempty"`
 	Channel        string `json:"_dave_inject_channel,omitempty"`
 	Nick           string `json:"_dave_inject_nick,omitempty"`
@@ -52,7 +51,6 @@ type GenerateImageInput struct {
 	NegativePrompt string `json:"negative_prompt,omitempty" jsonschema:"optional negative prompt"`
 	Workflow       string `json:"workflow,omitempty" jsonschema:"name of the workflow config to use (empty or 'default' uses the default workflow)"`
 	Seed           *int64 `json:"seed,omitempty" jsonschema:"optional fixed seed for reproducibility"`
-	OutputFormat   string `json:"output_format,omitempty" jsonschema:"output format: url (default), base64, or both"`
 	Timeout        int    `json:"timeout,omitempty" jsonschema:"max seconds to wait for generation (default: 300)"`
 	Network        string `json:"_dave_inject_network,omitempty"`
 	Channel        string `json:"_dave_inject_channel,omitempty"`
@@ -74,13 +72,12 @@ type GenerateImageOutput struct {
 }
 
 type EnhanceAndGenerateAsyncInput struct {
-	Prompt       string `json:"prompt" jsonschema:"the raw prompt to enhance and generate"`
-	Enhancement  string `json:"enhancement,omitempty" jsonschema:"name of enhancement config (default: from workflow or 'default')"`
-	Workflow     string `json:"workflow,omitempty" jsonschema:"name of the workflow config to use (empty or 'default' uses the default workflow)"`
-	OutputFormat string `json:"output_format,omitempty" jsonschema:"output format: url (default), base64, or both"`
-	Network      string `json:"_dave_inject_network,omitempty"`
-	Channel      string `json:"_dave_inject_channel,omitempty"`
-	Nick         string `json:"_dave_inject_nick,omitempty"`
+	Prompt      string `json:"prompt" jsonschema:"the raw prompt to enhance and generate"`
+	Enhancement string `json:"enhancement,omitempty" jsonschema:"name of enhancement config (default: from workflow or 'default')"`
+	Workflow    string `json:"workflow,omitempty" jsonschema:"name of the workflow config to use (empty or 'default' uses the default workflow)"`
+	Network     string `json:"_dave_inject_network,omitempty"`
+	Channel     string `json:"_dave_inject_channel,omitempty"`
+	Nick        string `json:"_dave_inject_nick,omitempty"`
 	// LLMGenerated is injected by dave (true) when this call originates from
 	// an LLM tool call; absent for direct user tool commands. Recorded in the
 	// workflow's prompt note metadata for image provenance.
@@ -96,14 +93,13 @@ type EnhanceAndGenerateAsyncOutput struct {
 }
 
 type EnhanceAndGenerateInput struct {
-	Prompt       string `json:"prompt" jsonschema:"the raw prompt to enhance and generate"`
-	Enhancement  string `json:"enhancement,omitempty" jsonschema:"name of enhancement config (default: from workflow or 'default')"`
-	Workflow     string `json:"workflow,omitempty" jsonschema:"name of the workflow config to use (empty or 'default' uses the default workflow)"`
-	OutputFormat string `json:"output_format,omitempty" jsonschema:"output format: url (default), base64, or both"`
-	Timeout      int    `json:"timeout,omitempty" jsonschema:"max seconds to wait for generation (default: 300)"`
-	Network      string `json:"_dave_inject_network,omitempty"`
-	Channel      string `json:"_dave_inject_channel,omitempty"`
-	Nick         string `json:"_dave_inject_nick,omitempty"`
+	Prompt      string `json:"prompt" jsonschema:"the raw prompt to enhance and generate"`
+	Enhancement string `json:"enhancement,omitempty" jsonschema:"name of enhancement config (default: from workflow or 'default')"`
+	Workflow    string `json:"workflow,omitempty" jsonschema:"name of the workflow config to use (empty or 'default' uses the default workflow)"`
+	Timeout     int    `json:"timeout,omitempty" jsonschema:"max seconds to wait for generation (default: 300)"`
+	Network     string `json:"_dave_inject_network,omitempty"`
+	Channel     string `json:"_dave_inject_channel,omitempty"`
+	Nick        string `json:"_dave_inject_nick,omitempty"`
 	// LLMGenerated is injected by dave (true) when this call originates from
 	// an LLM tool call; absent for direct user tool commands. Recorded in the
 	// workflow's prompt note metadata for image provenance.
@@ -328,7 +324,6 @@ func (h *ToolHandlers) handleGenerateImageAsync(ctx context.Context, req *mcp.Ca
 		NegativePrompt: input.NegativePrompt,
 		Enhancement:    enhancement,
 		Seed:           input.Seed,
-		OutputFormat:   input.OutputFormat,
 		LLMGenerated:   input.LLMGenerated,
 		Network:        input.Network,
 		Channel:        input.Channel,
@@ -351,7 +346,6 @@ func (h *ToolHandlers) handleEnhanceAndGenerateAsync(ctx context.Context, req *m
 	job, err := h.queue.Submit(jobType, workflow, JobInput{
 		Prompt:       input.Prompt,
 		Enhancement:  enhancement,
-		OutputFormat: input.OutputFormat,
 		LLMGenerated: input.LLMGenerated,
 		Network:      input.Network,
 		Channel:      input.Channel,
@@ -376,7 +370,6 @@ func (h *ToolHandlers) handleGenerateImage(ctx context.Context, req *mcp.CallToo
 		NegativePrompt: input.NegativePrompt,
 		Enhancement:    enhancement,
 		Seed:           input.Seed,
-		OutputFormat:   input.OutputFormat,
 		LLMGenerated:   input.LLMGenerated,
 		Network:        input.Network,
 		Channel:        input.Channel,
@@ -415,7 +408,6 @@ func (h *ToolHandlers) handleEnhanceAndGenerate(ctx context.Context, req *mcp.Ca
 	job, err := h.queue.Submit(jobType, workflow, JobInput{
 		Prompt:       input.Prompt,
 		Enhancement:  enhancement,
-		OutputFormat: input.OutputFormat,
 		LLMGenerated: input.LLMGenerated,
 		Network:      input.Network,
 		Channel:      input.Channel,

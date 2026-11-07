@@ -4,7 +4,7 @@
 #
 # Available options (per [section]):
 #   key                  (string)          API key (not required for local/unauthed endpoints)
-#   type                 (string, default: "openai")  "openai" or "llama" (omitted = openai behavior). type = "llama" also enables stream-session handling on streaming turns: requests carry an X-Conversation-Id header (the session's conv id) so llama.cpp keeps the generation server-side even if dave's connection drops mid-turn, and every stream exit releases it with DELETE /v1/stream (stops ^stopped/abandoned generations server-side). SSE responses also get comment/keepalive filtering (a spec-legal llama.cpp 30s keepalive comment otherwise kills the openai-go stream mid-prefill). Older llama.cpp builds ignore both.
+#   type                 (string, default: "openai")  "openai" or "llama" (omitted = openai behavior). type = "llama" also enables stream-session handling on streaming turns: requests carry an X-Conversation-Id header (the session's conv id) so llama.cpp keeps the generation server-side even if dave's connection drops mid-turn, and every stream exit releases it with DELETE /v1/stream (stops ^stopped/abandoned generations server-side). Separately, ALL services' SSE responses (not just llama) get comment/keepalive filtering — llama.cpp's spec-legal 30s keepalive comment otherwise kills the openai-go stream mid-prefill. Older llama.cpp builds ignore the header and the DELETE.
 #   baseurl              (string)          API base URL (e.g. "https://api.openai.com/v1/")
 #   maxtokens            (int)             Max tokens per response (legacy, prefer maxcompletiontokens)
 #   maxcompletiontokens  (int)             Max completion tokens per response

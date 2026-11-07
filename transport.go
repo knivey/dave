@@ -106,11 +106,11 @@ func (t *daveTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	ct := resp.Header.Get("Content-Type")
-	t.isStream = ct == "text/event-stream"
+	t.isStream = strings.HasPrefix(ct, "text/event-stream")
 	// SSE comment filtering (see ssecomments.go): strip keepalive comments
 	// and data-less blank lines before the SDK's SSE decoder can poison
 	// itself on them. Applies to every SSE response through this transport.
-	if strings.HasPrefix(ct, "text/event-stream") {
+	if t.isStream {
 		resp.Body = newSSECommentFilter(resp.Body)
 	}
 

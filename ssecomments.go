@@ -1,8 +1,8 @@
 package main
 
 import (
+	"bytes"
 	"io"
-	"strings"
 )
 
 // SSE comment filtering (Nov 2026; prod incidents 2026-11-04/05/06 —
@@ -31,14 +31,17 @@ import (
 //
 // Every other byte passes through unchanged (including CRLF terminators
 // and multi-line data fields), so well-formed streams are byte-identical.
-// Residual, documented: a "data:" line with a genuinely empty value would
-// still dispatch a whitespace-only event — no server we use emits that.
+// Residual, documented: any dispatch carrying NO data: field line would
+// still poison the SDK — e.g. an event:-only or id:-only event
+// ("event: foo\n\n") passes the filter (a field line armed the blank) but
+// dispatches empty data — no server we use emits those shapes.
 // NOTE: the filter changes body byte offsets relative to the wire — any
 // future reattach (GET /v1/stream?from=N) must count offsets on the
 // FILTERED byte stream, not the raw one.
 
 type sseCommentFilter struct {
 	rc       io.ReadCloser
+	buf      []byte // scratch for upstream reads (hoisted; consume copies what it keeps)
 	pending  []byte // decoded bytes ready to deliver
 	partial  []byte // current incomplete line (terminator not yet seen)
 	sawField bool   // a field line is buffered since the last blank line
@@ -47,7 +50,7 @@ type sseCommentFilter struct {
 }
 
 func newSSECommentFilter(rc io.ReadCloser) *sseCommentFilter {
-	return &sseCommentFilter{rc: rc}
+	return &sseCommentFilter{rc: rc, buf: make([]byte, 16*1024)}
 }
 
 func (f *sseCommentFilter) Read(p []byte) (int, error) {
@@ -67,7 +70,7 @@ func (f *sseCommentFilter) Read(p []byte) (int, error) {
 			}
 			return 0, io.EOF
 		}
-		buf := make([]byte, 16*1024)
+		buf := f.buf
 		n, err := f.rc.Read(buf)
 		if n > 0 {
 			f.consume(buf[:n])
@@ -93,7 +96,7 @@ func (f *sseCommentFilter) Close() error {
 // inside the content).
 func (f *sseCommentFilter) consume(data []byte) {
 	for len(data) > 0 {
-		idx := strings.IndexByte(string(data), '\n')
+		idx := bytes.IndexByte(data, '\n')
 		if idx < 0 {
 			f.partial = append(f.partial, data...)
 			return

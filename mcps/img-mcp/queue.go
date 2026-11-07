@@ -120,11 +120,12 @@ type JobInput struct {
 	Channel string
 	Nick    string
 	// InputImages carries the RESOLVED edit inputs (uploaded ComfyUI
-	// coordinates + the original ref strings for provenance) and Strength the
-	// edit denoise. Persisted (migration 005) so recovery re-submits with the
-	// same uploaded names without re-uploading.
+	// coordinates + the original ref strings for provenance). Persisted
+	// (migration 005) so recovery re-submits with the same uploaded names
+	// without re-uploading. (A Strength field lived here too — removed with
+	// the strength knob; the workflow file's own KSampler denoise is
+	// authoritative and the jobs.strength column is a vestige.)
 	InputImages []InputImageRef
-	Strength    *float64
 	// RawInputImages carries the model's input_images entries (data URIs,
 	// gen_ refs) exactly as the edit tool received them. NOT persisted:
 	// processJob resolves them into uploaded ComfyUI coordinates and
@@ -162,9 +163,9 @@ type ImageData struct {
 // are omitted so imgsite's unknown-defaulted column stays unknown instead of
 // the upload being rejected for a value the site refuses.
 //
-// EditedFrom/Strength are edit-job provenance, populated from the resolved
-// InputImages (the ORIGINAL ref strings, not the uploaded names) and the
-// recorded strength; both drop out via omitempty for generation jobs.
+// EditedFrom is edit-job provenance, populated from the resolved
+// InputImages (the ORIGINAL ref strings, not the uploaded names); it drops
+// out via omitempty for generation jobs.
 func buildUploadMeta(job *Job, finalPrompt, finalNegative, reasoning, safety string) UploadMeta {
 	return UploadMeta{
 		JobID:          job.ID,
@@ -179,7 +180,6 @@ func buildUploadMeta(job *Job, finalPrompt, finalNegative, reasoning, safety str
 		Nick:           job.Input.Nick,
 		Safety:         reportableSafety(safety),
 		EditedFrom:     editedFromRefs(job.Input),
-		Strength:       job.Input.Strength,
 	}
 }
 
@@ -862,7 +862,7 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 	var workflow ComfyWorkflow
 	var werr error
 	if job.Type == JobTypeEdit {
-		workflow, werr = prepareComfyEditWorkflow(cfg, job.Workflow, prompt, negativePrompt, job.Input.Seed, promptNote, editImages, job.Input.Strength)
+		workflow, werr = prepareComfyEditWorkflow(cfg, job.Workflow, prompt, negativePrompt, job.Input.Seed, promptNote, editImages)
 	} else {
 		workflow, werr = prepareComfyWorkflow(cfg, job.Workflow, prompt, negativePrompt, job.Input.Seed, promptNote)
 	}

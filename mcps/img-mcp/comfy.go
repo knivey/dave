@@ -233,14 +233,13 @@ func truncateForPromptNote(reasoning string) string {
 //     neither field = never enhanced (direct tools). skip_networks jobs
 //     never carry the flag — the whole classification machinery, first pass
 //     included, is skipped there.
-//   - EditedFrom/Strength are edit-job provenance: the input refs the
-//     caller supplied and the denoise strength actually used. Data-URI
-//     refs render as a compact sha256 descriptor (describeEditRef) —
-//     full-blob provenance was ruled out for permanent-metadata bloat —
-//     while gen_ refs stay verbatim. Both rebuild identically at rewrite
-//     time because they derive from the job row (input_images/strength
-//     columns), so a crash-recovered edit keeps its provenance with no
-//     extra plumbing. Omitted for generation jobs via omitempty.
+//   - EditedFrom is edit-job provenance: the input refs the
+//     caller supplied. Data-URI refs render as a compact sha256 descriptor
+//     (describeEditRef) — full-blob provenance was ruled out for
+//     permanent-metadata bloat — while gen_ refs stay verbatim. It rebuilds
+//     identically at rewrite time because it derives from the job row
+//     (input_images column), so a crash-recovered edit keeps its provenance
+//     with no extra plumbing. Omitted for generation jobs via omitempty.
 type promptNotePayload struct {
 	Prompt               string   `json:"prompt"`
 	LLMGenerated         bool     `json:"llm_generated"`
@@ -252,7 +251,6 @@ type promptNotePayload struct {
 	Nick                 string   `json:"nick,omitempty"`
 	Safety               string   `json:"safety,omitempty"`
 	EditedFrom           []string `json:"edited_from,omitempty"`
-	Strength             *float64 `json:"strength,omitempty"`
 }
 
 // editedFromRefs renders the edit-input provenance list shared by the
@@ -338,7 +336,6 @@ func buildPromptNoteWithSafety(job *Job, enhancementReasoning, safety string, ns
 		Nick:                 job.Input.Nick,
 		Safety:               reportableSafety(safety),
 		EditedFrom:           editedFromRefs(job.Input),
-		Strength:             job.Input.Strength,
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshaling prompt note: %w", err)
@@ -463,7 +460,12 @@ const editInputSlotPrefix = "images.image_"
 // slot the workflow treats as the edit subject and (resolution=0) the output
 // canvas. Later images are references. Order is preserved end to end from
 // the tool's input_images, including restart recovery (persisted coords).
-func prepareComfyEditWorkflow(cfg Config, workflowName, prompt, negativePrompt string, seedOverride *int64, promptNote string, images []ComfyImage, strength *float64) (ComfyWorkflow, error) {
+//
+// The workflow file's own KSampler denoise is the fixed authoritative edit
+// strength (owner ruling: Qwen Image 2.1 edit only works at denoise 1.0 —
+// the former strength override was removed because any other value makes a
+// bad image); this function never touches inputs.denoise.
+func prepareComfyEditWorkflow(cfg Config, workflowName, prompt, negativePrompt string, seedOverride *int64, promptNote string, images []ComfyImage) (ComfyWorkflow, error) {
 	workflow, err := prepareComfyWorkflow(cfg, workflowName, prompt, negativePrompt, seedOverride, promptNote)
 	if err != nil {
 		return nil, err
@@ -499,13 +501,6 @@ func prepareComfyEditWorkflow(cfg Config, workflowName, prompt, negativePrompt s
 			Inputs: map[string]interface{}{"image": comfyImageInputName(img.Filename, img.Subfolder)},
 		}
 		target.Inputs[fmt.Sprintf("%s%d", editInputSlotPrefix, i+1)] = []interface{}{nodeID, 0}
-	}
-	if strength != nil && wc.DenoiseNode != "" {
-		node, ok := workflow[wc.DenoiseNode]
-		if !ok || node.Inputs == nil {
-			return nil, fmt.Errorf("denoise node %q not found in workflow %q", wc.DenoiseNode, wc.WorkflowPath)
-		}
-		node.Inputs["denoise"] = *strength
 	}
 	return workflow, nil
 }

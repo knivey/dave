@@ -188,14 +188,14 @@ seed_nodes = ["3"]
 # image_input_node (string, default "") — node whose images.image_N inputs
 #   receive the edit input images (wired dynamically, one LoadImage per
 #   image; edit workflows only).
-# denoise_node (string, default "") — node whose inputs.denoise receives the
-#   edit strength; unset keeps the workflow file's own default.
+# The edit workflow file's own KSampler denoise is authoritative (Qwen
+#   Image 2.1 edit is denoise-1.0-only) — there is no strength knob.
 # Expected generation time for ETA calculations
 typical_time = "30s"
 
 # Real-world example EDIT workflow (Qwen Image 2.1): the workflow file
 # carries NO LoadImage nodes — prepare wires the edit inputs dynamically.
-# prompt_input/image_input_node/denoise_node are only consulted by the edit
+# prompt_input/image_input_node are only consulted by the edit
 # tools. Set [comfy] default_edit_workflow = "qwen-edit" to make edits work
 # with no workflow argument.
 # [workflow.qwen-edit]
@@ -205,7 +205,6 @@ typical_time = "30s"
 # prompt_node = "510"
 # prompt_input = "prompt"        # TextEncodeQwenImage21 names its prompt input "prompt" (default "text")
 # image_input_node = "510"       # its images.image_N slots get the edit inputs (wired dynamically)
-# denoise_node = "507"           # strength -> KSampler denoise (1.0 = official turbo path, lower = subtler)
 # seed_nodes = ["507"]
 # timeout = 300
 # description = "Qwen Image 2.1 edit — first image is the target (output follows its size); mention images in the prompt as <image1>, <image2>, ... (up to 10)"

@@ -128,7 +128,6 @@ type EditImageInput struct {
 	NegativePrompt string   `json:"negative_prompt,omitempty" jsonschema:"optional negative prompt"`
 	Workflow       string   `json:"workflow,omitempty" jsonschema:"name of the edit workflow config to use (empty or 'default' uses the default workflow)"`
 	Seed           *int64   `json:"seed,omitempty" jsonschema:"optional fixed seed for reproducibility"`
-	Strength       *float64 `json:"strength,omitempty" jsonschema:"edit strength 0-1 (how much to change; workflow default when omitted)"`
 	Timeout        int      `json:"timeout,omitempty" jsonschema:"max seconds to wait (default: 300)"`
 	Network        string   `json:"_dave_inject_network,omitempty"`
 	Channel        string   `json:"_dave_inject_channel,omitempty"`
@@ -151,7 +150,6 @@ type EditImageAsyncInput struct {
 	NegativePrompt string   `json:"negative_prompt,omitempty" jsonschema:"optional negative prompt"`
 	Workflow       string   `json:"workflow,omitempty" jsonschema:"name of the edit workflow config to use (empty or 'default' uses the default workflow)"`
 	Seed           *int64   `json:"seed,omitempty" jsonschema:"optional fixed seed for reproducibility"`
-	Strength       *float64 `json:"strength,omitempty" jsonschema:"edit strength 0-1 (how much to change; workflow default when omitted)"`
 	Network        string   `json:"_dave_inject_network,omitempty"`
 	Channel        string   `json:"_dave_inject_channel,omitempty"`
 	Nick           string   `json:"_dave_inject_nick,omitempty"`
@@ -428,18 +426,18 @@ func (h *ToolHandlers) handleEnhanceAndGenerateAsync(ctx context.Context, req *m
 
 // validateEditInput is the pre-Submit validation shared by both edit
 // handlers: input_images is required (an edit with no inputs is a
-// generation), strength must sit in (0, 1], the workflow argument resolves
+// generation), the workflow argument resolves
 // via resolveEditWorkflow (empty/"default" → [comfy] default_edit_workflow,
 // never the generation default), the resolved workflow must be edit-capable
 // (image_input_node configured — the readable pre-flight for a generation
 // workflow being aimed at an edit, whatever named it), and the supply must
 // fit the dynamic wiring's slot budget (images.image_1..image_10).
-func (h *ToolHandlers) validateEditInput(workflowName string, inputImages []string, strength *float64) (string, error) {
+// (A strength range check lived here too; the knob was removed entirely —
+// Qwen Image 2.1 edit is denoise-1.0-only, the workflow file's own KSampler
+// denoise is the fixed authoritative value, and nothing overrides it.)
+func (h *ToolHandlers) validateEditInput(workflowName string, inputImages []string) (string, error) {
 	if len(inputImages) == 0 {
 		return "", fmt.Errorf("input_images is required (at least one image reference)")
-	}
-	if strength != nil && (*strength <= 0 || *strength > 1) {
-		return "", fmt.Errorf("strength must be between 0 and 1")
 	}
 	workflow, err := h.resolveEditWorkflow(workflowName)
 	if err != nil {
@@ -463,7 +461,7 @@ func (h *ToolHandlers) validateEditInput(workflowName string, inputImages []stri
 // anything but return its arguments unchanged: dead work. Returns
 // GenerateImageAsyncOutput — the shape is identical (just a job_id).
 func (h *ToolHandlers) handleEditImageAsync(ctx context.Context, req *mcp.CallToolRequest, input EditImageAsyncInput) (*mcp.CallToolResult, GenerateImageAsyncOutput, error) {
-	workflow, err := h.validateEditInput(input.Workflow, input.InputImages, input.Strength)
+	workflow, err := h.validateEditInput(input.Workflow, input.InputImages)
 	if err != nil {
 		return nil, GenerateImageAsyncOutput{}, err
 	}
@@ -473,7 +471,6 @@ func (h *ToolHandlers) handleEditImageAsync(ctx context.Context, req *mcp.CallTo
 		NegativePrompt: input.NegativePrompt,
 		RawInputImages: input.InputImages,
 		Seed:           input.Seed,
-		Strength:       input.Strength,
 		LLMGenerated:   input.LLMGenerated,
 		Network:        input.Network,
 		Channel:        input.Channel,
@@ -569,7 +566,7 @@ func (h *ToolHandlers) handleEnhanceAndGenerate(ctx context.Context, req *mcp.Ca
 // result needs — images with URLs, status, error). Resolution/upload of
 // the input refs happens in processJob, not here.
 func (h *ToolHandlers) handleEditImage(ctx context.Context, req *mcp.CallToolRequest, input EditImageInput) (*mcp.CallToolResult, GenerateImageOutput, error) {
-	workflow, err := h.validateEditInput(input.Workflow, input.InputImages, input.Strength)
+	workflow, err := h.validateEditInput(input.Workflow, input.InputImages)
 	if err != nil {
 		return nil, GenerateImageOutput{}, err
 	}
@@ -579,7 +576,6 @@ func (h *ToolHandlers) handleEditImage(ctx context.Context, req *mcp.CallToolReq
 		NegativePrompt: input.NegativePrompt,
 		RawInputImages: input.InputImages,
 		Seed:           input.Seed,
-		Strength:       input.Strength,
 		LLMGenerated:   input.LLMGenerated,
 		Network:        input.Network,
 		Channel:        input.Channel,

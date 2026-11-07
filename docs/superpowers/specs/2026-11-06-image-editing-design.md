@@ -2,7 +2,7 @@
 
 Date: 2026-11-06
 Status: implemented (2026-11-06) — plan `docs/superpowers/plans/2026-11-06-image-editing.md`, tasks 1-8 landed.
-Amended 2026-11-07: dynamic edit inputs (`image_input_node` replaces `image_nodes`), per-workflow `prompt_input`, first-image-is-target semantics — see the "Amendment 2026-11-07" notes in the img-mcp design section.
+Amended 2026-11-07: dynamic edit inputs (`image_input_node` replaces `image_nodes`), per-workflow `prompt_input`, first-image-is-target semantics — see the "Amendment 2026-11-07" notes in the img-mcp design section. Amended again 2026-11-07: `strength`/`denoise_node` removed entirely — see "Amendment 2026-11-07 — strength/denoise_node removed" at the end.
 Builds on: `docs/superpowers/specs/2026-11-06-conversation-images-design.md` (view_image + ref store — shipped)
 
 ## Context
@@ -246,3 +246,18 @@ servers; dave's ref-store tests):
 - Original plan: `todo.md` (gitignored, main checkout), May 2026 session.
 - Foundation: conversation-images spec + implementation (view_image, ref
   store, `resolveImageRef` seam) — merged to master 2026-11-06.
+
+## Amendment 2026-11-07 — strength/denoise_node removed
+
+The `strength` tool input (both edit tools), its (0, 1] range validation,
+the `denoise_node` workflow-config field, and every downstream carrier
+(`JobInput.Strength`, the `jobs.strength` insert, `prepareComfyEditWorkflow`'s
+denoise override, the prompt-note payload field, the imgsite upload-meta
+field, and the tool-description sentence teaching it) were removed entirely,
+per an owner ruling: Qwen Image 2.1 edit only works at denoise 1.0 — any
+other value makes a bad image, so the knob was a footgun. The workflow
+file's own KSampler `denoise` value is the fixed authoritative setting;
+img-mcp never overrides it. The `jobs.strength` column (migration 005)
+remains as a vestige, exactly like `jobs.output_format`: no new migration,
+the column simply stops being written (new rows take the NULL default) and
+old rows keep their values.

@@ -375,18 +375,17 @@ func TestTerminalDBUpdatesConcurrentSingleWinner(t *testing.T) {
 }
 
 // TestJobInputImagesRoundTrip covers migration 005 + the persistence
-// plumbing for resolved edit inputs: dbInsertJob writes input_images/strength,
+// plumbing for resolved edit inputs: dbInsertJob writes input_images,
 // dbUpdateJobInputImages stamps the resolved upload coordinates after
 // processJob uploads them, and jobFromDBJob (restart recovery's rebuild)
-// hands both back onto JobInput.
+// hands them back onto JobInput.
 func TestJobInputImagesRoundTrip(t *testing.T) {
 	db := setupTestDB(t)
-	strength := 0.55
 	job := &Job{ID: "rt1", Type: JobTypeEdit, Status: StatusQueued, Workflow: "w",
 		Input: JobInput{Prompt: "p", InputImages: []InputImageRef{
 			{Ref: "web_aaa", Comfy: ComfyImage{Filename: "f.jpg"}},
 			{Ref: "gen_bbb_0", Comfy: ComfyImage{Filename: "g.png", Subfolder: "s"}},
-		}, Strength: &strength}}
+		}}}
 	require.NoError(t, dbInsertJob(db, job))
 	require.NoError(t, dbUpdateJobInputImages(db, job.ID, job.Input.InputImages))
 
@@ -396,8 +395,6 @@ func TestJobInputImagesRoundTrip(t *testing.T) {
 	require.Len(t, got.Input.InputImages, 2)
 	assert.Equal(t, "web_aaa", got.Input.InputImages[0].Ref)
 	assert.Equal(t, "g.png", got.Input.InputImages[1].Comfy.Filename)
-	require.NotNil(t, got.Input.Strength)
-	assert.Equal(t, 0.55, *got.Input.Strength)
 }
 
 // TestBuildJobResultFromDBIncludesRefs pins the DB-rebuild half of the

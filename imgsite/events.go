@@ -131,9 +131,10 @@ type imageReactedEvent struct {
 //
 // SafeVisible is the per-site delivery flag (safe-site plan): whether
 // the image this event describes is visible on the safe site, computed
-// ONCE at publish time from the row's network+safety (siteCanSee
-// against the then-current config) by the App publish helpers. It rides
-// the ring entry so replay filters per subscriber site with no DB
+// ONCE at publish time by the App publish helpers via siteCanSee — the
+// per-row visibility predicate, which consults the row's network,
+// safety, and edited against the then-current config. It rides the
+// ring entry so replay filters per subscriber site with no DB
 // reads and no config re-read — a reload between publish and replay
 // can no more change an event's visibility than its already-marshaled
 // payload. Events that don't describe an image (image-hidden, reset,
@@ -765,13 +766,13 @@ func (a *App) publishThumbReady(id string) {
 	}
 	// The worker seam hands over only the id, so the row is re-read
 	// here for the visibility flag: one indexed SELECT per thumbnail
-	// completion, narrowed to the two columns siteCanSee consults via
-	// dbGetImageSiteVisibility (network + safety) instead of a full
-	// row whose workflow_json can run to tens of KB. On lookup failure
-	// the event is withheld from the safe site only (fail closed — a
-	// missed thumb swap degrades through the client's existing
-	// shimmer-retry path, while a leaked event cannot be unsent); the
-	// default site still gets it.
+	// completion, narrowed to the three columns siteCanSee consults via
+	// dbGetImageSiteVisibility (network + safety + edited) instead of a
+	// full row whose workflow_json can run to tens of KB. On lookup
+	// failure the event is withheld from the safe site only (fail
+	// closed — a missed thumb swap degrades through the client's
+	// existing shimmer-retry path, while a leaked event cannot be
+	// unsent); the default site still gets it.
 	safeVisible := false
 	if img, err := dbGetImageSiteVisibility(a.db, id); err != nil {
 		loggerEvents.Warn("thumb-ready visibility lookup failed; withholding from safe site", "id", id, "error", err)

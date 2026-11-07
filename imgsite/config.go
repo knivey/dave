@@ -221,9 +221,10 @@ func loadConfig(configFile string) (Config, error) {
 	// present, all three fields are required: hosts without the rest
 	// (or the rest without hosts) is half a site; and an empty
 	// allowed_networks would silently reduce the safe site to
-	// safety='safe' rows only, which is almost certainly a config
-	// mistake rather than an intent. loadConfig failing here also
-	// fails a SIGHUP reload, keeping the running config untouched.
+	// (safety='safe' AND NOT edited) rows only, which is almost
+	// certainly a config mistake rather than an intent. loadConfig
+	// failing here also fails a SIGHUP reload, keeping the running
+	// config untouched.
 	if cfg.SafeSite != nil {
 		if len(cfg.SafeSite.Hosts) == 0 {
 			return cfg, fmt.Errorf("safe_site.hosts is required when [safe_site] is set")

@@ -22,6 +22,11 @@ baseurl = "http://localhost:8188"
 timeout = 90
 # Default workflow name (must match one of the [workflow.*] sections below)
 default_workflow = "zimage"
+# default_edit_workflow (string, default "") — workflow used by
+# edit_image/edit_image_async when their workflow arg is empty or 'default';
+# must be an edit workflow (image_input_node set). Empty means edits require
+# an explicit workflow argument.
+# default_edit_workflow = "qwen-edit"
 
 [upload]
 # imgsite base URL for hosting generated images (required).
@@ -183,7 +188,8 @@ typical_time = "30s"
 # Real-world example EDIT workflow (Qwen Image 2.1): the workflow file
 # carries NO LoadImage nodes — prepare wires the edit inputs dynamically.
 # prompt_input/image_input_node/denoise_node are only consulted by the edit
-# tools.
+# tools. Set [comfy] default_edit_workflow = "qwen-edit" to make edits work
+# with no workflow argument.
 # [workflow.qwen-edit]
 # workflow_path = "workflows/qwen_image_2_1_edit.json"
 # clientid = "img-mcp-qwen-edit"

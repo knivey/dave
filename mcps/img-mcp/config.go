@@ -38,9 +38,16 @@ type DatabaseConfig struct {
 }
 
 type ComfyServiceConfig struct {
-	BaseURL         string `toml:"baseurl"`
-	Timeout         int    `toml:"timeout"`
+	BaseURL string `toml:"baseurl"`
+	Timeout int    `toml:"timeout"`
+	// DefaultWorkflow names the workflow generation tools use when their
+	// workflow argument is empty or "default".
 	DefaultWorkflow string `toml:"default_workflow"`
+	// DefaultEditWorkflow is the workflow edit_image/edit_image_async use when
+	// their workflow argument is empty or "default". Separate from
+	// DefaultWorkflow (generations) because the two tool families need
+	// different workflow shapes; hot-reloadable with the rest of comfy.*.
+	DefaultEditWorkflow string `toml:"default_edit_workflow"`
 }
 
 type UploadConfig struct {
@@ -231,6 +238,21 @@ func loadConfig(configFile string) (Config, error) {
 	if cfg.Comfy.DefaultWorkflow != "" {
 		if _, ok := cfg.Workflows[cfg.Comfy.DefaultWorkflow]; !ok {
 			return cfg, fmt.Errorf("comfy.default_workflow %q is not defined in [workflow]", cfg.Comfy.DefaultWorkflow)
+		}
+	}
+
+	// The edit default must be load-time verified as an EDIT workflow: an
+	// edit tool with no workflow argument lands here, so a generation
+	// workflow in this slot would surface as "not an edit workflow" at the
+	// first edit call instead of at config load (mirrors the check
+	// validateEditInput runs on explicitly named workflows).
+	if cfg.Comfy.DefaultEditWorkflow != "" {
+		wc, ok := cfg.Workflows[cfg.Comfy.DefaultEditWorkflow]
+		if !ok {
+			return cfg, fmt.Errorf("comfy.default_edit_workflow %q is not defined in [workflow]", cfg.Comfy.DefaultEditWorkflow)
+		}
+		if wc.ImageInputNode == "" {
+			return cfg, fmt.Errorf("comfy.default_edit_workflow %q has no image_input_node — not an edit workflow", cfg.Comfy.DefaultEditWorkflow)
 		}
 	}
 

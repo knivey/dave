@@ -37,7 +37,7 @@ func createSyncServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "edit_image",
-		Description: "Edit images using an image-editing workflow. input_images is ORDERED: the FIRST image is the edit target — the edit applies to it and the output dimensions follow it; any additional images are references. Pass image references: the ref ids shown next to images in the conversation (usr_/web_) or gen_ refs from generation results. Some workflows expect images mentioned in the prompt (e.g. as <image1>, <image2>) — check the workflow's description with list_workflows. strength (0-1) controls edit intensity when the workflow supports it. Blocks until the edit completes and returns the image result directly.",
+		Description: "Edit images using an image-editing workflow. input_images is ORDERED: the FIRST image is the edit target — the edit applies to it and the output dimensions follow it; any additional images are references. Pass image references: the ref ids shown next to images in the conversation (usr_/web_) or gen_ refs from generation results. Some workflows expect images mentioned in the prompt (e.g. as <image1>, <image2>) — check the workflow's description with list_workflows. strength (0-1) controls edit intensity when the workflow supports it. Uses the default edit workflow if workflow is empty or 'default'. Blocks until the edit completes and returns the image result directly.",
 	}, handlers.handleEditImage)
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -89,7 +89,7 @@ func createAsyncServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "edit_image_async",
-		Description: "Edit images using an image-editing workflow. input_images is ORDERED: the FIRST image is the edit target — the edit applies to it and the output dimensions follow it; any additional images are references. Pass image references: the ref ids shown next to images in the conversation (usr_/web_) or gen_ refs from generation results. Some workflows expect images mentioned in the prompt (e.g. as <image1>, <image2>) — check the workflow's description with list_workflows. strength (0-1) controls edit intensity when the workflow supports it. Queues the edit job and returns a job_id immediately without waiting.",
+		Description: "Edit images using an image-editing workflow. input_images is ORDERED: the FIRST image is the edit target — the edit applies to it and the output dimensions follow it; any additional images are references. Pass image references: the ref ids shown next to images in the conversation (usr_/web_) or gen_ refs from generation results. Some workflows expect images mentioned in the prompt (e.g. as <image1>, <image2>) — check the workflow's description with list_workflows. strength (0-1) controls edit intensity when the workflow supports it. Uses the default edit workflow if workflow is empty or 'default'. Queues the edit job and returns a job_id immediately without waiting.",
 	}, handlers.handleEditImageAsync)
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -166,12 +166,12 @@ func createFullServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "edit_image",
-		Description: "Edit images using an image-editing workflow. input_images is ORDERED: the FIRST image is the edit target — the edit applies to it and the output dimensions follow it; any additional images are references. Pass image references: the ref ids shown next to images in the conversation (usr_/web_) or gen_ refs from generation results. Some workflows expect images mentioned in the prompt (e.g. as <image1>, <image2>) — check the workflow's description with list_workflows. strength (0-1) controls edit intensity when the workflow supports it. Blocks until the edit completes and returns the image result directly.",
+		Description: "Edit images using an image-editing workflow. input_images is ORDERED: the FIRST image is the edit target — the edit applies to it and the output dimensions follow it; any additional images are references. Pass image references: the ref ids shown next to images in the conversation (usr_/web_) or gen_ refs from generation results. Some workflows expect images mentioned in the prompt (e.g. as <image1>, <image2>) — check the workflow's description with list_workflows. strength (0-1) controls edit intensity when the workflow supports it. Uses the default edit workflow if workflow is empty or 'default'. Blocks until the edit completes and returns the image result directly.",
 	}, handlers.handleEditImage)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "edit_image_async",
-		Description: "Edit images using an image-editing workflow. input_images is ORDERED: the FIRST image is the edit target — the edit applies to it and the output dimensions follow it; any additional images are references. Pass image references: the ref ids shown next to images in the conversation (usr_/web_) or gen_ refs from generation results. Some workflows expect images mentioned in the prompt (e.g. as <image1>, <image2>) — check the workflow's description with list_workflows. strength (0-1) controls edit intensity when the workflow supports it. Queues the edit job and returns a job_id immediately without waiting.",
+		Description: "Edit images using an image-editing workflow. input_images is ORDERED: the FIRST image is the edit target — the edit applies to it and the output dimensions follow it; any additional images are references. Pass image references: the ref ids shown next to images in the conversation (usr_/web_) or gen_ refs from generation results. Some workflows expect images mentioned in the prompt (e.g. as <image1>, <image2>) — check the workflow's description with list_workflows. strength (0-1) controls edit intensity when the workflow supports it. Uses the default edit workflow if workflow is empty or 'default'. Queues the edit job and returns a job_id immediately without waiting.",
 	}, handlers.handleEditImageAsync)
 
 	mcp.AddTool(server, &mcp.Tool{

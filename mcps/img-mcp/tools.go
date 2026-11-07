@@ -309,6 +309,25 @@ func (h *ToolHandlers) resolveWorkflow(name string) (string, error) {
 	return name, nil
 }
 
+// resolveEditWorkflow resolves an edit tool's workflow argument: an explicit
+// name is looked up like resolveWorkflow; empty/"default" resolves to
+// [comfy] default_edit_workflow (NEVER DefaultWorkflow — that is a
+// generation workflow and would fail the edit gate after a wasted
+// round-trip; the resolver errors here instead, naming the knob).
+func (h *ToolHandlers) resolveEditWorkflow(name string) (string, error) {
+	cfg := h.getConfig()
+	if name == "" || name == "default" {
+		name = cfg.Comfy.DefaultEditWorkflow
+	}
+	if name == "" {
+		return "", fmt.Errorf("no edit workflow specified and no default_edit_workflow configured")
+	}
+	if _, ok := cfg.Workflows[name]; !ok {
+		return "", fmt.Errorf("workflow %q not found", name)
+	}
+	return name, nil
+}
+
 func (h *ToolHandlers) applyNetworkPolicy(network string, enhancement string, jobType JobType) (string, JobType) {
 	if network == "" {
 		return enhancement, jobType
@@ -409,10 +428,12 @@ func (h *ToolHandlers) handleEnhanceAndGenerateAsync(ctx context.Context, req *m
 
 // validateEditInput is the pre-Submit validation shared by both edit
 // handlers: input_images is required (an edit with no inputs is a
-// generation), strength must sit in (0, 1], the resolved workflow must be
-// edit-capable (image_input_node configured — the readable pre-flight for a
-// txt2img default workflow being aimed at an edit), and the supply must fit
-// the dynamic wiring's slot budget (images.image_1..image_10).
+// generation), strength must sit in (0, 1], the workflow argument resolves
+// via resolveEditWorkflow (empty/"default" → [comfy] default_edit_workflow,
+// never the generation default), the resolved workflow must be edit-capable
+// (image_input_node configured — the readable pre-flight for a generation
+// workflow being aimed at an edit, whatever named it), and the supply must
+// fit the dynamic wiring's slot budget (images.image_1..image_10).
 func (h *ToolHandlers) validateEditInput(workflowName string, inputImages []string, strength *float64) (string, error) {
 	if len(inputImages) == 0 {
 		return "", fmt.Errorf("input_images is required (at least one image reference)")
@@ -420,7 +441,7 @@ func (h *ToolHandlers) validateEditInput(workflowName string, inputImages []stri
 	if strength != nil && (*strength <= 0 || *strength > 1) {
 		return "", fmt.Errorf("strength must be between 0 and 1")
 	}
-	workflow, err := h.resolveWorkflow(workflowName)
+	workflow, err := h.resolveEditWorkflow(workflowName)
 	if err != nil {
 		return "", err
 	}

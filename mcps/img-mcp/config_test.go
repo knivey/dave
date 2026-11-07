@@ -103,6 +103,79 @@ func TestLoadConfigUploadURLRequired(t *testing.T) {
 	assert.Contains(t, err.Error(), "upload.url is required")
 }
 
+// TestLoadConfigDefaultEditWorkflowValidation pins the load-time gate on
+// [comfy] default_edit_workflow: it must name a configured workflow, and
+// that workflow must be an edit workflow (image_input_node set) — a
+// generation default aimed at edits fails at LOAD, not at the first edit
+// call. Empty stays valid (edits then require an explicit workflow
+// argument).
+func TestLoadConfigDefaultEditWorkflowValidation(t *testing.T) {
+	// A second workflow section sharing the fixture file, wired as an edit
+	// workflow (image_input_node set) so the valid case has a real target.
+	editWorkflowSection := `
+[workflow.editwf]
+workflow_path = "test_workflow.json"
+clientid = "test-client"
+output_node = "output-node"
+prompt_node = "prompt-node"
+image_input_node = "510"
+timeout = 60
+`
+	cases := []struct {
+		name     string
+		comfyAdd string
+		wantErr  string
+	}{
+		{
+			name:     "unknown workflow",
+			comfyAdd: `default_edit_workflow = "nope"`,
+			wantErr:  `comfy.default_edit_workflow "nope" is not defined in [workflow]`,
+		},
+		{
+			name:     "non-edit workflow (no image_input_node)",
+			comfyAdd: `default_edit_workflow = "test"`,
+			wantErr:  `comfy.default_edit_workflow "test" has no image_input_node — not an edit workflow`,
+		},
+		{
+			name:     "edit workflow is valid",
+			comfyAdd: `default_edit_workflow = "editwf"`,
+			wantErr:  "",
+		},
+		{
+			name:     "empty is valid",
+			comfyAdd: "",
+			wantErr:  "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			mustWriteWorkflow(t, dir)
+			toml := baseTestConfigToml("http://localhost:8188") + editWorkflowSection
+			if tc.comfyAdd != "" {
+				toml = strings.Replace(toml,
+					`default_workflow = "test"`,
+					`default_workflow = "test"`+"\n"+tc.comfyAdd, 1)
+			}
+			path := writeTestConfigFile(t, dir, toml)
+
+			cfg, err := loadConfig(path)
+
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			if tc.comfyAdd == "" {
+				assert.Empty(t, cfg.Comfy.DefaultEditWorkflow)
+			} else {
+				assert.Equal(t, "editwf", cfg.Comfy.DefaultEditWorkflow)
+			}
+		})
+	}
+}
+
 func TestLoadConfigLegacyUploadKeysIgnored(t *testing.T) {
 	dir := t.TempDir()
 	mustWriteWorkflow(t, dir)

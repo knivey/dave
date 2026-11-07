@@ -182,9 +182,17 @@ func TestGenerationToolsHaveNoOutputFormat(t *testing.T) {
 // the exact text an MCP client sees from ListTools.
 func toolDescriptionForTest(t *testing.T, name string) string {
 	t.Helper()
+	return toolDescriptionFromServer(t, createFullServer, name)
+}
+
+// toolDescriptionFromServer is toolDescriptionForTest for an arbitrary
+// server flavor, so description pins can cover every registration site
+// (sync, async, and full register overlapping tool sets).
+func toolDescriptionFromServer(t *testing.T, build func(Config, *ToolHandlers) *mcp.Server, name string) string {
+	t.Helper()
 	cfg := testConfig("http://127.0.0.1:0")
 	h := NewToolHandlers(cfg, queuedTestQueue(t))
-	server := createFullServer(cfg, h)
+	server := build(cfg, h)
 
 	ct, st := mcp.NewInMemoryTransports()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -223,6 +231,31 @@ func TestEditToolDescriptionsTeachFirstImage(t *testing.T) {
 			assert.Contains(t, desc, "gen_", "ref grammar: generation refs")
 			assert.Contains(t, desc, "strength", "strength must be explained")
 			assert.Contains(t, desc, "list_workflows", "pointer to per-workflow grammar")
+		})
+	}
+}
+
+// TestEditToolDescriptionsTeachDefaultEditWorkflow pins the
+// default-edit-workflow sentence on ALL FOUR edit registrations (sync
+// edit_image, async edit_image_async, and both on the full stdio server):
+// the model has no other way to know an empty or "default" workflow
+// argument is legal for edits. The sentence was dropped in the
+// dynamic-inputs round and reinstated with default_edit_workflow.
+func TestEditToolDescriptionsTeachDefaultEditWorkflow(t *testing.T) {
+	combos := []struct {
+		serverFlavor string
+		build        func(Config, *ToolHandlers) *mcp.Server
+		tool         string
+	}{
+		{"sync", createSyncServer, "edit_image"},
+		{"async", createAsyncServer, "edit_image_async"},
+		{"full", createFullServer, "edit_image"},
+		{"full", createFullServer, "edit_image_async"},
+	}
+	for _, c := range combos {
+		t.Run(c.serverFlavor+"/"+c.tool, func(t *testing.T) {
+			desc := toolDescriptionFromServer(t, c.build, c.tool)
+			assert.Contains(t, desc, "Uses the default edit workflow if workflow is empty or 'default'.")
 		})
 	}
 }
@@ -721,15 +754,29 @@ func TestHandleEditImageValidates(t *testing.T) {
 }
 
 // TestHandleEditImageRequiresImageInputNode pins the workflow gate: an edit
-// must land on a workflow with image_input_node configured (a txt2img default
-// workflow can never accept input images).
+// must land on a workflow with image_input_node configured. With
+// default_edit_workflow, an explicitly named generation workflow is the way
+// to reach the gate (an empty argument now resolves to the edit default or
+// errors naming the knob — never the generation default_workflow, the
+// production wasted-round-trip this resolver closes).
 func TestHandleEditImageRequiresImageInputNode(t *testing.T) {
 	// testConfig's only workflow ("test") has no image_input_node.
 	h := NewToolHandlers(testConfig("http://127.0.0.1:0"), queuedTestQueue(t))
-	_, _, err := h.handleEditImage(context.Background(), nil, EditImageInput{Prompt: "p", InputImages: []string{"gen_a"}})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "image_input_node")
-	assert.Contains(t, err.Error(), `"test"`, "error names the workflow")
+
+	t.Run("explicit generation workflow fails the gate", func(t *testing.T) {
+		_, _, err := h.handleEditImage(context.Background(), nil, EditImageInput{Prompt: "p", Workflow: "test", InputImages: []string{"gen_a"}})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "image_input_node")
+		assert.Contains(t, err.Error(), `"test"`, "error names the workflow")
+	})
+
+	t.Run("empty workflow with no edit default names the knob", func(t *testing.T) {
+		_, _, err := h.handleEditImage(context.Background(), nil, EditImageInput{Prompt: "p", InputImages: []string{"gen_a"}})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "default_edit_workflow")
+		assert.NotContains(t, err.Error(), "image_input_node",
+			"the generation default must not be aimed at the edit gate")
+	})
 }
 
 // TestHandleEditImageCapsInputImages pins the pre-Submit cap: the dynamic
@@ -772,4 +819,97 @@ func TestEditToolsPassRawInputs(t *testing.T) {
 		"the model's entries pass through verbatim — resolution is processJob's job")
 	assert.Equal(t, &strength, job.Input.Strength)
 	assert.Empty(t, job.Input.InputImages, "nothing is resolved at handler time")
+}
+
+// TestResolveEditWorkflow pins the edit resolver's defaulting contract: an
+// explicit name is looked up like resolveWorkflow, but empty/"default"
+// resolves to [comfy] default_edit_workflow — NEVER DefaultWorkflow, which
+// is a generation workflow and would die at the edit gate after a wasted
+// round-trip (the production incident this knob exists for).
+func TestResolveEditWorkflow(t *testing.T) {
+	cfg := editTestConfig(t)
+	cfg.Comfy.DefaultEditWorkflow = "edit"
+	h := NewToolHandlers(cfg, queuedTestQueueWithConfig(t, cfg))
+
+	// The discriminating setup: the generation default ("test", a txt2img
+	// workflow with no image_input_node) is set alongside the edit default —
+	// an empty argument must pick "edit", never "test".
+	require.Equal(t, "test", cfg.Comfy.DefaultWorkflow)
+
+	cases := []struct {
+		name    string
+		arg     string
+		want    string
+		wantErr string
+	}{
+		{"explicit existing name", "edit", "edit", ""},
+		{"empty resolves to edit default", "", "edit", ""},
+		{"default keyword resolves to edit default", "default", "edit", ""},
+		{"unknown explicit name", "nope", "", `workflow "nope" not found`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			name, err := h.resolveEditWorkflow(tc.arg)
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, name)
+		})
+	}
+
+	// No edit default configured: empty must error naming the knob — not
+	// fall through to the generation default.
+	noDefault := editTestConfig(t)
+	noDefault.Comfy.DefaultEditWorkflow = ""
+	h2 := NewToolHandlers(noDefault, queuedTestQueue(t))
+	_, err := h2.resolveEditWorkflow("")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "default_edit_workflow")
+}
+
+// TestEditHandlersUseEditDefault pins the handler wiring of the edit
+// default through the shared validateEditInput seam: an edit call with an
+// empty workflow argument submits its job on the configured
+// default_edit_workflow, not the generation default (which would die at
+// the image_input_node gate — the wasted round-trip the production model
+// kept paying).
+func TestEditHandlersUseEditDefault(t *testing.T) {
+	newHandlers := func(t *testing.T) *ToolHandlers {
+		t.Helper()
+		cfg := editTestConfig(t)
+		cfg.Comfy.DefaultEditWorkflow = "edit"
+		return NewToolHandlers(cfg, queuedTestQueueWithConfig(t, cfg))
+	}
+
+	t.Run("async", func(t *testing.T) {
+		h := newHandlers(t)
+		_, out, err := h.handleEditImageAsync(context.Background(), nil, EditImageAsyncInput{
+			Prompt:      "make it blue",
+			InputImages: []string{"gen_a"},
+		})
+		require.NoError(t, err, "handler")
+		job, ok := h.queue.Get(out.JobID)
+		require.True(t, ok, "job should be findable in queue")
+		assert.Equal(t, JobTypeEdit, job.Type)
+		assert.Equal(t, "edit", job.Workflow, "empty workflow arg must land on the edit default")
+	})
+
+	t.Run("sync", func(t *testing.T) {
+		h := newHandlers(t)
+		// No workers: WaitForJob times out after 1s; the handler returns
+		// cleanly and the submitted job stays queued for inspection.
+		_, _, err := h.handleEditImage(context.Background(), nil, EditImageInput{
+			Prompt:      "make it blue",
+			InputImages: []string{"gen_a"},
+			Timeout:     1,
+		})
+		require.NoError(t, err, "handler")
+		jobs := h.queue.ListJobs("", 10)
+		require.Len(t, jobs, 1, "exactly the one submitted job")
+		assert.Equal(t, JobTypeEdit, jobs[0].Type)
+		assert.Equal(t, "edit", jobs[0].Workflow, "empty workflow arg must land on the edit default")
+	})
 }

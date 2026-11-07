@@ -48,7 +48,7 @@ mcp = "img-mcp"
 tool = "enhance_and_generate"
 arg = "prompt"
 timeout = "2m"
-args = { workflow = "qwen", output_format = "url" }
+args = { workflow = "qwen" }
 
 [qwenHD]
 description = "Qwen HD enhanced image generation"
@@ -56,7 +56,7 @@ mcp = "img-mcp"
 tool = "enhance_and_generate"
 arg = "prompt"
 timeout = "2m"
-args = { workflow = "qwenHD", output_format = "url" }
+args = { workflow = "qwenHD" }
 
 [zimage]
 description = "Zimage enhanced image generation"
@@ -64,7 +64,7 @@ mcp = "img-mcp"
 tool = "enhance_and_generate"
 arg = "prompt"
 timeout = "2m"
-args = { workflow = "zimage", output_format = "url" }
+args = { workflow = "zimage" }
 
 [queue]
 description = "View generation queue status"

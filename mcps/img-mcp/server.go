@@ -16,6 +16,52 @@ func newServer(cfg Config, name string, instructions string) *mcp.Server {
 	)
 }
 
+// editToolBaseDescription is the shared teaching text for the edit tools:
+// input ordering (FIRST image is the edit target), the ref grammar
+// (usr_/web_ conversation refs, gen_ generation refs), the per-workflow
+// prompt grammar pointer, strength, and the default-edit-workflow rule.
+// The flavor tail (blocking vs queued) and the [safety] edit_policy suffix
+// are appended by editToolDescription.
+const editToolBaseDescription = "Edit images using an image-editing workflow. input_images is ORDERED: the FIRST image is the edit target — the edit applies to it and the output dimensions follow it; any additional images are references. Pass image references: the ref ids shown next to images in the conversation (usr_/web_) or gen_ refs from generation results. Some workflows expect images mentioned in the prompt (e.g. as <image1>, <image2>) — check the workflow's description with list_workflows. strength (0-1) controls edit intensity when the workflow supports it. Uses the default edit workflow if workflow is empty or 'default'."
+
+// editToolDescription builds the edit tools' advertised description: base
+// teaching text + the flavor tail + the configured content-policy suffix
+// (the owner's rules; empty edit_policy = no suffix). The policy is the
+// instruction-layer guard for the safeguard-free Qwen Image Edit model —
+// every model that can call the tools reads it here.
+func editToolDescription(cfg Config, async bool) string {
+	desc := editToolBaseDescription
+	if async {
+		desc += " Queues the edit job and returns a job_id immediately without waiting."
+	} else {
+		desc += " Blocks until the edit completes and returns the image result directly."
+	}
+	if p := cfg.Safety.EditPolicy; p != "" {
+		desc += "\n\nContent rules you MUST follow when editing: " + p
+	}
+	return desc
+}
+
+// registerEditToolSync registers the blocking edit_image tool. Split out of
+// the createXServer builders so live re-registration (edit_policy
+// hot-reload) shares the exact registration code — the description is
+// frozen at AddTool time, so a policy change means RemoveTools + this.
+func registerEditToolSync(server *mcp.Server, handlers *ToolHandlers, cfg Config) {
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "edit_image",
+		Description: editToolDescription(cfg, false),
+	}, handlers.handleEditImage)
+}
+
+// registerEditToolAsync is registerEditToolSync for the non-blocking
+// edit_image_async tool.
+func registerEditToolAsync(server *mcp.Server, handlers *ToolHandlers, cfg Config) {
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "edit_image_async",
+		Description: editToolDescription(cfg, true),
+	}, handlers.handleEditImageAsync)
+}
+
 func createSyncServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 	server := newServer(cfg, cfg.Server.Name,
 		"MCP server for ComfyUI image generation (sync). Use generate_image or enhance_and_generate for one-step image generation (blocks until done).")
@@ -35,10 +81,7 @@ func createSyncServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 		Description: "Enhance a prompt via LLM and then generate an image using ComfyUI in one step. Blocks until both enhancement and generation complete and returns the image result directly. This is the simplest way to enhance and generate. Uses the 'default' enhancement profile unless a different one is specified. Uses the default workflow if workflow is empty or 'default'.",
 	}, handlers.handleEnhanceAndGenerate)
 
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "edit_image",
-		Description: "Edit images using an image-editing workflow. input_images is ORDERED: the FIRST image is the edit target — the edit applies to it and the output dimensions follow it; any additional images are references. Pass image references: the ref ids shown next to images in the conversation (usr_/web_) or gen_ refs from generation results. Some workflows expect images mentioned in the prompt (e.g. as <image1>, <image2>) — check the workflow's description with list_workflows. strength (0-1) controls edit intensity when the workflow supports it. Uses the default edit workflow if workflow is empty or 'default'. Blocks until the edit completes and returns the image result directly.",
-	}, handlers.handleEditImage)
+	registerEditToolSync(server, handlers, cfg)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "upload_image",
@@ -87,10 +130,7 @@ func createAsyncServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 		Description: "Enhance a prompt via LLM and queue a ComfyUI image generation job in one step. Returns a job_id immediately without waiting. Uses the 'default' enhancement profile unless a different one is specified. Uses the default workflow if workflow is empty or 'default'.",
 	}, handlers.handleEnhanceAndGenerateAsync)
 
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "edit_image_async",
-		Description: "Edit images using an image-editing workflow. input_images is ORDERED: the FIRST image is the edit target — the edit applies to it and the output dimensions follow it; any additional images are references. Pass image references: the ref ids shown next to images in the conversation (usr_/web_) or gen_ refs from generation results. Some workflows expect images mentioned in the prompt (e.g. as <image1>, <image2>) — check the workflow's description with list_workflows. strength (0-1) controls edit intensity when the workflow supports it. Uses the default edit workflow if workflow is empty or 'default'. Queues the edit job and returns a job_id immediately without waiting.",
-	}, handlers.handleEditImageAsync)
+	registerEditToolAsync(server, handlers, cfg)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "wait_for_job",
@@ -164,15 +204,8 @@ func createFullServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 		Description: "Enhance a prompt via LLM and queue a ComfyUI image generation job in one step. Returns a job_id immediately without waiting. Uses the 'default' enhancement profile unless a different one is specified. Uses the default workflow if workflow is empty or 'default'.",
 	}, handlers.handleEnhanceAndGenerateAsync)
 
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "edit_image",
-		Description: "Edit images using an image-editing workflow. input_images is ORDERED: the FIRST image is the edit target — the edit applies to it and the output dimensions follow it; any additional images are references. Pass image references: the ref ids shown next to images in the conversation (usr_/web_) or gen_ refs from generation results. Some workflows expect images mentioned in the prompt (e.g. as <image1>, <image2>) — check the workflow's description with list_workflows. strength (0-1) controls edit intensity when the workflow supports it. Uses the default edit workflow if workflow is empty or 'default'. Blocks until the edit completes and returns the image result directly.",
-	}, handlers.handleEditImage)
-
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "edit_image_async",
-		Description: "Edit images using an image-editing workflow. input_images is ORDERED: the FIRST image is the edit target — the edit applies to it and the output dimensions follow it; any additional images are references. Pass image references: the ref ids shown next to images in the conversation (usr_/web_) or gen_ refs from generation results. Some workflows expect images mentioned in the prompt (e.g. as <image1>, <image2>) — check the workflow's description with list_workflows. strength (0-1) controls edit intensity when the workflow supports it. Uses the default edit workflow if workflow is empty or 'default'. Queues the edit job and returns a job_id immediately without waiting.",
-	}, handlers.handleEditImageAsync)
+	registerEditToolSync(server, handlers, cfg)
+	registerEditToolAsync(server, handlers, cfg)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "wait_for_job",

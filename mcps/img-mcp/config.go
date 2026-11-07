@@ -104,6 +104,15 @@ type SafetyConfig struct {
 	// separately configured by convention, like upload.api_key vs imgsite's
 	// auth.api_key.
 	SkipNetworks []string `toml:"skip_networks"`
+	// EditPolicy is appended to the edit_image/edit_image_async tool
+	// descriptions as content rules the model MUST follow (Qwen Image Edit
+	// has no built-in safeguards — this is the instruction-layer guard).
+	// Keep it short: it rides the tool definitions on every request.
+	// Hot-reloaded: a changed policy re-registers the edit tools on the
+	// live servers (tools/list_changed); connected clients are notified —
+	// dave applies it on its next /reload or reconnect. The safety vet
+	// stays text-only; images are never sent to the vet AI.
+	EditPolicy string `toml:"edit_policy"`
 }
 
 type WorkflowConfig struct {

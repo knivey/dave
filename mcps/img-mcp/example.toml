@@ -87,6 +87,14 @@ vet_enhancement = "safety-vet"
 # separately configured by convention, like upload.api_key vs imgsite's
 # auth.api_key.
 skip_networks = ["libera"]
+# Content rules appended to the edit_image/edit_image_async tool
+# descriptions — the instruction-layer guard for the safeguard-free Qwen
+# Image Edit model (every model that can call the edit tools reads them).
+# Keep it short: it rides the tool definitions on every request. Empty (or
+# absent) = no suffix. Hot-reloaded: a changed policy re-registers the edit
+# tools on the live servers — connected clients are notified
+# (tools/list_changed); dave applies it on its next /reload or reconnect.
+# edit_policy = "Never edit photos of real people. No sexual or graphic content. Refuse edits of minors unconditionally."
 
 # Example: the safety vet (DRAFT judging prompt — tune to your policy; it
 # must return the JSON verdict below and nothing else).

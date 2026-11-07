@@ -33,6 +33,7 @@ type testConfigTomlOpts struct {
 	ServerName      string
 	ServerVersion   string
 	ServerAddr      string
+	EditPolicy      string
 }
 
 func testConfigToml(opts testConfigTomlOpts) string {
@@ -67,6 +68,13 @@ url = "` + opts.UploadURL + `"
 	if opts.NoUploadSection {
 		uploadSection = ""
 	}
+	safetySection := ""
+	if opts.EditPolicy != "" {
+		safetySection = `
+[safety]
+edit_policy = "` + opts.EditPolicy + `"
+`
+	}
 	return `
 [server]
 name = "` + opts.ServerName + `"
@@ -77,7 +85,7 @@ addr = "` + opts.ServerAddr + `"
 baseurl = "` + opts.ComfyURL + `"
 timeout = 60
 default_workflow = "test"
-` + uploadSection + `
+` + uploadSection + safetySection + `
 [queue]
 max_workers = ` + fmt.Sprintf("%d", opts.MaxWorkers) + `
 max_depth = ` + fmt.Sprintf("%d", opts.MaxDepth) + `

@@ -21,6 +21,41 @@ type reloadResponse struct {
 	Message  string   `json:"message,omitempty"`
 }
 
+// liveServer retains a live MCP server together with the closure that
+// re-registers its edit tools under a new config — the hot-reload path for
+// [safety] edit_policy, which rides the edit tool descriptions and is
+// frozen at AddTool time. The SDK serializes the mutations
+// (changeAndNotify) and fires notifications/tools/list_changed to
+// connected clients; dave applies the new descriptions on its next tool
+// re-list or /reload.
+type liveServer struct {
+	server *mcp.Server
+	// refresh re-registers THIS server's edit tools under a new config
+	// (RemoveTools both names — idempotent — then AddTool per kind).
+	refresh func(cfg Config)
+}
+
+// newLiveServer wraps a live server with its refresh closure. carrySync /
+// carryAsync select which edit registrations this server flavor carries:
+// the stdio full server has both, the HTTP sync server only edit_image,
+// the HTTP async server only edit_image_async. RemoveTools is idempotent
+// (removing a name the server doesn't carry is a no-op), so every refresh
+// removes both names and re-adds only the kinds this flavor carries.
+func newLiveServer(server *mcp.Server, handlers *ToolHandlers, carrySync, carryAsync bool) liveServer {
+	return liveServer{
+		server: server,
+		refresh: func(cfg Config) {
+			server.RemoveTools("edit_image", "edit_image_async")
+			if carrySync {
+				registerEditToolSync(server, handlers, cfg)
+			}
+			if carryAsync {
+				registerEditToolAsync(server, handlers, cfg)
+			}
+		},
+	}
+}
+
 func main() {
 	httpMode := flag.Bool("http", false, "use HTTP transport instead of stdio")
 	flag.Parse()
@@ -89,9 +124,23 @@ func main() {
 		cancel()
 	}()
 
+	// Build the server(s) and their live-reload handles BEFORE the reload
+	// loop starts, so a SIGHUP arriving during startup still finds them.
+	var liveServers []liveServer
+	var run func()
+	if *httpMode {
+		handler, ls := buildHTTPHandler(cfg, handlers, queue, configPath)
+		liveServers = ls
+		run = func() { serveHTTP(ctx, cfg.Server.Addr, handler) }
+	} else {
+		server := createFullServer(cfg, handlers)
+		liveServers = []liveServer{newLiveServer(server, handlers, true, true)}
+		run = func() { serveStdio(ctx, server) }
+	}
+
 	go func() {
 		for range reloadCh {
-			resp := doReload(configPath, handlers, queue)
+			resp := doReload(configPath, handlers, queue, liveServers)
 			if resp.Status == "error" {
 				logger.Error("config reload failed", "error", resp.Message)
 			} else {
@@ -102,21 +151,28 @@ func main() {
 			}
 		}
 	}()
-	if *httpMode {
-		serveHTTP(ctx, cfg, handlers, queue, configPath)
-	} else {
-		server := createFullServer(cfg, handlers)
-		serveStdio(ctx, server)
-	}
+
+	run()
 }
 
-func doReload(configPath string, handlers *ToolHandlers, queue *JobQueue) reloadResponse {
-	newCfg, warnings, err := reloadConfigFromFile(configPath, handlers.getConfig())
+func doReload(configPath string, handlers *ToolHandlers, queue *JobQueue, liveServers []liveServer) reloadResponse {
+	oldCfg := handlers.getConfig()
+	newCfg, warnings, err := reloadConfigFromFile(configPath, oldCfg)
 	if err != nil {
 		return reloadResponse{Status: "error", Message: err.Error()}
 	}
 	handlers.setConfig(newCfg)
 	queue.setConfig(newCfg)
+	// [safety] edit_policy rides the edit tool descriptions, which are
+	// frozen at registration — a changed policy re-registers the edit
+	// tools on every live server (tools/list_changed fires; dave applies
+	// the new text on its next tool re-list or /reload).
+	if oldCfg.Safety.EditPolicy != newCfg.Safety.EditPolicy {
+		for _, ls := range liveServers {
+			ls.refresh(newCfg)
+		}
+		logger.Info("edit tool descriptions re-registered (edit_policy changed)")
+	}
 	resp := reloadResponse{Status: "ok"}
 	if len(warnings) > 0 {
 		resp.Warnings = warnings
@@ -134,12 +190,10 @@ func serveStdio(ctx context.Context, server *mcp.Server) {
 	}
 }
 
-func serveHTTP(ctx context.Context, cfg Config, handlers *ToolHandlers, queue *JobQueue, configPath string) {
-	mux := buildHTTPHandler(cfg, handlers, queue, configPath)
-
+func serveHTTP(ctx context.Context, addr string, handler http.Handler) {
 	httpServer := &http.Server{
-		Addr:    cfg.Server.Addr,
-		Handler: mux,
+		Addr:    addr,
+		Handler: handler,
 	}
 
 	go func() {
@@ -147,16 +201,24 @@ func serveHTTP(ctx context.Context, cfg Config, handlers *ToolHandlers, queue *J
 		httpServer.Shutdown(context.Background())
 	}()
 
-	logger.Info("HTTP server listening", "addr", cfg.Server.Addr)
+	logger.Info("HTTP server listening", "addr", addr)
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fmt.Fprintf(os.Stderr, "HTTP server error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func buildHTTPHandler(cfg Config, handlers *ToolHandlers, queue *JobQueue, configPath string) http.Handler {
+// buildHTTPHandler wires the two HTTP MCP servers (sync on /sync, async on
+// /async), the admin reload endpoint, and the middleware chain. It also
+// returns the liveServer handles so the SIGHUP path in main shares the
+// same edit-policy refresh closures as POST /admin/reload.
+func buildHTTPHandler(cfg Config, handlers *ToolHandlers, queue *JobQueue, configPath string) (http.Handler, []liveServer) {
 	syncServer := createSyncServer(cfg, handlers)
 	asyncServer := createAsyncServer(cfg, handlers)
+	liveServers := []liveServer{
+		newLiveServer(syncServer, handlers, true, false),
+		newLiveServer(asyncServer, handlers, false, true),
+	}
 
 	syncHandler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
 		return syncServer
@@ -171,7 +233,7 @@ func buildHTTPHandler(cfg Config, handlers *ToolHandlers, queue *JobQueue, confi
 	mux.Handle("/async", asyncHandler)
 
 	mux.HandleFunc("POST /admin/reload", func(w http.ResponseWriter, r *http.Request) {
-		resp := doReload(configPath, handlers, queue)
+		resp := doReload(configPath, handlers, queue, liveServers)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(resp)
 	})
@@ -183,7 +245,7 @@ func buildHTTPHandler(cfg Config, handlers *ToolHandlers, queue *JobQueue, confi
 	}
 	handler = requestLogMiddleware(handler)
 
-	return handler
+	return handler, liveServers
 }
 
 func requestLogMiddleware(next http.Handler) http.Handler {

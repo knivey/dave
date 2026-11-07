@@ -260,6 +260,105 @@ func TestEditToolDescriptionsTeachDefaultEditWorkflow(t *testing.T) {
 	}
 }
 
+// TestEditToolDescriptionPolicy pins the [safety] edit_policy suffix: the
+// configured content rules ride the edit tool descriptions verbatim after
+// the marker sentence, past the flavor tail; empty policy = no suffix at
+// all. This is the instruction-layer guard for the safeguard-free Qwen
+// Image Edit model — every model that can call the edit tools sees the
+// rules, and the safety vet stays text-only.
+func TestEditToolDescriptionPolicy(t *testing.T) {
+	cfg := testConfig("http://127.0.0.1:0")
+
+	t.Run("empty policy: base text only", func(t *testing.T) {
+		cfg.Safety.EditPolicy = ""
+		syncDesc := editToolDescription(cfg, false)
+		asyncDesc := editToolDescription(cfg, true)
+		for name, d := range map[string]string{"sync": syncDesc, "async": asyncDesc} {
+			assert.Contains(t, d, "FIRST image is the edit target", name+": base teaching text")
+			assert.Contains(t, d, "Uses the default edit workflow if workflow is empty or 'default'.", name)
+			assert.NotContains(t, d, "Content rules", name+": empty policy must add no suffix")
+		}
+		assert.Contains(t, syncDesc, "Blocks until the edit completes and returns the image result directly.")
+		assert.NotContains(t, syncDesc, "Queues the edit job")
+		assert.Contains(t, asyncDesc, "Queues the edit job and returns a job_id immediately without waiting.")
+		assert.NotContains(t, asyncDesc, "Blocks until the edit completes")
+	})
+
+	t.Run("policy appended verbatim after the marker, at the end", func(t *testing.T) {
+		cfg.Safety.EditPolicy = "No ducks. Ever."
+		for _, async := range []bool{false, true} {
+			d := editToolDescription(cfg, async)
+			assert.Contains(t, d, "\n\nContent rules you MUST follow when editing: No ducks. Ever.")
+			assert.True(t, strings.HasSuffix(d, "No ducks. Ever."),
+				"suffix must land at the end, after the flavor tail")
+		}
+	})
+}
+
+// TestRegisterEditToolsCarryPolicy pins the full wire path: a server built
+// with a policy advertises it in the listed edit tool descriptions, and the
+// liveServer refresh closure swaps it for a new one (RemoveTools + AddTool
+// → tools/list_changed) so the next ListTools shows the new text exactly
+// once. This is exactly what a SIGHUP-driven edit_policy change does in
+// production (doReload → every liveServer's refresh).
+func TestRegisterEditToolsCarryPolicy(t *testing.T) {
+	cfgA := testConfig("http://127.0.0.1:0")
+	cfgA.Safety.EditPolicy = "policy A: be kind"
+	h := NewToolHandlers(cfgA, queuedTestQueue(t))
+	server := createFullServer(cfgA, h)
+	ls := newLiveServer(server, h, true, true)
+
+	ct, st := mcp.NewInMemoryTransports()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go server.Run(ctx, st)
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	require.NoError(t, err, "connect")
+	t.Cleanup(func() { cs.Close() })
+
+	// editDescs lists the tools and returns both edit descriptions, also
+	// pinning that the refresh leaves exactly ONE registration per name
+	// (RemoveTools before AddTool — no duplicates).
+	editDescs := func(t *testing.T) (string, string) {
+		t.Helper()
+		res, err := cs.ListTools(ctx, nil)
+		require.NoError(t, err, "ListTools")
+		var syncDesc, asyncDesc string
+		var syncCount, asyncCount int
+		for _, tool := range res.Tools {
+			switch tool.Name {
+			case "edit_image":
+				syncDesc, syncCount = tool.Description, syncCount+1
+			case "edit_image_async":
+				asyncDesc, asyncCount = tool.Description, asyncCount+1
+			}
+		}
+		require.Equal(t, 1, syncCount, "exactly one edit_image registration")
+		require.Equal(t, 1, asyncCount, "exactly one edit_image_async registration")
+		require.NotEmpty(t, syncDesc)
+		require.NotEmpty(t, asyncDesc)
+		return syncDesc, asyncDesc
+	}
+
+	syncDesc, asyncDesc := editDescs(t)
+	assert.Contains(t, syncDesc, "policy A: be kind")
+	assert.Contains(t, asyncDesc, "policy A: be kind")
+
+	// The refresh closure is what doReload invokes on a policy change:
+	// re-register under cfgB, then the next ListTools must show B, not A.
+	cfgB := cfgA
+	cfgB.Safety.EditPolicy = "policy B: be cruel"
+	ls.refresh(cfgB)
+
+	syncDesc, asyncDesc = editDescs(t)
+	assert.Contains(t, syncDesc, "policy B: be cruel")
+	assert.Contains(t, asyncDesc, "policy B: be cruel")
+	assert.NotContains(t, syncDesc, "policy A: be kind")
+	assert.NotContains(t, asyncDesc, "policy A: be kind")
+}
+
 // TestJobReadersRaceFreeWhileCompleting pins the fix for unlocked job-field
 // readers in the tool handlers: job_status / list_jobs / wait_for_job must
 // observe the job through a snapshot taken under JobQueue.mu, never through

@@ -99,7 +99,7 @@ api_key = "test-secret-key"
 	defer queue.Stop()
 	handlers := NewToolHandlers(cfg, queue)
 
-	handler := buildHTTPHandler(cfg, handlers, queue, configPath)
+	handler, _ := buildHTTPHandler(cfg, handlers, queue, configPath)
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
@@ -146,7 +146,7 @@ func TestBuildHTTPHandler_WithoutAuth(t *testing.T) {
 	defer queue.Stop()
 	handlers := NewToolHandlers(cfg, queue)
 
-	handler := buildHTTPHandler(cfg, handlers, queue, configPath)
+	handler, _ := buildHTTPHandler(cfg, handlers, queue, configPath)
 	server := httptest.NewServer(handler)
 	defer server.Close()
 

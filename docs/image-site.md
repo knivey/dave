@@ -215,12 +215,27 @@ non-hidden images that pass the visibility predicate:
 
 ```sql
 AND (LOWER(i.network) IN (/* lowercased allowed_networks */)
-     OR i.safety = 'safe')
+     OR (i.safety = 'safe' AND NOT i.edited))
 ```
 
 `'unknown'` and `'unsafe'` verdicts fail the predicate — default-deny —
 and NULL/empty provenance (imported/legacy/direct uploads) is reachable
-only via `safety = 'safe'`. Site-aware surfaces, all resolving the site
+only via `safety = 'safe'`.
+
+**Edited images** (`images.edited`, migration 008) cross to the safe
+site ONLY via the network arm: the `safety='safe'` verdict arm carries
+`AND NOT edited`. The safety vet is text-only (owner ruling — images
+are never sent to the vet AI), so it cannot see an edit's input image;
+an NSFW input edited with an innocent prompt would otherwise pass as
+`safe` and cross. Libera-origin edits stay visible (network arm);
+edits from anywhere else are default-site-only regardless of verdict.
+The column is monotonic — once true it is never cleared (a note
+lacking `edited_from` cannot un-edit a row) — set from
+`edited_from` presence in the upload meta or the EXIF note
+(`applyMergedMetadata` preserve-true), so an `/admin/reextract` of a
+pre-migration edit backfills it from the note.
+
+Site-aware surfaces, all resolving the site
 once per request via the Host header:
 
 - Gallery page + fragment (`dbGetGalleryPage`) and search page +
@@ -297,6 +312,8 @@ CREATE TABLE images (
   network  TEXT, channel TEXT, nick TEXT, workflow_name TEXT,
   -- LLM safety verdict for the safe-site host split (migration 003)
   safety   TEXT NOT NULL DEFAULT 'unknown',   -- 'unknown' | 'safe' | 'unsafe'
+  -- edit-job output marker for the safe-site verdict arm (migration 008)
+  edited   INTEGER NOT NULL DEFAULT 0,        -- monotonic: never cleared once set
 
   -- graph-derived params
   seed INTEGER, steps INTEGER, cfg REAL, denoise REAL,
@@ -335,6 +352,19 @@ reset** a stored verdict — the UPDATE is guarded so an empty payload
 value keeps the stored one — and re-extract additionally *backfills*
 `'unknown'` (and empty provenance) from the note. No index at gallery
 scale; revisit past ~50k rows.
+
+#### Edited column (migration 008)
+
+`edited` marks an img-mcp edit job's output. Set from `edited_from`
+presence in EITHER the upload meta or the `dave_original_prompt` note
+(the merge ORs; `applyMergedMetadata` and the UPDATE are
+preserve-true), and the ONLY consumer is the safe-site visibility
+rule's verdict arm (`safety='safe' AND NOT edited` — see "Safe-site
+host split"). `dbGetImageSiteVisibility`'s projection includes it:
+the thumb-ready SSE publish path re-reads its row through that
+narrowed SELECT, and a missing column would leave `Edited` false and
+fail OPEN. See the safe-site section for why the verdict arm is
+closed to edits.
 
 ### Public IDs
 

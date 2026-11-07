@@ -1054,12 +1054,14 @@ func matrixSafeSiteCtx() siteCtx {
 	return siteCtx{Safe: true, networks: []string{"libera"}}
 }
 
-// TestSearchSiteMatrix runs the six-row visibility matrix through
+// TestSearchSiteMatrix runs the eight-row visibility matrix through
 // runSearch and the HTTP search surfaces on both hosts. The rows are
 // placed one per tier role (see seedSiteMatrix): tier 1 keeps its
 // visible row and drops the invisible one, tier 2 does the same, tier 3
 // (trigram-accelerated here — "gribble" is 7 runes) keeps its
-// safe-visible row. Default site unchanged.
+// safe-visible rows (sit0008's allowed origin carries the edit;
+// sit0007's 'safe' verdict does not — the edited guard). Default site
+// unchanged.
 func TestSearchSiteMatrix(t *testing.T) {
 	app := newTestApp(t, safeSiteTestConfig())
 	ts := newTestServer(t, app)
@@ -1067,14 +1069,14 @@ func TestSearchSiteMatrix(t *testing.T) {
 
 	t.Run("SafeSiteRunSearch", func(t *testing.T) {
 		res := runSearchForSite(t, app, "gribble", searchCursor{}, 48, matrixSafeSiteCtx())
-		assert.Equal(t, []string{"sit0001", "sit0004", "sit0005"}, hitIDs(res.Hits),
+		assert.Equal(t, []string{"sit0001", "sit0004", "sit0008", "sit0005"}, hitIDs(res.Hits),
 			"tier order preserved; exactly the safe-visible rows survive in every tier")
-		assert.Equal(t, []int{1, 2, 3}, []int{res.Hits[0].tier, res.Hits[1].tier, res.Hits[2].tier},
+		assert.Equal(t, []int{1, 2, 3, 3}, []int{res.Hits[0].tier, res.Hits[1].tier, res.Hits[2].tier, res.Hits[3].tier},
 			"one surviving row per tier keeps each tier's structural position")
 	})
 	t.Run("DefaultSiteRunSearch", func(t *testing.T) {
 		res := runSearchForSite(t, app, "gribble", searchCursor{}, 48, siteCtx{})
-		assert.ElementsMatch(t, []string{"sit0001", "sit0002", "sit0003", "sit0004", "sit0005"}, hitIDs(res.Hits))
+		assert.ElementsMatch(t, []string{"sit0001", "sit0002", "sit0003", "sit0004", "sit0005", "sit0007", "sit0008"}, hitIDs(res.Hits))
 		tiers := map[string]int{}
 		for _, h := range res.Hits {
 			tiers[h.img.ID] = h.tier
@@ -1084,6 +1086,8 @@ func TestSearchSiteMatrix(t *testing.T) {
 		assert.Equal(t, 2, tiers["sit0003"])
 		assert.Equal(t, 2, tiers["sit0004"])
 		assert.Equal(t, 3, tiers["sit0005"])
+		assert.Equal(t, 3, tiers["sit0007"], "default host still finds the edited row by substring")
+		assert.Equal(t, 3, tiers["sit0008"])
 	})
 	t.Run("SafeSitePaginationSkipsInvisible", func(t *testing.T) {
 		// Small pages prove the OFFSET stitch composes with the filter:
@@ -1092,35 +1096,35 @@ func TestSearchSiteMatrix(t *testing.T) {
 		cur := searchCursor{}
 		for page := 1; ; page++ {
 			res := runSearchForSite(t, app, "gribble", cur, 1, matrixSafeSiteCtx())
-			require.Less(t, page, 6, "pagination did not terminate")
+			require.Less(t, page, 7, "pagination did not terminate")
 			got = append(got, hitIDs(res.Hits)...)
 			if !res.HasMore {
 				break
 			}
 			cur = res.Next
 		}
-		assert.Equal(t, []string{"sit0001", "sit0004", "sit0005"}, got)
+		assert.Equal(t, []string{"sit0001", "sit0004", "sit0008", "sit0005"}, got)
 	})
 	t.Run("SafeHostHTTPPage", func(t *testing.T) {
 		status, body := getPageHost(t, ts, "safe.example.com", "/search?q=gribble")
 		require.Equal(t, http.StatusOK, status)
-		assertIDsInOrder(t, body, "sit0001", "sit0004", "sit0005")
-		for _, invisible := range []string{"sit0002", "sit0003", "sit0006"} {
+		assertIDsInOrder(t, body, "sit0001", "sit0004", "sit0008", "sit0005")
+		for _, invisible := range []string{"sit0002", "sit0003", "sit0006", "sit0007"} {
 			assert.NotContains(t, body, invisible)
 		}
 	})
 	t.Run("SafeHostHTTPFragment", func(t *testing.T) {
 		status, body := getPageHost(t, ts, "safe.example.com", "/search-fragment?q=gribble")
 		require.Equal(t, http.StatusOK, status)
-		assertIDsInOrder(t, body, "sit0001", "sit0004", "sit0005")
-		for _, invisible := range []string{"sit0002", "sit0003", "sit0006"} {
+		assertIDsInOrder(t, body, "sit0001", "sit0004", "sit0008", "sit0005")
+		for _, invisible := range []string{"sit0002", "sit0003", "sit0006", "sit0007"} {
 			assert.NotContains(t, body, invisible)
 		}
 	})
 	t.Run("DefaultHostHTTPPage", func(t *testing.T) {
 		status, body := getPage(t, ts.URL, "/search?q=gribble")
 		require.Equal(t, http.StatusOK, status)
-		for _, id := range []string{"sit0001", "sit0002", "sit0003", "sit0004", "sit0005"} {
+		for _, id := range []string{"sit0001", "sit0002", "sit0003", "sit0004", "sit0005", "sit0007", "sit0008"} {
 			assert.Contains(t, body, id, "default host sees id %s", id)
 		}
 		assert.NotContains(t, body, "sit0006", "hidden stays out of search on the default host")
@@ -1202,7 +1206,7 @@ func TestBuildLikeTierQuerySiteFilterShape(t *testing.T) {
 		query, args := buildLikeTierQuery([]string{"gribble"}, `"gribble"*`, 49, 0, matrixSafeSiteCtx())
 
 		assert.Contains(t, query, substringFTSTable, "accelerated shape intact")
-		assert.Contains(t, query, " AND (LOWER(i.network) IN (?) OR i.safety = 'safe')",
+		assert.Contains(t, query, " AND (LOWER(i.network) IN (?) OR (i.safety = 'safe' AND NOT i.edited))",
 			"site predicate is one outer AND conjunct")
 		assert.Equal(t, 1, strings.Count(query, "LOWER(i.network)"), "exactly one site conjunct")
 		assert.Equal(t, 1, strings.Count(query, "images_fts MATCH"),
@@ -1265,7 +1269,7 @@ func TestBuildFTSTierQuerySiteFilterShape(t *testing.T) {
 	t.Run("SafeSiteTier1FragmentAppendedAfterHidden", func(t *testing.T) {
 		query, args := buildFTSTierQuery(1, expr, tier1Expr, 0, 49, 27, matrixSafeSiteCtx())
 
-		assert.Contains(t, query, " AND (LOWER(i.network) IN (?) OR i.safety = 'safe')",
+		assert.Contains(t, query, " AND (LOWER(i.network) IN (?) OR (i.safety = 'safe' AND NOT i.edited))",
 			"site predicate is one outer AND conjunct")
 		assert.Equal(t, 1, strings.Count(query, "LOWER(i.network)"), "exactly one site conjunct")
 		assert.Less(t, strings.Index(query, "i.hidden = 0"), strings.Index(query, "LOWER(i.network)"),
@@ -1279,7 +1283,7 @@ func TestBuildFTSTierQuerySiteFilterShape(t *testing.T) {
 	t.Run("SafeSiteTier2SubqueryUntouched", func(t *testing.T) {
 		query, args := buildFTSTierQuery(2, expr, tier1Expr, 0, 49, 27, matrixSafeSiteCtx())
 
-		assert.Contains(t, query, " AND (LOWER(i.network) IN (?) OR i.safety = 'safe')")
+		assert.Contains(t, query, " AND (LOWER(i.network) IN (?) OR (i.safety = 'safe' AND NOT i.edited))")
 		assert.Equal(t, 1, strings.Count(query, "LOWER(i.network)"))
 		assert.Contains(t, query,
 			"SELECT rowid FROM images_fts WHERE images_fts MATCH ?",

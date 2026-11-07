@@ -36,16 +36,20 @@ type workflowNode struct {
 // expressed by composition with enhancement_reasoning, see img-mcp's
 // note builder): *bool keeps absent distinguishable from an explicit
 // false. Parsed for future site use only — no column, no behavior.
+// edited_from carries an edit job's input image refs (present = the
+// image is an edit's output; the safe-site verdict arm is closed to
+// edits because the text-only vet never saw those inputs).
 type promptNotePayload struct {
-	Prompt               string `json:"prompt"`
-	LLMGenerated         bool   `json:"llm_generated"`
-	JobID                string `json:"job_id"`
-	EnhancementReasoning string `json:"enhancement_reasoning,omitempty"`
-	NSFW                 *bool  `json:"nsfw,omitempty"`
-	Network              string `json:"network,omitempty"`
-	Channel              string `json:"channel,omitempty"`
-	Nick                 string `json:"nick,omitempty"`
-	Safety               string `json:"safety,omitempty"`
+	Prompt               string   `json:"prompt"`
+	LLMGenerated         bool     `json:"llm_generated"`
+	JobID                string   `json:"job_id"`
+	EnhancementReasoning string   `json:"enhancement_reasoning,omitempty"`
+	NSFW                 *bool    `json:"nsfw,omitempty"`
+	Network              string   `json:"network,omitempty"`
+	Channel              string   `json:"channel,omitempty"`
+	Nick                 string   `json:"nick,omitempty"`
+	Safety               string   `json:"safety,omitempty"`
+	EditedFrom           []string `json:"edited_from,omitempty"`
 }
 
 // extractedMetadata is everything the images table stores that can be
@@ -68,6 +72,12 @@ type extractedMetadata struct {
 	Channel string
 	Nick    string
 	Safety  string
+
+	// Edited is the note payload's edited_from presence (len > 0):
+	// the image is the output of an img-mcp edit job whose input image
+	// the text-only safety vet never saw. Parsed for the safe-site
+	// visibility rule — the verdict arm is closed to edited rows.
+	Edited bool
 
 	// NSFW is the note payload's first-pass sexual-content flag (nil =
 	// absent, no signal). FUTURE USE (owner: it "can be used later to
@@ -174,6 +184,11 @@ func extractFromGraph(wf map[string]workflowNode) extractedMetadata {
 				md.Network = pn.Network
 				md.Channel = pn.Channel
 				md.Nick = pn.Nick
+				// edited_from presence marks an edit's output — parsed
+				// for the safe-site rule (an edit's input image is
+				// invisible to the text vet, so the verdict arm must
+				// not carry it).
+				md.Edited = len(pn.EditedFrom) > 0
 				// The nsfw first-pass flag copies through as-is (pointer:
 				// nil stays nil) — exposed for future use, consumed by no
 				// column or merge today (see extractedMetadata.NSFW).

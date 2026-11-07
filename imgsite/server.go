@@ -202,9 +202,10 @@ func hostWithoutPort(host string) string {
 // network — falls in the safe site's allowed set, compared
 // case-insensitively on both sides. An empty n is never allowed:
 // rows without provenance (imported/legacy/direct uploads) are only
-// visible on the safe site via safety='safe' — default-deny, per the
-// design doc. A nil receiver allows nothing, so callers can use it
-// without guarding config presence.
+// visible on the safe site via the safety='safe' verdict arm (itself
+// closed to edited rows) — default-deny, per the design doc. A nil
+// receiver allows nothing, so callers can use it without guarding
+// config presence.
 func (s *SafeSiteConfig) allowsNetwork(n string) bool {
 	if s == nil || n == "" {
 		return false
@@ -223,15 +224,19 @@ func (s *SafeSiteConfig) allowsNetwork(n string) bool {
 // that go with it. The default site gets "" / nil — no restriction,
 // today's behavior. The safe site gets:
 //
-//	AND (LOWER(i.network) IN (?, ...) OR i.safety = 'safe')
+//	AND (LOWER(i.network) IN (?, ...) OR (i.safety = 'safe' AND NOT i.edited))
 //
 // with exactly one lowercased arg per allowed network, in config
 // order. Callers splice the fragment directly after their existing
 // predicates and append the args — the shape is load-bearing:
 // `i` is the images alias every read query already uses, so no
 // query restructuring is needed. NULL networks fail the IN and stay
-// reachable only through safety='safe' (default-deny for
-// imported/legacy rows).
+// reachable only through the safety='safe' arm (default-deny for
+// imported/legacy rows), and that verdict arm is closed to edited
+// rows (images.edited): the safety vet is text-only and cannot see an
+// edit's input image, so an NSFW input edited with an innocent prompt
+// would otherwise cross as 'safe'. Edited images reach the safe site
+// only through the network arm (origin in allowed_networks).
 func siteVisibilityFilter(sc siteCtx) (sqlFrag string, args []any) {
 	if !sc.Safe || len(sc.networks) == 0 {
 		return "", nil
@@ -244,7 +249,7 @@ func siteVisibilityFilter(sc siteCtx) (sqlFrag string, args []any) {
 		// so the "args are lowercase" contract holds for any siteCtx.
 		args[i] = strings.ToLower(n)
 	}
-	return " AND (LOWER(i.network) IN (" + strings.Join(placeholders, ", ") + ") OR i.safety = 'safe')", args
+	return " AND (LOWER(i.network) IN (" + strings.Join(placeholders, ", ") + ") OR (i.safety = 'safe' AND NOT i.edited))", args
 }
 
 // siteCanSee is the per-row twin of siteVisibilityFilter's SQL
@@ -253,16 +258,18 @@ func siteVisibilityFilter(sc siteCtx) (sqlFrag string, args []any) {
 // id checks — orig, thumbs, and thereby the download target — all
 // consume it). It must stay semantically
 // identical to the WHERE fragment — allowed-network origin
-// (case-insensitive) OR safety='safe', with NULL/empty networks
-// default-denied — so a row can never be navigable in SQL yet 404 at
-// the page (or vice versa). The `len(networks) == 0` guard mirrors the
+// (case-insensitive) OR (safety='safe' AND NOT edited), with NULL/empty
+// networks default-denied — so a row can never be navigable in SQL yet
+// 404 at the page (or vice versa). The edited guard on the verdict arm
+// exists because the text-only vet never saw an edit's input image.
+// The `len(networks) == 0` guard mirrors the
 // SQL side's degenerate case (no fragment = no restriction); config
 // validation makes that shape unreachable, the symmetry is defensive.
 func siteCanSee(sc siteCtx, img *dbImage) bool {
 	if !sc.Safe || len(sc.networks) == 0 {
 		return true
 	}
-	if img.Safety == safetySafe {
+	if img.Safety == safetySafe && !img.Edited {
 		return true
 	}
 	if img.Network == nil || *img.Network == "" {

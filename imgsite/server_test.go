@@ -1349,14 +1349,14 @@ func TestSiteVisibilityFilter(t *testing.T) {
 	t.Run("OneNetwork", func(t *testing.T) {
 		frag, args := siteVisibilityFilter(siteCtx{Safe: true, networks: []string{"libera"}})
 
-		assert.Equal(t, " AND (LOWER(i.network) IN (?) OR i.safety = 'safe')", frag)
+		assert.Equal(t, " AND (LOWER(i.network) IN (?) OR (i.safety = 'safe' AND NOT i.edited))", frag)
 		assert.Equal(t, []any{"libera"}, args)
 	})
 
 	t.Run("TwoNetworks", func(t *testing.T) {
 		frag, args := siteVisibilityFilter(siteCtx{Safe: true, networks: []string{"efnet", "libera"}})
 
-		assert.Equal(t, " AND (LOWER(i.network) IN (?, ?) OR i.safety = 'safe')", frag)
+		assert.Equal(t, " AND (LOWER(i.network) IN (?, ?) OR (i.safety = 'safe' AND NOT i.edited))", frag)
 		assert.Equal(t, []any{"efnet", "libera"}, args)
 	})
 
@@ -1373,7 +1373,7 @@ func TestSiteVisibilityFilter(t *testing.T) {
 
 		frag, args := siteVisibilityFilter(app.resolveSite(req))
 
-		assert.Equal(t, " AND (LOWER(i.network) IN (?) OR i.safety = 'safe')", frag)
+		assert.Equal(t, " AND (LOWER(i.network) IN (?) OR (i.safety = 'safe' AND NOT i.edited))", frag)
 		assert.Equal(t, []any{"libera"}, args, "args are lowercased regardless of config casing")
 	})
 
@@ -1406,7 +1406,9 @@ func TestSiteVisibilityFilter(t *testing.T) {
 // host. Rows cover BOTH branches of the visibility rule: ORIGIN
 // (libera allowed / efnet disallowed / NULL default-denied) and
 // VERDICT (safety='safe' outranking a disallowed origin; an explicit
-// 'unsafe' denied exactly like 'unknown'). The details page's
+// 'unsafe' denied exactly like 'unknown'), plus the edited guard on
+// the verdict arm (edsafe1: 'safe' verdict + edited never crosses).
+// The details page's
 // download anchor targets the orig URL (the download attribute is
 // client-side only — there is no separate download route), so the
 // orig assertions cover the download target too.
@@ -1432,6 +1434,16 @@ func TestAssetRoutesSiteMatrix(t *testing.T) {
 		img.Safety = safetySafe
 	})
 	require.NoError(t, processThumbJob(app.db, app.store, cfg, "efsafe1"))
+	insertImageWithFile(t, app, "edsafe1", loadFixture(t, "plain.webp"), func(img *dbImage) {
+		// The edited guard on the VERDICT branch: same shape as efsafe1
+		// (disallowed origin, 'safe' verdict) plus edited=true — the
+		// text-only vet never saw this edit's input image, so the
+		// verdict must NOT carry it to the safe site.
+		img.Network = ptrStr("efnet")
+		img.Safety = safetySafe
+		img.Edited = true
+	})
+	require.NoError(t, processThumbJob(app.db, app.store, cfg, "edsafe1"))
 	insertImageWithFile(t, app, "efunsaf", loadFixture(t, "plain.webp"), func(img *dbImage) {
 		img.Network = ptrStr("efnet") // disallowed origin, unsafe VERDICT: denied exactly like unknown
 		img.Safety = safetyUnsafe
@@ -1475,6 +1487,18 @@ func TestAssetRoutesSiteMatrix(t *testing.T) {
 		// allowed-origin row does.
 		for _, path := range assetPaths("efsafe1") {
 			status, _ := getPageHost(t, ts, "safe.example.com", path)
+			assert.Equal(t, http.StatusOK, status, path)
+		}
+	})
+	t.Run("EditedSafeVerdictIs404OnSafeHostServesOnDefault", func(t *testing.T) {
+		// The edited guard: identical to efsafe1 except edited=true.
+		// The 'safe' verdict is void for safe-site visibility (the
+		// text-only vet cannot see an edit's input image), so the row
+		// 404s on the safe host while the default host is unchanged.
+		for _, path := range assetPaths("edsafe1") {
+			status, _ := getPageHost(t, ts, "safe.example.com", path)
+			assert.Equal(t, http.StatusNotFound, status, path)
+			status, _ = getPage(t, ts.URL, path)
 			assert.Equal(t, http.StatusOK, status, path)
 		}
 	})

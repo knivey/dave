@@ -712,11 +712,12 @@ func TestDetailsPageWorkflowJSONTruncationMarker(t *testing.T) {
 // TestSiteCanSee pins the per-row twin of siteVisibilityFilter's SQL
 // predicate, used by the details page and (next task) asset gating:
 // default site sees everything; the safe site admits allowed-network
-// origins (case-insensitive) and safety='safe' verdicts, default-denies
-// NULL/empty networks with any other verdict, and — mirroring the SQL
-// guard's degenerate case — an empty networks slice means no
-// restriction (config validation makes that shape unreachable; the
-// symmetry is defensive).
+// origins (case-insensitive) and safety='safe' verdicts on UNEDITED
+// rows only (the text-only vet never saw an edit's input image),
+// default-denies NULL/empty networks with any other verdict, and —
+// mirroring the SQL guard's degenerate case — an empty networks slice
+// means no restriction (config validation makes that shape
+// unreachable; the symmetry is defensive).
 func TestSiteCanSee(t *testing.T) {
 	safe := siteCtx{Safe: true, networks: []string{"libera"}}
 	tests := []struct {
@@ -735,6 +736,13 @@ func TestSiteCanSee(t *testing.T) {
 		{"VerdictOutranksDisallowedNetwork", safe, dbImage{Network: ptrStr("efnet"), Safety: safetySafe}, true},
 		{"UnsafeVerdictOnAllowedOriginStillVisible", safe, dbImage{Network: ptrStr("libera"), Safety: safetyUnsafe}, true},
 		{"ZeroValueSafetyBehavesAsUnknown", safe, dbImage{Network: ptrStr("efnet"), Safety: ""}, false},
+		// The edited guard on the verdict arm: the safety vet is
+		// text-only and cannot see an edit's input image, so a 'safe'
+		// verdict never carries an edited row to the safe site.
+		{"SafeVerdictEditedBlocked", safe, dbImage{Safety: safetySafe, Edited: true}, false},
+		{"SafeVerdictEditedBlockedDisallowedOrigin", safe, dbImage{Network: ptrStr("efnet"), Safety: safetySafe, Edited: true}, false},
+		{"SafeVerdictUneditedAllowed", safe, dbImage{Safety: safetySafe, Edited: false}, true},
+		{"EditedAllowedNetworkStillVisible", safe, dbImage{Network: ptrStr("libera"), Edited: true}, true},
 		// The one hand-built Safe&&empty siteCtx in the package.
 		// Production can never construct this shape: safeSiteCtx — the
 		// ONLY Safe=true constructor — always pairs Safe with a
@@ -763,10 +771,10 @@ func TestSiteCanSee(t *testing.T) {
 	}
 }
 
-// TestGallerySiteMatrix runs the six-row visibility matrix through the
+// TestGallerySiteMatrix runs the eight-row visibility matrix through the
 // gallery page and fragment on both hosts: the safe host lists exactly
-// the allowed-origin ∪ safety='safe' rows in recency order; the default
-// host lists every non-hidden row, unchanged.
+// the allowed-origin ∪ (safety='safe' AND NOT edited) rows in recency
+// order; the default host lists every non-hidden row, unchanged.
 func TestGallerySiteMatrix(t *testing.T) {
 	app := newTestApp(t, safeSiteTestConfig())
 	ts := newTestServer(t, app)
@@ -775,29 +783,29 @@ func TestGallerySiteMatrix(t *testing.T) {
 	t.Run("SafeHostPage", func(t *testing.T) {
 		status, body := getPageHost(t, ts, "safe.example.com", "/")
 		require.Equal(t, http.StatusOK, status)
-		assertIDsInOrder(t, body, "sit0005", "sit0004", "sit0001")
-		for _, invisible := range []string{"sit0002", "sit0003", "sit0006"} {
+		assertIDsInOrder(t, body, "sit0008", "sit0005", "sit0004", "sit0001")
+		for _, invisible := range []string{"sit0002", "sit0003", "sit0006", "sit0007"} {
 			assert.NotContains(t, body, invisible, "invisible on the safe host")
 		}
 	})
 	t.Run("SafeHostFragment", func(t *testing.T) {
 		status, body := getPageHost(t, ts, "safe.example.com", "/gallery")
 		require.Equal(t, http.StatusOK, status)
-		assertIDsInOrder(t, body, "sit0005", "sit0004", "sit0001")
-		for _, invisible := range []string{"sit0002", "sit0003", "sit0006"} {
+		assertIDsInOrder(t, body, "sit0008", "sit0005", "sit0004", "sit0001")
+		for _, invisible := range []string{"sit0002", "sit0003", "sit0006", "sit0007"} {
 			assert.NotContains(t, body, invisible, "invisible on the safe host")
 		}
 	})
 	t.Run("DefaultHostPage", func(t *testing.T) {
 		status, body := getPage(t, ts.URL, "/")
 		require.Equal(t, http.StatusOK, status)
-		assertIDsInOrder(t, body, "sit0005", "sit0004", "sit0003", "sit0002", "sit0001")
+		assertIDsInOrder(t, body, "sit0008", "sit0007", "sit0005", "sit0004", "sit0003", "sit0002", "sit0001")
 		assert.NotContains(t, body, "sit0006", "hidden stays hidden on the default host")
 	})
 	t.Run("DefaultHostFragment", func(t *testing.T) {
 		status, body := getPage(t, ts.URL, "/gallery")
 		require.Equal(t, http.StatusOK, status)
-		assertIDsInOrder(t, body, "sit0005", "sit0004", "sit0003", "sit0002", "sit0001")
+		assertIDsInOrder(t, body, "sit0008", "sit0007", "sit0005", "sit0004", "sit0003", "sit0002", "sit0001")
 		assert.NotContains(t, body, "sit0006")
 	})
 }
@@ -827,19 +835,23 @@ func TestDetailsPageSiteMatrix(t *testing.T) {
 	seedSiteMatrix(t, app)
 
 	t.Run("InvisibleIDIs404OnSafeHost", func(t *testing.T) {
-		for _, id := range []string{"sit0002", "sit0003"} {
+		// sit0007 is the edited-guard case: 'safe' verdict + edited +
+		// NULL origin must 404 exactly like the plain-invisible rows.
+		for _, id := range []string{"sit0002", "sit0003", "sit0007"} {
 			status, _ := getPageHost(t, ts, "safe.example.com", "/"+id)
 			assert.Equal(t, http.StatusNotFound, status, "id %s", id)
 		}
 	})
 	t.Run("InvisibleIDServesOnDefaultHost", func(t *testing.T) {
-		for _, id := range []string{"sit0002", "sit0003"} {
+		for _, id := range []string{"sit0002", "sit0003", "sit0007"} {
 			status, _ := getPage(t, ts.URL, "/"+id)
 			assert.Equal(t, http.StatusOK, status, "id %s", id)
 		}
 	})
 	t.Run("VisibleIDsServeOnSafeHost", func(t *testing.T) {
-		for _, id := range []string{"sit0001", "sit0004", "sit0005"} {
+		// sit0008 is edited but on an allowed origin: the network arm
+		// carries edits.
+		for _, id := range []string{"sit0001", "sit0004", "sit0005", "sit0008"} {
 			status, _ := getPageHost(t, ts, "safe.example.com", "/"+id)
 			assert.Equal(t, http.StatusOK, status, "id %s", id)
 		}
@@ -878,6 +890,14 @@ func TestNeighborsSiteMatrix(t *testing.T) {
 		assert.Contains(t, body, `id="nav-prev" href="/sit0005"`)
 		assert.Contains(t, body, `id="nav-next" href="/sit0001"`, "next skips the invisible older row")
 		assert.NotContains(t, body, "sit0003")
+
+		// From sit0005: prev skips hidden sit0006 AND edited sit0007
+		// ('safe' verdict + edited never crosses) to sit0008 — the
+		// network arm keeps sit0008 navigable.
+		_, body = getPageHost(t, ts, "safe.example.com", "/sit0005")
+		assert.Contains(t, body, `id="nav-prev" href="/sit0008"`,
+			"prev skips the hidden row and the edited row to the newest allowed-origin row")
+		assert.NotContains(t, body, "sit0007")
 	})
 	t.Run("DefaultHostPageChevronsUnchanged", func(t *testing.T) {
 		_, body := getPage(t, ts.URL, "/sit0001")
@@ -903,6 +923,13 @@ func TestNeighborsSiteMatrix(t *testing.T) {
 		status, _ := getPageHost(t, ts, "safe.example.com", "/api/images/sit0002/neighbors")
 		assert.Equal(t, http.StatusNotFound, status)
 		status, _ = getPage(t, ts.URL, "/api/images/sit0002/neighbors")
+		assert.Equal(t, http.StatusOK, status, "default host unchanged")
+
+		// The edited-guard case as center id: 404 on the safe host,
+		// 200 on the default host, exactly like sit0002.
+		status, _ = getPageHost(t, ts, "safe.example.com", "/api/images/sit0007/neighbors")
+		assert.Equal(t, http.StatusNotFound, status)
+		status, _ = getPage(t, ts.URL, "/api/images/sit0007/neighbors")
 		assert.Equal(t, http.StatusOK, status, "default host unchanged")
 	})
 }

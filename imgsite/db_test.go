@@ -115,12 +115,15 @@ func TestGetImageByIDUnknown(t *testing.T) {
 }
 
 // TestDbGetImageSiteVisibility pins the thumb-ready publish path's
-// narrowed re-read: exactly network and safety come back populated
-// (the PARTIAL-row contract dbGetImageSiteVisibility documents —
-// siteCanSee reads nothing else, and callers must not reach for other
-// fields), the write-boundary 'unknown' normalization is visible
-// through it, and an unknown id returns sql.ErrNoRows exactly like
-// dbGetImageByID (publishThumbReady maps that to fail-closed).
+// narrowed re-read: exactly network, safety, and edited come back
+// populated (the PARTIAL-row contract dbGetImageSiteVisibility
+// documents — siteCanSee reads nothing else, and callers must not
+// reach for other fields), the write-boundary 'unknown' normalization
+// is visible through it, and an unknown id returns sql.ErrNoRows
+// exactly like dbGetImageByID (publishThumbReady maps that to
+// fail-closed). The edited column is LOAD-BEARING here: if the
+// projection ever drops it again, Edited stays at its false zero value
+// and thumb-ready events for edited images fail OPEN on the safe site.
 func TestDbGetImageSiteVisibility(t *testing.T) {
 	db := setupTestDB(t)
 	in := &dbImage{
@@ -144,6 +147,21 @@ func TestDbGetImageSiteVisibility(t *testing.T) {
 	assert.Empty(t, img.OriginalPrompt, "prompt columns are not part of the projection")
 	assert.Empty(t, img.WorkflowJSON, "workflow_json is the byte-heavy column the narrowing exists to skip")
 	assert.False(t, img.Hidden)
+
+	// Edited round-trips through the widened projection: an edited row
+	// with a 'safe' verdict and no origin stays safe-site INVISIBLE —
+	// the exact row shape publishThumbReady must not leak.
+	require.NoError(t, dbInsertImage(db, &dbImage{
+		ID: "visred2", SHA256: strings.Repeat("ee", 32), Filename: "y.webp",
+		MimeType: "image/webp", SizeBytes: 1, CreatedAt: "2026-09-26 02:00:00",
+		ThumbStatus: thumbStatusPending, Safety: safetySafe, Edited: true,
+		MetaSource: metaSourceUpload,
+	}))
+	edited, err := dbGetImageSiteVisibility(db, "visred2")
+	require.NoError(t, err)
+	assert.True(t, edited.Edited, "edited is part of the projection — a false zero here fails OPEN")
+	safe := siteCtx{Safe: true, networks: []string{"libera"}}
+	assert.False(t, siteCanSee(safe, edited), "'safe' verdict must not carry an edited row to the safe site")
 
 	_, err = dbGetImageSiteVisibility(db, "zzzzzzz")
 	require.Error(t, err)
@@ -464,10 +482,10 @@ func TestSafetyUpdatePreservedWhenPayloadEmpty(t *testing.T) {
 
 // TestDbGetGalleryPageSiteFiltered pins the gallery query's site
 // awareness at the DB layer: the safe site's predicate narrows the
-// keyset page to allowed-origin ∪ safety='safe' rows (recency order
-// preserved), the default site is unchanged, and a keyset continuation
-// cursor composes with the filter (the page after a visible row skips
-// invisible rows at the boundary).
+// keyset page to allowed-origin ∪ (safety='safe' AND NOT edited) rows
+// (recency order preserved), the default site is unchanged, and a
+// keyset continuation cursor composes with the filter (the page after
+// a visible row skips invisible rows at the boundary).
 func TestDbGetGalleryPageSiteFiltered(t *testing.T) {
 	app := newTestApp(t, safeSiteTestConfig())
 	seedSiteMatrix(t, app)
@@ -475,12 +493,12 @@ func TestDbGetGalleryPageSiteFiltered(t *testing.T) {
 
 	rows, err := dbGetGalleryPage(app.db, "", "", 10, safe)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"sit0005", "sit0004", "sit0001"}, imageIDs(rows),
-		"safe site: newest-first over the visible set only — hidden, efnet-unknown, and NULL-unknown rows absent")
+	assert.Equal(t, []string{"sit0008", "sit0005", "sit0004", "sit0001"}, imageIDs(rows),
+		"safe site: newest-first over the visible set only — hidden, efnet-unknown, NULL-unknown, and edited-safe rows absent")
 
 	rows, err = dbGetGalleryPage(app.db, "", "", 10, siteCtx{})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"sit0005", "sit0004", "sit0003", "sit0002", "sit0001"}, imageIDs(rows),
+	assert.Equal(t, []string{"sit0008", "sit0007", "sit0005", "sit0004", "sit0003", "sit0002", "sit0001"}, imageIDs(rows),
 		"default site: every non-hidden row, unchanged behavior")
 
 	// Keyset continuation composes with the filter: page past sit0004
@@ -525,10 +543,19 @@ func TestDbNeighborQueriesSiteFiltered(t *testing.T) {
 		require.NotNil(t, img)
 		assert.Equal(t, "sit0001", img.ID)
 	})
-	t.Run("SafeNewestVisibleHasNoPrev", func(t *testing.T) {
-		// sit0006 is newer but hidden (skipped by the hidden filter on
-		// both sites); sit0005 is the newest visible row everywhere.
+	t.Run("SafeNewerSkipsHiddenAndEdited", func(t *testing.T) {
+		// From sit0005 the immediately-newer rows are sit0006 (hidden)
+		// and sit0007 (NULL origin, 'safe' verdict, EDITED — the
+		// verdict arm is closed to edits); prev must land on sit0008.
 		img, err := dbGetNewerImage(app.db, "2026-09-26 05:00:00", "sit0005", safe)
+		require.NoError(t, err)
+		require.NotNil(t, img)
+		assert.Equal(t, "sit0008", img.ID)
+	})
+	t.Run("SafeNewestVisibleHasNoPrev", func(t *testing.T) {
+		// sit0008 is the newest visible row on the safe site (edited,
+		// but the allowed origin carries it).
+		img, err := dbGetNewerImage(app.db, "2026-09-26 08:00:00", "sit0008", safe)
 		require.NoError(t, err)
 		assert.Nil(t, img)
 	})

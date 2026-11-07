@@ -492,6 +492,156 @@ func TestReextractPreservesNonEmptyProvenanceAndSafety(t *testing.T) {
 	assert.Equal(t, safetyUnsafe, healed.Safety, "stored verdict survives a disagreeing note")
 }
 
+// TestMergeUploadEdited pins the merge-side edited policy: presence of
+// edited_from in EITHER source (upload meta or EXIF note) marks the
+// merge edited — OR semantics, because being an edit's output is a
+// fact about the generation, not a classification a source asserts.
+// Contrast TestMergeUploadSafety: there, only a real verdict writes.
+func TestMergeUploadEdited(t *testing.T) {
+	tests := []struct {
+		name         string
+		metaEdited   []string
+		noteEdited   bool
+		exifOK       bool
+		want         bool
+		wantMetaPart bool
+	}{
+		{"MetaEditedFrom", []string{"gen_x_1"}, false, true, true, true},
+		{"MetaEditedFromNoExif", []string{"gen_x_1"}, false, false, true, true},
+		{"NoteEditedBackfills", nil, true, true, true, false},
+		{"NoteEditedIgnoredWithoutExifOK", nil, true, false, false, false},
+		{"BothSources", []string{"gen_x_1", "gen_x_2"}, true, true, true, true},
+		{"Neither", nil, false, true, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			meta := UploadMeta{EditedFrom: tt.metaEdited}
+			md := extractedMetadata{Edited: tt.noteEdited}
+			merged := mergeUploadMetadata(meta, md, tt.exifOK)
+			assert.Equal(t, tt.want, merged.Edited)
+			// edited_from alone counts as meta contribution for
+			// meta_source labeling, mirroring safety.
+			assert.Equal(t, tt.wantMetaPart, uploadMetaPresent(meta))
+		})
+	}
+	t.Run("ApplyMergedPreservesTrue", func(t *testing.T) {
+		// Stored true + merged false stays true: applyMergedMetadata
+		// never clears the flag (an absent edited_from in both sources
+		// is not information that the generation was not an edit).
+		img := dbImage{Edited: true}
+		applyMergedMetadata(&img, mergedUploadMetadata{})
+		assert.True(t, img.Edited)
+	})
+	t.Run("ApplyMergedSetsTrue", func(t *testing.T) {
+		img := dbImage{}
+		applyMergedMetadata(&img, mergedUploadMetadata{Edited: true})
+		assert.True(t, img.Edited)
+	})
+}
+
+// editedNoteJSON builds a dave_original_prompt note payload carrying
+// (optionally) the edit provenance refs — the shape img-mcp's edit jobs
+// bake in. edited == false omits the field (legacy/non-edit notes).
+func editedNoteJSON(edited bool) string {
+	note := map[string]any{
+		"prompt": "a shrew on main street", "llm_generated": true, "job_id": "edrex01",
+		"network": "libera", "channel": "#dave", "nick": "knivey",
+	}
+	if edited {
+		note["edited_from"] = []string{"gen_x_0"}
+	}
+	b, err := json.Marshal(note)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
+}
+
+// TestReextractBackfillsEdited — direction 1 of the re-extract healing
+// contract for the edited flag: a row whose edited is still false heals
+// from the note payload's edited_from the img-mcp EXIF rewrite baked
+// into the workflow.
+func TestReextractBackfillsEdited(t *testing.T) {
+	db := setupTestDB(t)
+	require.NoError(t, dbInsertImage(db, &dbImage{
+		ID: "rex0003", SHA256: strings.Repeat("0c", 32), Filename: "x.webp",
+		MimeType: "image/webp", SizeBytes: 1, CreatedAt: "2026-09-26 00:00:00",
+		ThumbStatus: thumbStatusPending, Safety: safetyUnknown,
+		WorkflowJSON: syntheticGraph("ConditioningZeroOut", editedNoteJSON(true)),
+		MetaSource:   metaSourceEXIF,
+	}))
+
+	row, err := dbGetImageByID(db, "rex0003")
+	require.NoError(t, err)
+	md, ok := ExtractMetadata(row.WorkflowJSON)
+	require.True(t, ok)
+	assert.True(t, md.Edited, "extraction parses edited_from presence")
+	merged := mergeUploadMetadata(rowToUploadMeta(row), md, true)
+	assert.True(t, merged.Edited, "note edited backfills a false row through the merge")
+	applyMergedMetadata(row, merged)
+	require.NoError(t, dbUpdateImageMetadata(db, row))
+
+	healed, err := dbGetImageByID(db, "rex0003")
+	require.NoError(t, err)
+	assert.True(t, healed.Edited, "edited backfilled from the note and persisted")
+}
+
+// TestReextractPreservesEdited — direction 2: a stored edited=true row
+// survives re-extraction against a note WITHOUT edited_from (the
+// monotonic rule — a legacy note cannot un-edit a row), through the
+// rowToUploadMeta round-trip's placeholder marker.
+func TestReextractPreservesEdited(t *testing.T) {
+	db := setupTestDB(t)
+	require.NoError(t, dbInsertImage(db, &dbImage{
+		ID: "rex0004", SHA256: strings.Repeat("0d", 32), Filename: "x.webp",
+		MimeType: "image/webp", SizeBytes: 1, CreatedAt: "2026-09-26 00:00:00",
+		ThumbStatus: thumbStatusPending, Safety: safetyUnknown, Edited: true,
+		WorkflowJSON: syntheticGraph("ConditioningZeroOut", editedNoteJSON(false)),
+		MetaSource:   metaSourceEXIF,
+	}))
+
+	row, err := dbGetImageByID(db, "rex0004")
+	require.NoError(t, err)
+	meta := rowToUploadMeta(row)
+	assert.NotEmpty(t, meta.EditedFrom, "stored edited round-trips as EditedFrom presence (placeholder)")
+	md, ok := ExtractMetadata(row.WorkflowJSON)
+	require.True(t, ok)
+	assert.False(t, md.Edited, "the note carries no edited_from")
+	merged := mergeUploadMetadata(meta, md, true)
+	assert.True(t, merged.Edited, "meta-side presence preserves the stored flag")
+	applyMergedMetadata(row, merged)
+	require.NoError(t, dbUpdateImageMetadata(db, row))
+
+	healed, err := dbGetImageByID(db, "rex0004")
+	require.NoError(t, err)
+	assert.True(t, healed.Edited, "stored edited survives a note without the field (monotonic)")
+}
+
+// TestUploadEditedMetaMarksRow pins the upload wire path end to end: a
+// meta carrying edited_from inserts edited=1, and that row is
+// safe-site INVISIBLE even with a 'safe' verdict — the exact crossing
+// this rule exists to close.
+func TestUploadEditedMetaMarksRow(t *testing.T) {
+	app := newTestApp(t, testConfig())
+	ts := newTestServer(t, app)
+
+	resp := doUpload(t, ts, testAPIKey, uploadParts{
+		hasFile: true, filename: "x.png", data: pngBytes("x"),
+		meta: `{"edited_from":["gen_ed12_1"],"safety":"safe"}`,
+	})
+	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	ur := decodeUploadResponse(t, resp)
+
+	img, err := dbGetImageByID(app.db, ur.ID)
+	require.NoError(t, err)
+	assert.True(t, img.Edited, "meta edited_from marks the row edited")
+	assert.Equal(t, safetySafe, img.Safety)
+
+	safe := matrixSafeSiteCtx()
+	assert.True(t, siteCanSee(siteCtx{}, img), "default site sees everything")
+	assert.False(t, siteCanSee(safe, img), "'safe' verdict must not carry an edited row to the safe site")
+}
+
 func TestUploadUnparseableEmbeddedWorkflowFallsBackToMeta(t *testing.T) {
 	// webp with a prompt: payload that is not valid JSON.
 	badPayload := "{definitely not json"

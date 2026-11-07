@@ -39,19 +39,23 @@ const imageIDAlphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrs
 // Safety carries the LLM safety verdict ('safe'/'unsafe', omitempty —
 // img-mcp omits it when classification didn't resolve); anything but
 // those two values or absent is rejected by the handler (tripwire:
-// img-mcp is the only writer) and ignored by the merge.
+// img-mcp is the only writer) and ignored by the merge. EditedFrom
+// carries an edit job's input image refs (omitempty — non-edit
+// generations omit it); presence marks the row edited for the
+// safe-site rule (the text-only vet never saw those inputs).
 type UploadMeta struct {
-	JobID          string `json:"job_id"`
-	OriginalPrompt string `json:"original_prompt"`
-	EnhancedPrompt string `json:"enhanced_prompt"`
-	NegativePrompt string `json:"negative_prompt"`
-	Reasoning      string `json:"reasoning"`
-	LLMGenerated   *bool  `json:"llm_generated"`
-	WorkflowName   string `json:"workflow_name"`
-	Network        string `json:"network"`
-	Channel        string `json:"channel"`
-	Nick           string `json:"nick"`
-	Safety         string `json:"safety,omitempty"`
+	JobID          string   `json:"job_id"`
+	OriginalPrompt string   `json:"original_prompt"`
+	EnhancedPrompt string   `json:"enhanced_prompt"`
+	NegativePrompt string   `json:"negative_prompt"`
+	Reasoning      string   `json:"reasoning"`
+	LLMGenerated   *bool    `json:"llm_generated"`
+	WorkflowName   string   `json:"workflow_name"`
+	Network        string   `json:"network"`
+	Channel        string   `json:"channel"`
+	Nick           string   `json:"nick"`
+	Safety         string   `json:"safety,omitempty"`
+	EditedFrom     []string `json:"edited_from,omitempty"`
 }
 
 // validSafetyVerdict reports whether s is a real verdict — exactly
@@ -333,6 +337,12 @@ type mergedUploadMetadata struct {
 	// validSafetyVerdict).
 	Safety string
 
+	// Edited marks an img-mcp edit job's output (edited_from present in
+	// the upload meta or the EXIF note). OR'd across sources — presence
+	// in EITHER marks the row edited — because it is a fact about the
+	// generation, not a classification a source may assert or retract.
+	Edited bool
+
 	// Graph-derived: EXIF is the source of truth when available.
 	Seed         *int64
 	Steps        *int
@@ -380,6 +390,10 @@ func mergeUploadMetadata(meta UploadMeta, md extractedMetadata, exifOK bool) mer
 	if validSafetyVerdict(meta.Safety) {
 		m.Safety = meta.Safety
 	}
+	// Edited: meta-first like safety, but presence alone counts (no
+	// value gate — the refs are provenance, not a classification), and
+	// the note side ORs in below rather than backfilling empties.
+	m.Edited = len(meta.EditedFrom) > 0
 
 	metaContributed := uploadMetaPresent(meta)
 
@@ -414,6 +428,12 @@ func mergeUploadMetadata(meta UploadMeta, md extractedMetadata, exifOK bool) mer
 		}
 		if m.Safety == "" && validSafetyVerdict(md.Safety) {
 			m.Safety = md.Safety
+		}
+		// Edited backfills the same way — OR semantics: presence in
+		// EITHER source marks the row edited (a fact about the
+		// generation, not a classification either side may retract).
+		if !m.Edited {
+			m.Edited = md.Edited
 		}
 
 		// Cross-check quartet: WARN + prefer EXIF on mismatch. Only fields
@@ -491,6 +511,13 @@ func applyMergedMetadata(img *dbImage, merged mergedUploadMetadata) {
 	} else if img.Safety == "" {
 		img.Safety = safetyUnknown
 	}
+	// Edited preserve-true: merged.Edited only ever sets, never clears
+	// — an absent edited_from in both sources is not information that
+	// the generation was not an edit, so a note lacking the field
+	// cannot un-edit a stored row.
+	if merged.Edited {
+		img.Edited = true
+	}
 	img.Seed = merged.Seed
 	img.Steps = merged.Steps
 	img.Cfg = merged.Cfg
@@ -526,7 +553,7 @@ func applyMergedMetadata(img *dbImage, merged mergedUploadMetadata) {
 // normalization is a choice, not a bug.
 func rowToUploadMeta(img *dbImage) UploadMeta {
 	llm := img.LLMGenerated
-	return UploadMeta{
+	m := UploadMeta{
 		JobID:          ptrValue(img.JobID),
 		OriginalPrompt: img.OriginalPrompt,
 		EnhancedPrompt: img.EnhancedPrompt,
@@ -539,6 +566,14 @@ func rowToUploadMeta(img *dbImage) UploadMeta {
 		Nick:           ptrValue(img.Nick),
 		Safety:         img.Safety,
 	}
+	// EditedFrom round-trip: the ref list itself is not stored, so a
+	// stored edited row carries a placeholder — the merge only ORs on
+	// presence (len > 0), which preserves the stored edited-ness on
+	// re-extract exactly like safety's verdict round-trip.
+	if img.Edited {
+		m.EditedFrom = []string{"1"}
+	}
+	return m
 }
 
 // uploadMetaPresent reports whether the form meta carried any information
@@ -554,7 +589,8 @@ func uploadMetaPresent(meta UploadMeta) bool {
 		meta.Network != "" ||
 		meta.Channel != "" ||
 		meta.Nick != "" ||
-		validSafetyVerdict(meta.Safety)
+		validSafetyVerdict(meta.Safety) ||
+		len(meta.EditedFrom) > 0
 }
 
 // deriveBaseURL builds the external base URL from the request when

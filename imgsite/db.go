@@ -57,11 +57,15 @@ const (
 	metaSourceUploadAndEXIF = "upload+exif"
 
 	// images.safety values (migration 003). 'unknown' is default-deny:
-	// the safe site shows only allowed-network origins ∪ safety='safe',
-	// so rows without a verdict stay invisible there until one lands
-	// (upload meta, EXIF-note re-extract backfill, or the -safety admin
-	// CLI's manual marking). A verdict, once stored, is only ever changed
-	// by an explicit write — merges and re-extracts preserve it.
+	// the safe site shows only allowed-network origins ∪ (safety='safe'
+	// AND NOT edited), so rows without a verdict stay invisible there
+	// until one lands (upload meta, EXIF-note re-extract backfill, or
+	// the -safety admin CLI's manual marking). A verdict, once stored,
+	// is only ever changed by an explicit write — merges and re-extracts
+	// preserve it. The verdict arm is closed to edited rows
+	// (images.edited, migration 008): the vet is text-only and never
+	// sees an edit's input image, so an edit crosses only via the
+	// network arm.
 	safetyUnknown = "unknown"
 	safetySafe    = "safe"
 	safetyUnsafe  = "unsafe"
@@ -96,6 +100,10 @@ type dbImage struct {
 	// zero value to 'unknown'; migration 003 backfilled all
 	// pre-existing rows the same way).
 	Safety string `db:"safety"`
+	// Edited is true for images produced by an img-mcp edit job (edited_from
+	// non-empty in the upload meta / EXIF note). Monotonic: once true it is
+	// never cleared (a note that lacks the field cannot un-edit a row).
+	Edited bool `db:"edited"`
 
 	Seed      *int64   `db:"seed"`
 	Steps     *int     `db:"steps"`
@@ -177,7 +185,7 @@ func dbInsertImage(db *sqlx.DB, img *dbImage) error {
 			created_at, thumb_status, hidden,
 			original_prompt, enhanced_prompt, negative_prompt, reasoning,
 			job_id, llm_generated, network, channel, nick, workflow_name,
-			safety,
+			safety, edited,
 			seed, steps, cfg, denoise, sampler, scheduler,
 			model_unet, model_clip, model_vae, loras,
 			workflow_json, meta_source
@@ -186,7 +194,7 @@ func dbInsertImage(db *sqlx.DB, img *dbImage) error {
 			:created_at, :thumb_status, :hidden,
 			:original_prompt, :enhanced_prompt, :negative_prompt, :reasoning,
 			:job_id, :llm_generated, :network, :channel, :nick, :workflow_name,
-			COALESCE(NULLIF(:safety, ''), 'unknown'),
+			COALESCE(NULLIF(:safety, ''), 'unknown'), :edited,
 			:seed, :steps, :cfg, :denoise, :sampler, :scheduler,
 			:model_unet, :model_clip, :model_vae, :loras,
 			:workflow_json, :meta_source
@@ -205,19 +213,22 @@ func dbGetImageByID(db *sqlx.DB, id string) (*dbImage, error) {
 	return &img, nil
 }
 
-// dbGetImageSiteVisibility fetches exactly the two columns the
-// safe-site visibility flag consults — network and safety; siteCanSee
-// reads nothing else. The thumb-ready publish path re-reads its row
-// through this (one indexed SELECT per thumbnail completion) instead
-// of dbGetImageByID's SELECT *, which drags workflow_json —
-// potentially tens of KB per row — along for two scalars' worth of
-// answer. The returned dbImage is PARTIAL by design: only Network and
-// Safety are populated, and callers must not reach for other fields.
-// Returns sql.ErrNoRows when the id is unknown (publishThumbReady
+// dbGetImageSiteVisibility fetches exactly the three columns the
+// safe-site visibility flag consults — network, safety, and edited;
+// siteCanSee reads nothing else. The thumb-ready publish path re-reads
+// its row through this (one indexed SELECT per thumbnail completion)
+// instead of dbGetImageByID's SELECT *, which drags workflow_json —
+// potentially tens of KB per row — along for three scalars' worth of
+// answer. The returned dbImage is PARTIAL by design: only Network,
+// Safety, and Edited are populated, and callers must not reach for
+// other fields. The edited column is LOAD-BEARING in the projection:
+// a missing column leaves Edited at its false zero value and every
+// thumb-ready event for an edited image would fail OPEN on the safe
+// site. Returns sql.ErrNoRows when the id is unknown (publishThumbReady
 // maps that to fail-closed: the event is withheld from the safe site).
 func dbGetImageSiteVisibility(db *sqlx.DB, id string) (*dbImage, error) {
 	var img dbImage
-	err := db.Get(&img, `SELECT network, safety FROM images WHERE id = ?`, id)
+	err := db.Get(&img, `SELECT network, safety, edited FROM images WHERE id = ?`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -514,6 +525,8 @@ func dbGetImagesWithWorkflow(db *sqlx.DB) ([]dbImage, error) {
 // strings: an empty payload value ("") keeps the stored verdict — a
 // hand-built update struct can never clobber a classification — while an
 // explicit verdict (the re-extract backfill writes one that way) lands.
+// edited is monotonic: `edited OR :edited` — once true it is never
+// cleared (a note lacking edited_from cannot un-edit a row).
 func dbUpdateImageMetadata(db *sqlx.DB, img *dbImage) error {
 	_, err := db.NamedExec(
 		`UPDATE images SET
@@ -528,6 +541,7 @@ func dbUpdateImageMetadata(db *sqlx.DB, img *dbImage) error {
 			nick = :nick,
 			workflow_name = :workflow_name,
 			safety = COALESCE(NULLIF(:safety, ''), safety),
+			edited = (edited OR :edited),
 			seed = :seed,
 			steps = :steps,
 			cfg = :cfg,

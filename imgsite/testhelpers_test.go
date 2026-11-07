@@ -95,8 +95,9 @@ func getPageHost(t *testing.T, ts *httptest.Server, host, path string) (int, str
 	return resp.StatusCode, string(body)
 }
 
-// seedSiteMatrix seeds the six-row site-visibility matrix from the
-// safe-site plan (task-3 brief). Every row shares the search token
+// seedSiteMatrix seeds the eight-row site-visibility matrix from the
+// safe-site plan (task-3 brief) plus the edited-guard rows (sit0007/
+// sit0008). Every row shares the search token
 // "gribble" so /search?q=gribble hits them all; placement per row:
 //
 //	sit0001 libera network, unknown safety — safe-visible by ORIGIN;
@@ -114,9 +115,17 @@ func getPageHost(t *testing.T, ts *httptest.Server, host, path string) (int, str
 //	         disallowed origin so the 410-first pins (details page,
 //	         asset routes) discriminate check order: a site-check-
 //	         first bug would 404 it on the safe host, not 410
+//	sit0007 NULL network, safety='safe', EDITED — the edited guard's
+//	         purest case: a 'safe' verdict alone no longer crosses
+//	         (the text-only vet never saw the edit's input image);
+//	         safe-INVISIBLE, default-visible; tier 3 (substring-only
+//	         "cowgribble" like sit0005)
+//	sit0008 libera network, unknown safety, EDITED — the network arm
+//	         carries edits: allowed origin stays safe-visible even
+//	         though the verdict arm is closed; tier 3
 //
-// Resulting visibility: safe host sees {sit0001, sit0004, sit0005};
-// default host sees all five non-hidden rows.
+// Resulting visibility: safe host sees {sit0001, sit0004, sit0005,
+// sit0008}; default host sees all seven non-hidden rows.
 func seedSiteMatrix(t *testing.T, app *App) {
 	t.Helper()
 	insertImage(t, app, "sit0001", "2026-09-26 01:00:00", func(img *dbImage) {
@@ -155,6 +164,23 @@ func seedSiteMatrix(t *testing.T, app *App) {
 		// would 404 on the safe host instead of 410.
 		img.Network = ptrStr("efnet")
 		img.OriginalPrompt = "gribble hidden six"
+	})
+	insertImage(t, app, "sit0007", "2026-09-26 07:00:00", func(img *dbImage) {
+		// The purest edited-guard case: NULL network (no origin arm)
+		// + safety='safe' + edited. Under the old rule the verdict
+		// alone crossed it to the safe site — the exact hole the
+		// edited guard closes.
+		img.Network = nil
+		img.Safety = safetySafe
+		img.Edited = true
+		img.OriginalPrompt = "a cowgribble edited seven"
+	})
+	insertImage(t, app, "sit0008", "2026-09-26 08:00:00", func(img *dbImage) {
+		// The network arm still carries edits: allowed origin stays
+		// safe-visible despite the closed verdict arm.
+		img.Network = ptrStr("libera")
+		img.Edited = true
+		img.OriginalPrompt = "a cowgribble edited eight"
 	})
 }
 

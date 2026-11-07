@@ -1,8 +1,10 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,6 +128,83 @@ func TestCleanupImageRefsByAge(t *testing.T) {
 	require.NoError(t, err)
 	_, statErr := os.Stat(row.FilePath)
 	assert.NoError(t, statErr, "kept ref's file still exists")
+}
+
+func TestSanitizeToolArgsForLog(t *testing.T) {
+	longB64 := strings.Repeat("QUJD", 500) // 2000 chars of plausible base64
+	dataURI := "data:image/jpeg;base64," + longB64
+	wantCollapsed := fmt.Sprintf("data:image/jpeg;base64,[… %d chars]", len(longB64))
+
+	t.Run("collapses data URIs in []any input_images", func(t *testing.T) {
+		args := map[string]any{"input_images": []any{dataURI, "gen_abc_0"}}
+		san := sanitizeToolArgsForLog(args)
+		entries, ok := san["input_images"].([]any)
+		require.True(t, ok, "[]any shape preserved")
+		assert.Equal(t, wantCollapsed, entries[0], "data URI collapsed to prefix + length")
+		assert.Equal(t, "gen_abc_0", entries[1], "gen ref unchanged")
+	})
+
+	t.Run("collapses data URIs in []string input_images", func(t *testing.T) {
+		args := map[string]any{"input_images": []string{dataURI, "gen_abc_0"}}
+		san := sanitizeToolArgsForLog(args)
+		entries, ok := san["input_images"].([]string)
+		require.True(t, ok, "[]string shape preserved")
+		assert.Equal(t, wantCollapsed, entries[0])
+		assert.Equal(t, "gen_abc_0", entries[1])
+	})
+
+	t.Run("recurses into nested maps and slices", func(t *testing.T) {
+		args := map[string]any{
+			"opts": map[string]any{"img": dataURI, "refs": []any{[]string{dataURI}}},
+		}
+		san := sanitizeToolArgsForLog(args)
+		inner, ok := san["opts"].(map[string]any)
+		require.True(t, ok, "nested map walked")
+		assert.Equal(t, wantCollapsed, inner["img"])
+		nested, ok := inner["refs"].([]any)
+		require.True(t, ok)
+		innerSlice, ok := nested[0].([]string)
+		require.True(t, ok, "slice inside slice walked")
+		assert.Equal(t, wantCollapsed, innerSlice[0])
+	})
+
+	t.Run("ordinary strings pass through byte-unchanged", func(t *testing.T) {
+		prompt := "draw a cat, then a dog, then, finally, a bird"
+		args := map[string]any{
+			"prompt":   prompt,
+			"mention":  "the payload data:image/png;base64,AAAA here is mid-string, not a URI",
+			"dataless": "data:image/png",
+			"semi":     "foo;base64,bar",
+		}
+		san := sanitizeToolArgsForLog(args)
+		assert.Equal(t, prompt, san["prompt"], "prompt text must stay readable")
+		assert.Equal(t, args["mention"], san["mention"], "no data: prefix -> verbatim")
+		assert.Equal(t, args["dataless"], san["dataless"], "data: prefix but no ;base64, -> verbatim")
+		assert.Equal(t, args["semi"], san["semi"], ";base64, but no data: prefix -> verbatim")
+	})
+
+	t.Run("original map is not mutated", func(t *testing.T) {
+		args := map[string]any{"input_images": []any{dataURI}}
+		_ = sanitizeToolArgsForLog(args)
+		entries := args["input_images"].([]any)
+		require.Len(t, entries, 1)
+		assert.Equal(t, dataURI, entries[0], "original still holds the full URI — the MCP call needs it")
+	})
+
+	t.Run("non-string scalars pass through", func(t *testing.T) {
+		raw := []byte("bytes")
+		args := map[string]any{"n": 42, "f": 1.5, "b": true, "z": nil, "raw": raw}
+		san := sanitizeToolArgsForLog(args)
+		assert.Equal(t, 42, san["n"])
+		assert.Equal(t, 1.5, san["f"])
+		assert.Equal(t, true, san["b"])
+		assert.Nil(t, san["z"])
+		assert.Equal(t, raw, san["raw"])
+	})
+
+	t.Run("nil args stay nil", func(t *testing.T) {
+		assert.Nil(t, sanitizeToolArgsForLog(nil))
+	})
 }
 
 func TestSweepOrphanImageFiles(t *testing.T) {

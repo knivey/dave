@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -36,8 +37,11 @@ type dbJob struct {
 	NegativePrompt string `db:"negative_prompt"`
 	Enhancement    string `db:"enhancement"`
 	Seed           *int64 `db:"seed"`
-	OutputFormat   string `db:"output_format"`
-	LLMGenerated   bool   `db:"llm_generated"`
+	// Vestige: the jobs.output_format column is no longer written (removed
+	// from JobInput — results are always url; new rows take the 'url'
+	// DEFAULT) but old rows still carry values, so the scan stays.
+	OutputFormat string `db:"output_format"`
+	LLMGenerated bool   `db:"llm_generated"`
 	// Network/Channel/Nick are IRC provenance for the imgsite upload meta.
 	// Insert/recovery-only columns: no terminal UPDATE statement touches
 	// them, so they cannot interfere with the terminal-update fencing.
@@ -51,12 +55,21 @@ type dbJob struct {
 	// dbUpdateJobSafety when the verdict resolves; recovery-read so
 	// restarts never re-vet. Like the provenance columns it stays out of
 	// every terminal-fenced statement.
-	Safety        string  `db:"safety"`
-	Error         *string `db:"error"`
-	ComfyPromptID *string `db:"comfy_prompt_id"`
-	CreatedAt     string  `db:"created_at"`
-	StartedAt     *string `db:"started_at"`
-	CompletedAt   *string `db:"completed_at"`
+	Safety string `db:"safety"`
+	// InputImages is the JSON of resolved edit-input upload coordinates
+	// (InputImageRef) stamped by dbUpdateJobInputImages after processJob
+	// uploads them; empty = never resolved (non-edit jobs, or a crash
+	// before the uploads). Insert/recovery-only column: no terminal
+	// UPDATE statement touches it.
+	InputImages string `db:"input_images"`
+	// Strength is the edit denoise strength; NULL = not an edit job (or
+	// none supplied). Same insert/recovery-only shape as InputImages.
+	Strength      *float64 `db:"strength"`
+	Error         *string  `db:"error"`
+	ComfyPromptID *string  `db:"comfy_prompt_id"`
+	CreatedAt     string   `db:"created_at"`
+	StartedAt     *string  `db:"started_at"`
+	CompletedAt   *string  `db:"completed_at"`
 }
 
 type dbJobImage struct {
@@ -110,13 +123,31 @@ func closeDB(db *sqlx.DB) {
 }
 
 func dbInsertJob(db *sqlx.DB, job *Job) error {
+	// output_format is deliberately absent from the column list: the field
+	// was removed from JobInput (owner ruling — never used, results are
+	// always url), so new rows take the column's 'url' DEFAULT. The column
+	// itself stays for old rows; dbJob still scans it as a vestige.
+	//
+	// input_images starts empty (the column's DEFAULT is '' anyway, but the
+	// insert carries it explicitly so a job submitted with pre-resolved refs
+	// — a future path — lands complete) and strength rides the *float64 so
+	// nil writes NULL.
+	inputImages := ""
+	if len(job.Input.InputImages) > 0 {
+		b, err := json.Marshal(job.Input.InputImages)
+		if err != nil {
+			return fmt.Errorf("marshaling input_images: %w", err)
+		}
+		inputImages = string(b)
+	}
 	_, err := db.Exec(
-		`INSERT INTO jobs (job_id, type, status, workflow, prompt, negative_prompt, enhancement, seed, output_format, llm_generated, network, channel, nick)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO jobs (job_id, type, status, workflow, prompt, negative_prompt, enhancement, seed, llm_generated, network, channel, nick, input_images, strength)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		job.ID, string(job.Type), string(job.Status), job.Workflow,
 		job.Input.Prompt, job.Input.NegativePrompt, job.Input.Enhancement,
-		job.Input.Seed, job.Input.OutputFormat, job.Input.LLMGenerated,
+		job.Input.Seed, job.Input.LLMGenerated,
 		job.Input.Network, job.Input.Channel, job.Input.Nick,
+		inputImages, job.Input.Strength,
 	)
 	return err
 }
@@ -159,6 +190,19 @@ func dbUpdateJobSafety(db *sqlx.DB, jobID, safety string) error {
 		`UPDATE jobs SET safety = ? WHERE job_id = ?`,
 		safety, jobID,
 	)
+	return err
+}
+
+// dbUpdateJobInputImages persists resolved edit-input upload coordinates
+// after processJob uploads them — the recovery re-submit seam. Deliberately
+// unfenced like jobs.safety: it touches only these columns and can never
+// contend with a terminal status write.
+func dbUpdateJobInputImages(db *sqlx.DB, jobID string, imgs []InputImageRef) error {
+	b, err := json.Marshal(imgs)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`UPDATE jobs SET input_images = ? WHERE job_id = ?`, string(b), jobID)
 	return err
 }
 
@@ -282,6 +326,25 @@ func dbLoadJobImages(db *sqlx.DB, jobID string) ([]dbJobImage, error) {
 	return images, err
 }
 
+// dbGetJobImage returns the nth (0-based) job_images row for a job — the
+// ComfyUI /view coordinates plus the imgsite fallback URL.
+func dbGetJobImage(db *sqlx.DB, jobID string, ordinal int) (ComfyImage, string, error) {
+	var row struct {
+		Filename  string `db:"filename"`
+		Subfolder string `db:"subfolder"`
+		ImgType   string `db:"img_type"`
+		URL       string `db:"url"`
+	}
+	err := db.Get(&row, `SELECT filename, subfolder, img_type, url FROM job_images WHERE job_id = ? AND ordinal = ?`, jobID, ordinal)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ComfyImage{}, "", fmt.Errorf("no image %d for job %q", ordinal, jobID)
+		}
+		return ComfyImage{}, "", err
+	}
+	return ComfyImage{Filename: row.Filename, Subfolder: row.Subfolder, Type: row.ImgType}, row.URL, nil
+}
+
 func dbGetJob(db *sqlx.DB, jobID string) (*dbJob, error) {
 	var job dbJob
 	err := db.Get(&job, `SELECT * FROM jobs WHERE job_id = ?`, jobID)
@@ -323,13 +386,25 @@ func jobFromDBJob(dbj *dbJob) *Job {
 			NegativePrompt: dbj.NegativePrompt,
 			Enhancement:    dbj.Enhancement,
 			Seed:           dbj.Seed,
-			OutputFormat:   dbj.OutputFormat,
 			LLMGenerated:   dbj.LLMGenerated,
 			Network:        dbj.Network,
 			Channel:        dbj.Channel,
 			Nick:           dbj.Nick,
+			Strength:       dbj.Strength,
 		},
 		Error: ptrStr(dbj.Error),
+	}
+
+	// Resolved edit inputs: empty = never resolved (non-edit jobs, or a
+	// crash before the uploads) — leave nil so recovery treats the job as
+	// having nothing to re-submit.
+	if dbj.InputImages != "" {
+		var imgs []InputImageRef
+		if err := json.Unmarshal([]byte(dbj.InputImages), &imgs); err != nil {
+			loggerDB.Warn("unmarshaling persisted input_images", "job", dbj.JobID, "error", err.Error())
+		} else {
+			job.Input.InputImages = imgs
+		}
 	}
 
 	if dbj.CreatedAt != "" {
@@ -373,6 +448,9 @@ func buildJobResultFromDB(db *sqlx.DB, jobID string) (*JobResult, []ComfyImage, 
 		result.Images = append(result.Images, ImageData{
 			URL:      img.URL,
 			MIMEType: img.MIMEType,
+			// Same gen_ handles the live path stamped: the DB-rebuilt
+			// result (restart recovery / TTL path) stays re-editable.
+			Ref: fmt.Sprintf("gen_%s_%d", jobID, img.Ordinal),
 		})
 		comfyImages = append(comfyImages, ComfyImage{
 			Filename:  img.Filename,

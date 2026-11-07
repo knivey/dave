@@ -2,11 +2,13 @@ package main
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -150,9 +152,9 @@ func registerImageRef(sessionID int64, origin, sourceURL, mime string, width, he
 	return ref, nil
 }
 
-// resolveImageRef looks a ref up. Deliberately unused by production today —
-// it is the seam the img-mcp edit workflow's tool-call interception resolves
-// usr_/web_ refs through; these tests keep it honest so it cannot rot.
+// resolveImageRef looks a ref up. Production consumers: the input_images
+// interception (resolveImageRefArgs) resolves usr_/web_ refs through this
+// on every MCP tool-call path (LLM turns and direct tool commands).
 func resolveImageRef(ref string) (*ImageRef, error) {
 	if theDB == nil {
 		return nil, errors.New("image ref store: database not initialized")
@@ -165,6 +167,59 @@ func resolveImageRef(ref string) (*ImageRef, error) {
 		return nil, err
 	}
 	return &row, nil
+}
+
+// resolveImageRefArgs rewrites input_images entries in MCP tool args from
+// usr_/web_ refs to data URIs the MCP server can consume (base64 of the
+// stored ref file). The FIELD NAME is a dave-MCP convention — the same idea
+// as the _dave_inject_ prefix: any tool declaring an input_images string
+// array gets its ref entries expanded here. gen_ refs, data URIs, and
+// anything else pass through untouched (img-mcp owns gen_ resolution).
+// A non-nil error aborts the call: the message names the dead ref.
+var resolveImageRefArgsFn = resolveImageRefArgs
+
+func resolveImageRefArgs(toolArgs map[string]any) error {
+	raw, ok := toolArgs["input_images"]
+	if !ok {
+		return nil
+	}
+	rewrite := func(s string) (string, error) {
+		if !strings.HasPrefix(s, "usr_") && !strings.HasPrefix(s, "web_") {
+			return s, nil
+		}
+		row, err := resolveImageRef(s)
+		if err != nil {
+			return "", fmt.Errorf("image ref %q could not be resolved: %v", s, err)
+		}
+		data, err := os.ReadFile(row.FilePath)
+		if err != nil {
+			return "", fmt.Errorf("image ref %q could not be read: %v", s, err)
+		}
+		return "data:" + row.MIME + ";base64," + base64.StdEncoding.EncodeToString(data), nil
+	}
+	switch entries := raw.(type) {
+	case []string:
+		for i, s := range entries {
+			nv, err := rewrite(s)
+			if err != nil {
+				return err
+			}
+			entries[i] = nv
+		}
+	case []any:
+		for i, v := range entries {
+			s, ok := v.(string)
+			if !ok {
+				continue
+			}
+			nv, err := rewrite(s)
+			if err != nil {
+				return err
+			}
+			entries[i] = nv
+		}
+	}
+	return nil
 }
 
 // cleanupImageRefsByAge removes ref rows (and their files) older than

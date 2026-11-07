@@ -63,6 +63,49 @@ func TestResolveImageRefUnknown(t *testing.T) {
 	assert.Contains(t, err.Error(), "unknown image ref")
 }
 
+func TestResolveImageRefArgsRewritesUsrWebPassesGen(t *testing.T) {
+	setupImageRefTest(t)
+	usrRef, err := registerImageRef(1, "user", "https://x/a.jpg", "image/jpeg", 10, 10, []byte("USRB"))
+	require.NoError(t, err)
+	webRef, err := registerImageRef(1, "view", "https://x/b.png", "image/png", 10, 10, []byte("WEBB"))
+	require.NoError(t, err)
+
+	entries := []string{usrRef, "gen_abc_0", webRef, "data:image/png;base64,QQ=="}
+
+	// Shape 1: []string (programmatic callers)
+	args := map[string]any{"input_images": append([]string(nil), entries...)}
+	require.NoError(t, resolveImageRefArgs(args))
+	got := args["input_images"].([]string)
+	assert.Equal(t, "data:image/jpeg;base64,VVNSQg==", got[0], "usr_ ref rewritten from the stored file's bytes")
+	assert.Equal(t, "gen_abc_0", got[1], "gen_ passthrough")
+	assert.Equal(t, "data:image/png;base64,V0VCQg==", got[2], "web_ ref rewritten")
+	assert.Equal(t, "data:image/png;base64,QQ==", got[3], "existing data URI untouched")
+
+	// Shape 2: []any (what json.Unmarshal of model args produces)
+	anyEntries := make([]any, len(entries))
+	for i, e := range entries {
+		anyEntries[i] = e
+	}
+	args2 := map[string]any{"input_images": anyEntries}
+	require.NoError(t, resolveImageRefArgs(args2))
+	got2 := args2["input_images"].([]any)
+	assert.Equal(t, "data:image/jpeg;base64,VVNSQg==", got2[0])
+	assert.Equal(t, "gen_abc_0", got2[1])
+	assert.Equal(t, "data:image/png;base64,V0VCQg==", got2[2])
+
+	// No input_images -> no-op, no error
+	plain := map[string]any{"prompt": "hi"}
+	require.NoError(t, resolveImageRefArgs(plain))
+}
+
+func TestResolveImageRefArgsUnresolvableRef(t *testing.T) {
+	setupImageRefTest(t)
+	args := map[string]any{"input_images": []any{"usr_deadbeefcafe"}}
+	err := resolveImageRefArgs(args)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "usr_deadbeefcafe")
+}
+
 func TestCleanupImageRefsByAge(t *testing.T) {
 	setupImageRefTest(t)
 	oldRef, err := registerImageRef(1, "view", "u", "image/png", 1, 1, []byte("old"))

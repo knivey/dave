@@ -29,7 +29,6 @@ type GenerateImageAsyncInput struct {
 	NegativePrompt string `json:"negative_prompt,omitempty" jsonschema:"optional negative prompt"`
 	Workflow       string `json:"workflow,omitempty" jsonschema:"name of the workflow config to use (empty or 'default' uses the default workflow)"`
 	Seed           *int64 `json:"seed,omitempty" jsonschema:"optional fixed seed for reproducibility"`
-	OutputFormat   string `json:"output_format,omitempty" jsonschema:"output format: url (default), base64, or both"`
 	Network        string `json:"_dave_inject_network,omitempty"`
 	Channel        string `json:"_dave_inject_channel,omitempty"`
 	Nick           string `json:"_dave_inject_nick,omitempty"`
@@ -52,7 +51,6 @@ type GenerateImageInput struct {
 	NegativePrompt string `json:"negative_prompt,omitempty" jsonschema:"optional negative prompt"`
 	Workflow       string `json:"workflow,omitempty" jsonschema:"name of the workflow config to use (empty or 'default' uses the default workflow)"`
 	Seed           *int64 `json:"seed,omitempty" jsonschema:"optional fixed seed for reproducibility"`
-	OutputFormat   string `json:"output_format,omitempty" jsonschema:"output format: url (default), base64, or both"`
 	Timeout        int    `json:"timeout,omitempty" jsonschema:"max seconds to wait for generation (default: 300)"`
 	Network        string `json:"_dave_inject_network,omitempty"`
 	Channel        string `json:"_dave_inject_channel,omitempty"`
@@ -74,13 +72,12 @@ type GenerateImageOutput struct {
 }
 
 type EnhanceAndGenerateAsyncInput struct {
-	Prompt       string `json:"prompt" jsonschema:"the raw prompt to enhance and generate"`
-	Enhancement  string `json:"enhancement,omitempty" jsonschema:"name of enhancement config (default: from workflow or 'default')"`
-	Workflow     string `json:"workflow,omitempty" jsonschema:"name of the workflow config to use (empty or 'default' uses the default workflow)"`
-	OutputFormat string `json:"output_format,omitempty" jsonschema:"output format: url (default), base64, or both"`
-	Network      string `json:"_dave_inject_network,omitempty"`
-	Channel      string `json:"_dave_inject_channel,omitempty"`
-	Nick         string `json:"_dave_inject_nick,omitempty"`
+	Prompt      string `json:"prompt" jsonschema:"the raw prompt to enhance and generate"`
+	Enhancement string `json:"enhancement,omitempty" jsonschema:"name of enhancement config (default: from workflow or 'default')"`
+	Workflow    string `json:"workflow,omitempty" jsonschema:"name of the workflow config to use (empty or 'default' uses the default workflow)"`
+	Network     string `json:"_dave_inject_network,omitempty"`
+	Channel     string `json:"_dave_inject_channel,omitempty"`
+	Nick        string `json:"_dave_inject_nick,omitempty"`
 	// LLMGenerated is injected by dave (true) when this call originates from
 	// an LLM tool call; absent for direct user tool commands. Recorded in the
 	// workflow's prompt note metadata for image provenance.
@@ -96,14 +93,13 @@ type EnhanceAndGenerateAsyncOutput struct {
 }
 
 type EnhanceAndGenerateInput struct {
-	Prompt       string `json:"prompt" jsonschema:"the raw prompt to enhance and generate"`
-	Enhancement  string `json:"enhancement,omitempty" jsonschema:"name of enhancement config (default: from workflow or 'default')"`
-	Workflow     string `json:"workflow,omitempty" jsonschema:"name of the workflow config to use (empty or 'default' uses the default workflow)"`
-	OutputFormat string `json:"output_format,omitempty" jsonschema:"output format: url (default), base64, or both"`
-	Timeout      int    `json:"timeout,omitempty" jsonschema:"max seconds to wait for generation (default: 300)"`
-	Network      string `json:"_dave_inject_network,omitempty"`
-	Channel      string `json:"_dave_inject_channel,omitempty"`
-	Nick         string `json:"_dave_inject_nick,omitempty"`
+	Prompt      string `json:"prompt" jsonschema:"the raw prompt to enhance and generate"`
+	Enhancement string `json:"enhancement,omitempty" jsonschema:"name of enhancement config (default: from workflow or 'default')"`
+	Workflow    string `json:"workflow,omitempty" jsonschema:"name of the workflow config to use (empty or 'default' uses the default workflow)"`
+	Timeout     int    `json:"timeout,omitempty" jsonschema:"max seconds to wait for generation (default: 300)"`
+	Network     string `json:"_dave_inject_network,omitempty"`
+	Channel     string `json:"_dave_inject_channel,omitempty"`
+	Nick        string `json:"_dave_inject_nick,omitempty"`
 	// LLMGenerated is injected by dave (true) when this call originates from
 	// an LLM tool call; absent for direct user tool commands. Recorded in the
 	// workflow's prompt note metadata for image provenance.
@@ -118,6 +114,55 @@ type EnhanceAndGenerateOutput struct {
 	Images []ImageData `json:"images"`
 	Status string      `json:"status"`
 	Error  string      `json:"error,omitempty"`
+}
+
+// EditImageInput is the sync edit tool's input. input_images carries image
+// REFERENCES (no bytes): the ref ids dave pairs with conversation images
+// (usr_/web_ — dave resolves them to data URIs before the call) or gen_
+// refs from this server's generation results; processJob resolves them
+// into uploaded ComfyUI coordinates. It is the one deliberately-required
+// array: an edit with no inputs is a generation.
+type EditImageInput struct {
+	Prompt         string   `json:"prompt" jsonschema:"the edit to apply — describe the change, not the whole scene"`
+	InputImages    []string `json:"input_images" jsonschema:"image references to edit — ref ids from image labels in the conversation (usr_/web_) or gen_ refs from generation results"`
+	NegativePrompt string   `json:"negative_prompt,omitempty" jsonschema:"optional negative prompt"`
+	Workflow       string   `json:"workflow,omitempty" jsonschema:"name of the edit workflow config to use (empty or 'default' uses the default workflow)"`
+	Seed           *int64   `json:"seed,omitempty" jsonschema:"optional fixed seed for reproducibility"`
+	Strength       *float64 `json:"strength,omitempty" jsonschema:"edit strength 0-1 (how much to change; workflow default when omitted)"`
+	Timeout        int      `json:"timeout,omitempty" jsonschema:"max seconds to wait (default: 300)"`
+	Network        string   `json:"_dave_inject_network,omitempty"`
+	Channel        string   `json:"_dave_inject_channel,omitempty"`
+	Nick           string   `json:"_dave_inject_nick,omitempty"`
+	// LLMGenerated is injected by dave (true) when this call originates from
+	// an LLM tool call; absent for direct user tool commands. Recorded in the
+	// workflow's prompt note metadata for image provenance.
+	// The omitempty is load-bearing: jsonschema-go marks every non-omitempty
+	// field REQUIRED, and the SDK server then rejects callers that omit the
+	// field — dave's direct tools.toml commands never send _dave_inject_*
+	// fields (see TestInjectLLMGeneratedNotRequired).
+	LLMGenerated bool `json:"_dave_inject_llm_generated,omitempty"`
+}
+
+// EditImageAsyncInput is EditImageInput minus the sync Timeout — the async
+// tool returns a job_id immediately.
+type EditImageAsyncInput struct {
+	Prompt         string   `json:"prompt" jsonschema:"the edit to apply — describe the change, not the whole scene"`
+	InputImages    []string `json:"input_images" jsonschema:"image references to edit — ref ids from image labels in the conversation (usr_/web_) or gen_ refs from generation results"`
+	NegativePrompt string   `json:"negative_prompt,omitempty" jsonschema:"optional negative prompt"`
+	Workflow       string   `json:"workflow,omitempty" jsonschema:"name of the edit workflow config to use (empty or 'default' uses the default workflow)"`
+	Seed           *int64   `json:"seed,omitempty" jsonschema:"optional fixed seed for reproducibility"`
+	Strength       *float64 `json:"strength,omitempty" jsonschema:"edit strength 0-1 (how much to change; workflow default when omitted)"`
+	Network        string   `json:"_dave_inject_network,omitempty"`
+	Channel        string   `json:"_dave_inject_channel,omitempty"`
+	Nick           string   `json:"_dave_inject_nick,omitempty"`
+	// LLMGenerated is injected by dave (true) when this call originates from
+	// an LLM tool call; absent for direct user tool commands. Recorded in the
+	// workflow's prompt note metadata for image provenance.
+	// The omitempty is load-bearing: jsonschema-go marks every non-omitempty
+	// field REQUIRED, and the SDK server then rejects callers that omit the
+	// field — dave's direct tools.toml commands never send _dave_inject_*
+	// fields (see TestInjectLLMGeneratedNotRequired).
+	LLMGenerated bool `json:"_dave_inject_llm_generated,omitempty"`
 }
 
 type WaitForJobInput struct {
@@ -328,7 +373,6 @@ func (h *ToolHandlers) handleGenerateImageAsync(ctx context.Context, req *mcp.Ca
 		NegativePrompt: input.NegativePrompt,
 		Enhancement:    enhancement,
 		Seed:           input.Seed,
-		OutputFormat:   input.OutputFormat,
 		LLMGenerated:   input.LLMGenerated,
 		Network:        input.Network,
 		Channel:        input.Channel,
@@ -351,7 +395,6 @@ func (h *ToolHandlers) handleEnhanceAndGenerateAsync(ctx context.Context, req *m
 	job, err := h.queue.Submit(jobType, workflow, JobInput{
 		Prompt:       input.Prompt,
 		Enhancement:  enhancement,
-		OutputFormat: input.OutputFormat,
 		LLMGenerated: input.LLMGenerated,
 		Network:      input.Network,
 		Channel:      input.Channel,
@@ -362,6 +405,64 @@ func (h *ToolHandlers) handleEnhanceAndGenerateAsync(ctx context.Context, req *m
 	}
 
 	return nil, EnhanceAndGenerateAsyncOutput{JobID: job.ID}, nil
+}
+
+// validateEditInput is the pre-Submit validation shared by both edit
+// handlers: input_images is required (an edit with no inputs is a
+// generation), strength must sit in (0, 1], the resolved workflow must be
+// edit-capable (image_input_node configured — the readable pre-flight for a
+// txt2img default workflow being aimed at an edit), and the supply must fit
+// the dynamic wiring's slot budget (images.image_1..image_10).
+func (h *ToolHandlers) validateEditInput(workflowName string, inputImages []string, strength *float64) (string, error) {
+	if len(inputImages) == 0 {
+		return "", fmt.Errorf("input_images is required (at least one image reference)")
+	}
+	if strength != nil && (*strength <= 0 || *strength > 1) {
+		return "", fmt.Errorf("strength must be between 0 and 1")
+	}
+	workflow, err := h.resolveWorkflow(workflowName)
+	if err != nil {
+		return "", err
+	}
+	wc := h.getConfig().Workflows[workflow]
+	if wc.ImageInputNode == "" {
+		return "", fmt.Errorf("workflow %q has no image_input_node configured — not an edit workflow", workflow)
+	}
+	if len(inputImages) > maxEditInputImages {
+		return "", fmt.Errorf("at most %d input images, got %d", maxEditInputImages, len(inputImages))
+	}
+	return workflow, nil
+}
+
+// handleEditImageAsync queues an edit job. It deliberately skips
+// applyNetworkPolicy: there is no enhancement path for edits (processJob's
+// enhance block is type-gated on JobTypeEnhanceGenerate) and the policy's
+// enhancement-selection/Force machinery is generation-specific — Force only
+// rewrites JobTypeGenerate, so for an edit job the call could never do
+// anything but return its arguments unchanged: dead work. Returns
+// GenerateImageAsyncOutput — the shape is identical (just a job_id).
+func (h *ToolHandlers) handleEditImageAsync(ctx context.Context, req *mcp.CallToolRequest, input EditImageAsyncInput) (*mcp.CallToolResult, GenerateImageAsyncOutput, error) {
+	workflow, err := h.validateEditInput(input.Workflow, input.InputImages, input.Strength)
+	if err != nil {
+		return nil, GenerateImageAsyncOutput{}, err
+	}
+	loggerTools.Info("tool: edit_image_async", "prompt", input.Prompt, "workflow", workflow, "inputs", len(input.InputImages))
+	job, err := h.queue.Submit(JobTypeEdit, workflow, JobInput{
+		Prompt:         input.Prompt,
+		NegativePrompt: input.NegativePrompt,
+		RawInputImages: input.InputImages,
+		Seed:           input.Seed,
+		Strength:       input.Strength,
+		LLMGenerated:   input.LLMGenerated,
+		Network:        input.Network,
+		Channel:        input.Channel,
+		Nick:           input.Nick,
+	})
+	if err != nil {
+		return nil, GenerateImageAsyncOutput{}, err
+	}
+
+	return nil, GenerateImageAsyncOutput{JobID: job.ID}, nil
 }
 
 func (h *ToolHandlers) handleGenerateImage(ctx context.Context, req *mcp.CallToolRequest, input GenerateImageInput) (*mcp.CallToolResult, GenerateImageOutput, error) {
@@ -376,7 +477,6 @@ func (h *ToolHandlers) handleGenerateImage(ctx context.Context, req *mcp.CallToo
 		NegativePrompt: input.NegativePrompt,
 		Enhancement:    enhancement,
 		Seed:           input.Seed,
-		OutputFormat:   input.OutputFormat,
 		LLMGenerated:   input.LLMGenerated,
 		Network:        input.Network,
 		Channel:        input.Channel,
@@ -415,7 +515,6 @@ func (h *ToolHandlers) handleEnhanceAndGenerate(ctx context.Context, req *mcp.Ca
 	job, err := h.queue.Submit(jobType, workflow, JobInput{
 		Prompt:       input.Prompt,
 		Enhancement:  enhancement,
-		OutputFormat: input.OutputFormat,
 		LLMGenerated: input.LLMGenerated,
 		Network:      input.Network,
 		Channel:      input.Channel,
@@ -435,6 +534,50 @@ func (h *ToolHandlers) handleEnhanceAndGenerate(ctx context.Context, req *mcp.Ca
 	}
 
 	out := EnhanceAndGenerateOutput{
+		Status: string(result.Status),
+		Error:  result.Error,
+	}
+	if result.Result != nil {
+		out.Images = result.Result.Images
+	}
+	return nil, out, nil
+}
+
+// handleEditImage is the blocking edit tool: same wait/return shape as
+// handleGenerateImage (GenerateImageOutput carries everything an edit
+// result needs — images with URLs, status, error). Resolution/upload of
+// the input refs happens in processJob, not here.
+func (h *ToolHandlers) handleEditImage(ctx context.Context, req *mcp.CallToolRequest, input EditImageInput) (*mcp.CallToolResult, GenerateImageOutput, error) {
+	workflow, err := h.validateEditInput(input.Workflow, input.InputImages, input.Strength)
+	if err != nil {
+		return nil, GenerateImageOutput{}, err
+	}
+	loggerTools.Info("tool: edit_image", "prompt", input.Prompt, "workflow", workflow, "inputs", len(input.InputImages))
+	job, err := h.queue.Submit(JobTypeEdit, workflow, JobInput{
+		Prompt:         input.Prompt,
+		NegativePrompt: input.NegativePrompt,
+		RawInputImages: input.InputImages,
+		Seed:           input.Seed,
+		Strength:       input.Strength,
+		LLMGenerated:   input.LLMGenerated,
+		Network:        input.Network,
+		Channel:        input.Channel,
+		Nick:           input.Nick,
+	})
+	if err != nil {
+		return nil, GenerateImageOutput{}, err
+	}
+
+	timeout := input.Timeout
+	if timeout == 0 {
+		timeout = 300
+	}
+	result := h.queue.WaitForJob(job.ID, time.Duration(timeout)*time.Second)
+	if result == nil {
+		return nil, GenerateImageOutput{}, fmt.Errorf("job %q not found", job.ID)
+	}
+
+	out := GenerateImageOutput{
 		Status: string(result.Status),
 		Error:  result.Error,
 	}

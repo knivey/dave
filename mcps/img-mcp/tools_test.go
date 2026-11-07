@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -32,6 +33,8 @@ func TestInjectLLMGeneratedNotRequired(t *testing.T) {
 		"GenerateImageAsyncInput":      func() (*jsonschema.Schema, error) { return jsonschema.For[GenerateImageAsyncInput](nil) },
 		"EnhanceAndGenerateInput":      func() (*jsonschema.Schema, error) { return jsonschema.For[EnhanceAndGenerateInput](nil) },
 		"EnhanceAndGenerateAsyncInput": func() (*jsonschema.Schema, error) { return jsonschema.For[EnhanceAndGenerateAsyncInput](nil) },
+		"EditImageInput":               func() (*jsonschema.Schema, error) { return jsonschema.For[EditImageInput](nil) },
+		"EditImageAsyncInput":          func() (*jsonschema.Schema, error) { return jsonschema.For[EditImageAsyncInput](nil) },
 		"EnhancePromptInput":           func() (*jsonschema.Schema, error) { return jsonschema.For[EnhancePromptInput](nil) },
 	} {
 		s, err := infer()
@@ -44,6 +47,8 @@ func TestInjectLLMGeneratedNotRequired(t *testing.T) {
 		"GenerateImageAsyncInput":      true,
 		"EnhanceAndGenerateInput":      true,
 		"EnhanceAndGenerateAsyncInput": true,
+		"EditImageInput":               true,
+		"EditImageAsyncInput":          true,
 		"EnhancePromptInput":           false,
 	}
 	// channel/nick provenance rides the same 4 generation inputs as
@@ -53,6 +58,8 @@ func TestInjectLLMGeneratedNotRequired(t *testing.T) {
 		"GenerateImageAsyncInput":      true,
 		"EnhanceAndGenerateInput":      true,
 		"EnhanceAndGenerateAsyncInput": true,
+		"EditImageInput":               true,
+		"EditImageAsyncInput":          true,
 		"EnhancePromptInput":           false,
 	}
 	for name, s := range schemas {
@@ -104,7 +111,7 @@ func TestCallGenerationToolsWithoutInjectFields(t *testing.T) {
 		t.Run(tool, func(t *testing.T) {
 			res, err := cs.CallTool(ctx, &mcp.CallToolParams{
 				Name:      tool,
-				Arguments: map[string]any{"prompt": "a cat", "output_format": "base64"},
+				Arguments: map[string]any{"prompt": "a cat"},
 			})
 			require.NoError(t, err, "tool call must pass schema validation without inject fields")
 			var texts []string
@@ -114,6 +121,108 @@ func TestCallGenerationToolsWithoutInjectFields(t *testing.T) {
 				}
 			}
 			require.False(t, res.IsError, "tool call should not return an error result: %s", strings.Join(texts, "; "))
+		})
+	}
+}
+
+// toolInputSchemaForTest returns the ADVERTISED input schema of the named
+// tool — the wire-level map an MCP client receives from ListTools, not the
+// struct-level jsonschema inference. The server is built through the same
+// createFullServer path production uses (the one flavor that registers all
+// four generation tools) and served over in-memory transports, mirroring
+// TestCallGenerationToolsWithoutInjectFields.
+func toolInputSchemaForTest(t *testing.T, name string) map[string]any {
+	t.Helper()
+	cfg := testConfig("http://127.0.0.1:0")
+	h := NewToolHandlers(cfg, queuedTestQueue(t))
+	server := createFullServer(cfg, h)
+
+	ct, st := mcp.NewInMemoryTransports()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go server.Run(ctx, st)
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	require.NoError(t, err, "connect")
+	t.Cleanup(func() { cs.Close() })
+
+	res, err := cs.ListTools(ctx, nil)
+	require.NoError(t, err, "ListTools")
+	for _, tool := range res.Tools {
+		if tool.Name == name {
+			schema, ok := tool.InputSchema.(map[string]any)
+			require.True(t, ok, "tool %s: advertised input schema must be a map (got %T)", name, tool.InputSchema)
+			return schema
+		}
+	}
+	t.Fatalf("tool %q not found in the full server's tool list", name)
+	return nil
+}
+
+// TestGenerationToolsHaveNoOutputFormat pins the owner ruling: output_format
+// (result delivery: url/base64/both) was never once used by any caller, so
+// it is dropped from every generation tool's advertised input — results are
+// always URLs.
+func TestGenerationToolsHaveNoOutputFormat(t *testing.T) {
+	for _, name := range []string{"generate_image", "generate_image_async", "enhance_and_generate", "enhance_and_generate_async"} {
+		t.Run(name, func(t *testing.T) {
+			schema := toolInputSchemaForTest(t, name)
+			props, ok := schema["properties"].(map[string]any)
+			require.True(t, ok, "tool %s must declare properties", name)
+			assert.NotContains(t, props, "output_format",
+				"output_format is dropped from generation tools (owner ruling, never used)")
+			assert.NotContains(t, props, "base64")
+		})
+	}
+}
+
+// toolDescriptionForTest returns the advertised description of the named
+// tool from the full (stdio) server flavor, over in-memory transports —
+// the exact text an MCP client sees from ListTools.
+func toolDescriptionForTest(t *testing.T, name string) string {
+	t.Helper()
+	cfg := testConfig("http://127.0.0.1:0")
+	h := NewToolHandlers(cfg, queuedTestQueue(t))
+	server := createFullServer(cfg, h)
+
+	ct, st := mcp.NewInMemoryTransports()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go server.Run(ctx, st)
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	require.NoError(t, err, "connect")
+	t.Cleanup(func() { cs.Close() })
+
+	res, err := cs.ListTools(ctx, nil)
+	require.NoError(t, err, "ListTools")
+	for _, tool := range res.Tools {
+		if tool.Name == name {
+			return tool.Description
+		}
+	}
+	t.Fatalf("tool %q not found in the full server's tool list", name)
+	return ""
+}
+
+// TestEditToolDescriptionsTeachFirstImage pins the first-image semantic in
+// the advertised edit tool descriptions: input_images is ORDERED, the FIRST
+// image is the edit target (edit applies to it, output dimensions follow
+// it), later images are references. The model has no other place to learn
+// the ordering contract.
+func TestEditToolDescriptionsTeachFirstImage(t *testing.T) {
+	for _, name := range []string{"edit_image", "edit_image_async"} {
+		t.Run(name, func(t *testing.T) {
+			desc := toolDescriptionForTest(t, name)
+			assert.Contains(t, desc, "FIRST image is the edit target",
+				"the description must teach the first-image semantic")
+			assert.Contains(t, desc, "input_images is ORDERED")
+			assert.Contains(t, desc, "usr_/web_", "ref grammar: conversation refs")
+			assert.Contains(t, desc, "gen_", "ref grammar: generation refs")
+			assert.Contains(t, desc, "strength", "strength must be explained")
+			assert.Contains(t, desc, "list_workflows", "pointer to per-workflow grammar")
 		})
 	}
 }
@@ -173,7 +282,7 @@ func TestJobReadersRaceFreeWhileCompleting(t *testing.T) {
 		q.mu.Unlock()
 
 		q.mu.Lock()
-		job.Result = &JobResult{Images: []ImageData{{MIMEType: "image/png", Base64: "eA=="}}}
+		job.Result = &JobResult{Images: []ImageData{{MIMEType: "image/png", URL: "https://img.example.com/img.png"}}}
 		job.Status = StatusCompleted
 		job.CompletedAt = &now
 		q.mu.Unlock()
@@ -261,7 +370,7 @@ func TestGenerateToolsSyncPassProvenance(t *testing.T) {
 			name: "generate_image",
 			call: func(t *testing.T, h *ToolHandlers) error {
 				_, out, err := h.handleGenerateImage(context.Background(), nil,
-					GenerateImageInput{Prompt: "a cat", Network: "libera", Channel: "#dave", Nick: "knivey", OutputFormat: "base64"})
+					GenerateImageInput{Prompt: "a cat", Network: "libera", Channel: "#dave", Nick: "knivey"})
 				assert.Equal(t, "completed", out.Status)
 				return err
 			},
@@ -270,7 +379,7 @@ func TestGenerateToolsSyncPassProvenance(t *testing.T) {
 			name: "enhance_and_generate",
 			call: func(t *testing.T, h *ToolHandlers) error {
 				_, out, err := h.handleEnhanceAndGenerate(context.Background(), nil,
-					EnhanceAndGenerateInput{Prompt: "a cat", Network: "libera", Channel: "#dave", Nick: "knivey", OutputFormat: "base64"})
+					EnhanceAndGenerateInput{Prompt: "a cat", Network: "libera", Channel: "#dave", Nick: "knivey"})
 				assert.Equal(t, "completed", out.Status)
 				return err
 			},
@@ -282,6 +391,7 @@ func TestGenerateToolsSyncPassProvenance(t *testing.T) {
 			wc := cfg.Workflows["test"]
 			wc.WorkflowPath = mustWriteWorkflow(t, t.TempDir())
 			cfg.Workflows["test"] = wc
+			cfg.Upload.URL = newFakeUploadServer(t).server.URL
 			cfg.Enhancements = map[string]EnhancementConfig{
 				"default": {
 					BaseURL:      newMockEnhanceServer(t).URL,
@@ -363,7 +473,15 @@ func TestToolHandlersResolveWorkflow_AfterConfigSwap(t *testing.T) {
 // queued and inspectable.
 func queuedTestQueue(t *testing.T) *JobQueue {
 	t.Helper()
-	cfg := testConfig("http://127.0.0.1:0")
+	return queuedTestQueueWithConfig(t, testConfig("http://127.0.0.1:0"))
+}
+
+// queuedTestQueueWithConfig is queuedTestQueue for tests whose handlers
+// resolve workflows the default test config does not carry (e.g. the edit
+// workflow): Submit validates the workflow name against the QUEUE's config,
+// so handler and queue must agree.
+func queuedTestQueueWithConfig(t *testing.T, cfg Config) *JobQueue {
+	t.Helper()
 	cfg.Queue.MaxWorkers = 0
 	db := setupTestDB(t)
 	_, cancel := context.WithCancel(context.Background())
@@ -428,7 +546,7 @@ func TestGenerateToolsSyncPassLLMGeneratedFlag(t *testing.T) {
 			name: "generate_image",
 			call: func(t *testing.T, h *ToolHandlers) error {
 				_, out, err := h.handleGenerateImage(context.Background(), nil,
-					GenerateImageInput{Prompt: "a cat", LLMGenerated: true, OutputFormat: "base64"})
+					GenerateImageInput{Prompt: "a cat", LLMGenerated: true})
 				assert.Equal(t, "completed", out.Status)
 				return err
 			},
@@ -437,7 +555,7 @@ func TestGenerateToolsSyncPassLLMGeneratedFlag(t *testing.T) {
 			name: "enhance_and_generate",
 			call: func(t *testing.T, h *ToolHandlers) error {
 				_, out, err := h.handleEnhanceAndGenerate(context.Background(), nil,
-					EnhanceAndGenerateInput{Prompt: "a cat", LLMGenerated: true, OutputFormat: "base64"})
+					EnhanceAndGenerateInput{Prompt: "a cat", LLMGenerated: true})
 				assert.Equal(t, "completed", out.Status)
 				return err
 			},
@@ -449,6 +567,7 @@ func TestGenerateToolsSyncPassLLMGeneratedFlag(t *testing.T) {
 			wc := cfg.Workflows["test"]
 			wc.WorkflowPath = mustWriteWorkflow(t, t.TempDir())
 			cfg.Workflows["test"] = wc
+			cfg.Upload.URL = newFakeUploadServer(t).server.URL
 			cfg.Enhancements = map[string]EnhancementConfig{
 				"default": {
 					BaseURL:      newMockEnhanceServer(t).URL,
@@ -571,4 +690,86 @@ func TestApplyNetworkPolicy(t *testing.T) {
 			assert.Equal(t, tt.expectJobType, jobType, "jobType")
 		})
 	}
+}
+
+// floatPtr is the *float64 test helper for edit strength (nil pointer =
+// "workflow default" is part of the tool contract, so the field is a
+// pointer everywhere).
+func floatPtr(f float64) *float64 { return &f }
+
+// TestHandleEditImageValidates pins the edit tool's pre-Submit validation:
+// input_images is required and strength must sit in (0, 1] — errors surface
+// as tool errors BEFORE any job is queued, so the model can correct itself.
+func TestHandleEditImageValidates(t *testing.T) {
+	h := NewToolHandlers(testConfig("http://127.0.0.1:0"), queuedTestQueue(t))
+	cases := []struct {
+		name string
+		args EditImageInput
+		want string
+	}{
+		{"no inputs", EditImageInput{Prompt: "p"}, "input_images"},
+		{"bad strength low", EditImageInput{Prompt: "p", InputImages: []string{"gen_a"}, Strength: floatPtr(0)}, "strength"},
+		{"bad strength high", EditImageInput{Prompt: "p", InputImages: []string{"gen_a"}, Strength: floatPtr(1.5)}, "strength"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := h.handleEditImage(context.Background(), nil, tc.args)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
+// TestHandleEditImageRequiresImageInputNode pins the workflow gate: an edit
+// must land on a workflow with image_input_node configured (a txt2img default
+// workflow can never accept input images).
+func TestHandleEditImageRequiresImageInputNode(t *testing.T) {
+	// testConfig's only workflow ("test") has no image_input_node.
+	h := NewToolHandlers(testConfig("http://127.0.0.1:0"), queuedTestQueue(t))
+	_, _, err := h.handleEditImage(context.Background(), nil, EditImageInput{Prompt: "p", InputImages: []string{"gen_a"}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "image_input_node")
+	assert.Contains(t, err.Error(), `"test"`, "error names the workflow")
+}
+
+// TestHandleEditImageCapsInputImages pins the pre-Submit cap: the dynamic
+// wiring builds images.image_1..image_10, so an over-supply is rejected
+// before any job is queued.
+func TestHandleEditImageCapsInputImages(t *testing.T) {
+	cfg := editTestConfig(t)
+	h := NewToolHandlers(cfg, queuedTestQueueWithConfig(t, cfg))
+	refs := make([]string, maxEditInputImages+1)
+	for i := range refs {
+		refs[i] = fmt.Sprintf("gen_job_%d", i)
+	}
+	_, _, err := h.handleEditImage(context.Background(), nil, EditImageInput{Prompt: "p", Workflow: "edit", InputImages: refs})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "at most 10 input images")
+}
+
+// TestEditToolsPassRawInputs pins the handler wiring the processJob tests
+// cannot see (they build JobInput directly): the model's input_images
+// entries ride JobInput.RawInputImages untouched for processJob-time
+// resolution, the strength pointer survives, and the job lands under
+// JobTypeEdit on the named workflow.
+func TestEditToolsPassRawInputs(t *testing.T) {
+	cfg := editTestConfig(t)
+	h := NewToolHandlers(cfg, queuedTestQueueWithConfig(t, cfg))
+	strength := 0.6
+	_, out, err := h.handleEditImageAsync(context.Background(), nil, EditImageAsyncInput{
+		Prompt:      "make it blue",
+		Workflow:    "edit",
+		InputImages: []string{"gen_a", "usr_1"},
+		Strength:    &strength,
+	})
+	require.NoError(t, err, "handler")
+
+	job, ok := h.queue.Get(out.JobID)
+	require.True(t, ok, "job should be findable in queue")
+	assert.Equal(t, JobTypeEdit, job.Type)
+	assert.Equal(t, "edit", job.Workflow)
+	assert.Equal(t, []string{"gen_a", "usr_1"}, job.Input.RawInputImages,
+		"the model's entries pass through verbatim — resolution is processJob's job")
+	assert.Equal(t, &strength, job.Input.Strength)
+	assert.Empty(t, job.Input.InputImages, "nothing is resolved at handler time")
 }

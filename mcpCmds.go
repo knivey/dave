@@ -79,6 +79,14 @@ func mcpCmd(network Network, c *girc.Client, e girc.Event, cfg MCPCommandConfig,
 		"nick":    nick,
 	})
 
+	// Expand usr_/web_ image refs in input_images to data URIs; an
+	// unresolvable ref aborts the command with a readable error.
+	if err := resolveImageRefArgsFn(toolArgs); err != nil {
+		sendOrDone(ctx, output, errorNotice(n.Tools.Failed, map[string]string{"error": err.Error()}))
+		log.Error("MCP tool call failed", "error", err.Error())
+		return
+	}
+
 	if !cfg.Sync {
 		mcpCmdAsync(network, cfg, ctx, output, toolArgs, prompt, channel, nick, userID, log)
 		return
@@ -150,6 +158,14 @@ func mcpCmdAsync(network Network, cfg MCPCommandConfig, ctx context.Context, out
 		"user_id": userID,
 		"nick":    nick,
 	})
+
+	// Expand usr_/web_ image refs in input_images to data URIs; an
+	// unresolvable ref aborts the command with a readable error.
+	if err := resolveImageRefArgsFn(toolArgs); err != nil {
+		sendOrDone(ctx, output, errorNotice(n.Tools.Failed, map[string]string{"error": err.Error()}))
+		log.Error("async MCP tool call failed", "error", err.Error())
+		return
+	}
 
 	log.Debug("calling async MCP tool", "tool", asyncTool, "timeout", cfg.Timeout.String())
 

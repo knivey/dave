@@ -27,6 +27,7 @@ type JobType string
 const (
 	JobTypeGenerate        JobType = "generate"
 	JobTypeEnhanceGenerate JobType = "enhance_generate"
+	JobTypeEdit            JobType = "edit"
 )
 
 type Job struct {
@@ -105,7 +106,6 @@ type JobInput struct {
 	NegativePrompt string
 	Enhancement    string
 	Seed           *int64
-	OutputFormat   string
 	// LLMGenerated records whether the prompt was composed by an LLM tool
 	// call (dave injects _dave_inject_llm_generated=true on that path)
 	// versus typed directly by the IRC user. Persisted so restart-recovered
@@ -119,6 +119,17 @@ type JobInput struct {
 	Network string
 	Channel string
 	Nick    string
+	// InputImages carries the RESOLVED edit inputs (uploaded ComfyUI
+	// coordinates + the original ref strings for provenance) and Strength the
+	// edit denoise. Persisted (migration 005) so recovery re-submits with the
+	// same uploaded names without re-uploading.
+	InputImages []InputImageRef
+	Strength    *float64
+	// RawInputImages carries the model's input_images entries (data URIs,
+	// gen_ refs) exactly as the edit tool received them. NOT persisted:
+	// processJob resolves them into uploaded ComfyUI coordinates and
+	// persists THOSE (InputImages above) — the recovery re-submit seam.
+	RawInputImages []string
 }
 
 type JobResult struct {
@@ -127,8 +138,12 @@ type JobResult struct {
 
 type ImageData struct {
 	URL      string `json:"url,omitempty"`
-	Base64   string `json:"base64,omitempty"`
 	MIMEType string `json:"mime_type"`
+	// Ref is the re-edit handle: gen_<jobid>_<ordinal> (output order).
+	// The model passes it back in edit_image's input_images to chain a
+	// result into the next edit. omitempty keeps non-job contexts clean —
+	// e.g. the edit tool's input echo and hand-built tool results.
+	Ref string `json:"ref,omitempty"`
 }
 
 // buildUploadMeta assembles the imgsite upload meta payload for a job.
@@ -146,6 +161,10 @@ type ImageData struct {
 // affirmative values leave the process (reportableSafety) — "" and "unknown"
 // are omitted so imgsite's unknown-defaulted column stays unknown instead of
 // the upload being rejected for a value the site refuses.
+//
+// EditedFrom/Strength are edit-job provenance, populated from the resolved
+// InputImages (the ORIGINAL ref strings, not the uploaded names) and the
+// recorded strength; both drop out via omitempty for generation jobs.
 func buildUploadMeta(job *Job, finalPrompt, finalNegative, reasoning, safety string) UploadMeta {
 	return UploadMeta{
 		JobID:          job.ID,
@@ -159,6 +178,8 @@ func buildUploadMeta(job *Job, finalPrompt, finalNegative, reasoning, safety str
 		Channel:        job.Input.Channel,
 		Nick:           job.Input.Nick,
 		Safety:         reportableSafety(safety),
+		EditedFrom:     editedFromRefs(job.Input),
+		Strength:       job.Input.Strength,
 	}
 }
 
@@ -787,15 +808,66 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 	// rather than incidental.
 	noteNSFW := firstPassNSFW && !safetyNetworkSkipped(cfg, job.Input.Network)
 
+	// Edit jobs resolve their input references into uploaded ComfyUI
+	// coordinates here — INSIDE processJob, not the tool handler, and
+	// BEFORE buildPromptNote so the submit-time note carries the same
+	// edited_from provenance the rewrite-time note rebuilds (the note is
+	// embedded in the submitted workflow graph, and for non-webp outputs
+	// that skip the EXIF rewrite it is the ONLY note the image keeps — a
+	// submit-time note without edited_from would permanently disagree with
+	// the rewrite-time one). A restart-recovered job finds its
+	// coordinates already persisted (InputImages, stamped by
+	// dbUpdateJobInputImages below) and skips the resolution/upload
+	// entirely. If ComfyUI's input dir was cleaned since, the
+	// submit/monitor fails with a readable error (accepted).
+	var editImages []ComfyImage
+	if job.Type == JobTypeEdit {
+		if len(job.Input.InputImages) == 0 {
+			if len(job.Input.RawInputImages) == 0 {
+				// Crash window: Submit persisted the job row, but the
+				// restart re-queued it before dbUpdateJobInputImages
+				// landed the resolved coordinates — and RawInputImages
+				// is deliberately not persisted, so there is nothing
+				// left to re-resolve. Fail readably instead of letting
+				// resolveEditInputs' empty loop produce zero refs and
+				// the workflow file's default image silently stand in
+				// for the user's input.
+				q.failJob(job, "edit inputs failed: no input images recorded for this job — cannot re-resolve after restart; please retry the edit")
+				return
+			}
+			refs, err := resolveEditInputs(jobCtx, q.db, cfg, job.ID, job.Input.RawInputImages)
+			if err != nil {
+				q.failJob(job, fmt.Sprintf("edit inputs failed: %v", err))
+				return
+			}
+			job.Input.InputImages = refs
+			if q.db != nil {
+				if uerr := dbUpdateJobInputImages(q.db, job.ID, refs); uerr != nil {
+					loggerQueue.Warn("persisting edit input coords failed (recovery will re-resolve)",
+						"job_id", job.ID, "error", uerr.Error())
+				}
+			}
+		}
+		for _, r := range job.Input.InputImages {
+			editImages = append(editImages, r.Comfy)
+		}
+	}
+
 	promptNote, err := buildPromptNote(job, enhancementReasoning, noteNSFW)
 	if err != nil {
 		q.failJob(job, fmt.Sprintf("workflow preparation failed: %v", err))
 		return
 	}
 
-	workflow, err := prepareComfyWorkflow(cfg, job.Workflow, prompt, negativePrompt, job.Input.Seed, promptNote)
-	if err != nil {
-		q.failJob(job, fmt.Sprintf("workflow preparation failed: %v", err))
+	var workflow ComfyWorkflow
+	var werr error
+	if job.Type == JobTypeEdit {
+		workflow, werr = prepareComfyEditWorkflow(cfg, job.Workflow, prompt, negativePrompt, job.Input.Seed, promptNote, editImages, job.Input.Strength)
+	} else {
+		workflow, werr = prepareComfyWorkflow(cfg, job.Workflow, prompt, negativePrompt, job.Input.Seed, promptNote)
+	}
+	if werr != nil {
+		q.failJob(job, fmt.Sprintf("workflow preparation failed: %v", werr))
 		return
 	}
 
@@ -845,16 +917,10 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 		return
 	}
 
-	outputFormat := job.Input.OutputFormat
-	if outputFormat == "" {
-		outputFormat = "url"
-	}
-
 	loggerQueue.Info("generation complete",
 		"job_id", job.ID,
 		"prompt_id", promptID,
 		"images", len(comfyResult.Images),
-		"output_format", outputFormat,
 	)
 
 	jobResult := &JobResult{}
@@ -887,9 +953,7 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 	// submit-time fields plus the now-resolved verdict — and baked into the
 	// image bytes BEFORE hashing/uploading, so the bytes imgsite receives,
 	// stores, and sha256-dedups are the enriched bytes (rewrite → sha256 →
-	// upload; the site computes the hash from what it receives). Applied to
-	// every output format, not just uploads: base64 deliveries carry the same
-	// enriched artifact the gallery would.
+	// upload; the site computes the hash from what it receives).
 	rewriteNote, noteErr := buildPromptNoteWithSafety(job, enhancementReasoning, jobSafety, noteNSFW)
 	if noteErr != nil {
 		// Unreachable in practice (marshaling plain strings); degrade like
@@ -901,6 +965,9 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 	for i, img := range comfyResult.Images {
 		imgData := ImageData{
 			MIMEType: guessMIMEType(img.Filename, "image/png"),
+			// gen_ ref: the model's re-edit handle for this image
+			// (passed back via edit_image's input_images).
+			Ref: fmt.Sprintf("gen_%s_%d", job.ID, i),
 		}
 
 		if rewriteNote != "" {
@@ -911,25 +978,12 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 			comfyImgs = append(comfyImgs, comfyResult.ComfyImages[i])
 		}
 
-		switch outputFormat {
-		case "url":
-			url, err := uploadImage(cfg, img.Data, img.Filename, uploadMeta)
-			if err != nil {
-				q.failJob(job, fmt.Sprintf("upload failed: %v", err))
-				return
-			}
-			imgData.URL = url
-		case "base64":
-			imgData.Base64 = encodeBase64(img.Data)
-		case "both":
-			url, err := uploadImage(cfg, img.Data, img.Filename, uploadMeta)
-			if err != nil {
-				q.failJob(job, fmt.Sprintf("upload failed: %v", err))
-				return
-			}
-			imgData.URL = url
-			imgData.Base64 = encodeBase64(img.Data)
+		url, err := uploadImage(cfg, img.Data, img.Filename, uploadMeta)
+		if err != nil {
+			q.failJob(job, fmt.Sprintf("upload failed: %v", err))
+			return
 		}
+		imgData.URL = url
 
 		jobResult.Images = append(jobResult.Images, imgData)
 	}
@@ -1211,11 +1265,6 @@ func (q *JobQueue) recoverRunningJob(_ context.Context, job *Job, comfyPromptID 
 		return
 	}
 
-	outputFormat := job.Input.OutputFormat
-	if outputFormat == "" {
-		outputFormat = "url"
-	}
-
 	// Safety verdict on the recovery path (same jobSafety shape processJob
 	// produces for the EXIF rewrite / upload meta): a verdict persisted
 	// before the crash is reused as-is — never re-vetted, an "unknown" as
@@ -1291,6 +1340,9 @@ func (q *JobQueue) recoverRunningJob(_ context.Context, job *Job, comfyPromptID 
 	for i, img := range comfyResult.Images {
 		imgData := ImageData{
 			MIMEType: guessMIMEType(img.Filename, "image/png"),
+			// Same gen_ ref contract as processJob: a recovered job's
+			// results stay re-editable through the identical handles.
+			Ref: fmt.Sprintf("gen_%s_%d", job.ID, i),
 		}
 
 		if rewriteNote != "" {
@@ -1301,25 +1353,12 @@ func (q *JobQueue) recoverRunningJob(_ context.Context, job *Job, comfyPromptID 
 			comfyImgs = append(comfyImgs, comfyResult.ComfyImages[i])
 		}
 
-		switch outputFormat {
-		case "url":
-			url, err := uploadImage(cfg, img.Data, img.Filename, uploadMeta)
-			if err != nil {
-				q.failJob(job, fmt.Sprintf("upload failed during recovery: %v", err))
-				return
-			}
-			imgData.URL = url
-		case "base64":
-			imgData.Base64 = encodeBase64(img.Data)
-		case "both":
-			url, err := uploadImage(cfg, img.Data, img.Filename, uploadMeta)
-			if err != nil {
-				q.failJob(job, fmt.Sprintf("upload failed during recovery: %v", err))
-				return
-			}
-			imgData.URL = url
-			imgData.Base64 = encodeBase64(img.Data)
+		url, err := uploadImage(cfg, img.Data, img.Filename, uploadMeta)
+		if err != nil {
+			q.failJob(job, fmt.Sprintf("upload failed during recovery: %v", err))
+			return
 		}
+		imgData.URL = url
 
 		jobResult.Images = append(jobResult.Images, imgData)
 	}

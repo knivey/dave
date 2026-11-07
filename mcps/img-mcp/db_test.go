@@ -373,3 +373,46 @@ func TestTerminalDBUpdatesConcurrentSingleWinner(t *testing.T) {
 		})
 	}
 }
+
+// TestJobInputImagesRoundTrip covers migration 005 + the persistence
+// plumbing for resolved edit inputs: dbInsertJob writes input_images/strength,
+// dbUpdateJobInputImages stamps the resolved upload coordinates after
+// processJob uploads them, and jobFromDBJob (restart recovery's rebuild)
+// hands both back onto JobInput.
+func TestJobInputImagesRoundTrip(t *testing.T) {
+	db := setupTestDB(t)
+	strength := 0.55
+	job := &Job{ID: "rt1", Type: JobTypeEdit, Status: StatusQueued, Workflow: "w",
+		Input: JobInput{Prompt: "p", InputImages: []InputImageRef{
+			{Ref: "web_aaa", Comfy: ComfyImage{Filename: "f.jpg"}},
+			{Ref: "gen_bbb_0", Comfy: ComfyImage{Filename: "g.png", Subfolder: "s"}},
+		}, Strength: &strength}}
+	require.NoError(t, dbInsertJob(db, job))
+	require.NoError(t, dbUpdateJobInputImages(db, job.ID, job.Input.InputImages))
+
+	dbj, err := dbGetJob(db, "rt1")
+	require.NoError(t, err, "dbGetJob")
+	got := jobFromDBJob(dbj)
+	require.Len(t, got.Input.InputImages, 2)
+	assert.Equal(t, "web_aaa", got.Input.InputImages[0].Ref)
+	assert.Equal(t, "g.png", got.Input.InputImages[1].Comfy.Filename)
+	require.NotNil(t, got.Input.Strength)
+	assert.Equal(t, 0.55, *got.Input.Strength)
+}
+
+// TestBuildJobResultFromDBIncludesRefs pins the DB-rebuild half of the
+// gen_ ref contract: a result reconstructed from persisted job_images rows
+// (the restart/TTL path WaitForJob-after-restart and result_getter take)
+// carries the same gen_<jobid>_<ordinal> handles the live path set, so a
+// result stays re-editable across a restart.
+func TestBuildJobResultFromDBIncludesRefs(t *testing.T) {
+	db := setupTestDB(t)
+	_, err := db.Exec(`INSERT INTO jobs (job_id, type, status, workflow, prompt) VALUES ('r1','generate','completed','w','p')`)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO job_images (job_id, url, filename, subfolder, img_type, mime_type, ordinal) VALUES ('r1','https://img/a','a.png','','output','image/png',0)`)
+	require.NoError(t, err)
+	res, _, err := buildJobResultFromDB(db, "r1")
+	require.NotNil(t, res)
+	require.Len(t, res.Images, 1)
+	assert.Equal(t, "gen_r1_0", res.Images[0].Ref)
+}

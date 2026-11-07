@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -555,6 +556,289 @@ func TestPrepareComfyWorkflowMissingPromptNode(t *testing.T) {
 	assert.Contains(t, err.Error(), "prompt node")
 }
 
+// mustWriteWorkflowString writes raw workflow JSON to a temp file and
+// returns its path — the string-input sibling of mustWriteWorkflow, for
+// tests that build an inline workflow fixture.
+func mustWriteWorkflowString(t *testing.T, jsonStr string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "edit_workflow.json")
+	require.NoError(t, os.WriteFile(path, []byte(jsonStr), 0644))
+	return path
+}
+
+// editTestWorkflowJSON is the shared edit fixture — the qwen-edit shape: a
+// TextEncodeQwenImage21 ("510", prompt input named "prompt", carries the
+// images.image_N slots) and a KSampler ("3", seed + denoise). It carries NO
+// LoadImage nodes (owner ruling: edit inputs are wired dynamically by
+// prepareComfyEditWorkflow — a fixed count in the file would leak placeholder
+// images into unused slots).
+func editTestWorkflowJSON(t *testing.T) string {
+	t.Helper()
+	wf := ComfyWorkflow{
+		"510": {Inputs: map[string]interface{}{"prompt": "", "negative_prompt": "", "resolution": 0}, Class: "TextEncodeQwenImage21"},
+		"3":   {Inputs: map[string]interface{}{"denoise": 1.0, "seed": 1}, Class: "KSampler"},
+	}
+	b, err := json.Marshal(wf)
+	require.NoError(t, err)
+	return string(b)
+}
+
+// editWorkflowConfig wraps wfJSON in the standard edit-workflow config: node
+// "510" is BOTH the prompt node (via PromptInput "prompt" — the qwen shape)
+// and the image input node; KSampler "3" is denoise + seed. Guard tests that
+// need different wiring mutate the returned config's WorkflowConfig.
+func editWorkflowConfig(t *testing.T, wfJSON string) Config {
+	t.Helper()
+	cfg := testConfig("")
+	cfg.Workflows["edit"] = WorkflowConfig{
+		WorkflowPath: mustWriteWorkflowString(t, wfJSON),
+		ClientID:     "test-client", OutputNode: "output-node", PromptNode: "510",
+		PromptInput:    "prompt",
+		ImageInputNode: "510",
+		DenoiseNode:    "3",
+		Timeout:        60,
+	}
+	return cfg
+}
+
+func editTestConfig(t *testing.T) Config {
+	return editWorkflowConfig(t, editTestWorkflowJSON(t))
+}
+
+// TestPrepareComfyEditWorkflowDynamicWiring pins the dynamic-input contract:
+// one LoadImage node per supplied image (dave_edit_in_<n>), linked in order
+// into the target's images.image_N slots — images[0] lands in slot 1 because
+// the FIRST image is the edit target. Also pins the prompt_input override and
+// the denoise wiring.
+func TestPrepareComfyEditWorkflowDynamicWiring(t *testing.T) {
+	cfg := editTestConfig(t)
+	images := []ComfyImage{
+		{Filename: "first.jpg"},
+		{Filename: "second.png", Subfolder: "sub"},
+	}
+	strength := 0.6
+	wf, err := prepareComfyEditWorkflow(cfg, "edit", "make it blue", "", nil, "note", images, &strength)
+	require.NoError(t, err)
+
+	n1, ok := wf["dave_edit_in_1"]
+	require.True(t, ok, "dave_edit_in_1 must be added for the first image")
+	assert.Equal(t, "LoadImage", n1.Class)
+	assert.Equal(t, "first.jpg", n1.Inputs["image"], "no subfolder -> bare name")
+	n2, ok := wf["dave_edit_in_2"]
+	require.True(t, ok, "dave_edit_in_2 must be added for the second image")
+	assert.Equal(t, "LoadImage", n2.Class)
+	assert.Equal(t, "sub/second.png", n2.Inputs["image"], "subfolder -> sub/name")
+
+	target := wf["510"]
+	assert.Equal(t, []interface{}{"dave_edit_in_1", 0}, target.Inputs["images.image_1"],
+		"images[0] -> slot 1: the FIRST image is the edit target")
+	assert.Equal(t, []interface{}{"dave_edit_in_2", 0}, target.Inputs["images.image_2"])
+	assert.Equal(t, "make it blue", target.Inputs["prompt"],
+		"prompt lands in the configured prompt_input key, not the default 'text'")
+	assert.NotContains(t, target.Inputs, "text", "the default key must not be created")
+	assert.Equal(t, 0.6, wf["3"].Inputs["denoise"], "strength wired to denoise_node")
+
+	// nil strength leaves the workflow file's own default riding.
+	wf2, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.png"}}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 1.0, wf2["3"].Inputs["denoise"], "nil strength leaves the workflow default")
+}
+
+// TestPrepareComfyEditWorkflowZeroImagesAllowed pins that prepare stays
+// total: zero images is not an error (every image_N slot cleared, no dynamic
+// nodes). Recovery can no longer produce zero resolved coords —
+// resolveEditInputs errors first — but the function's contract allows it.
+func TestPrepareComfyEditWorkflowZeroImagesAllowed(t *testing.T) {
+	cfg := editTestConfig(t)
+	wf, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", nil, nil)
+	require.NoError(t, err)
+	assert.NotContains(t, wf, "dave_edit_in_1", "no image -> no dynamic node")
+	assert.NotContains(t, wf["510"].Inputs, "images.image_1", "no image -> no slot link")
+	assert.Equal(t, "p", wf["510"].Inputs["prompt"], "prompt still wired")
+}
+
+// TestPrepareComfyEditWorkflowClearsStaleSlots pins the stale-slot guard: a
+// workflow file that still carries LoadImage nodes wired into the target's
+// images.image_N slots must never feed placeholders alongside the dynamic
+// wiring — prepare deletes every images.image_* link before wiring.
+func TestPrepareComfyEditWorkflowClearsStaleSlots(t *testing.T) {
+	var wf ComfyWorkflow
+	require.NoError(t, json.Unmarshal([]byte(editTestWorkflowJSON(t)), &wf))
+	target := wf["510"]
+	target.Inputs["images.image_1"] = []interface{}{"516", 0}
+	target.Inputs["images.image_7"] = []interface{}{"517", 0}
+	wf["510"] = target
+	wf["516"] = ComfyNode{Inputs: map[string]interface{}{"image": "placeholder1.png"}, Class: "LoadImage"}
+	wf["517"] = ComfyNode{Inputs: map[string]interface{}{"image": "placeholder7.png"}, Class: "LoadImage"}
+	b, err := json.Marshal(wf)
+	require.NoError(t, err)
+	cfg := editWorkflowConfig(t, string(b))
+
+	// One image supplied: slot 1 is re-wired to the dynamic node, the stale
+	// slot 7 link is gone.
+	got, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.jpg"}}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, []interface{}{"dave_edit_in_1", 0}, got["510"].Inputs["images.image_1"],
+		"an occupied slot is re-wired, not duplicated")
+	assert.NotContains(t, got["510"].Inputs, "images.image_7", "stale slot link must be cleared")
+
+	// Zero images supplied: every image_N slot cleared.
+	got0, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", nil, nil)
+	require.NoError(t, err)
+	assert.NotContains(t, got0["510"].Inputs, "images.image_1")
+	assert.NotContains(t, got0["510"].Inputs, "images.image_7")
+}
+
+// TestPrepareComfyEditWorkflowMissingNodeErrors pins every guard error
+// prepareComfyEditWorkflow can return: later tasks surface these exact
+// strings as user-facing tool results, so deleting a guard must break a
+// test here.
+func TestPrepareComfyEditWorkflowMissingNodeErrors(t *testing.T) {
+	t.Run("no image_input_node configured", func(t *testing.T) {
+		cfg := editTestConfig(t)
+		// Map values are not addressable: copy, mutate, store back (the
+		// same pattern the prepareComfyWorkflow tests use).
+		wc := cfg.Workflows["edit"]
+		wc.ImageInputNode = ""
+		cfg.Workflows["edit"] = wc
+		_, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.jpg"}}, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no image_input_node")
+		assert.Contains(t, err.Error(), "edit", "error names the workflow")
+	})
+
+	t.Run("missing image input node", func(t *testing.T) {
+		cfg := editTestConfig(t)
+		wc := cfg.Workflows["edit"]
+		wc.ImageInputNode = "999"
+		cfg.Workflows["edit"] = wc
+		_, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.jpg"}}, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "999")
+		assert.Contains(t, err.Error(), "not found in workflow")
+		assert.Contains(t, err.Error(), "edit", "error names the node and workflow")
+	})
+
+	t.Run("image input node without inputs map", func(t *testing.T) {
+		// The target node 510 loses its inputs map. In the shared fixture
+		// 510 is ALSO the prompt node and prepareComfyWorkflow's prompt
+		// guard runs first, so this variant moves the prompt onto its own
+		// node to reach the edit-side guard.
+		wf := ComfyWorkflow{
+			"prompt-node": {Inputs: map[string]interface{}{"text": "orig"}, Class: "CLIPTextEncode"},
+			"510":         {Class: "TextEncodeQwenImage21"},
+			"3":           {Inputs: map[string]interface{}{"denoise": 1.0, "seed": 1}, Class: "KSampler"},
+		}
+		b, err := json.Marshal(wf)
+		require.NoError(t, err)
+		cfg := editWorkflowConfig(t, string(b))
+		wc := cfg.Workflows["edit"]
+		wc.PromptNode = "prompt-node"
+		wc.PromptInput = ""
+		cfg.Workflows["edit"] = wc
+		_, err = prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.jpg"}}, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "510")
+		assert.Contains(t, err.Error(), "has no inputs map")
+	})
+
+	t.Run("too many images", func(t *testing.T) {
+		cfg := editTestConfig(t)
+		images := make([]ComfyImage, maxEditInputImages+1)
+		for i := range images {
+			images[i] = ComfyImage{Filename: fmt.Sprintf("in_%d.jpg", i)}
+		}
+		_, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", images, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "at most 10 input images")
+		assert.Contains(t, err.Error(), "got 11")
+	})
+
+	t.Run("reserved node id collision", func(t *testing.T) {
+		var wf ComfyWorkflow
+		require.NoError(t, json.Unmarshal([]byte(editTestWorkflowJSON(t)), &wf))
+		wf["dave_edit_in_1"] = ComfyNode{Inputs: map[string]interface{}{"image": "x.png"}, Class: "LoadImage"}
+		b, err := json.Marshal(wf)
+		require.NoError(t, err)
+		cfg := editWorkflowConfig(t, string(b))
+		_, err = prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.jpg"}}, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "dave_edit_in_1")
+		assert.Contains(t, err.Error(), "reserved node id")
+		assert.Contains(t, err.Error(), "edit", "error names the workflow")
+	})
+
+	t.Run("missing denoise node", func(t *testing.T) {
+		cfg := editTestConfig(t)
+		wc := cfg.Workflows["edit"]
+		wc.DenoiseNode = "777"
+		cfg.Workflows["edit"] = wc
+		strength := 0.5
+		_, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.jpg"}}, &strength)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "777")
+		assert.Contains(t, err.Error(), "not found in workflow")
+	})
+
+	t.Run("denoise node without inputs map", func(t *testing.T) {
+		// The denoise guard covers absent node and nil inputs with one
+		// message: both are "not usable as configured".
+		wf := ComfyWorkflow{
+			"510": {Inputs: map[string]interface{}{"prompt": "", "negative_prompt": "", "resolution": 0}, Class: "TextEncodeQwenImage21"},
+			"3":   {Class: "KSampler"},
+		}
+		b, err := json.Marshal(wf)
+		require.NoError(t, err)
+		cfg := editWorkflowConfig(t, string(b))
+		strength := 0.5
+		_, err = prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.jpg"}}, &strength)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "denoise node")
+		assert.Contains(t, err.Error(), "not found in workflow")
+	})
+}
+
+// TestPrepareComfyWorkflowPromptInput pins the per-workflow prompt injection
+// key: default "text" (CLIPTextEncode and friends), overridable because
+// TextEncodeQwenImage21 names its prompt input "prompt". The non-configured
+// key must never be created.
+func TestPrepareComfyWorkflowPromptInput(t *testing.T) {
+	cases := []struct {
+		name        string
+		promptInput string // WorkflowConfig.PromptInput; "" = default "text"
+		writeKey    string // the key that must receive the prompt
+		otherKey    string // a key that must NOT be written
+	}{
+		{name: "default key is text", promptInput: "", writeKey: "text", otherKey: "prompt"},
+		{name: "override prompt (TextEncodeQwenImage21)", promptInput: "prompt", writeKey: "prompt", otherKey: "text"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cfg := testConfig("http://127.0.0.1:0")
+			wc := cfg.Workflows["test"]
+			// The node carries BOTH keys pre-set to "" so the assertion is
+			// about which key was WRITTEN, not which keys exist.
+			workflow := map[string]ComfyNode{
+				"prompt-node": {Inputs: map[string]interface{}{"text": "", "prompt": ""}, Class: "CLIPTextEncode"},
+			}
+			data, err := json.Marshal(workflow)
+			require.NoError(t, err)
+			wc.WorkflowPath = filepath.Join(dir, "wf.json")
+			require.NoError(t, os.WriteFile(wc.WorkflowPath, data, 0644))
+			wc.PromptInput = tc.promptInput
+			cfg.Workflows["test"] = wc
+
+			got, err := prepareComfyWorkflow(cfg, "test", "a cat", "", nil, "{}")
+			require.NoError(t, err)
+			assert.Equal(t, "a cat", got["prompt-node"].Inputs[tc.writeKey],
+				"the prompt must land in the configured key")
+			assert.Equal(t, "", got["prompt-node"].Inputs[tc.otherKey],
+				"the other key must not be written")
+		})
+	}
+}
+
 func TestBuildPromptNote(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -597,6 +881,25 @@ func TestBuildPromptNote(t *testing.T) {
 			reasoning: "the user wants a cat",
 			nsfw:      true,
 			want:      `{"prompt":"a cat","llm_generated":false,"job_id":"j_6","enhancement_reasoning":"the user wants a cat","nsfw":true}`,
+		},
+		{
+			name: "edit job carries edited_from refs + strength",
+			job: &Job{ID: "j_7", Input: JobInput{
+				Prompt:   "make it blue",
+				Strength: floatPtr(0.65),
+				InputImages: []InputImageRef{
+					// A real decodable data URI (the production shape —
+					// dave rewrites usr_/web_ refs to data URIs) plus a
+					// compact gen_ ref.
+					{Ref: "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("PNGBYTES")), Comfy: ComfyImage{Filename: "edit_j7_0.png"}},
+					{Ref: "gen_abc", Comfy: ComfyImage{Filename: "edit_j7_1.png"}},
+				},
+			}},
+			// sha256("PNGBYTES")[:12] = 541fec54762a; the data-URI entry
+			// collapses to the compact descriptor, the gen_ ref stays
+			// verbatim.
+			want: `{"prompt":"make it blue","llm_generated":false,"job_id":"j_7",` +
+				`"edited_from":["data:image/png;sha256=541fec54762a (8 bytes)","gen_abc"],"strength":0.65}`,
 		},
 	}
 	for _, tt := range tests {
@@ -654,10 +957,41 @@ func TestBuildPromptNoteTruncatesReasoning(t *testing.T) {
 		"truncation must cut on rune boundaries")
 }
 
+// TestDescribeEditRef pins the compact edited_from descriptor: data-URI
+// entries (the production shape — dave rewrites usr_/web_ refs to data
+// URIs before the call) must collapse to mime+sha256+size instead of
+// embedding their base64 payload into permanent metadata, while gen_ refs
+// stay verbatim. The undecodable fallback hashes the raw entry string so a
+// hand-built ref still gets a stable descriptor.
+func TestDescribeEditRef(t *testing.T) {
+	uri := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("PNGBYTES"))
+	desc := describeEditRef(uri)
+	assert.Equal(t, "data:image/png;sha256=541fec54762a (8 bytes)", desc,
+		"sha256 of the DECODED bytes, 12 hex chars, decoded byte count")
+	assert.NotContains(t, desc, "UE5HQllURVM=", "the base64 payload must not ride the descriptor")
+	assert.NotContains(t, desc, ";base64", "mime params are stripped — only the mime segment rides")
+
+	assert.Equal(t, "gen_abc", describeEditRef("gen_abc"),
+		"non-data-URI refs (gen_) stay verbatim — already compact ids")
+	assert.Equal(t, "usr_1", describeEditRef("usr_1"),
+		"a hand-built non-URI ref passes through too; the resolver rejects those earlier")
+
+	// Undecodable payload: fall back to hashing the RAW entry so the
+	// descriptor is still stable and sized, never an error path.
+	raw := "data:image/jpeg;base64,!!!not-base64!!!"
+	fallback := describeEditRef(raw)
+	assert.Contains(t, fallback, "data:image/jpeg;sha256=")
+	assert.Contains(t, fallback, fmt.Sprintf("(%d bytes)", len(raw)),
+		"fallback sizes the raw entry string")
+	assert.NotContains(t, fallback, "!!!not-base64!!!")
+}
+
 // mockComfyFlowServer stands in for ComfyUI's HTTP+WS API: it records every
 // workflow submitted to /prompt, reports a completed history entry for the
-// prompt it handed out, serves /view bytes, and accepts+immediately closes
-// the /ws monitor socket so monitorComfyGeneration falls back to history.
+// prompt it handed out, serves /view bytes, accepts /upload/image by echoing
+// the uploaded filename back as the stored name (the edit path's input
+// coordinates), and accepts+immediately closes the /ws monitor socket so
+// monitorComfyGeneration falls back to history.
 type mockComfyFlowServer struct {
 	server      *httptest.Server
 	mu          sync.Mutex
@@ -716,6 +1050,24 @@ func newMockComfyFlowServer(t *testing.T) *mockComfyFlowServer {
 		}
 		w.Write(data)
 	})
+	mux.HandleFunc("/upload/image", func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseMultipartForm(8 << 20); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		f, hdr, err := r.FormFile("image")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		f.Close()
+		// Echo the uploaded filename back as the stored name (no
+		// subfolder): the edit path's coordinates round-trip as
+		// "edit_<job>_<i>.<ext>", which is what the workflow's image
+		// nodes receive.
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"name":%q,"subfolder":"","type":"input"}`, hdr.Filename)
+	})
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		m.mu.Lock()
 		m.wsClientIDs = append(m.wsClientIDs, r.URL.Query().Get("clientId"))
@@ -759,23 +1111,31 @@ func (m *mockComfyFlowServer) wsClientIDList() []string {
 	return append([]string{}, m.wsClientIDs...)
 }
 
+// ServeHTTP delegates to the mock's mux so tests can front it with a
+// wrapping proxy — e.g. the edit-recovery test counts /upload/image hits
+// through one before delegating here.
+func (m *mockComfyFlowServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	m.server.Config.Handler.ServeHTTP(w, r)
+}
+
 func (m *mockComfyFlowServer) URL() string {
 	return m.server.URL
 }
 
 func TestProcessJobSubmitsPromptNote(t *testing.T) {
 	mockComfy := newMockComfyFlowServer(t)
+	up := newFakeUploadServer(t)
 	cfg := testConfig(mockComfy.URL())
 	wc := cfg.Workflows["test"]
 	wc.WorkflowPath = mustWriteWorkflow(t, t.TempDir())
 	cfg.Workflows["test"] = wc
+	cfg.Upload.URL = up.server.URL
 	q, cleanup := setupTestQueue(t, cfg)
 	defer cleanup()
 
 	job, err := q.Submit(JobTypeGenerate, "test", JobInput{
 		Prompt:       "a cat sitting on a mat",
 		LLMGenerated: true,
-		OutputFormat: "base64",
 	})
 	require.NoError(t, err, "Submit")
 
@@ -845,12 +1205,14 @@ func newMockEnhanceServer(t *testing.T) *httptest.Server {
 
 func TestProcessJobEnhanceKeepsOriginalPromptInNote(t *testing.T) {
 	mockComfy := newMockComfyFlowServer(t)
+	up := newFakeUploadServer(t)
 	enhServer := newMockEnhanceServer(t)
 
 	cfg := testConfig(mockComfy.URL())
 	wc := cfg.Workflows["test"]
 	wc.WorkflowPath = mustWriteWorkflow(t, t.TempDir())
 	cfg.Workflows["test"] = wc
+	cfg.Upload.URL = up.server.URL
 	cfg.Enhancements = map[string]EnhancementConfig{
 		"default": {
 			BaseURL:      enhServer.URL,
@@ -865,7 +1227,6 @@ func TestProcessJobEnhanceKeepsOriginalPromptInNote(t *testing.T) {
 	job, err := q.Submit(JobTypeEnhanceGenerate, "test", JobInput{
 		Prompt:       "a cat sitting on a mat",
 		LLMGenerated: false,
-		OutputFormat: "base64",
 	})
 	require.NoError(t, err, "Submit")
 
@@ -908,9 +1269,11 @@ func TestProcessJobEnhanceEmbedsReasoningInNote(t *testing.T) {
 	})
 
 	cfg := testConfig(mockComfy.URL())
+	up := newFakeUploadServer(t)
 	wc := cfg.Workflows["test"]
 	wc.WorkflowPath = mustWriteWorkflow(t, t.TempDir())
 	cfg.Workflows["test"] = wc
+	cfg.Upload.URL = up.server.URL
 	cfg.Enhancements = map[string]EnhancementConfig{
 		"default": {
 			BaseURL:      enhServer.URL + "/v1",
@@ -925,8 +1288,7 @@ func TestProcessJobEnhanceEmbedsReasoningInNote(t *testing.T) {
 	defer cleanup()
 
 	job, err := q.Submit(JobTypeEnhanceGenerate, "test", JobInput{
-		Prompt:       "a cat sitting on a mat",
-		OutputFormat: "base64",
+		Prompt: "a cat sitting on a mat",
 	})
 	require.NoError(t, err, "Submit")
 
@@ -1058,6 +1420,7 @@ func TestPrepareComfyWorkflowStripsEnhancementInstructions(t *testing.T) {
 // line, and prepareComfyWorkflow strips the node before submission.
 func TestProcessJobEnhanceUsesWorkflowInstructions(t *testing.T) {
 	mockComfy := newMockComfyFlowServer(t)
+	up := newFakeUploadServer(t)
 	enhServer, rec := newEnhancementStubServer(t, EnhancementResponse{
 		EnhancedPrompt: "a majestic cat, studio lighting, 4k",
 		NegativePrompt: "blurry",
@@ -1079,6 +1442,7 @@ func TestProcessJobEnhanceUsesWorkflowInstructions(t *testing.T) {
 	wc.WorkflowPath = filepath.Join(dir, "wf.json")
 	require.NoError(t, os.WriteFile(wc.WorkflowPath, data, 0644))
 	cfg.Workflows["test"] = wc
+	cfg.Upload.URL = up.server.URL
 	cfg.Enhancements = map[string]EnhancementConfig{
 		"default": {
 			BaseURL:      enhServer.URL + "/v1",
@@ -1092,8 +1456,7 @@ func TestProcessJobEnhanceUsesWorkflowInstructions(t *testing.T) {
 	defer cleanup()
 
 	job, err := q.Submit(JobTypeEnhanceGenerate, "test", JobInput{
-		Prompt:       "a cat sitting on a mat",
-		OutputFormat: "base64",
+		Prompt: "a cat sitting on a mat",
 	})
 	require.NoError(t, err, "Submit")
 
@@ -1115,4 +1478,45 @@ func TestProcessJobEnhanceUsesWorkflowInstructions(t *testing.T) {
 	require.Len(t, submitted, 1)
 	assert.NotContains(t, submitted[0].Prompt, daveEnhancementInstructionsNodeID,
 		"instructions node must be stripped from the submitted workflow")
+}
+
+func TestUploadComfyImage(t *testing.T) {
+	var gotName, gotOverwrite string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/upload/image", func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, r.ParseMultipartForm(8<<20))
+		f, hdr, err := r.FormFile("image")
+		require.NoError(t, err)
+		defer f.Close()
+		gotName = hdr.Filename
+		gotOverwrite = r.FormValue("overwrite")
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"name":"stored.png","subfolder":"dave","type":"input"}`)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	img, err := uploadComfyImage(context.Background(), srv.URL, []byte("pngbytes"), "edit_1_0.jpg")
+	require.NoError(t, err)
+	assert.Equal(t, "stored.png", img.Filename)
+	assert.Equal(t, "dave", img.Subfolder)
+	assert.Equal(t, "input", img.Type)
+	assert.Equal(t, "edit_1_0.jpg", gotName, "multipart file part carries the filename")
+	assert.Equal(t, "true", gotOverwrite, "overwrite=true so re-edits replace cleanly")
+}
+
+func TestParseGenRef(t *testing.T) {
+	job, ord, ok := parseGenRef("gen_abc12345")
+	require.True(t, ok)
+	assert.Equal(t, "abc12345", job)
+	assert.Equal(t, 0, ord)
+	job, ord, ok = parseGenRef("gen_abc12345_2")
+	require.True(t, ok)
+	assert.Equal(t, 2, ord)
+	_, _, ok = parseGenRef("usr_abc")
+	assert.False(t, ok)
+	_, _, ok = parseGenRef("gen_")
+	assert.False(t, ok)
+	_, _, ok = parseGenRef("https://img.example.com/x")
+	assert.False(t, ok)
 }

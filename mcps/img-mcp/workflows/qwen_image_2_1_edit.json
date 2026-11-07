@@ -1,0 +1,150 @@
+{
+  "506": {
+    "inputs": {
+      "samples": [
+        "507",
+        0
+      ],
+      "vae": [
+        "513",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode",
+      "cnr_id": "comfy-core",
+      "ver": "0.44.0"
+    }
+  },
+  "507": {
+    "inputs": {
+      "seed": 142872806311860,
+      "steps": 8,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "509",
+        0
+      ],
+      "positive": [
+        "510",
+        0
+      ],
+      "negative": [
+        "510",
+        1
+      ],
+      "latent_image": [
+        "510",
+        2
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler",
+      "cnr_id": "comfy-core",
+      "ver": "0.44.0"
+    }
+  },
+  "509": {
+    "inputs": {
+      "device": "auto",
+      "dtype": "default",
+      "model": [
+        "511",
+        0
+      ]
+    },
+    "class_type": "QwenImage21Cache",
+    "_meta": {
+      "title": "Qwen Image 2.1 Cache",
+      "cnr_id": "comfy-core",
+      "ver": "0.44.0"
+    }
+  },
+  "510": {
+    "inputs": {
+      "prompt": "",
+      "negative_prompt": "",
+      "resolution": 0,
+      "clip": [
+        "512",
+        0
+      ],
+      "vae": [
+        "513",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImage21",
+    "_meta": {
+      "title": "Text Encode Qwen Image 2.1",
+      "cnr_id": "comfy-core",
+      "ver": "0.44.0"
+    }
+  },
+  "511": {
+    "inputs": {
+      "unet_name": "qwen_image_2.1_turbo_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "Load Diffusion Model",
+      "cnr_id": "comfy-core",
+      "ver": "0.44.0"
+    }
+  },
+  "512": {
+    "inputs": {
+      "clip_name": "qwen3vl_8b_int8_convrot.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "Load CLIP",
+      "cnr_id": "comfy-core",
+      "ver": "0.44.0"
+    }
+  },
+  "513": {
+    "inputs": {
+      "vae_name": "qwen_image_2.1_vae_bf16.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "Load VAE",
+      "cnr_id": "comfy-core",
+      "ver": "0.44.0"
+    }
+  },
+  "515": {
+    "inputs": {
+      "filename": "%time_%basemodelname_%seed",
+      "path": "",
+      "extension": "webp",
+      "lossless_webp": false,
+      "quality_jpeg_or_webp": 80,
+      "optimize_png": false,
+      "embed_workflow": true,
+      "save_workflow_as_json": false,
+      "counter": 0,
+      "time_format": "%Y-%m-%d-%H%M%S",
+      "show_preview": true,
+      "images": [
+        "506",
+        0
+      ]
+    },
+    "class_type": "Image Saver Simple",
+    "_meta": {
+      "title": "Image Saver Simple",
+      "cnr_id": "comfyui-image-saver",
+      "ver": "1.19.0"
+    }
+  }
+}

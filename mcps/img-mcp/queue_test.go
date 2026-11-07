@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -533,6 +535,33 @@ func TestBuildUploadMeta(t *testing.T) {
 			},
 			expectJSONEq: `{"job_id":"barejob","original_prompt":"a cat","enhanced_prompt":"a cat","workflow_name":"zimage"}`,
 		},
+		{
+			name: "edit job: original input refs + strength ride the meta",
+			job: &Job{ID: "editjob", Type: JobTypeEdit, Workflow: "edit", Input: JobInput{
+				Prompt:   "make it blue",
+				Strength: floatPtr(0.5),
+				InputImages: []InputImageRef{
+					// Production shape: dave rewrites usr_/web_ refs to
+					// data URIs; edited_from carries the compact
+					// descriptor, never the base64 blob.
+					{Ref: "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("PNGBYTES")), Comfy: ComfyImage{Filename: "edit_editjob_0.png"}},
+					{Ref: "gen_abc", Comfy: ComfyImage{Filename: "edit_editjob_1.png"}},
+				},
+				Network: "libera",
+			}},
+			finalPrompt: "make it blue",
+			expect: UploadMeta{
+				JobID:          "editjob",
+				OriginalPrompt: "make it blue",
+				EnhancedPrompt: "make it blue",
+				WorkflowName:   "edit",
+				Network:        "libera",
+				EditedFrom:     []string{"data:image/png;sha256=541fec54762a (8 bytes)", "gen_abc"},
+				Strength:       floatPtr(0.5),
+			},
+			expectJSONEq: `{"job_id":"editjob","original_prompt":"make it blue","enhanced_prompt":"make it blue",
+				"workflow_name":"edit","network":"libera","edited_from":["data:image/png;sha256=541fec54762a (8 bytes)","gen_abc"],"strength":0.5}`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -776,7 +805,7 @@ func TestCancelDuringUploadKeepsJobCancelled(t *testing.T) {
 	q, cleanup := setupTestQueue(t, cfg) // single real worker
 	defer cleanup()
 
-	job, err := q.Submit(JobTypeGenerate, "test", JobInput{Prompt: "a cat", OutputFormat: "url"})
+	job, err := q.Submit(JobTypeGenerate, "test", JobInput{Prompt: "a cat"})
 	require.NoError(t, err, "Submit")
 
 	select {
@@ -790,7 +819,7 @@ func TestCancelDuringUploadKeepsJobCancelled(t *testing.T) {
 	// Drain the parked upload, then prove the worker finished job's
 	// processing by completing a canary behind it (one worker ⇒ serial).
 	close(up.release)
-	canary, err := q.Submit(JobTypeGenerate, "test", JobInput{Prompt: "a dog", OutputFormat: "base64"})
+	canary, err := q.Submit(JobTypeGenerate, "test", JobInput{Prompt: "a dog"})
 	require.NoError(t, err, "Submit canary")
 	waitForJobDone(t, canary, 15*time.Second)
 	assertJobStatus(t, q, canary.ID, StatusCompleted)
@@ -822,7 +851,7 @@ func TestRecoverRunningJobUploadFailureClosesDone(t *testing.T) {
 	cfg.Queue.MaxWorkers = 0
 	q := manualQueueLiteral(t, cfg)
 
-	job := submitTestJob(t, q) // OutputFormat "" -> url -> upload fails
+	job := submitTestJob(t, q) // results are always url -> the 500 upload fails
 	markRunningInMemoryAndDB(t, q, job, "test-prompt-1")
 
 	q.wg.Add(1)
@@ -945,9 +974,8 @@ func TestProcessJobVetOverlapsGenerationAndUploadAwaitsIt(t *testing.T) {
 	defer cleanup()
 
 	job, err := q.Submit(JobTypeGenerate, "test", JobInput{
-		Prompt:       "a cat sitting on a mat",
-		Network:      "graped",
-		OutputFormat: "url",
+		Prompt:  "a cat sitting on a mat",
+		Network: "graped",
 	})
 	require.NoError(t, err, "Submit")
 
@@ -1017,9 +1045,8 @@ func TestProcessJobVetFailureStillCompletesJob(t *testing.T) {
 	defer cleanup()
 
 	job, err := q.Submit(JobTypeGenerate, "test", JobInput{
-		Prompt:       "a cat sitting on a mat",
-		Network:      "graped",
-		OutputFormat: "url",
+		Prompt:  "a cat sitting on a mat",
+		Network: "graped",
 	})
 	require.NoError(t, err, "Submit")
 
@@ -1098,16 +1125,17 @@ func TestProcessJobPersistsSafetyVerdict(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mockComfy := newMockComfyFlowServer(t)
+			up := newFakeUploadServer(t)
 			vet := newVetStubServer(t, tt.vetStatus, tt.vetContent)
 			cfg := safetyQueueConfig(t, mockComfy.URL(), vet, tt.skipNetworks)
+			cfg.Upload.URL = up.server.URL
 
 			q, cleanup := setupTestQueue(t, cfg)
 			defer cleanup()
 
 			job, err := q.Submit(JobTypeGenerate, "test", JobInput{
-				Prompt:       "a cat sitting on a mat",
-				Network:      tt.network,
-				OutputFormat: "base64", // upload is not under test here
+				Prompt:  "a cat sitting on a mat",
+				Network: tt.network,
 			})
 			require.NoError(t, err, "Submit")
 
@@ -1142,13 +1170,15 @@ func restartRecoverJob(t *testing.T, q *JobQueue, jobID string) *Job {
 // final: "vetted but unresolved" must not be re-classified either).
 func TestRecoverRunningJobUsesPersistedSafety(t *testing.T) {
 	mockComfy := newMockComfyFlowServer(t)
+	up := newFakeUploadServer(t)
 	vet := newVetStubServer(t, http.StatusOK, `{"safe":true,"reason":"fine"}`) // would say safe...
 	cfg := safetyQueueConfig(t, mockComfy.URL(), vet, nil)
+	cfg.Upload.URL = up.server.URL
 	cfg.Queue.MaxWorkers = 0
 	q := manualQueueLiteral(t, cfg)
 
 	job, err := q.Submit(JobTypeGenerate, "test", JobInput{
-		Prompt: "a cat", Network: "graped", OutputFormat: "base64",
+		Prompt: "a cat", Network: "graped",
 	})
 	require.NoError(t, err, "Submit")
 	markRunningInMemoryAndDB(t, q, job, "test-prompt-1")
@@ -1179,13 +1209,15 @@ func TestRecoverRunningJobReVetsWhenUnresolved(t *testing.T) {
 	mockComfy := newMockComfyFlowServer(t)
 	const enhancedPrompt = "an enhanced majestic cat, studio lighting"
 	mockComfy.serveViewData(exifWebPWithPrompt(t, enhancedPrompt))
+	up := newFakeUploadServer(t)
 	vet := newVetStubServer(t, http.StatusOK, `{"safe":true,"reason":"fine"}`)
 	cfg := safetyQueueConfig(t, mockComfy.URL(), vet, nil)
+	cfg.Upload.URL = up.server.URL
 	cfg.Queue.MaxWorkers = 0
 	q := manualQueueLiteral(t, cfg)
 
 	job, err := q.Submit(JobTypeGenerate, "test", JobInput{
-		Prompt: "a cat", Network: "graped", OutputFormat: "base64",
+		Prompt: "a cat", Network: "graped",
 	})
 	require.NoError(t, err, "Submit")
 	markRunningInMemoryAndDB(t, q, job, "test-prompt-1")
@@ -1217,13 +1249,15 @@ func TestRecoverRunningJobReVetsWhenUnresolved(t *testing.T) {
 // allowed_networks rule, not a verdict.
 func TestRecoverRunningJobSkipNetworksDoesNotReVet(t *testing.T) {
 	mockComfy := newMockComfyFlowServer(t)
+	up := newFakeUploadServer(t)
 	vet := newVetStubServer(t, http.StatusOK, `{"safe":true,"reason":"fine"}`)
 	cfg := safetyQueueConfig(t, mockComfy.URL(), vet, []string{"libera"})
+	cfg.Upload.URL = up.server.URL
 	cfg.Queue.MaxWorkers = 0
 	q := manualQueueLiteral(t, cfg)
 
 	job, err := q.Submit(JobTypeGenerate, "test", JobInput{
-		Prompt: "a cat", Network: "Libera", OutputFormat: "base64",
+		Prompt: "a cat", Network: "Libera",
 	})
 	require.NoError(t, err, "Submit")
 	markRunningInMemoryAndDB(t, q, job, "test-prompt-1")
@@ -1269,7 +1303,6 @@ func TestProcessJobRewritesNoteBeforeUpload(t *testing.T) {
 		Network:      "graped",
 		Channel:      "#test",
 		Nick:         "user1",
-		OutputFormat: "url",
 	})
 	require.NoError(t, err, "Submit")
 
@@ -1355,9 +1388,8 @@ func TestProcessJobRewritesEveryImageNote(t *testing.T) {
 	defer cleanup()
 
 	job, err := q.Submit(JobTypeGenerate, "test", JobInput{
-		Prompt:       "a cat",
-		Network:      "graped",
-		OutputFormat: "url",
+		Prompt:  "a cat",
+		Network: "graped",
 	})
 	require.NoError(t, err, "Submit")
 
@@ -1409,7 +1441,7 @@ func TestProcessJobNoteRewriteSkipsNonWebp(t *testing.T) {
 	defer cleanup()
 
 	job, err := q.Submit(JobTypeGenerate, "test", JobInput{
-		Prompt: "a cat", Network: "graped", OutputFormat: "url",
+		Prompt: "a cat", Network: "graped",
 	})
 	require.NoError(t, err, "Submit")
 
@@ -1472,9 +1504,8 @@ func TestProcessJobNoteRewriteCarriesNSFWFirstPass(t *testing.T) {
 	defer cleanup()
 
 	job, err := q.Submit(JobTypeEnhanceGenerate, "test", JobInput{
-		Prompt:       "a cat",
-		Network:      "graped",
-		OutputFormat: "url",
+		Prompt:  "a cat",
+		Network: "graped",
 	})
 	require.NoError(t, err, "Submit")
 
@@ -1557,9 +1588,8 @@ func TestProcessJobNoteRewriteSkipNetworksOmitsNSFW(t *testing.T) {
 	defer cleanup()
 
 	job, err := q.Submit(JobTypeEnhanceGenerate, "test", JobInput{
-		Prompt:       "a cat",
-		Network:      "Libera",
-		OutputFormat: "url",
+		Prompt:  "a cat",
+		Network: "Libera",
 	})
 	require.NoError(t, err, "Submit")
 
@@ -1626,7 +1656,6 @@ func TestRecoverRunningJobCarriesNSFWFlagAcrossRewrite(t *testing.T) {
 		Network:      "graped",
 		Channel:      "#test",
 		Nick:         "user1",
-		OutputFormat: "url",
 	})
 	require.NoError(t, err, "Submit")
 	markRunningInMemoryAndDB(t, q, job, "test-prompt-1")
@@ -1695,7 +1724,7 @@ func TestProcessJobNoteRewriteOmitsUnresolvedSafety(t *testing.T) {
 			defer cleanup()
 
 			job, err := q.Submit(JobTypeGenerate, "test", JobInput{
-				Prompt: "a cat", Network: tt.network, OutputFormat: "url",
+				Prompt: "a cat", Network: tt.network,
 			})
 			require.NoError(t, err, "Submit")
 
@@ -1751,7 +1780,6 @@ func TestRecoverRunningJobRewritesNoteWithPersistedSafety(t *testing.T) {
 		Network:      "graped",
 		Channel:      "#test",
 		Nick:         "user1",
-		OutputFormat: "url",
 	})
 	require.NoError(t, err, "Submit")
 	markRunningInMemoryAndDB(t, q, job, "test-prompt-1")
@@ -1784,4 +1812,177 @@ func TestRecoverRunningJobRewritesNoteWithPersistedSafety(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(up.gotMetaRaw), &meta))
 	assert.Equal(t, safetyVerdictUnsafe, meta.Safety,
 		"the recovery path's buildUploadMeta must consume the jobSafety verdict too")
+}
+
+// editQueueConfig wraps testConfig with the shared edit fixture (prompt+image
+// input node "510" via prompt_input "prompt", denoise node "3") plus an
+// imgsite upload mock — processJob uploads every completed image, so without
+// the mock the job would fail at the upload step before any assertion could
+// run.
+func editQueueConfig(t *testing.T, comfyURL string) Config {
+	t.Helper()
+	cfg := editWorkflowConfig(t, editTestWorkflowJSON(t))
+	cfg.Comfy.BaseURL = comfyURL
+	cfg.Upload.URL = newFakeUploadServer(t).server.URL
+	return cfg
+}
+
+// TestProcessJobEditSubmitsUploadedInputs runs an edit job whose inputs are
+// already resolved (the recovery shape) end to end and pins the dynamic
+// wiring: the uploaded coordinates land in a dave_edit_in_1 LoadImage node
+// linked into the target's images.image_1 slot (FIRST image = edit target),
+// strength in the denoise node, the prompt in the configured prompt_input
+// key.
+func TestProcessJobEditSubmitsUploadedInputs(t *testing.T) {
+	mockComfy := newMockComfyFlowServer(t)
+	cfg := editQueueConfig(t, mockComfy.URL())
+	q, stop := setupTestQueue(t, cfg)
+	defer stop()
+	strength := 0.65
+	inputs := []InputImageRef{{Ref: "web_aa", Comfy: ComfyImage{Filename: "in0.jpg"}}}
+	job, err := q.Submit(JobTypeEdit, "edit", JobInput{Prompt: "edit it", InputImages: inputs, Strength: &strength})
+	require.NoError(t, err)
+	result := q.WaitForJob(job.ID, 30*time.Second)
+	require.NotNil(t, result)
+	require.Empty(t, result.Error, "job must succeed: %s", result.Error)
+
+	prompts := mockComfy.submittedPrompts()
+	require.Len(t, prompts, 1)
+	wf := prompts[0].Prompt
+	in1, ok := wf["dave_edit_in_1"]
+	require.True(t, ok, "the input image must be wired as a dynamic LoadImage node")
+	assert.Equal(t, "LoadImage", in1.Class)
+	assert.Equal(t, "in0.jpg", in1.Inputs["image"], "uploaded name wired into the dynamic node")
+	assert.Equal(t, []interface{}{"dave_edit_in_1", float64(0)}, wf["510"].Inputs["images.image_1"],
+		"the (first) input links into the target's slot 1")
+	assert.Equal(t, 0.65, wf["3"].Inputs["denoise"], "strength wired into denoise node")
+	assert.Equal(t, "edit it", wf["510"].Inputs["prompt"], "prompt lands via prompt_input")
+}
+
+// TestEditJobRecoveryReusesPersistedUploadNames proves the recovery seam:
+// a fresh edit job (RawInputImages, no resolved coords) resolves+uploads
+// exactly once, and a job whose InputImages were already persisted (the
+// jobFromDBJob reconstruction a restart produces) re-submits the SAME
+// uploaded name with zero further /upload/image hits.
+func TestEditJobRecoveryReusesPersistedUploadNames(t *testing.T) {
+	// A counting front-proxy over the flow mock: recovery must re-submit
+	// the SAME uploaded name without a second /upload/image hit.
+	var uploads int32
+	mockComfy := newMockComfyFlowServer(t)
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/upload/image" {
+			atomic.AddInt32(&uploads, 1)
+		}
+		mockComfy.ServeHTTP(w, r)
+	}))
+	defer proxy.Close()
+	cfg := editQueueConfig(t, proxy.URL)
+	q, stop := setupTestQueue(t, cfg)
+	defer stop()
+
+	// Fresh edit job (RawInputImages set, no resolved coords): resolution
+	// uploads once (via a data-URI entry pointing at the proxy's /upload).
+	strength := 0.5
+	dataURI := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("PNG"))
+	job, err := q.Submit(JobTypeEdit, "edit", JobInput{Prompt: "p", RawInputImages: []string{dataURI}, Strength: &strength})
+	require.NoError(t, err)
+	res := q.WaitForJob(job.ID, 30*time.Second)
+	require.NotNil(t, res)
+	require.Empty(t, res.Error)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&uploads), "fresh run uploads exactly once")
+	firstAny := mockComfy.submittedPrompts()[0].Prompt["dave_edit_in_1"].Inputs["image"]
+	first, ok := firstAny.(string)
+	require.True(t, ok, "the dynamic LoadImage input must decode back as a string, got %T", firstAny)
+
+	// The SUBMITTED note must already carry the same edited_from provenance
+	// the rewrite-time note rebuilds: the edit branch resolves inputs BEFORE
+	// buildPromptNote (pre-hoist, the fresh-resolve path embedded strength
+	// but no edited_from). The data-URI entry renders as the compact
+	// descriptor — sha256("PNG")[:12] = 796120837694 — never the blob.
+	noteNode, ok := mockComfy.submittedPrompts()[0].Prompt[davePromptNoteNodeID]
+	require.True(t, ok, "submitted workflow must carry the prompt note node")
+	var note promptNotePayload
+	require.NoError(t, json.Unmarshal([]byte(noteNode.Inputs["text"].(string)), &note))
+	require.Len(t, note.EditedFrom, 1, "submit-time note must carry edited_from")
+	assert.Equal(t, "data:image/png;sha256=796120837694 (3 bytes)", note.EditedFrom[0])
+	assert.Equal(t, 0.5, *note.Strength, "submit-time note carries the strength")
+	assert.NotContains(t, noteNode.Inputs["text"].(string), "UE5H",
+		"the base64 payload must never ride the note")
+
+	// Recovery shape: a NEW queue (simulated restart) processing a job
+	// whose InputImages were already persisted (jobFromDBJob
+	// reconstruction). Re-submit the completed job's resolved coords
+	// through a queued Job:
+	recJob, err := q.Submit(JobTypeEdit, "edit", JobInput{
+		Prompt: "p", Strength: &strength,
+		InputImages: []InputImageRef{{Ref: dataURI, Comfy: ComfyImage{Filename: filepathFromInputName(t, first)}}},
+	})
+	require.NoError(t, err)
+	res2 := q.WaitForJob(recJob.ID, 30*time.Second)
+	require.NotNil(t, res2)
+	require.Empty(t, res2.Error)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&uploads), "recovered job re-submits WITHOUT re-uploading")
+	submitted := mockComfy.submittedPrompts()
+	assert.Equal(t, first, submitted[len(submitted)-1].Prompt["dave_edit_in_1"].Inputs["image"], "same uploaded name re-used")
+}
+
+// filepathFromInputName strips a possible subfolder prefix for the Comfy
+// coordinate used in the recovery assertion.
+func filepathFromInputName(t *testing.T, in string) string {
+	t.Helper()
+	if i := strings.LastIndex(in, "/"); i >= 0 {
+		return in[i+1:]
+	}
+	return in
+}
+
+// TestEditJobWithoutInputsFailsReadably pins the crash-window guard: a job
+// whose InputImages AND RawInputImages are both empty (the shape a crash
+// between Submit and the coordinate persist leaves behind — RawInputImages
+// is deliberately not persisted) must fail with a readable retry error.
+// Pre-fix, resolveEditInputs' empty loop returned zero refs with no error
+// and prepareComfyEditWorkflow accepted them, so the "edit" silently
+// generated from the workflow file's default image.
+func TestEditJobWithoutInputsFailsReadably(t *testing.T) {
+	mockComfy := newMockComfyFlowServer(t)
+	cfg := editQueueConfig(t, mockComfy.URL())
+	q, stop := setupTestQueue(t, cfg)
+	defer stop()
+
+	job, err := q.Submit(JobTypeEdit, "edit", JobInput{Prompt: "p"})
+	require.NoError(t, err)
+	res := q.WaitForJob(job.ID, 30*time.Second)
+	require.NotNil(t, res)
+	assert.Equal(t, StatusFailed, res.Status)
+	assert.Contains(t, res.Error, "no input images recorded")
+	assert.Contains(t, res.Error, "retry the edit")
+	assert.Empty(t, mockComfy.submittedPrompts(), "nothing must reach comfy — a default-image edit is worse than a failure")
+}
+
+// TestResultsCarryGenRefs pins the re-edit handle contract: every completed
+// image's result entry carries Ref = gen_<jobid>_<ordinal> (output order),
+// so the model can pass a prior result back into edit_image's input_images
+// without scraping URLs. This is also the sync generate_image path's only
+// exposure of its job identity.
+func TestResultsCarryGenRefs(t *testing.T) {
+	mockComfy := newMockComfyFlowServer(t)
+	mockComfy.serveHistoryImages(2)
+	up := newFakeUploadServer(t)
+	cfg := testConfig(mockComfy.URL())
+	wc := cfg.Workflows["test"]
+	wc.WorkflowPath = mustWriteWorkflow(t, t.TempDir())
+	cfg.Workflows["test"] = wc
+	cfg.Upload.URL = up.server.URL
+	q, stop := setupTestQueue(t, cfg)
+	defer stop()
+
+	job, err := q.Submit(JobTypeGenerate, "test", JobInput{Prompt: "a cat"})
+	require.NoError(t, err, "Submit")
+
+	result := q.WaitForJob(job.ID, 30*time.Second)
+	require.NotNil(t, result)
+	require.Empty(t, result.Error)
+	require.Len(t, result.Result.Images, 2)
+	assert.Equal(t, "gen_"+job.ID+"_0", result.Result.Images[0].Ref)
+	assert.Equal(t, "gen_"+job.ID+"_1", result.Result.Images[1].Ref)
 }

@@ -3,15 +3,22 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math"
 	"math/rand"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptrace"
+	"net/textproto"
 	"os"
 	"regexp"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -226,16 +233,80 @@ func truncateForPromptNote(reasoning string) string {
 //     neither field = never enhanced (direct tools). skip_networks jobs
 //     never carry the flag — the whole classification machinery, first pass
 //     included, is skipped there.
+//   - EditedFrom/Strength are edit-job provenance: the input refs the
+//     caller supplied and the denoise strength actually used. Data-URI
+//     refs render as a compact sha256 descriptor (describeEditRef) —
+//     full-blob provenance was ruled out for permanent-metadata bloat —
+//     while gen_ refs stay verbatim. Both rebuild identically at rewrite
+//     time because they derive from the job row (input_images/strength
+//     columns), so a crash-recovered edit keeps its provenance with no
+//     extra plumbing. Omitted for generation jobs via omitempty.
 type promptNotePayload struct {
-	Prompt               string `json:"prompt"`
-	LLMGenerated         bool   `json:"llm_generated"`
-	JobID                string `json:"job_id"`
-	EnhancementReasoning string `json:"enhancement_reasoning,omitempty"`
-	NSFW                 bool   `json:"nsfw,omitempty"`
-	Network              string `json:"network,omitempty"`
-	Channel              string `json:"channel,omitempty"`
-	Nick                 string `json:"nick,omitempty"`
-	Safety               string `json:"safety,omitempty"`
+	Prompt               string   `json:"prompt"`
+	LLMGenerated         bool     `json:"llm_generated"`
+	JobID                string   `json:"job_id"`
+	EnhancementReasoning string   `json:"enhancement_reasoning,omitempty"`
+	NSFW                 bool     `json:"nsfw,omitempty"`
+	Network              string   `json:"network,omitempty"`
+	Channel              string   `json:"channel,omitempty"`
+	Nick                 string   `json:"nick,omitempty"`
+	Safety               string   `json:"safety,omitempty"`
+	EditedFrom           []string `json:"edited_from,omitempty"`
+	Strength             *float64 `json:"strength,omitempty"`
+}
+
+// editedFromRefs renders the edit-input provenance list shared by the
+// prompt note and the upload meta. CONTROLLER RULING: full data-URI blobs
+// are rejected as edited_from provenance — dave resolves usr_/web_ refs to
+// data URIs before the call, so verbatim refs would embed megabytes of
+// base64 into permanent metadata (the EXIF note baked into every output
+// image, the imgsite upload POST, and the site's workflow_json). Data-URI
+// entries therefore render as a compact descriptor (describeEditRef) that
+// identifies the exact input bytes without the payload; non-data-URI
+// entries (gen_ refs) are already compact ids and stay verbatim. Nil for
+// generation jobs so omitempty drops the key.
+func editedFromRefs(input JobInput) []string {
+	var refs []string
+	for _, r := range input.InputImages {
+		refs = append(refs, describeEditRef(r.Ref))
+	}
+	return refs
+}
+
+// editedFromHashChars is how much of the sha256 hex digest the compact
+// descriptor carries — 12 hex chars (48 bits) is far beyond any realistic
+// collision count for one job's handful of inputs, and keeps the descriptor
+// a single readable token.
+const editedFromHashChars = 12
+
+// describeEditRef renders one edit-input ref for edited_from provenance.
+// A data URI collapses to "data:<mime>;sha256=<hex12> (<N> bytes)": the
+// mime segment (params like ;base64 stripped), a 12-hex-char sha256 of the
+// DECODED bytes (raw entry string on the defensive fallback — every ref
+// that came through resolveEditInputs decodes), and the decoded byte
+// count. The descriptor identifies the exact input without embedding it
+// (see editedFromRefs for the bloat ruling). Anything else — a gen_ ref —
+// passes through verbatim.
+func describeEditRef(ref string) string {
+	if !strings.HasPrefix(ref, "data:") {
+		return ref
+	}
+	mime := ref
+	if comma := strings.Index(ref, ","); comma >= 0 {
+		mime = ref[:comma]
+	}
+	if i := strings.Index(mime, ";"); i >= 0 {
+		mime = mime[:i]
+	}
+	mime = strings.TrimPrefix(mime, "data:")
+
+	n, sum := len(ref), sha256.Sum256([]byte(ref))
+	if comma := strings.Index(ref, ","); comma >= 0 {
+		if raw, err := base64.StdEncoding.DecodeString(ref[comma+1:]); err == nil {
+			n, sum = len(raw), sha256.Sum256(raw)
+		}
+	}
+	return fmt.Sprintf("data:%s;sha256=%s (%d bytes)", mime, hex.EncodeToString(sum[:])[:editedFromHashChars], n)
 }
 
 // buildPromptNote assembles the submit-time note: everything known when the
@@ -266,6 +337,8 @@ func buildPromptNoteWithSafety(job *Job, enhancementReasoning, safety string, ns
 		Channel:              job.Input.Channel,
 		Nick:                 job.Input.Nick,
 		Safety:               reportableSafety(safety),
+		EditedFrom:           editedFromRefs(job.Input),
+		Strength:             job.Input.Strength,
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshaling prompt note: %w", err)
@@ -304,7 +377,11 @@ func prepareComfyWorkflow(cfg Config, workflowName, prompt, negativePrompt strin
 	if promptNode.Inputs == nil {
 		return nil, fmt.Errorf("prompt node %q in workflow %q has no inputs map", wc.PromptNode, wc.WorkflowPath)
 	}
-	promptNode.Inputs["text"] = prompt
+	promptKey := wc.PromptInput
+	if promptKey == "" {
+		promptKey = "text"
+	}
+	promptNode.Inputs[promptKey] = prompt
 
 	if wc.NegativePromptNode != "" && negativePrompt != "" {
 		negNode, ok := workflow[wc.NegativePromptNode]
@@ -356,6 +433,80 @@ func prepareComfyWorkflow(cfg Config, workflowName, prompt, negativePrompt strin
 		Meta:   &comfyNodeMeta{Title: davePromptNoteTitle},
 	}
 
+	return workflow, nil
+}
+
+// comfyImageInputName renders a ComfyUI LoadImage inputs.image value:
+// bare filename at the input root, "subfolder/name" otherwise.
+func comfyImageInputName(name, subfolder string) string {
+	if subfolder == "" {
+		return name
+	}
+	return subfolder + "/" + name
+}
+
+const maxEditInputImages = 10
+const editInputSlotPrefix = "images.image_"
+
+// prepareComfyEditWorkflow builds an edit prompt: everything a generation
+// gets via prepareComfyWorkflow (prompt via the configured prompt_input key,
+// negative, seeds, orphan prompt note), then the input images are wired
+// DYNAMICALLY — the workflow file carries NO image nodes; one LoadImage per
+// supplied image is added here (dave_edit_in_<n>; same node-adding precedent
+// as dave_original_prompt; LoadImage is a core backend class, satisfying
+// validate_prompt's registration check) and linked into the configured
+// image_input_node's "images.image_<n>" slot. Dynamic wiring is the owner's
+// chosen design: a fixed node count in the file would leave placeholder
+// images wired into unused slots.
+//
+// FIRST IMAGE IS THE EDIT TARGET: images[0] lands in images.image_1 — the
+// slot the workflow treats as the edit subject and (resolution=0) the output
+// canvas. Later images are references. Order is preserved end to end from
+// the tool's input_images, including restart recovery (persisted coords).
+func prepareComfyEditWorkflow(cfg Config, workflowName, prompt, negativePrompt string, seedOverride *int64, promptNote string, images []ComfyImage, strength *float64) (ComfyWorkflow, error) {
+	workflow, err := prepareComfyWorkflow(cfg, workflowName, prompt, negativePrompt, seedOverride, promptNote)
+	if err != nil {
+		return nil, err
+	}
+	wc := cfg.Workflows[workflowName]
+	if wc.ImageInputNode == "" {
+		return nil, fmt.Errorf("workflow %q has no image_input_node configured — not an edit workflow", workflowName)
+	}
+	if len(images) > maxEditInputImages {
+		return nil, fmt.Errorf("workflow %q accepts at most %d input images (images.image_1..image_%d), got %d", workflowName, maxEditInputImages, maxEditInputImages, len(images))
+	}
+	target, ok := workflow[wc.ImageInputNode]
+	if !ok {
+		return nil, fmt.Errorf("image input node %q not found in workflow %q", wc.ImageInputNode, wc.WorkflowPath)
+	}
+	if target.Inputs == nil {
+		return nil, fmt.Errorf("image input node %q in workflow %q has no inputs map", wc.ImageInputNode, wc.WorkflowPath)
+	}
+	// Clear any stale image-slot links so a workflow file that still carries
+	// LoadImage nodes can never feed placeholders alongside our wiring.
+	for k := range target.Inputs {
+		if strings.HasPrefix(k, editInputSlotPrefix) {
+			delete(target.Inputs, k)
+		}
+	}
+	for i, img := range images {
+		nodeID := fmt.Sprintf("dave_edit_in_%d", i+1)
+		if _, exists := workflow[nodeID]; exists {
+			return nil, fmt.Errorf("workflow %q contains reserved node id %q (edit inputs)", wc.WorkflowPath, nodeID)
+		}
+		workflow[nodeID] = ComfyNode{
+			Class:  "LoadImage",
+			Inputs: map[string]interface{}{"image": comfyImageInputName(img.Filename, img.Subfolder)},
+		}
+		target.Inputs[fmt.Sprintf("%s%d", editInputSlotPrefix, i+1)] = []interface{}{nodeID, 0}
+	}
+	if strength != nil && wc.DenoiseNode != "" {
+		node, ok := workflow[wc.DenoiseNode]
+		if !ok || node.Inputs == nil {
+			return nil, fmt.Errorf("denoise node %q not found in workflow %q", wc.DenoiseNode, wc.WorkflowPath)
+		}
+		node.Inputs["denoise"] = *strength
+	}
 	return workflow, nil
 }
 
@@ -901,4 +1052,77 @@ func mbPerSecond(bytes, ms int64) float64 {
 		ms = 1
 	}
 	return float64(bytes) / (1 << 20) / (float64(ms) / 1000)
+}
+
+// uploadComfyImage POSTs input bytes to ComfyUI's /upload/image (multipart
+// "image" file part + overwrite=true so repeated edits of the same ref
+// replace cleanly) and returns the stored coordinates for a LoadImage node.
+func uploadComfyImage(ctx context.Context, baseURL string, data []byte, filename string) (ComfyImage, error) {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	h := textproto.MIMEHeader{}
+	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="image"; filename="%s"`, filename))
+	h.Set("Content-Type", "application/octet-stream")
+	fw, err := mw.CreatePart(h)
+	if err != nil {
+		return ComfyImage{}, fmt.Errorf("building multipart: %w", err)
+	}
+	if _, err := fw.Write(data); err != nil {
+		return ComfyImage{}, fmt.Errorf("writing multipart: %w", err)
+	}
+	if err := mw.WriteField("overwrite", "true"); err != nil {
+		return ComfyImage{}, fmt.Errorf("building multipart: %w", err)
+	}
+	if err := mw.Close(); err != nil {
+		return ComfyImage{}, fmt.Errorf("closing multipart: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/upload/image", &buf)
+	if err != nil {
+		return ComfyImage{}, err
+	}
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return ComfyImage{}, fmt.Errorf("uploading image to comfy: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return ComfyImage{}, fmt.Errorf("comfy /upload/image returned %d: %s", resp.StatusCode, string(body))
+	}
+	var out struct {
+		Name      string `json:"name"`
+		Subfolder string `json:"subfolder"`
+		Type      string `json:"type"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return ComfyImage{}, fmt.Errorf("parsing /upload/image response: %w", err)
+	}
+	if out.Name == "" {
+		return ComfyImage{}, fmt.Errorf("comfy /upload/image returned empty name")
+	}
+	if out.Type == "" {
+		out.Type = "input"
+	}
+	return ComfyImage{Filename: out.Name, Subfolder: out.Subfolder, Type: out.Type}, nil
+}
+
+// parseGenRef parses gen_<jobid> (ordinal 0) and gen_<jobid>_<n>.
+func parseGenRef(s string) (string, int, bool) {
+	rest, ok := strings.CutPrefix(s, "gen_")
+	if !ok || rest == "" {
+		return "", 0, false
+	}
+	job, n, hasN := strings.Cut(rest, "_")
+	if job == "" {
+		return "", 0, false
+	}
+	if !hasN {
+		return job, 0, true
+	}
+	ord, err := strconv.Atoi(n)
+	if err != nil || ord < 0 {
+		return "", 0, false
+	}
+	return job, ord, true
 }

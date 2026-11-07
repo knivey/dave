@@ -36,6 +36,11 @@ func createSyncServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 	}, handlers.handleEnhanceAndGenerate)
 
 	mcp.AddTool(server, &mcp.Tool{
+		Name:        "edit_image",
+		Description: "Edit images using an image-editing workflow. input_images is ORDERED: the FIRST image is the edit target — the edit applies to it and the output dimensions follow it; any additional images are references. Pass image references: the ref ids shown next to images in the conversation (usr_/web_) or gen_ refs from generation results. Some workflows expect images mentioned in the prompt (e.g. as <image1>, <image2>) — check the workflow's description with list_workflows. strength (0-1) controls edit intensity when the workflow supports it. Blocks until the edit completes and returns the image result directly.",
+	}, handlers.handleEditImage)
+
+	mcp.AddTool(server, &mcp.Tool{
 		Name:        "upload_image",
 		Description: "Upload base64-encoded image data to the configured file host and return the URL.",
 	}, handlers.handleUploadImage)
@@ -83,8 +88,13 @@ func createAsyncServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 	}, handlers.handleEnhanceAndGenerateAsync)
 
 	mcp.AddTool(server, &mcp.Tool{
+		Name:        "edit_image_async",
+		Description: "Edit images using an image-editing workflow. input_images is ORDERED: the FIRST image is the edit target — the edit applies to it and the output dimensions follow it; any additional images are references. Pass image references: the ref ids shown next to images in the conversation (usr_/web_) or gen_ refs from generation results. Some workflows expect images mentioned in the prompt (e.g. as <image1>, <image2>) — check the workflow's description with list_workflows. strength (0-1) controls edit intensity when the workflow supports it. Queues the edit job and returns a job_id immediately without waiting.",
+	}, handlers.handleEditImageAsync)
+
+	mcp.AddTool(server, &mcp.Tool{
 		Name:        "wait_for_job",
-		Description: "Block until an image generation job completes, fails, or times out. Returns the full result including image URLs or base64 data.",
+		Description: "Block until an image generation job completes, fails, or times out. Returns the full result including image URLs.",
 	}, handlers.handleWaitForJob)
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -155,8 +165,18 @@ func createFullServer(cfg Config, handlers *ToolHandlers) *mcp.Server {
 	}, handlers.handleEnhanceAndGenerateAsync)
 
 	mcp.AddTool(server, &mcp.Tool{
+		Name:        "edit_image",
+		Description: "Edit images using an image-editing workflow. input_images is ORDERED: the FIRST image is the edit target — the edit applies to it and the output dimensions follow it; any additional images are references. Pass image references: the ref ids shown next to images in the conversation (usr_/web_) or gen_ refs from generation results. Some workflows expect images mentioned in the prompt (e.g. as <image1>, <image2>) — check the workflow's description with list_workflows. strength (0-1) controls edit intensity when the workflow supports it. Blocks until the edit completes and returns the image result directly.",
+	}, handlers.handleEditImage)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "edit_image_async",
+		Description: "Edit images using an image-editing workflow. input_images is ORDERED: the FIRST image is the edit target — the edit applies to it and the output dimensions follow it; any additional images are references. Pass image references: the ref ids shown next to images in the conversation (usr_/web_) or gen_ refs from generation results. Some workflows expect images mentioned in the prompt (e.g. as <image1>, <image2>) — check the workflow's description with list_workflows. strength (0-1) controls edit intensity when the workflow supports it. Queues the edit job and returns a job_id immediately without waiting.",
+	}, handlers.handleEditImageAsync)
+
+	mcp.AddTool(server, &mcp.Tool{
 		Name:        "wait_for_job",
-		Description: "Block until an image generation job completes, fails, or times out. Returns the full result including image URLs or base64 data.",
+		Description: "Block until an image generation job completes, fails, or times out. Returns the full result including image URLs.",
 	}, handlers.handleWaitForJob)
 
 	mcp.AddTool(server, &mcp.Tool{

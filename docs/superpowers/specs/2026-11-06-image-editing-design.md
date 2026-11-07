@@ -1,7 +1,8 @@
 # Image Editing — img-mcp edit tools, ref interception, gen_ refs
 
 Date: 2026-11-06
-Status: approved design (brainstorm 2026-11-06), pending implementation plan
+Status: implemented (2026-11-06) — plan `docs/superpowers/plans/2026-11-06-image-editing.md`, tasks 1-8 landed.
+Amended 2026-11-07: dynamic edit inputs (`image_input_node` replaces `image_nodes`), per-workflow `prompt_input`, first-image-is-target semantics — see the "Amendment 2026-11-07" notes in the img-mcp design section.
 Builds on: `docs/superpowers/specs/2026-11-06-conversation-images-design.md` (view_image + ref store — shipped)
 
 ## Context
@@ -16,8 +17,10 @@ another user) generated.
 Owner rulings from the design conversation (binding):
 
 - The ComfyUI edit workflow JSON is **owner-provided** (like every existing
-  workflow); the design adds the config plumbing (`image_nodes`, optional
-  `denoise_node`) to wire it.
+  workflow); the design adds the config plumbing (`image_input_node`,
+  `prompt_input`, optional `denoise_node`) to wire it — with the edit inputs
+  wired DYNAMICALLY (amendment 2026-11-07; the workflow file carries no
+  LoadImage nodes).
 - dave-resolved bytes reach img-mcp as **base64 data URIs rewritten into the
   tool args** at the existing injection seam. No file paths, no dave→ComfyUI
   coupling.
@@ -50,9 +53,12 @@ model calls edit_image(prompt, input_images: ["web_x1", "gen_abc_0"], strength 0
         → ComfyUI /view download. Anything else → error tool result teaching
         the model to view_image first and pass the ref.
       bytes → POST /upload/image → {name, subfolder, type}
-      → prepareComfyWorkflow(edit): image_nodes[].inputs.image = uploaded name;
-        denoise_node.inputs.denoise = strength (when set); prompt/negative/seed
-        + orphan note as usual
+      → prepareComfyWorkflow(edit): prompt via the per-workflow prompt_input
+        key (default "text"); seeds + orphan note as usual; strength →
+        denoise_node.inputs.denoise (when set); then the edit inputs are
+        wired DYNAMICALLY — one LoadImage node per image (dave_edit_in_<n>)
+        linked into image_input_node's images.image_<n> slots, images[0] →
+        slot 1 (the edit target; output dimensions follow it)
    │
    ▼ same queue / safety vet / imgsite upload / EXIF-note machinery (JobTypeEdit)
       note payload + upload meta gain edited_from refs + strength
@@ -67,10 +73,16 @@ model calls edit_image(prompt, input_images: ["web_x1", "gen_abc_0"], strength 0
 
 - `edit_image` (sync server) and `edit_image_async` (async server; both on
   stdio full server). Inputs:
-  `prompt` (required), `input_images []string` (required, ≥1), `negative_prompt`,
+  `prompt` (required), `input_images []string` (required, ≥1, ≤10, ORDERED —
+  see the first-image rule below), `negative_prompt`,
   `workflow`, `seed`, `strength` (float 0–1, optional), `timeout` (sync only,
   default 300), + `_dave_inject_network/channel/nick/llm_generated` (omitempty —
   the schema-required bug class is known).
+- The tool descriptions teach the ordering contract: `input_images` is
+  ORDERED, the FIRST image is the edit target — the edit applies to it and
+  the output dimensions follow it; any additional images are references
+  (mention them in the prompt as `<image1>`, `<image2>`, … when the workflow
+  expects it — see the workflow's `description` via `list_workflows`).
 - Registered alongside the generation tools; `list_workflows` continues to
   advertise everything (edit-capable workflows noted via config description).
 
@@ -91,12 +103,48 @@ parse `{name, subfolder, type}`. Used by the edit path only.
 ### WorkflowConfig additions
 
 ```go
-ImageNodes  []string `toml:"image_nodes"`  // LoadImage node ids (edit workflows)
-DenoiseNode string   `toml:"denoise_node"` // optional; inputs.denoise = strength
+PromptInput    string `toml:"prompt_input"`    // prompt node's input key (default "text")
+ImageInputNode string `toml:"image_input_node"` // node receiving images.image_N (edit workflows)
+DenoiseNode    string `toml:"denoise_node"`    // optional; inputs.denoise = strength
 ```
 
-Validation: edit call against a workflow without `image_nodes` → readable
-error naming the workflow. Neither field affects generation workflows.
+Validation: edit call against a workflow without `image_input_node` →
+readable error naming the workflow; >10 input images → readable error
+(pre-Submit, `maxEditInputImages`). None of the fields affect generation
+workflows (`prompt_input` defaults to `"text"`, the key every existing
+workflow uses).
+
+**Amendment 2026-11-07 — dynamic edit inputs.** The original design wired a
+fixed `image_nodes` list (one LoadImage node id per input slot, the workflow
+file carrying that many nodes). The owner reviewed their real Qwen Image 2.1
+edit workflow and ruled the change:
+
+- The workflow file carries ZERO LoadImage nodes.
+  `prepareComfyEditWorkflow` adds one LoadImage per supplied image
+  (`dave_edit_in_<n>`, the same node-adding precedent as
+  `dave_original_prompt`; LoadImage is a core backend class, satisfying
+  `validate_prompt`'s registration check) and links it into the configured
+  `image_input_node`'s `images.image_<n>` slot. A fixed node count would
+  leak placeholder images into unused slots.
+- Any pre-existing `images.image_*` links on the target are CLEARED before
+  wiring, so a workflow file that still carries LoadImage nodes can never
+  feed placeholders alongside the dynamic wiring.
+- Cap: 10 input images (`maxEditInputImages`), enforced both pre-Submit
+  (`validateEditInput`) and at prepare.
+- Reserved ids: a workflow file containing a node literally named
+  `dave_edit_in_<n>` is a readable error.
+- **FIRST image is the edit target**: `images[0]` lands in `images.image_1` —
+  the slot the workflow treats as the edit subject and (resolution=0) the
+  output canvas. Later images are references. Order is preserved end to end
+  from the tool's `input_images`, including restart recovery (persisted
+  upload coordinates keep their array order).
+- `prompt_input` (default `"text"`): the prompt node's input key
+  `prepareComfyWorkflow` writes — `TextEncodeQwenImage21` names its prompt
+  input `"prompt"`. The negative prompt stays hardcoded `"text"` (no known
+  workflow needs otherwise).
+- `negative_prompt_node` stays optional per workflow (the qwen-edit workflow
+  configures none — `TextEncodeQwenImage21` folds the negative into its own
+  inputs).
 
 ### gen_ ref resolution
 
@@ -150,9 +198,10 @@ unchanged.
 ### Result labels
 
 No change: edit results teach refs by example (`gen_…` in `ImageData.Ref`);
-the model learns the loop from tool descriptions (edit_image's description
-names `input_images` as "image references — the ref ids from image labels in
-the conversation, or gen_ refs from generation results").
+the model learns the loop and the ordering contract from the tool
+descriptions (amended 2026-11-07: `input_images` is ORDERED, the FIRST image
+is the edit target, refs are the conversation `usr_`/`web_` ids or `gen_`
+refs from generation results).
 
 ## Error handling summary
 
@@ -160,7 +209,8 @@ the conversation, or gen_ refs from generation results").
 |---|---|
 | Unknown `input_images` entry (not usr_/web_/gen_/data:) | img-mcp error tool result: "view the image first (view_image) and pass its ref" |
 | Unresolvable usr_/web_ ref (dave side) | call aborted, readable error result naming the ref |
-| Edit called with workflow lacking image_nodes | readable error naming the workflow |
+| Edit called with workflow lacking image_input_node | readable error naming the workflow |
+| Edit called with >10 input_images | readable error ("at most 10 input images") before any job is queued |
 | gen_ ref: job/image missing from img-mcp DB | readable error naming the ref |
 | ComfyUI /upload/image failure | readable error |
 | Recovery after ComfyUI input-dir cleanup | job fails with readable error (accepted) |
@@ -172,7 +222,8 @@ servers; dave's ref-store tests):
 
 - img-mcp: uploadComfyImage (multipart shape, response parse), gen ref parse +
   resolution (DB → /view, imgsite fallback), edit processJob end-to-end
-  (inputs uploaded, image_nodes/denoise wired, note carries edited_from,
+  (inputs uploaded, dynamic dave_edit_in wiring + prompt_input/denoise
+  wired, note carries edited_from,
   safety rides), recovery with persisted upload names, output_format removal
   (tools no longer declare it; results always url; base64 field gone),
   edit_image_async path, error rows above.

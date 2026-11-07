@@ -932,7 +932,7 @@ func callMCPToolWithTimeoutContext(ctx context.Context, toolName string, args ma
 	}
 
 	if logger != nil {
-		logger.Info("calling MCP tool", "server", serverName, "tool", toolName, "args", args)
+		logger.Info("calling MCP tool", "server", serverName, "tool", toolName, "args", sanitizeToolArgsForLog(args))
 	}
 
 	result, err := withMCPRetry(serverName, ctx, "tool call", func(srv *MCPServer) (*mcp.CallToolResult, error) {
@@ -958,7 +958,7 @@ func callMCPToolWithTimeout(toolName string, args map[string]any, timeout time.D
 	}
 
 	if logger != nil {
-		logger.Info("calling MCP tool", "server", serverName, "tool", toolName, "args", args)
+		logger.Info("calling MCP tool", "server", serverName, "tool", toolName, "args", sanitizeToolArgsForLog(args))
 	}
 
 	result, err := withMCPRetry(serverName, context.Background(), "tool call", func(srv *MCPServer) (*mcp.CallToolResult, error) {
@@ -1151,6 +1151,65 @@ func injectScopeArgsFromRunner(toolArgs map[string]any, toolName string, cr *cha
 		"llm_generated": true,
 	})
 	cr.logger.Debug("injected scope args", "tool", toolName)
+}
+
+// sanitizeToolArgsForLog returns a log-safe copy of toolArgs: base64 data
+// URIs (dave's image-ref rewrites can embed megabytes in input_images) are
+// collapsed to "data:<mime>;base64,[… N chars]". The ORIGINAL map is never
+// mutated — the real args must reach the MCP call intact; only the log line
+// sees the truncated copy. Nested []string and []any entries are walked;
+// every other value passes through unchanged.
+func sanitizeToolArgsForLog(args map[string]any) map[string]any {
+	if args == nil {
+		return nil
+	}
+	out := make(map[string]any, len(args))
+	for k, v := range args {
+		out[k] = sanitizeValueForLog(v)
+	}
+	return out
+}
+
+// sanitizeValueForLog collapses base64 data-URI strings to a short marker
+// carrying the payload length. Only strings that START with "data:" AND
+// contain ";base64," are collapsed — prompt text must stay readable in the
+// log, so this is a data-URI shape match, not general truncation (the mid-
+// string / prefix-less cases stay verbatim). Containers are rebuilt as fresh
+// copies so the caller's args are never aliased into the log copy.
+func sanitizeValueForLog(v any) any {
+	switch val := v.(type) {
+	case string:
+		return collapseDataURLForLog(val)
+	case []string:
+		out := make([]string, len(val))
+		for i, s := range val {
+			out[i] = collapseDataURLForLog(s)
+		}
+		return out
+	case []any:
+		out := make([]any, len(val))
+		for i, e := range val {
+			out[i] = sanitizeValueForLog(e)
+		}
+		return out
+	case map[string]any:
+		return sanitizeToolArgsForLog(val)
+	default:
+		return v
+	}
+}
+
+func collapseDataURLForLog(s string) string {
+	const marker = ";base64,"
+	if !strings.HasPrefix(s, "data:") {
+		return s
+	}
+	idx := strings.Index(s, marker)
+	if idx < 0 {
+		return s
+	}
+	head := s[:idx+len(marker)]
+	return fmt.Sprintf("%s[… %d chars]", head, len(s)-len(head))
 }
 
 func mcpToolResultToText(result *mcp.CallToolResult) string {

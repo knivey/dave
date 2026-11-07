@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -172,6 +173,56 @@ func TestGenerationToolsHaveNoOutputFormat(t *testing.T) {
 			assert.NotContains(t, props, "output_format",
 				"output_format is dropped from generation tools (owner ruling, never used)")
 			assert.NotContains(t, props, "base64")
+		})
+	}
+}
+
+// toolDescriptionForTest returns the advertised description of the named
+// tool from the full (stdio) server flavor, over in-memory transports —
+// the exact text an MCP client sees from ListTools.
+func toolDescriptionForTest(t *testing.T, name string) string {
+	t.Helper()
+	cfg := testConfig("http://127.0.0.1:0")
+	h := NewToolHandlers(cfg, queuedTestQueue(t))
+	server := createFullServer(cfg, h)
+
+	ct, st := mcp.NewInMemoryTransports()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go server.Run(ctx, st)
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "0"}, nil)
+	cs, err := client.Connect(ctx, ct, nil)
+	require.NoError(t, err, "connect")
+	t.Cleanup(func() { cs.Close() })
+
+	res, err := cs.ListTools(ctx, nil)
+	require.NoError(t, err, "ListTools")
+	for _, tool := range res.Tools {
+		if tool.Name == name {
+			return tool.Description
+		}
+	}
+	t.Fatalf("tool %q not found in the full server's tool list", name)
+	return ""
+}
+
+// TestEditToolDescriptionsTeachFirstImage pins the first-image semantic in
+// the advertised edit tool descriptions: input_images is ORDERED, the FIRST
+// image is the edit target (edit applies to it, output dimensions follow
+// it), later images are references. The model has no other place to learn
+// the ordering contract.
+func TestEditToolDescriptionsTeachFirstImage(t *testing.T) {
+	for _, name := range []string{"edit_image", "edit_image_async"} {
+		t.Run(name, func(t *testing.T) {
+			desc := toolDescriptionForTest(t, name)
+			assert.Contains(t, desc, "FIRST image is the edit target",
+				"the description must teach the first-image semantic")
+			assert.Contains(t, desc, "input_images is ORDERED")
+			assert.Contains(t, desc, "usr_/web_", "ref grammar: conversation refs")
+			assert.Contains(t, desc, "gen_", "ref grammar: generation refs")
+			assert.Contains(t, desc, "strength", "strength must be explained")
+			assert.Contains(t, desc, "list_workflows", "pointer to per-workflow grammar")
 		})
 	}
 }
@@ -669,17 +720,31 @@ func TestHandleEditImageValidates(t *testing.T) {
 	}
 }
 
-// TestHandleEditImageRequiresImageNodes pins the workflow gate: an edit
-// must land on a workflow with image_nodes configured (a txt2img default
-// workflow can never accept input images). Presence-only by design —
-// over-supply is caught later by prepareComfyEditWorkflow's count guard,
-// which knows the workflow file's real node list.
-func TestHandleEditImageRequiresImageNodes(t *testing.T) {
-	// testConfig's only workflow ("test") has no image_nodes.
+// TestHandleEditImageRequiresImageInputNode pins the workflow gate: an edit
+// must land on a workflow with image_input_node configured (a txt2img default
+// workflow can never accept input images).
+func TestHandleEditImageRequiresImageInputNode(t *testing.T) {
+	// testConfig's only workflow ("test") has no image_input_node.
 	h := NewToolHandlers(testConfig("http://127.0.0.1:0"), queuedTestQueue(t))
 	_, _, err := h.handleEditImage(context.Background(), nil, EditImageInput{Prompt: "p", InputImages: []string{"gen_a"}})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "image_nodes")
+	assert.Contains(t, err.Error(), "image_input_node")
+	assert.Contains(t, err.Error(), `"test"`, "error names the workflow")
+}
+
+// TestHandleEditImageCapsInputImages pins the pre-Submit cap: the dynamic
+// wiring builds images.image_1..image_10, so an over-supply is rejected
+// before any job is queued.
+func TestHandleEditImageCapsInputImages(t *testing.T) {
+	cfg := editTestConfig(t)
+	h := NewToolHandlers(cfg, queuedTestQueueWithConfig(t, cfg))
+	refs := make([]string, maxEditInputImages+1)
+	for i := range refs {
+		refs[i] = fmt.Sprintf("gen_job_%d", i)
+	}
+	_, _, err := h.handleEditImage(context.Background(), nil, EditImageInput{Prompt: "p", Workflow: "edit", InputImages: refs})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "at most 10 input images")
 }
 
 // TestEditToolsPassRawInputs pins the handler wiring the processJob tests

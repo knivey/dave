@@ -409,11 +409,10 @@ func (h *ToolHandlers) handleEnhanceAndGenerateAsync(ctx context.Context, req *m
 
 // validateEditInput is the pre-Submit validation shared by both edit
 // handlers: input_images is required (an edit with no inputs is a
-// generation), strength must sit in (0, 1], and the resolved workflow must
-// be edit-capable (image_nodes present — the readable pre-flight for a
-// txt2img default workflow being aimed at an edit). The image_nodes check
-// is presence-only by design: over-supply is caught later by
-// prepareComfyEditWorkflow's count guard, which knows the real node list.
+// generation), strength must sit in (0, 1], the resolved workflow must be
+// edit-capable (image_input_node configured — the readable pre-flight for a
+// txt2img default workflow being aimed at an edit), and the supply must fit
+// the dynamic wiring's slot budget (images.image_1..image_10).
 func (h *ToolHandlers) validateEditInput(workflowName string, inputImages []string, strength *float64) (string, error) {
 	if len(inputImages) == 0 {
 		return "", fmt.Errorf("input_images is required (at least one image reference)")
@@ -425,8 +424,12 @@ func (h *ToolHandlers) validateEditInput(workflowName string, inputImages []stri
 	if err != nil {
 		return "", err
 	}
-	if len(h.getConfig().Workflows[workflow].ImageNodes) == 0 {
-		return "", fmt.Errorf("workflow %q has no image_nodes configured — not an edit workflow", workflow)
+	wc := h.getConfig().Workflows[workflow]
+	if wc.ImageInputNode == "" {
+		return "", fmt.Errorf("workflow %q has no image_input_node configured — not an edit workflow", workflow)
+	}
+	if len(inputImages) > maxEditInputImages {
+		return "", fmt.Errorf("at most %d input images, got %d", maxEditInputImages, len(inputImages))
 	}
 	return workflow, nil
 }

@@ -100,16 +100,22 @@ type SafetyConfig struct {
 }
 
 type WorkflowConfig struct {
-	WorkflowPath       string   `toml:"workflow_path"`
-	ClientID           string   `toml:"clientid"`
-	OutputNode         string   `toml:"output_node"`
-	PromptNode         string   `toml:"prompt_node"`
+	WorkflowPath string `toml:"workflow_path"`
+	ClientID     string `toml:"clientid"`
+	OutputNode   string `toml:"output_node"`
+	PromptNode   string `toml:"prompt_node"`
+	// PromptInput names the prompt node's input key prepareComfyWorkflow
+	// writes (default "text" — CLIPTextEncode and friends). Qwen Image 2.1's
+	// TextEncodeQwenImage21 uses "prompt".
+	PromptInput string `toml:"prompt_input"`
+	// ImageInputNode names the node whose "images.image_N" inputs receive the
+	// edit inputs (dynamically wired — see prepareComfyEditWorkflow). Only
+	// edit workflows configure this.
+	ImageInputNode string `toml:"image_input_node"`
+	// NegativePromptNode optionally names the node whose inputs.text receives
+	// the negative prompt.
 	NegativePromptNode string   `toml:"negative_prompt_node"`
 	SeedNodes          []string `toml:"seed_nodes"`
-	// ImageNodes names the LoadImage node ids an EDIT workflow wires uploaded
-	// input images into (inputs.image). Only edit workflows configure these;
-	// calling edit_image against a workflow without them is a readable error.
-	ImageNodes []string `toml:"image_nodes"`
 	// DenoiseNode optionally names the node whose inputs.denoise receives the
 	// edit strength (0-1). Unset = the workflow file's own default rides.
 	DenoiseNode string        `toml:"denoise_node"`

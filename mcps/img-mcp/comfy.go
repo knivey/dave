@@ -377,7 +377,11 @@ func prepareComfyWorkflow(cfg Config, workflowName, prompt, negativePrompt strin
 	if promptNode.Inputs == nil {
 		return nil, fmt.Errorf("prompt node %q in workflow %q has no inputs map", wc.PromptNode, wc.WorkflowPath)
 	}
-	promptNode.Inputs["text"] = prompt
+	promptKey := wc.PromptInput
+	if promptKey == "" {
+		promptKey = "text"
+	}
+	promptNode.Inputs[promptKey] = prompt
 
 	if wc.NegativePromptNode != "" && negativePrompt != "" {
 		negNode, ok := workflow[wc.NegativePromptNode]
@@ -441,43 +445,65 @@ func comfyImageInputName(name, subfolder string) string {
 	return subfolder + "/" + name
 }
 
-// prepareComfyEditWorkflow builds an edit (img2img) prompt: it reuses
-// prepareComfyWorkflow for everything a generation gets (prompt/negative
-// text, seeds, orphan prompt note), then wires the uploaded input images
-// into the configured image_nodes (in order) and the optional strength into
-// denoise_node. Missing image nodes are errors, not silent skips — the same
-// guard style as the prompt-node lookup.
+const maxEditInputImages = 10
+const editInputSlotPrefix = "images.image_"
+
+// prepareComfyEditWorkflow builds an edit prompt: everything a generation
+// gets via prepareComfyWorkflow (prompt via the configured prompt_input key,
+// negative, seeds, orphan prompt note), then the input images are wired
+// DYNAMICALLY — the workflow file carries NO image nodes; one LoadImage per
+// supplied image is added here (dave_edit_in_<n>; same node-adding precedent
+// as dave_original_prompt; LoadImage is a core backend class, satisfying
+// validate_prompt's registration check) and linked into the configured
+// image_input_node's "images.image_<n>" slot. Dynamic wiring is the owner's
+// chosen design: a fixed node count in the file would leave placeholder
+// images wired into unused slots.
+//
+// FIRST IMAGE IS THE EDIT TARGET: images[0] lands in images.image_1 — the
+// slot the workflow treats as the edit subject and (resolution=0) the output
+// canvas. Later images are references. Order is preserved end to end from
+// the tool's input_images, including restart recovery (persisted coords).
 func prepareComfyEditWorkflow(cfg Config, workflowName, prompt, negativePrompt string, seedOverride *int64, promptNote string, images []ComfyImage, strength *float64) (ComfyWorkflow, error) {
 	workflow, err := prepareComfyWorkflow(cfg, workflowName, prompt, negativePrompt, seedOverride, promptNote)
 	if err != nil {
 		return nil, err
 	}
 	wc := cfg.Workflows[workflowName]
-	if len(wc.ImageNodes) == 0 {
-		return nil, fmt.Errorf("workflow %q has no image_nodes configured — not an edit workflow", workflowName)
+	if wc.ImageInputNode == "" {
+		return nil, fmt.Errorf("workflow %q has no image_input_node configured — not an edit workflow", workflowName)
 	}
-	if len(images) > len(wc.ImageNodes) {
-		return nil, fmt.Errorf("workflow %q accepts %d input image(s), got %d", workflowName, len(wc.ImageNodes), len(images))
+	if len(images) > maxEditInputImages {
+		return nil, fmt.Errorf("workflow %q accepts at most %d input images (images.image_1..image_%d), got %d", workflowName, maxEditInputImages, maxEditInputImages, len(images))
 	}
-	for i, nodeID := range wc.ImageNodes {
-		node, ok := workflow[nodeID]
-		if !ok {
-			return nil, fmt.Errorf("image node %q not found in workflow %q", nodeID, wc.WorkflowPath)
+	target, ok := workflow[wc.ImageInputNode]
+	if !ok {
+		return nil, fmt.Errorf("image input node %q not found in workflow %q", wc.ImageInputNode, wc.WorkflowPath)
+	}
+	if target.Inputs == nil {
+		return nil, fmt.Errorf("image input node %q in workflow %q has no inputs map", wc.ImageInputNode, wc.WorkflowPath)
+	}
+	// Clear any stale image-slot links so a workflow file that still carries
+	// LoadImage nodes can never feed placeholders alongside our wiring.
+	for k := range target.Inputs {
+		if strings.HasPrefix(k, editInputSlotPrefix) {
+			delete(target.Inputs, k)
 		}
-		if node.Inputs == nil {
-			return nil, fmt.Errorf("image node %q in workflow %q has no inputs map", nodeID, wc.WorkflowPath)
+	}
+	for i, img := range images {
+		nodeID := fmt.Sprintf("dave_edit_in_%d", i+1)
+		if _, exists := workflow[nodeID]; exists {
+			return nil, fmt.Errorf("workflow %q contains reserved node id %q (edit inputs)", wc.WorkflowPath, nodeID)
 		}
-		if i < len(images) {
-			node.Inputs["image"] = comfyImageInputName(images[i].Filename, images[i].Subfolder)
+		workflow[nodeID] = ComfyNode{
+			Class:  "LoadImage",
+			Inputs: map[string]interface{}{"image": comfyImageInputName(img.Filename, img.Subfolder)},
 		}
+		target.Inputs[fmt.Sprintf("%s%d", editInputSlotPrefix, i+1)] = []interface{}{nodeID, 0}
 	}
 	if strength != nil && wc.DenoiseNode != "" {
 		node, ok := workflow[wc.DenoiseNode]
-		if !ok {
+		if !ok || node.Inputs == nil {
 			return nil, fmt.Errorf("denoise node %q not found in workflow %q", wc.DenoiseNode, wc.WorkflowPath)
-		}
-		if node.Inputs == nil {
-			return nil, fmt.Errorf("denoise node %q in workflow %q has no inputs map", wc.DenoiseNode, wc.WorkflowPath)
 		}
 		node.Inputs["denoise"] = *strength
 	}

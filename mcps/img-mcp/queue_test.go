@@ -1814,28 +1814,25 @@ func TestRecoverRunningJobRewritesNoteWithPersistedSafety(t *testing.T) {
 		"the recovery path's buildUploadMeta must consume the jobSafety verdict too")
 }
 
-// editQueueConfig wraps testConfig with the shared edit fixture (prompt
-// node "6", image node "40", denoise node "3") plus an imgsite upload mock
-// — processJob uploads every completed image, so without the mock the job
-// would fail at the upload step before any assertion could run.
+// editQueueConfig wraps testConfig with the shared edit fixture (prompt+image
+// input node "510" via prompt_input "prompt", denoise node "3") plus an
+// imgsite upload mock — processJob uploads every completed image, so without
+// the mock the job would fail at the upload step before any assertion could
+// run.
 func editQueueConfig(t *testing.T, comfyURL string) Config {
 	t.Helper()
-	cfg := testConfig(comfyURL)
-	cfg.Workflows["edit"] = WorkflowConfig{
-		WorkflowPath: mustWriteWorkflowString(t, editTestWorkflowJSON(t)),
-		ClientID:     "test-client", OutputNode: "output-node", PromptNode: "6",
-		ImageNodes:  []string{"40"},
-		DenoiseNode: "3",
-		Timeout:     60,
-	}
+	cfg := editWorkflowConfig(t, editTestWorkflowJSON(t))
+	cfg.Comfy.BaseURL = comfyURL
 	cfg.Upload.URL = newFakeUploadServer(t).server.URL
 	return cfg
 }
 
 // TestProcessJobEditSubmitsUploadedInputs runs an edit job whose inputs are
-// already resolved (the recovery shape) end to end and pins the workflow
-// wiring: uploaded coordinates land in the image node, strength in the
-// denoise node, the prompt in the text node.
+// already resolved (the recovery shape) end to end and pins the dynamic
+// wiring: the uploaded coordinates land in a dave_edit_in_1 LoadImage node
+// linked into the target's images.image_1 slot (FIRST image = edit target),
+// strength in the denoise node, the prompt in the configured prompt_input
+// key.
 func TestProcessJobEditSubmitsUploadedInputs(t *testing.T) {
 	mockComfy := newMockComfyFlowServer(t)
 	cfg := editQueueConfig(t, mockComfy.URL())
@@ -1852,9 +1849,14 @@ func TestProcessJobEditSubmitsUploadedInputs(t *testing.T) {
 	prompts := mockComfy.submittedPrompts()
 	require.Len(t, prompts, 1)
 	wf := prompts[0].Prompt
-	assert.Equal(t, "in0.jpg", wf["40"].Inputs["image"], "uploaded name wired into image node")
+	in1, ok := wf["dave_edit_in_1"]
+	require.True(t, ok, "the input image must be wired as a dynamic LoadImage node")
+	assert.Equal(t, "LoadImage", in1.Class)
+	assert.Equal(t, "in0.jpg", in1.Inputs["image"], "uploaded name wired into the dynamic node")
+	assert.Equal(t, []interface{}{"dave_edit_in_1", float64(0)}, wf["510"].Inputs["images.image_1"],
+		"the (first) input links into the target's slot 1")
 	assert.Equal(t, 0.65, wf["3"].Inputs["denoise"], "strength wired into denoise node")
-	assert.Equal(t, "edit it", wf["6"].Inputs["text"])
+	assert.Equal(t, "edit it", wf["510"].Inputs["prompt"], "prompt lands via prompt_input")
 }
 
 // TestEditJobRecoveryReusesPersistedUploadNames proves the recovery seam:
@@ -1888,9 +1890,9 @@ func TestEditJobRecoveryReusesPersistedUploadNames(t *testing.T) {
 	require.NotNil(t, res)
 	require.Empty(t, res.Error)
 	assert.Equal(t, int32(1), atomic.LoadInt32(&uploads), "fresh run uploads exactly once")
-	firstAny := mockComfy.submittedPrompts()[0].Prompt["40"].Inputs["image"]
+	firstAny := mockComfy.submittedPrompts()[0].Prompt["dave_edit_in_1"].Inputs["image"]
 	first, ok := firstAny.(string)
-	require.True(t, ok, "the image node input must decode back as a string, got %T", firstAny)
+	require.True(t, ok, "the dynamic LoadImage input must decode back as a string, got %T", firstAny)
 
 	// The SUBMITTED note must already carry the same edited_from provenance
 	// the rewrite-time note rebuilds: the edit branch resolves inputs BEFORE
@@ -1921,7 +1923,7 @@ func TestEditJobRecoveryReusesPersistedUploadNames(t *testing.T) {
 	require.Empty(t, res2.Error)
 	assert.Equal(t, int32(1), atomic.LoadInt32(&uploads), "recovered job re-submits WITHOUT re-uploading")
 	submitted := mockComfy.submittedPrompts()
-	assert.Equal(t, first, submitted[len(submitted)-1].Prompt["40"].Inputs["image"], "same uploaded name re-used")
+	assert.Equal(t, first, submitted[len(submitted)-1].Prompt["dave_edit_in_1"].Inputs["image"], "same uploaded name re-used")
 }
 
 // filepathFromInputName strips a possible subfolder prefix for the Comfy

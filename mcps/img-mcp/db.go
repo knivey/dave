@@ -62,8 +62,10 @@ type dbJob struct {
 	// before the uploads). Insert/recovery-only column: no terminal
 	// UPDATE statement touches it.
 	InputImages string `db:"input_images"`
-	// Strength is the edit denoise strength; NULL = not an edit job (or
-	// none supplied). Same insert/recovery-only shape as InputImages.
+	// Vestige: the jobs.strength column is no longer written (the edit
+	// strength knob was removed — Qwen Image 2.1 edit is denoise-1.0-only,
+	// the workflow file's own KSampler value is authoritative) but old rows
+	// still carry values, so the scan stays.
 	Strength      *float64 `db:"strength"`
 	Error         *string  `db:"error"`
 	ComfyPromptID *string  `db:"comfy_prompt_id"`
@@ -123,15 +125,17 @@ func closeDB(db *sqlx.DB) {
 }
 
 func dbInsertJob(db *sqlx.DB, job *Job) error {
-	// output_format is deliberately absent from the column list: the field
-	// was removed from JobInput (owner ruling — never used, results are
-	// always url), so new rows take the column's 'url' DEFAULT. The column
-	// itself stays for old rows; dbJob still scans it as a vestige.
+	// output_format and strength are deliberately absent from the column
+	// list: output_format was removed from JobInput first (owner ruling —
+	// never used, results are always url), and strength followed it (Qwen
+	// Image 2.1 edit is denoise-1.0-only; the workflow file's own KSampler
+	// denoise is authoritative). New rows take both columns' DEFAULTs
+	// ('url' / NULL); the columns themselves stay for old rows, and dbJob
+	// still scans them as vestiges.
 	//
 	// input_images starts empty (the column's DEFAULT is '' anyway, but the
 	// insert carries it explicitly so a job submitted with pre-resolved refs
-	// — a future path — lands complete) and strength rides the *float64 so
-	// nil writes NULL.
+	// — a future path — lands complete).
 	inputImages := ""
 	if len(job.Input.InputImages) > 0 {
 		b, err := json.Marshal(job.Input.InputImages)
@@ -141,13 +145,13 @@ func dbInsertJob(db *sqlx.DB, job *Job) error {
 		inputImages = string(b)
 	}
 	_, err := db.Exec(
-		`INSERT INTO jobs (job_id, type, status, workflow, prompt, negative_prompt, enhancement, seed, llm_generated, network, channel, nick, input_images, strength)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO jobs (job_id, type, status, workflow, prompt, negative_prompt, enhancement, seed, llm_generated, network, channel, nick, input_images)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		job.ID, string(job.Type), string(job.Status), job.Workflow,
 		job.Input.Prompt, job.Input.NegativePrompt, job.Input.Enhancement,
 		job.Input.Seed, job.Input.LLMGenerated,
 		job.Input.Network, job.Input.Channel, job.Input.Nick,
-		inputImages, job.Input.Strength,
+		inputImages,
 	)
 	return err
 }
@@ -390,7 +394,6 @@ func jobFromDBJob(dbj *dbJob) *Job {
 			Network:        dbj.Network,
 			Channel:        dbj.Channel,
 			Nick:           dbj.Nick,
-			Strength:       dbj.Strength,
 		},
 		Error: ptrStr(dbj.Error),
 	}

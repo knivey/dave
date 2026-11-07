@@ -536,10 +536,9 @@ func TestBuildUploadMeta(t *testing.T) {
 			expectJSONEq: `{"job_id":"barejob","original_prompt":"a cat","enhanced_prompt":"a cat","workflow_name":"zimage"}`,
 		},
 		{
-			name: "edit job: original input refs + strength ride the meta",
+			name: "edit job: original input refs ride the meta",
 			job: &Job{ID: "editjob", Type: JobTypeEdit, Workflow: "edit", Input: JobInput{
-				Prompt:   "make it blue",
-				Strength: floatPtr(0.5),
+				Prompt: "make it blue",
 				InputImages: []InputImageRef{
 					// Production shape: dave rewrites usr_/web_ refs to
 					// data URIs; edited_from carries the compact
@@ -557,10 +556,9 @@ func TestBuildUploadMeta(t *testing.T) {
 				WorkflowName:   "edit",
 				Network:        "libera",
 				EditedFrom:     []string{"data:image/png;sha256=541fec54762a (8 bytes)", "gen_abc"},
-				Strength:       floatPtr(0.5),
 			},
 			expectJSONEq: `{"job_id":"editjob","original_prompt":"make it blue","enhanced_prompt":"make it blue",
-				"workflow_name":"edit","network":"libera","edited_from":["data:image/png;sha256=541fec54762a (8 bytes)","gen_abc"],"strength":0.5}`,
+				"workflow_name":"edit","network":"libera","edited_from":["data:image/png;sha256=541fec54762a (8 bytes)","gen_abc"]}`,
 		},
 	}
 	for _, tt := range tests {
@@ -1815,10 +1813,9 @@ func TestRecoverRunningJobRewritesNoteWithPersistedSafety(t *testing.T) {
 }
 
 // editQueueConfig wraps testConfig with the shared edit fixture (prompt+image
-// input node "510" via prompt_input "prompt", denoise node "3") plus an
-// imgsite upload mock — processJob uploads every completed image, so without
-// the mock the job would fail at the upload step before any assertion could
-// run.
+// input node "510" via prompt_input "prompt") plus an imgsite upload mock —
+// processJob uploads every completed image, so without the mock the job
+// would fail at the upload step before any assertion could run.
 func editQueueConfig(t *testing.T, comfyURL string) Config {
 	t.Helper()
 	cfg := editWorkflowConfig(t, editTestWorkflowJSON(t))
@@ -1831,16 +1828,16 @@ func editQueueConfig(t *testing.T, comfyURL string) Config {
 // already resolved (the recovery shape) end to end and pins the dynamic
 // wiring: the uploaded coordinates land in a dave_edit_in_1 LoadImage node
 // linked into the target's images.image_1 slot (FIRST image = edit target),
-// strength in the denoise node, the prompt in the configured prompt_input
-// key.
+// the prompt in the configured prompt_input key, and the workflow file's own
+// denoise riding untouched (the strength knob is gone — Qwen edit is
+// denoise-1.0-only, the file's value is authoritative).
 func TestProcessJobEditSubmitsUploadedInputs(t *testing.T) {
 	mockComfy := newMockComfyFlowServer(t)
 	cfg := editQueueConfig(t, mockComfy.URL())
 	q, stop := setupTestQueue(t, cfg)
 	defer stop()
-	strength := 0.65
 	inputs := []InputImageRef{{Ref: "web_aa", Comfy: ComfyImage{Filename: "in0.jpg"}}}
-	job, err := q.Submit(JobTypeEdit, "edit", JobInput{Prompt: "edit it", InputImages: inputs, Strength: &strength})
+	job, err := q.Submit(JobTypeEdit, "edit", JobInput{Prompt: "edit it", InputImages: inputs})
 	require.NoError(t, err)
 	result := q.WaitForJob(job.ID, 30*time.Second)
 	require.NotNil(t, result)
@@ -1855,7 +1852,8 @@ func TestProcessJobEditSubmitsUploadedInputs(t *testing.T) {
 	assert.Equal(t, "in0.jpg", in1.Inputs["image"], "uploaded name wired into the dynamic node")
 	assert.Equal(t, []interface{}{"dave_edit_in_1", float64(0)}, wf["510"].Inputs["images.image_1"],
 		"the (first) input links into the target's slot 1")
-	assert.Equal(t, 0.65, wf["3"].Inputs["denoise"], "strength wired into denoise node")
+	assert.Equal(t, 1.0, wf["3"].Inputs["denoise"],
+		"the workflow file's own denoise rides untouched")
 	assert.Equal(t, "edit it", wf["510"].Inputs["prompt"], "prompt lands via prompt_input")
 }
 
@@ -1882,9 +1880,8 @@ func TestEditJobRecoveryReusesPersistedUploadNames(t *testing.T) {
 
 	// Fresh edit job (RawInputImages set, no resolved coords): resolution
 	// uploads once (via a data-URI entry pointing at the proxy's /upload).
-	strength := 0.5
 	dataURI := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("PNG"))
-	job, err := q.Submit(JobTypeEdit, "edit", JobInput{Prompt: "p", RawInputImages: []string{dataURI}, Strength: &strength})
+	job, err := q.Submit(JobTypeEdit, "edit", JobInput{Prompt: "p", RawInputImages: []string{dataURI}})
 	require.NoError(t, err)
 	res := q.WaitForJob(job.ID, 30*time.Second)
 	require.NotNil(t, res)
@@ -1896,8 +1893,8 @@ func TestEditJobRecoveryReusesPersistedUploadNames(t *testing.T) {
 
 	// The SUBMITTED note must already carry the same edited_from provenance
 	// the rewrite-time note rebuilds: the edit branch resolves inputs BEFORE
-	// buildPromptNote (pre-hoist, the fresh-resolve path embedded strength
-	// but no edited_from). The data-URI entry renders as the compact
+	// buildPromptNote (pre-hoist, the fresh-resolve path's note once missed
+	// edited_from entirely). The data-URI entry renders as the compact
 	// descriptor — sha256("PNG")[:12] = 796120837694 — never the blob.
 	noteNode, ok := mockComfy.submittedPrompts()[0].Prompt[davePromptNoteNodeID]
 	require.True(t, ok, "submitted workflow must carry the prompt note node")
@@ -1905,7 +1902,6 @@ func TestEditJobRecoveryReusesPersistedUploadNames(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(noteNode.Inputs["text"].(string)), &note))
 	require.Len(t, note.EditedFrom, 1, "submit-time note must carry edited_from")
 	assert.Equal(t, "data:image/png;sha256=796120837694 (3 bytes)", note.EditedFrom[0])
-	assert.Equal(t, 0.5, *note.Strength, "submit-time note carries the strength")
 	assert.NotContains(t, noteNode.Inputs["text"].(string), "UE5H",
 		"the base64 payload must never ride the note")
 
@@ -1914,7 +1910,7 @@ func TestEditJobRecoveryReusesPersistedUploadNames(t *testing.T) {
 	// reconstruction). Re-submit the completed job's resolved coords
 	// through a queued Job:
 	recJob, err := q.Submit(JobTypeEdit, "edit", JobInput{
-		Prompt: "p", Strength: &strength,
+		Prompt:      "p",
 		InputImages: []InputImageRef{{Ref: dataURI, Comfy: ComfyImage{Filename: filepathFromInputName(t, first)}}},
 	})
 	require.NoError(t, err)

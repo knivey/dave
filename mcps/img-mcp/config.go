@@ -130,14 +130,11 @@ type WorkflowConfig struct {
 	ImageInputNode string `toml:"image_input_node"`
 	// NegativePromptNode optionally names the node whose inputs.text receives
 	// the negative prompt.
-	NegativePromptNode string   `toml:"negative_prompt_node"`
-	SeedNodes          []string `toml:"seed_nodes"`
-	// DenoiseNode optionally names the node whose inputs.denoise receives the
-	// edit strength (0-1). Unset = the workflow file's own default rides.
-	DenoiseNode string        `toml:"denoise_node"`
-	Timeout     int           `toml:"timeout"`
-	TypicalTime time.Duration `toml:"typical_time"`
-	Description string        `toml:"description"`
+	NegativePromptNode string        `toml:"negative_prompt_node"`
+	SeedNodes          []string      `toml:"seed_nodes"`
+	Timeout            int           `toml:"timeout"`
+	TypicalTime        time.Duration `toml:"typical_time"`
+	Description        string        `toml:"description"`
 }
 
 func loadConfig(configFile string) (Config, error) {

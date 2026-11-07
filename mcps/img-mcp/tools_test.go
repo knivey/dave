@@ -229,7 +229,10 @@ func TestEditToolDescriptionsTeachFirstImage(t *testing.T) {
 			assert.Contains(t, desc, "input_images is ORDERED")
 			assert.Contains(t, desc, "usr_/web_", "ref grammar: conversation refs")
 			assert.Contains(t, desc, "gen_", "ref grammar: generation refs")
-			assert.Contains(t, desc, "strength", "strength must be explained")
+			// strength was removed (owner ruling: Qwen Image 2.1 edit is
+			// denoise-1.0-only; the workflow file's own value is
+			// authoritative) — the description must not teach it.
+			assert.NotContains(t, desc, "strength")
 			assert.Contains(t, desc, "list_workflows", "pointer to per-workflow grammar")
 		})
 	}
@@ -824,14 +827,11 @@ func TestApplyNetworkPolicy(t *testing.T) {
 	}
 }
 
-// floatPtr is the *float64 test helper for edit strength (nil pointer =
-// "workflow default" is part of the tool contract, so the field is a
-// pointer everywhere).
-func floatPtr(f float64) *float64 { return &f }
-
 // TestHandleEditImageValidates pins the edit tool's pre-Submit validation:
-// input_images is required and strength must sit in (0, 1] — errors surface
-// as tool errors BEFORE any job is queued, so the model can correct itself.
+// input_images is required — errors surface as tool errors BEFORE any job is
+// queued, so the model can correct itself. (A strength range check lived here
+// too; the strength knob was removed entirely — Qwen Image 2.1 edit is
+// denoise-1.0-only, the workflow file's own value is authoritative.)
 func TestHandleEditImageValidates(t *testing.T) {
 	h := NewToolHandlers(testConfig("http://127.0.0.1:0"), queuedTestQueue(t))
 	cases := []struct {
@@ -840,8 +840,6 @@ func TestHandleEditImageValidates(t *testing.T) {
 		want string
 	}{
 		{"no inputs", EditImageInput{Prompt: "p"}, "input_images"},
-		{"bad strength low", EditImageInput{Prompt: "p", InputImages: []string{"gen_a"}, Strength: floatPtr(0)}, "strength"},
-		{"bad strength high", EditImageInput{Prompt: "p", InputImages: []string{"gen_a"}, Strength: floatPtr(1.5)}, "strength"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -896,17 +894,14 @@ func TestHandleEditImageCapsInputImages(t *testing.T) {
 // TestEditToolsPassRawInputs pins the handler wiring the processJob tests
 // cannot see (they build JobInput directly): the model's input_images
 // entries ride JobInput.RawInputImages untouched for processJob-time
-// resolution, the strength pointer survives, and the job lands under
-// JobTypeEdit on the named workflow.
+// resolution, and the job lands under JobTypeEdit on the named workflow.
 func TestEditToolsPassRawInputs(t *testing.T) {
 	cfg := editTestConfig(t)
 	h := NewToolHandlers(cfg, queuedTestQueueWithConfig(t, cfg))
-	strength := 0.6
 	_, out, err := h.handleEditImageAsync(context.Background(), nil, EditImageAsyncInput{
 		Prompt:      "make it blue",
 		Workflow:    "edit",
 		InputImages: []string{"gen_a", "usr_1"},
-		Strength:    &strength,
 	})
 	require.NoError(t, err, "handler")
 
@@ -916,7 +911,6 @@ func TestEditToolsPassRawInputs(t *testing.T) {
 	assert.Equal(t, "edit", job.Workflow)
 	assert.Equal(t, []string{"gen_a", "usr_1"}, job.Input.RawInputImages,
 		"the model's entries pass through verbatim — resolution is processJob's job")
-	assert.Equal(t, &strength, job.Input.Strength)
 	assert.Empty(t, job.Input.InputImages, "nothing is resolved at handler time")
 }
 

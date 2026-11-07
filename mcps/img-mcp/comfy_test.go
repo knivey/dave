@@ -568,10 +568,11 @@ func mustWriteWorkflowString(t *testing.T, jsonStr string) string {
 
 // editTestWorkflowJSON is the shared edit fixture — the qwen-edit shape: a
 // TextEncodeQwenImage21 ("510", prompt input named "prompt", carries the
-// images.image_N slots) and a KSampler ("3", seed + denoise). It carries NO
-// LoadImage nodes (owner ruling: edit inputs are wired dynamically by
-// prepareComfyEditWorkflow — a fixed count in the file would leak placeholder
-// images into unused slots).
+// images.image_N slots) and a KSampler ("3", seed + the file's own denoise
+// 1.0 — authoritative since the strength knob was removed, never
+// overridden). It carries NO LoadImage nodes (owner ruling: edit inputs are
+// wired dynamically by prepareComfyEditWorkflow — a fixed count in the file
+// would leak placeholder images into unused slots).
 func editTestWorkflowJSON(t *testing.T) string {
 	t.Helper()
 	wf := ComfyWorkflow{
@@ -585,8 +586,8 @@ func editTestWorkflowJSON(t *testing.T) string {
 
 // editWorkflowConfig wraps wfJSON in the standard edit-workflow config: node
 // "510" is BOTH the prompt node (via PromptInput "prompt" — the qwen shape)
-// and the image input node; KSampler "3" is denoise + seed. Guard tests that
-// need different wiring mutate the returned config's WorkflowConfig.
+// and the image input node. Guard tests that need different wiring mutate
+// the returned config's WorkflowConfig.
 func editWorkflowConfig(t *testing.T, wfJSON string) Config {
 	t.Helper()
 	cfg := testConfig("")
@@ -595,7 +596,6 @@ func editWorkflowConfig(t *testing.T, wfJSON string) Config {
 		ClientID:     "test-client", OutputNode: "output-node", PromptNode: "510",
 		PromptInput:    "prompt",
 		ImageInputNode: "510",
-		DenoiseNode:    "3",
 		Timeout:        60,
 	}
 	return cfg
@@ -608,16 +608,17 @@ func editTestConfig(t *testing.T) Config {
 // TestPrepareComfyEditWorkflowDynamicWiring pins the dynamic-input contract:
 // one LoadImage node per supplied image (dave_edit_in_<n>), linked in order
 // into the target's images.image_N slots — images[0] lands in slot 1 because
-// the FIRST image is the edit target. Also pins the prompt_input override and
-// the denoise wiring.
+// the FIRST image is the edit target. Also pins the prompt_input override
+// and that the workflow file's own KSampler denoise rides untouched (the
+// strength knob was removed — Qwen Image 2.1 edit is denoise-1.0-only and
+// the file's value is authoritative).
 func TestPrepareComfyEditWorkflowDynamicWiring(t *testing.T) {
 	cfg := editTestConfig(t)
 	images := []ComfyImage{
 		{Filename: "first.jpg"},
 		{Filename: "second.png", Subfolder: "sub"},
 	}
-	strength := 0.6
-	wf, err := prepareComfyEditWorkflow(cfg, "edit", "make it blue", "", nil, "note", images, &strength)
+	wf, err := prepareComfyEditWorkflow(cfg, "edit", "make it blue", "", nil, "note", images)
 	require.NoError(t, err)
 
 	n1, ok := wf["dave_edit_in_1"]
@@ -636,12 +637,8 @@ func TestPrepareComfyEditWorkflowDynamicWiring(t *testing.T) {
 	assert.Equal(t, "make it blue", target.Inputs["prompt"],
 		"prompt lands in the configured prompt_input key, not the default 'text'")
 	assert.NotContains(t, target.Inputs, "text", "the default key must not be created")
-	assert.Equal(t, 0.6, wf["3"].Inputs["denoise"], "strength wired to denoise_node")
-
-	// nil strength leaves the workflow file's own default riding.
-	wf2, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.png"}}, nil)
-	require.NoError(t, err)
-	assert.Equal(t, 1.0, wf2["3"].Inputs["denoise"], "nil strength leaves the workflow default")
+	assert.Equal(t, 1.0, wf["3"].Inputs["denoise"],
+		"the workflow file's own denoise rides untouched — nothing overrides it")
 }
 
 // TestPrepareComfyEditWorkflowZeroImagesAllowed pins that prepare stays
@@ -650,7 +647,7 @@ func TestPrepareComfyEditWorkflowDynamicWiring(t *testing.T) {
 // resolveEditInputs errors first — but the function's contract allows it.
 func TestPrepareComfyEditWorkflowZeroImagesAllowed(t *testing.T) {
 	cfg := editTestConfig(t)
-	wf, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", nil, nil)
+	wf, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", nil)
 	require.NoError(t, err)
 	assert.NotContains(t, wf, "dave_edit_in_1", "no image -> no dynamic node")
 	assert.NotContains(t, wf["510"].Inputs, "images.image_1", "no image -> no slot link")
@@ -676,14 +673,14 @@ func TestPrepareComfyEditWorkflowClearsStaleSlots(t *testing.T) {
 
 	// One image supplied: slot 1 is re-wired to the dynamic node, the stale
 	// slot 7 link is gone.
-	got, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.jpg"}}, nil)
+	got, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.jpg"}})
 	require.NoError(t, err)
 	assert.Equal(t, []interface{}{"dave_edit_in_1", 0}, got["510"].Inputs["images.image_1"],
 		"an occupied slot is re-wired, not duplicated")
 	assert.NotContains(t, got["510"].Inputs, "images.image_7", "stale slot link must be cleared")
 
 	// Zero images supplied: every image_N slot cleared.
-	got0, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", nil, nil)
+	got0, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", nil)
 	require.NoError(t, err)
 	assert.NotContains(t, got0["510"].Inputs, "images.image_1")
 	assert.NotContains(t, got0["510"].Inputs, "images.image_7")
@@ -701,7 +698,7 @@ func TestPrepareComfyEditWorkflowMissingNodeErrors(t *testing.T) {
 		wc := cfg.Workflows["edit"]
 		wc.ImageInputNode = ""
 		cfg.Workflows["edit"] = wc
-		_, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.jpg"}}, nil)
+		_, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.jpg"}})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "no image_input_node")
 		assert.Contains(t, err.Error(), "edit", "error names the workflow")
@@ -712,7 +709,7 @@ func TestPrepareComfyEditWorkflowMissingNodeErrors(t *testing.T) {
 		wc := cfg.Workflows["edit"]
 		wc.ImageInputNode = "999"
 		cfg.Workflows["edit"] = wc
-		_, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.jpg"}}, nil)
+		_, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.jpg"}})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "999")
 		assert.Contains(t, err.Error(), "not found in workflow")
@@ -736,7 +733,7 @@ func TestPrepareComfyEditWorkflowMissingNodeErrors(t *testing.T) {
 		wc.PromptNode = "prompt-node"
 		wc.PromptInput = ""
 		cfg.Workflows["edit"] = wc
-		_, err = prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.jpg"}}, nil)
+		_, err = prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.jpg"}})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "510")
 		assert.Contains(t, err.Error(), "has no inputs map")
@@ -748,7 +745,7 @@ func TestPrepareComfyEditWorkflowMissingNodeErrors(t *testing.T) {
 		for i := range images {
 			images[i] = ComfyImage{Filename: fmt.Sprintf("in_%d.jpg", i)}
 		}
-		_, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", images, nil)
+		_, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", images)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "at most 10 input images")
 		assert.Contains(t, err.Error(), "got 11")
@@ -761,40 +758,11 @@ func TestPrepareComfyEditWorkflowMissingNodeErrors(t *testing.T) {
 		b, err := json.Marshal(wf)
 		require.NoError(t, err)
 		cfg := editWorkflowConfig(t, string(b))
-		_, err = prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.jpg"}}, nil)
+		_, err = prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.jpg"}})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "dave_edit_in_1")
 		assert.Contains(t, err.Error(), "reserved node id")
 		assert.Contains(t, err.Error(), "edit", "error names the workflow")
-	})
-
-	t.Run("missing denoise node", func(t *testing.T) {
-		cfg := editTestConfig(t)
-		wc := cfg.Workflows["edit"]
-		wc.DenoiseNode = "777"
-		cfg.Workflows["edit"] = wc
-		strength := 0.5
-		_, err := prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.jpg"}}, &strength)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "777")
-		assert.Contains(t, err.Error(), "not found in workflow")
-	})
-
-	t.Run("denoise node without inputs map", func(t *testing.T) {
-		// The denoise guard covers absent node and nil inputs with one
-		// message: both are "not usable as configured".
-		wf := ComfyWorkflow{
-			"510": {Inputs: map[string]interface{}{"prompt": "", "negative_prompt": "", "resolution": 0}, Class: "TextEncodeQwenImage21"},
-			"3":   {Class: "KSampler"},
-		}
-		b, err := json.Marshal(wf)
-		require.NoError(t, err)
-		cfg := editWorkflowConfig(t, string(b))
-		strength := 0.5
-		_, err = prepareComfyEditWorkflow(cfg, "edit", "p", "", nil, "n", []ComfyImage{{Filename: "x.jpg"}}, &strength)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "denoise node")
-		assert.Contains(t, err.Error(), "not found in workflow")
 	})
 }
 
@@ -883,10 +851,9 @@ func TestBuildPromptNote(t *testing.T) {
 			want:      `{"prompt":"a cat","llm_generated":false,"job_id":"j_6","enhancement_reasoning":"the user wants a cat","nsfw":true}`,
 		},
 		{
-			name: "edit job carries edited_from refs + strength",
+			name: "edit job carries edited_from refs",
 			job: &Job{ID: "j_7", Input: JobInput{
-				Prompt:   "make it blue",
-				Strength: floatPtr(0.65),
+				Prompt: "make it blue",
 				InputImages: []InputImageRef{
 					// A real decodable data URI (the production shape —
 					// dave rewrites usr_/web_ refs to data URIs) plus a
@@ -899,7 +866,7 @@ func TestBuildPromptNote(t *testing.T) {
 			// collapses to the compact descriptor, the gen_ ref stays
 			// verbatim.
 			want: `{"prompt":"make it blue","llm_generated":false,"job_id":"j_7",` +
-				`"edited_from":["data:image/png;sha256=541fec54762a (8 bytes)","gen_abc"],"strength":0.65}`,
+				`"edited_from":["data:image/png;sha256=541fec54762a (8 bytes)","gen_abc"]}`,
 		},
 	}
 	for _, tt := range tests {

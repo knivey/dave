@@ -9,42 +9,37 @@ import (
 	"time"
 )
 
-// llama.cpp stream-session support (Nov 2026, prod incident 2026-11-06
-// session 3002): a llama.cpp child server binds a streaming generation to
-// its HTTP socket — between prefill batches it polls the socket with
-// select()+MSG_PEEK, and any transient readable-wakeup on the router↔child
-// loopback connection is read as "client gone": the child cancels the task,
-// the router's proxy logs "http client error: Failed to read connection",
-// and dave receives a plain-text "proxy error: ..." line inside its already
-// committed 200 text/event-stream response, which the openai-go SSE decoder
-// turns into "unexpected end of JSON input". Three incidents over three
-// days (sessions 2890, 2908, 3002), all ~21k-token streaming turns on
-// type = "llama" services, dying mid-prefill at 14.8-40.6s — a race, not a
-// timer (dave's own timeouts were 4m and never fired).
+// llama.cpp stream-session support (Nov 2026, prod incidents 2026-11-04/
+// 05/06 — sessions 2890, 2908, 3002, 3007 ×2). THE ROOT CAUSE of those
+// deaths turned out to be client-side and is fixed in ssecomments.go:
+// llama.cpp's SSE keepalive comment (":\n\n", sent after every 30s of
+// stream silence) hit an openai-go ssestream bug that aborts the whole
+// stream on the comment's data-less blank-line dispatch — a cold-cache
+// 21k-token prefill is ~30.5s of exactly such silence, so the FIRST big
+// request after every model load died (later turns ride the KV cache and
+// prefill in ~1s). Investigation detour worth remembering: the llama.cpp
+// child/router logs ("http client error: Failed to read connection",
+// task cancels) were all DOWNSTREAM of the SDK aborting — the wire was
+// healthy, verified by relay capture: keepalive comment at T+30.0s,
+// client FIN 3ms later.
 //
-// llama.cpp's opt-out is the X-Conversation-Id header (server-stream.cpp):
-// with it, server_res_spipe::should_stop() returns only the session's
-// cancel flag — the generation detaches from the socket entirely and only
-// an explicit DELETE /v1/stream stops it. This is what the webui uses,
-// which is why webui long prefills never die. Verified live against the
-// prod router (b12156): the same 21k-token request that died headerless
-// ran 42.5s clean with the header.
-//
-// The detachment cuts both ways: once the header is sent, dave dropping or
-// cancelling its end no longer stops the server-side generation. Every
-// runTurnStream exit therefore releases the session with
-// DELETE /v1/stream?conv_id=<id> — ^stop, queue cancel, shutdown, stream
-// errors, idle timeouts, and normal completion alike. The DELETE also
-// clears the router's conv_models map entry, which otherwise accumulates
-// one entry per conv id until the router restarts. The release runs on a
-// DETACHED context with a short timeout precisely because the runner ctx
-// is cancelled on the paths where it matters most.
+// What this file adds on top is DEFENSE IN DEPTH, still valuable with the
+// root cause fixed: llama.cpp's X-Conversation-Id header detaches the
+// generation from the HTTP socket (server_res_spipe::should_stop returns
+// only the session cancel flag), so if dave ever DOES lose a live stream
+// — genuine network drop, restart, ^stop — the generation survives
+// server-side in a resumable ring (GET /v1/stream, 4MiB / 300s TTL) and
+// only an explicit DELETE stops it. Without the release DELETE, an
+// abandoned detached generation would burn GPU to max_tokens with no
+// reader; with it, ^stop/shutdown/error paths actually stop server work.
+// The DELETE also clears the router's conv_models map entry, which
+// otherwise accumulates one entry per conv id until router restart.
 //
 // Scope is deliberately streaming-only: a non-streaming turn cannot keep
 // reading the live wire, so header-detaching it would let an abandoned
-// generation burn the GPU to max_tokens with no reader — the DELETE would
-// arrive only after dave already gave up. Streaming turns hold the wire
-// for their whole life, so a live dave implies a live reader.
+// generation burn the GPU with no reader. dave has no reattach today;
+// if it ever gains one, byte offsets must be counted on the FILTERED
+// body (see ssecomments.go).
 
 const (
 	// llamaConversationIDHeader is the llama.cpp resumable-stream opt-in.

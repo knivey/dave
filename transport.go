@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 )
 
@@ -106,6 +107,12 @@ func (t *daveTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	ct := resp.Header.Get("Content-Type")
 	t.isStream = ct == "text/event-stream"
+	// SSE comment filtering (see ssecomments.go): strip keepalive comments
+	// and data-less blank lines before the SDK's SSE decoder can poison
+	// itself on them. Applies to every SSE response through this transport.
+	if strings.HasPrefix(ct, "text/event-stream") {
+		resp.Body = newSSECommentFilter(resp.Body)
+	}
 
 	t.mu.Lock()
 	shouldCapture := t.captureBody

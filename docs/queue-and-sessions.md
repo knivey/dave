@@ -33,8 +33,9 @@ is auto-detected from the server (`GET /props`, `max_instances`); a
 service-level `models_max` can force it (see services.toml).
 
 When a command is queued, the queue notice says on the same line whether
-the request is already processing in the background (its service has a
-free `parallel` slot) and whether a model swap is predicted for it —
+the request is already processing in the background (it started
+immediately — its service had a free `parallel` slot) and whether a
+model swap is predicted for it —
 e.g. `⏳ Queued (position 1) — already processing in the background,
 gemma will load after qwen finishes`. A safety valve aborts gate waits
 that exceed 10 minutes / 3× the command timeout.

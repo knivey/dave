@@ -58,21 +58,6 @@ func (es *execSlot) release() {
 	<-es.semaphore
 }
 
-// ServiceSlotFree reports (advisory) whether an item enqueued for this
-// service would start executing immediately — the per-service parallel
-// slot has capacity. Advisory only: racing items may take the slot in
-// between; used by the queue-notice hook (modelGateQueueSuffix) to tell
-// the user their request is already processing in the background.
-func (qm *QueueManager) ServiceSlotFree(service string) bool {
-	qm.mu.Lock()
-	defer qm.mu.Unlock()
-	slot, ok := qm.execSlots[service]
-	if !ok || slot.max == 0 {
-		return true // no limit configured for this service
-	}
-	return len(slot.semaphore) < slot.max
-}
-
 type deliverySlot struct {
 	mu      sync.Mutex
 	cond    *sync.Cond
@@ -196,6 +181,25 @@ func (qm *QueueManager) Enqueue(network, channel string, userID int64, nick, ser
 	return qm.EnqueueAt(network, channel, userID, nick, service, desc, time.Now(), fn)
 }
 
+// EnqueueWithStart is Enqueue plus the authoritative started fact: the
+// queue decides synchronously at enqueue time whether the item acquires
+// a service slot and begins executing immediately (started=true) or
+// waits in pending. Used by the dispatch sites that compose the
+// queue-notice suffix — a post-hoc "is the slot free" consult would
+// count the just-enqueued item's own occupancy and suppress the
+// "already processing in the background" suffix in exactly the
+// contended cases it exists for.
+func (qm *QueueManager) EnqueueWithStart(network, channel string, userID int64, nick, service, desc string, fn func(ctx context.Context, output chan<- string)) (int, bool) {
+	qm.mu.Lock()
+	defer qm.mu.Unlock()
+
+	item := qm.newQueueItem(network, channel, userID, nick, service, desc, time.Now(), fn)
+	if item == nil {
+		return -1, false
+	}
+	return qm.enqueueItem(item)
+}
+
 func (qm *QueueManager) newQueueItem(network, channel string, userID int64, nick, service, desc string, enqueuedAt time.Time, fn func(ctx context.Context, output chan<- string)) *QueueItem {
 	if !qm.running.Load() {
 		return nil
@@ -226,7 +230,7 @@ func (qm *QueueManager) newQueueItem(network, channel string, userID int64, nick
 	}
 }
 
-func (qm *QueueManager) enqueueItem(item *QueueItem) int {
+func (qm *QueueManager) enqueueItem(item *QueueItem) (int, bool) {
 	ds := qm.getDeliverySlot(item.Network, item.Channel)
 	var deliveryPos int
 	ds.mu.Lock()
@@ -250,13 +254,13 @@ func (qm *QueueManager) enqueueItem(item *QueueItem) int {
 	if slot != nil && !slot.tryAcquire() {
 		cq.pending = append(cq.pending, item)
 		qm.notify()
-		return deliveryPos
+		return deliveryPos, false
 	}
 
 	cq.running[item.ID] = item
 	qm.wg.Add(1)
 	go qm.runJob(item)
-	return deliveryPos
+	return deliveryPos, true
 }
 
 func (qm *QueueManager) EnqueueAt(network, channel string, userID int64, nick, service, desc string, enqueuedAt time.Time, fn func(ctx context.Context, output chan<- string)) int {
@@ -268,7 +272,8 @@ func (qm *QueueManager) EnqueueAt(network, channel string, userID int64, nick, s
 		return -1
 	}
 
-	return qm.enqueueItem(item)
+	pos, _ := qm.enqueueItem(item)
+	return pos
 }
 
 func (qm *QueueManager) EnqueueAtWithPrompt(network, channel string, userID int64, nick, service, desc, prompt, startedMsgOverride string, enqueuedAt time.Time, fn func(ctx context.Context, output chan<- string)) int {
@@ -283,7 +288,8 @@ func (qm *QueueManager) EnqueueAtWithPrompt(network, channel string, userID int6
 	item.Prompt = prompt
 	item.StartedMsg = startedMsgOverride
 
-	return qm.enqueueItem(item)
+	pos, _ := qm.enqueueItem(item)
+	return pos
 }
 
 func (qm *QueueManager) StopCurrent(network, channel string) bool {

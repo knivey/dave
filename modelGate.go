@@ -501,21 +501,27 @@ func (h modelGateAcquire) acquire() (func(), bool) {
 
 // modelGateQueueSuffix composes the extra context appended to the queue
 // position notice at ENQUEUE time — one IRC line, not two: whether the
-// service has a free execution slot (the request is already processing
-// in the background while its output waits for delivery), and whether
-// the model gate predicts a model swap for this command's model. Sent
-// from the dispatch site via client.Cmd.Reply — unbuffered, so unlike
+// item STARTED at enqueue (the authoritative fact from
+// EnqueueWithStart: it is already processing in the background while
+// its output waits for delivery — NOT a post-hoc slot consult, which
+// would count the just-enqueued item's own occupancy and suppress the
+// suffix in exactly the contended cases it exists for), and whether the
+// model gate predicts a model swap for this command's model. Sent from
+// the dispatch site via client.Cmd.Reply — unbuffered, so unlike
 // turn-side notices it displays immediately instead of sitting in the
 // delivery output buffer until the wait is already over. Advisory: the
 // gate state may change between send and the turn's acquire — fine,
 // this sets expectations; the gate remains the authority. position <= 0
 // (not queued) yields "" — the started message needs no suffix.
-func modelGateQueueSuffix(service, model string, position int) string {
+// Worst case the capacity cache is cold or its failure TTL expired and
+// this pays one /props probe (2s timeout, fail-open) on the dispatch
+// goroutine — once, and it warms the cache the turn would pay anyway.
+func modelGateQueueSuffix(service, model string, position int, started bool) string {
 	if position <= 0 {
 		return ""
 	}
 	var extra string
-	if queueMgr != nil && queueMgr.ServiceSlotFree(service) {
+	if started {
 		n := getNotices()
 		if n.Queue.BgSuffix != "" {
 			extra += expandNotice(n.Queue.BgSuffix, nil)

@@ -550,38 +550,16 @@ func TestQueueManager_ParallelDeliveryShowsStartedMsg(t *testing.T) {
 	assert.Contains(t, startedMsg, "Processing", "started msg should contain 'Processing'")
 }
 
-func TestQueueManagerServiceSlotFree(t *testing.T) {
-	qm := NewQueueManager(NoticesConfig{}, 5)
-
-	assert.True(t, qm.ServiceSlotFree("unknown"),
-		"a service with no configured limit is unlimited")
-
-	qm.UpdateServiceLimits(map[string]Service{"svc": {Parallel: 1}})
-	require.True(t, qm.ServiceSlotFree("svc"), "fresh slot must be free")
-
-	require.True(t, qm.execSlots["svc"].tryAcquire())
-	assert.False(t, qm.ServiceSlotFree("svc"), "occupied slot must not be free")
-	qm.execSlots["svc"].release()
-	assert.True(t, qm.ServiceSlotFree("svc"), "released slot must be free again")
-
-	qm.UpdateServiceLimits(map[string]Service{"unl": {Parallel: 0}})
-	assert.True(t, qm.ServiceSlotFree("unl"), "parallel = 0 (nil semaphore) is unlimited")
-}
-
 // TestModelGateQueueSuffix pins the enqueue-time queue-notice suffix: one
 // IRC line carrying the background-processing fact and the predicted model
 // swap. The turn-side wait notice is GONE (turn-side notices sit in the
 // delivery output buffer until the wait is over — they display stale), so
-// this is the only user-facing wait explanation.
+// this is the only user-facing wait explanation. `started` is the
+// authoritative EnqueueWithStart fact, so no queue state is needed here.
 func TestModelGateQueueSuffix(t *testing.T) {
 	setupNoticesDefaults(t)
 	clearModelGateCache()
 	t.Cleanup(clearModelGateCache)
-
-	origQM := queueMgr
-	queueMgr = NewQueueManager(NoticesConfig{}, 5)
-	queueMgr.UpdateServiceLimits(map[string]Service{"gatedsvc": {Parallel: 1}, "busysvc": {Parallel: 1}})
-	t.Cleanup(func() { queueMgr = origQM })
 
 	// Hold the gated server's slot: one model resident on a capacity-1 gate.
 	releaseHold, ok := acquireModelSlot(context.Background(), "gate://suffix", "mA", 1, time.Minute)
@@ -593,43 +571,40 @@ func TestModelGateQueueSuffix(t *testing.T) {
 		"gatedsvc": {Type: "llama", BaseURL: "gate://suffix/v1", ModelsMax: 1},
 		"offsvc":   {Type: "llama", BaseURL: "gate://suffix/v1", ModelsMax: -1},
 		"plainsvc": {BaseURL: "https://api.example.com/v1"},
-		"busysvc":  {Type: "llama", BaseURL: "gate://suffix/v1", ModelsMax: 1},
 	}
 	t.Cleanup(func() { config.Services = origServices })
 
 	t.Run("position zero sends nothing", func(t *testing.T) {
-		assert.Empty(t, modelGateQueueSuffix("gatedsvc", "mB", 0))
+		assert.Empty(t, modelGateQueueSuffix("gatedsvc", "mB", 0, true))
 	})
 
 	t.Run("model suffix with held model", func(t *testing.T) {
-		out := modelGateQueueSuffix("gatedsvc", "mB", 1)
+		out := modelGateQueueSuffix("gatedsvc", "mB", 1, true)
 		assert.Contains(t, out, "mB")
 		assert.Contains(t, out, "mA")
-		assert.Contains(t, out, "background", "free slot must also produce the bg suffix")
+		assert.Contains(t, out, "background", "started item must also produce the bg suffix")
+	})
+
+	t.Run("not started drops the bg suffix, model suffix stays", func(t *testing.T) {
+		out := modelGateQueueSuffix("gatedsvc", "mB", 1, false)
+		assert.NotContains(t, out, "background")
+		assert.Contains(t, out, "mB")
 	})
 
 	t.Run("models_max off never suffixes the model", func(t *testing.T) {
-		out := modelGateQueueSuffix("offsvc", "mB", 1)
+		out := modelGateQueueSuffix("offsvc", "mB", 1, true)
 		assert.NotContains(t, out, "mB")
 		assert.Contains(t, out, "background")
 	})
 
 	t.Run("non-llama ungated service gets bg only", func(t *testing.T) {
-		out := modelGateQueueSuffix("plainsvc", "mB", 1)
+		out := modelGateQueueSuffix("plainsvc", "mB", 1, true)
 		assert.Contains(t, out, "background")
 		assert.NotContains(t, out, "mB", "no gate on this service — no model suffix")
 	})
 
-	t.Run("busy slot drops the bg suffix, model suffix stays", func(t *testing.T) {
-		require.True(t, queueMgr.execSlots["busysvc"].tryAcquire())
-		defer queueMgr.execSlots["busysvc"].release()
-		out := modelGateQueueSuffix("busysvc", "mB", 1)
-		assert.NotContains(t, out, "background")
-		assert.Contains(t, out, "mB")
-	})
-
 	t.Run("same-model request gets no model suffix", func(t *testing.T) {
-		out := modelGateQueueSuffix("gatedsvc", "mA", 1)
+		out := modelGateQueueSuffix("gatedsvc", "mA", 1, true)
 		assert.NotContains(t, out, "mA")
 		assert.Contains(t, out, "background")
 	})

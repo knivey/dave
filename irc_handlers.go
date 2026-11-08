@@ -445,12 +445,16 @@ func handleMention(network Network, client *girc.Client, event girc.Event, chann
 	}
 	logger.Info("Running chat completion with existing context")
 
-	position := queueMgr.Enqueue(network.Name, channel, userID, event.Source.Name,
+	position, started := queueMgr.EnqueueWithStart(network.Name, channel, userID, event.Source.Name,
 		sessionCfg.Service, "chat",
 		func(cx context.Context, output chan<- string) {
 			chat(network, client, event, sessionCfg, cx, output, resolvedUser, msg)
 		})
-	replyIfQueued(client, event, position)
+	// Same enqueue-time context the trigger path gets (see modelGate.go):
+	// a queued mention behind a predicted model swap deserves the same
+	// heads-up.
+	replyIfQueuedExtra(client, event, position,
+		modelGateQueueSuffix(sessionCfg.Service, sessionCfg.Model, position, started))
 }
 
 func handleTrigger(network Network, client *girc.Client, event girc.Event, channel, msg, stripped string) {
@@ -627,7 +631,7 @@ func handleTrigger(network Network, client *girc.Client, event girc.Event, chann
 		ClearContext(network.Name, channel, userID)
 	}
 	svc := getServiceForConfigCmd(match.trigger)
-	position := queueMgr.Enqueue(network.Name, channel, userID, event.Source.Name, svc, msg,
+	position, started := queueMgr.EnqueueWithStart(network.Name, channel, userID, event.Source.Name, svc, msg,
 		func(cx context.Context, output chan<- string) {
 			match.cmd(network, client, event, ctxWithResolvedUser(cx, resolvedUser), output, match.args...)
 		})
@@ -635,9 +639,9 @@ func handleTrigger(network Network, client *girc.Client, event girc.Event, chann
 	// (modelGate.go: why this is here and not inside the turn): whether
 	// the request is already processing in the background, and whether a
 	// model swap is predicted. modelGateQueueSuffix no-ops for
-	// position <= 0 before touching the gate or the queue.
+	// position <= 0 before touching the gate.
 	replyIfQueuedExtra(client, event, position,
-		modelGateQueueSuffix(svc, getModelForConfigCmd(match.trigger), position))
+		modelGateQueueSuffix(svc, getModelForConfigCmd(match.trigger), position, started))
 }
 
 // getModelForConfigCmd resolves the model a trigger's command will

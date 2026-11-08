@@ -224,6 +224,96 @@ func TestModelGateGiveUpAfterAdmissionRollsBack(t *testing.T) {
 	release()
 }
 
+// TestEnqueueWithStartModelGateSuffix drives the REAL enqueue path — the
+// regression guard for the self-occupancy bug: a post-hoc "slot free"
+// consult counts the just-enqueued item's own slot and suppressed the
+// bg suffix in exactly the contended cases it exists for. EnqueueWithStart
+// reports the authoritative started fact instead.
+func TestEnqueueWithStartModelGateSuffix(t *testing.T) {
+	setupNoticesDefaults(t)
+	clearModelGateCache()
+	t.Cleanup(clearModelGateCache)
+
+	origQM := queueMgr
+	queueMgr = newTestQM(t)
+	t.Cleanup(func() { queueMgr = origQM })
+
+	// One model resident on the gated server's capacity-1 gate.
+	releaseHold, ok := acquireModelSlot(context.Background(), "gate://wiring", "mA", 1, time.Minute)
+	require.True(t, ok)
+	defer releaseHold()
+
+	origServices := config.Services
+	config.Services = map[string]Service{
+		// The flagship scenario: parallel = 2, one slot busy with item A.
+		"par2": {Type: "llama", BaseURL: "gate://wiring/v1", ModelsMax: 1, Parallel: 2},
+		// The suppression scenario: parallel = 1, the only slot busy.
+		"par1": {Type: "llama", BaseURL: "gate://wiring/v1", ModelsMax: 1, Parallel: 1},
+	}
+	t.Cleanup(func() { config.Services = origServices })
+	queueMgr.UpdateServiceLimits(config.Services)
+
+	releaseItems := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(releaseItems) }) }
+	t.Cleanup(releaseAll)
+	blocking := func(cx context.Context, output chan<- string) { <-releaseItems }
+
+	// Flagship: B queues behind A's DELIVERY but starts executing
+	// immediately on the free second slot — both suffixes must appear.
+	_, startedA := queueMgr.EnqueueWithStart("net", "#w1", 1, "userA", "par2", "", blocking)
+	require.True(t, startedA)
+	posB, startedB := queueMgr.EnqueueWithStart("net", "#w1", 2, "userB", "par2", "", blocking)
+	require.Positive(t, posB, "B queues behind A's delivery")
+	require.True(t, startedB, "parallel=2 with one slot busy: B must start")
+	out := modelGateQueueSuffix("par2", "mB", posB, startedB)
+	assert.Contains(t, out, "background", "the bg suffix must survive its own enqueue (self-occupancy regression)")
+	assert.Contains(t, out, "mB")
+	assert.Contains(t, out, "mA")
+
+	// Suppression: at parallel=1 the second item waits to start — the bg
+	// suffix must drop while the model suffix stays.
+	_, startedA1 := queueMgr.EnqueueWithStart("net", "#w2", 1, "userA", "par1", "", blocking)
+	require.True(t, startedA1)
+	posB1, startedB1 := queueMgr.EnqueueWithStart("net", "#w2", 2, "userB", "par1", "", blocking)
+	require.Positive(t, posB1)
+	require.False(t, startedB1, "parallel=1 with the slot busy: B must wait to start")
+	out1 := modelGateQueueSuffix("par1", "mB", posB1, startedB1)
+	assert.NotContains(t, out1, "background")
+	assert.Contains(t, out1, "mB")
+
+	releaseAll()
+	waitForNotRunning(t, queueMgr, "net", "#w1", 1)
+	waitForNotRunning(t, queueMgr, "net", "#w1", 2)
+	waitForNotRunning(t, queueMgr, "net", "#w2", 1)
+	waitForNotRunning(t, queueMgr, "net", "#w2", 2)
+}
+
+// TestGetModelForConfigCmd pins the three-map mirror: every command kind
+// resolves its model, unknown triggers resolve empty (the suffix helper
+// treats empty model as ungated).
+func TestGetModelForConfigCmd(t *testing.T) {
+	origNames := configCmdNames
+	origCommands := config.Commands
+	configCmdNames = map[string]string{
+		"=c": "c", "=h": "h", "=g": "g", "=x": "x",
+	}
+	config.Commands = Commands{
+		Completions: map[string]AIConfig{"c": {Model: "mC"}},
+		Chats:       map[string]AIConfig{"h": {Model: "mH"}},
+		Generators:  map[string]GeneratorConfig{"g": {AIConfig: AIConfig{Model: "mG"}}},
+	}
+	t.Cleanup(func() {
+		configCmdNames = origNames
+		config.Commands = origCommands
+	})
+
+	assert.Equal(t, "mC", getModelForConfigCmd("=c"))
+	assert.Equal(t, "mH", getModelForConfigCmd("=h"))
+	assert.Equal(t, "mG", getModelForConfigCmd("=g"))
+	assert.Empty(t, getModelForConfigCmd("=x"), "unknown trigger resolves empty")
+}
+
 func TestModelGateValveFires(t *testing.T) {
 	key := "gate://valve"
 	releaseA, ok := acquireModelSlot(context.Background(), key, "modelA", 1, time.Minute)

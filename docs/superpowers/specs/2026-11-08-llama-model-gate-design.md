@@ -191,11 +191,10 @@ silence.
 
 ### Notices + logging
 
-- `[queue] model_wait` — sent when a turn is about to block on the gate
-  (advisory busy-check first, like `sessionTurnBusy` → `turn_wait`).
-  Vars: `{nick}`, `{model}`, `{held}` (comma-joined models currently
-  resident). Default: `⏳ {nick}: {model} is waiting for {held} to
-  finish (one model at a time on this server)…`
+- ~~`[queue] model_wait` — sent when a turn is about to block on the gate~~
+  (RETIRED post-implementation — see the addendum: turn-side notices
+  display stale because they sit in the delivery output buffer until the
+  wait is over; replaced by enqueue-time suffix composition).
 - `[queue] model_wait_timeout` — on valve fire, `{wait}` = actual
   elapsed wait. Default: `⚠️ {nick}: gave up after {wait} waiting for
   the model — nothing was sent, please try again.`
@@ -220,8 +219,9 @@ silence.
   overrides → stricter + WARN.
 - Wiring: `runTurn` holds across tool iterations (two-model contention
   test); gate acquired before `maybeNotifyModelLoad` (order pinned);
-  `completion()` gated; `callSummarizer()` gated; `model_wait` notice
-  fired on wait and not when free; valve notice content; cancelled
+  `completion()` gated; `callSummarizer()` gated; the ~~`model_wait`
+  notice~~ (retired — see addendum) queue-suffix composition on wait
+  and not when free; valve notice content; cancelled
   waiter silent; non-llama service ungated.
 - Config: `models_max` parsing/defaults/cascade absence;
   services.toml reference updated (config doc convention).
@@ -281,17 +281,21 @@ Replaced by enqueue-time composition on the SAME LINE as the queue
 position notice (sent from the dispatch site via `client.Cmd.Reply` —
 unbuffered, displays immediately):
 
-- `bg_suffix` — appended when the service has a free execution slot
-  (`QueueManager.ServiceSlotFree`, advisory): the request is already
-  processing in the background while its output waits for delivery.
+- `bg_suffix` — appended when the item STARTED at enqueue
+  (`EnqueueWithStart`'s authoritative flag: `enqueueItem` synchronously
+  acquires the service slot and launches before returning). NOT a
+  post-hoc "is the slot free" consult — that counts the just-enqueued
+  item's own occupancy and suppresses the suffix in exactly the
+  contended cases it exists for (parallel = 2 with one slot busy is the
+  flagship scenario; caught in review).
 - `model_suffix` ({model},{held}) — appended when the gate predicts a
   model swap for the command's model (`modelGateQueueSuffix`, advisory
   gate consult incl. capacity resolution).
 
 Both are suffix templates in notices.toml; `model_wait` is retired.
 `model_wait_timeout` (valve abort) is unchanged — "gave up after {wait}"
-is true whenever it displays. Accepted trade-off: turns that never see a
-queue notice (rate-exempt mentions, cross-channel turns whose queue is
-empty while another channel holds the gate) have a quiet gap before the
-load notice; a turn-side grace notice for those paths is a parked
-refinement.
+is true whenever it displays. Both the trigger dispatch and the mention
+path (a queued continuation behind a predicted swap) compose the suffix;
+the remaining no-suffix paths are rate-exempt direct-dispatch triggers
+(never enqueue, so no queue notice at all) and position-0 turns (not
+queued — they get the started message).

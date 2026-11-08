@@ -222,9 +222,9 @@ silence.
 - Wiring: `runTurn` holds across tool iterations (two-model contention
   test); gate acquired before `maybeNotifyModelLoad` (order pinned);
   `completion()` gated; `callSummarizer()` gated; the ~~`model_wait`
-  notice~~ (retired — see addendum) queue-suffix composition on wait
-  and not when free; valve notice content; cancelled
-  waiter silent; non-llama service ungated.
+  notice~~ (turn-side use retired — see the addendum and its follow-up)
+  queue-suffix composition on wait and not when free; valve notice
+  content; cancelled waiter silent; non-llama service ungated.
 - Config: `models_max` parsing/defaults/cascade absence;
   services.toml reference updated (config doc convention).
 - Full `go test ./...`, `go fmt ./...`, `go vet ./...`.

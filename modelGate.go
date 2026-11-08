@@ -563,10 +563,13 @@ func modelGateQueueSuffix(service, model string, position int, started bool) str
 // slot wait precedes everything (the turn cannot even start), and once
 // a slot frees the model story arrives via the load notice anyway.
 // Sent as a direct client reply at dispatch — unbuffered, displays
-// immediately. position > 0 (queued) returns "": those items carry
-// their explanation as suffixes on the queue notice instead.
+// immediately. Any position other than 0 returns "": queued items
+// (position > 0) carry their explanation as suffixes on the queue
+// notice instead, and position < 0 means the item was DROPPED (queue
+// at maxDepth, or shutting down) — it must not be told it is waiting
+// for anything.
 func executionWaitNotice(nick, service, model string, position int, started bool) string {
-	if position > 0 {
+	if position != 0 {
 		return ""
 	}
 	n := getNotices()

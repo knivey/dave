@@ -456,7 +456,7 @@ func handleMention(network Network, client *girc.Client, event girc.Event, chann
 	if position > 0 {
 		replyIfQueuedExtra(client, event, position,
 			modelGateQueueSuffix(sessionCfg.Service, sessionCfg.Model, position, started))
-	} else if wait := executionWaitNotice(event.Source.Name, sessionCfg.Service, sessionCfg.Model, 0, started); wait != "" {
+	} else if wait := executionWaitNotice(event.Source.Name, sessionCfg.Service, sessionCfg.Model, position, started); wait != "" {
 		client.Cmd.Reply(event, wait)
 	}
 }
@@ -648,7 +648,7 @@ func handleTrigger(network Network, client *girc.Client, event girc.Event, chann
 	if position > 0 {
 		replyIfQueuedExtra(client, event, position,
 			modelGateQueueSuffix(svc, model, position, started))
-	} else if wait := executionWaitNotice(event.Source.Name, svc, model, 0, started); wait != "" {
+	} else if wait := executionWaitNotice(event.Source.Name, svc, model, position, started); wait != "" {
 		client.Cmd.Reply(event, wait)
 	}
 }

@@ -282,6 +282,18 @@ func TestEnqueueWithStartModelGateSuffix(t *testing.T) {
 	assert.NotContains(t, out1, "background")
 	assert.Contains(t, out1, "mB")
 
+	// Cross-channel: an item in an otherwise-idle channel gets position 0
+	// but waits for a slot (userA holds par1's only slot from #w2) — the
+	// standalone slot_wait line, via the REAL enqueue path. This is the
+	// shape that caught the literal-0 bug (a dropped -1 used to render as
+	// a slot wait).
+	posC, startedC := queueMgr.EnqueueWithStart("net", "#w3", 3, "userC", "par1", "", blocking)
+	require.Equal(t, 0, posC, "idle channel: nothing ahead in delivery")
+	require.False(t, startedC)
+	outC := executionWaitNotice("userC", "par1", "mB", posC, startedC)
+	assert.Contains(t, outC, "free slot", "cross-channel slot contention gets the standalone line")
+	assert.NotContains(t, outC, "mB", "slot wait is the primary blocker — no model line")
+
 	releaseAll()
 	waitForNotRunning(t, queueMgr, "net", "#w1", 1)
 	waitForNotRunning(t, queueMgr, "net", "#w1", 2)
@@ -340,6 +352,12 @@ func TestExecutionWaitNotice(t *testing.T) {
 
 	t.Run("queued items never get the standalone line", func(t *testing.T) {
 		assert.Empty(t, executionWaitNotice("shrew", "gatedsvc", "mB", 1, false))
+	})
+
+	t.Run("dropped items (position -1, queue full/shutdown) get nothing", func(t *testing.T) {
+		// EnqueueWithStart returns (-1, false) when the item is DROPPED —
+		// it must not be told it is waiting for anything.
+		assert.Empty(t, executionWaitNotice("shrew", "gatedsvc", "mB", -1, false))
 	})
 
 	t.Run("slot wait when not started", func(t *testing.T) {

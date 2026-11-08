@@ -631,7 +631,38 @@ func handleTrigger(network Network, client *girc.Client, event girc.Event, chann
 		func(cx context.Context, output chan<- string) {
 			match.cmd(network, client, event, ctxWithResolvedUser(cx, resolvedUser), output, match.args...)
 		})
-	replyIfQueued(client, event, position)
+	// Enqueue-time context on the SAME line as the queue position
+	// (modelGate.go: why this is here and not inside the turn): whether
+	// the request is already processing in the background, and whether a
+	// model swap is predicted. modelGateQueueSuffix no-ops for
+	// position <= 0 before touching the gate or the queue.
+	replyIfQueuedExtra(client, event, position,
+		modelGateQueueSuffix(svc, getModelForConfigCmd(match.trigger), position))
+}
+
+// getModelForConfigCmd resolves the model a trigger's command will
+// request — the model-gate suffix needs it at ENQUEUE time, before the
+// command's own config resolution runs. Mirrors getServiceForConfigCmd.
+func getModelForConfigCmd(trigger string) string {
+	commandsMutex.RLock()
+	defer commandsMutex.RUnlock()
+	canonical := configCmdNames[trigger]
+	var model string
+	readConfig(func() {
+		if c, ok := config.Commands.Completions[canonical]; ok {
+			model = c.Model
+			return
+		}
+		if c, ok := config.Commands.Chats[canonical]; ok {
+			model = c.Model
+			return
+		}
+		if c, ok := config.Commands.Generators[canonical]; ok {
+			model = c.AIConfig.Model
+			return
+		}
+	})
+	return model
 }
 
 func getServiceForConfigCmd(trigger string) string {

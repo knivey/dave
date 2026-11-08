@@ -70,7 +70,6 @@ func completion(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx
 		ctx: ctx, llamaSvc: svc.Type == "llama", modelsMax: svc.ModelsMax,
 		baseURL: svcBaseURL, apiKey: svcKey, model: cfg.Model,
 		nick: e.Source.Name, timeout: cfg.Timeout,
-		warn:   func(msg string) { sendToOutput(msg, output, ctx) },
 		fail:   func(msg string) { sendToOutput(msg, output, ctx) },
 		logger: logger,
 	}).acquire()
@@ -1357,7 +1356,7 @@ func (cr *chatRunner) runTurn(turn *turnContext) bool {
 		ctx: cr.ctx, llamaSvc: cr.llamaService, modelsMax: cr.modelsMax,
 		baseURL: cr.baseURL, apiKey: cr.apiKey, model: cr.cfg.Model,
 		nick: cr.nick, timeout: cr.cfg.Timeout,
-		warn: cr.sendWarning, fail: cr.sendError, logger: cr.logger,
+		fail: cr.sendError, logger: cr.logger,
 	}).acquire()
 	if !modelOK {
 		return true

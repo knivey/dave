@@ -551,16 +551,15 @@ window_too_large = "stale"
 		"the dead section's values must not leak anywhere")
 }
 
-func TestNoticesModelWaitDefaults(t *testing.T) {
+func TestNoticesQueueSuffixDefaults(t *testing.T) {
 	n := NoticesConfig{}
 	setNoticesDefaults(&n)
-	assert.Contains(t, n.Queue.ModelWait, "{nick}")
-	assert.Contains(t, n.Queue.ModelWait, "{model}")
-	assert.Contains(t, n.Queue.ModelWait, "{held}")
-	assert.Contains(t, n.Queue.ModelWaitTimeout, "{wait}")
+	assert.Contains(t, n.Queue.BgSuffix, "background", "bg suffix default must explain background processing")
+	assert.Contains(t, n.Queue.ModelSuffix, "{model}")
+	assert.Contains(t, n.Queue.ModelSuffix, "{held}")
+	assert.Contains(t, n.Queue.ModelWaitTimeout, "{wait}", "valve timeout notice unchanged")
 
-	out := expandNotice(n.Queue.ModelWait, map[string]string{"nick": "shrew", "model": "mB", "held": "mA"})
-	assert.Contains(t, out, "shrew")
+	out := expandNotice(n.Queue.ModelSuffix, map[string]string{"model": "mB", "held": "mA"})
 	assert.Contains(t, out, "mB")
 	assert.Contains(t, out, "mA")
 }

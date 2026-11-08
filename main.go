@@ -134,9 +134,19 @@ func getSessionConfig(session *Session) (AIConfig, bool) {
 }
 
 func replyIfQueued(client *girc.Client, event girc.Event, position int) {
+	replyIfQueuedExtra(client, event, position, "")
+}
+
+// replyIfQueuedExtra appends extra (already-composed suffix text) to the
+// queued notice — the chat dispatch site uses it to tell the user, on
+// the SAME line as the queue position, whether their request is already
+// processing in the background and/or waiting on a model swap. See
+// modelGateQueueSuffix for why this runs at enqueue time on the direct
+// client path (unbuffered) rather than from inside the turn.
+func replyIfQueuedExtra(client *girc.Client, event girc.Event, position int, extra string) {
 	if position > 0 {
 		var queueMsg string
-		readConfig(func() { queueMsg = config.Notices.QueueMsg(position, 0) })
+		readConfig(func() { queueMsg = config.Notices.QueueMsg(position, 0) + extra })
 		client.Cmd.Reply(event, queueMsg)
 	}
 }

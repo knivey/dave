@@ -265,3 +265,33 @@ silence.
 - The gate cannot help with a genuinely wedged holder faster than the
   valve; holders terminate via their own timeout chain
   (per-request timeout × ≤20 tool iterations).
+
+## Addendum (2026-11-08, post-implementation): queue-time notice composition
+
+The turn-side `model_wait` notice was REMOVED after the first production
+run surfaced a structural problem: with `parallel = 2`, a queued command
+starts executing immediately and its turn-side notices go into the
+delivery OUTPUT BUFFER, where they sit until the channel's delivery slot
+opens — i.e. until the wait is already over. The notice was sent
+truthfully at turn start and displayed stale ("waiting for X…" arrived
+after X had finished). Any turn-side wait notice has this defect by
+construction; a grace window cannot fix display-time staleness.
+
+Replaced by enqueue-time composition on the SAME LINE as the queue
+position notice (sent from the dispatch site via `client.Cmd.Reply` —
+unbuffered, displays immediately):
+
+- `bg_suffix` — appended when the service has a free execution slot
+  (`QueueManager.ServiceSlotFree`, advisory): the request is already
+  processing in the background while its output waits for delivery.
+- `model_suffix` ({model},{held}) — appended when the gate predicts a
+  model swap for the command's model (`modelGateQueueSuffix`, advisory
+  gate consult incl. capacity resolution).
+
+Both are suffix templates in notices.toml; `model_wait` is retired.
+`model_wait_timeout` (valve abort) is unchanged — "gave up after {wait}"
+is true whenever it displays. Accepted trade-off: turns that never see a
+queue notice (rate-exempt mentions, cross-channel turns whose queue is
+empty while another channel holds the gate) have a quiet gap before the
+load notice; a turn-side grace notice for those paths is a parked
+refinement.

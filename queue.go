@@ -58,6 +58,21 @@ func (es *execSlot) release() {
 	<-es.semaphore
 }
 
+// ServiceSlotFree reports (advisory) whether an item enqueued for this
+// service would start executing immediately — the per-service parallel
+// slot has capacity. Advisory only: racing items may take the slot in
+// between; used by the queue-notice hook (modelGateQueueSuffix) to tell
+// the user their request is already processing in the background.
+func (qm *QueueManager) ServiceSlotFree(service string) bool {
+	qm.mu.Lock()
+	defer qm.mu.Unlock()
+	slot, ok := qm.execSlots[service]
+	if !ok || slot.max == 0 {
+		return true // no limit configured for this service
+	}
+	return len(slot.semaphore) < slot.max
+}
+
 type deliverySlot struct {
 	mu      sync.Mutex
 	cond    *sync.Cond

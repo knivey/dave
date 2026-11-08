@@ -435,10 +435,16 @@ func probeModelGateProps(baseURL, apiKey string) (int, bool) {
 	return props.MaxInstances, true
 }
 
-// modelGateAcquire bundles what the user-facing hook sites need: the
-// chat path fills it from chatRunner fields, the legacy completions
-// path from its locals. warn/fail split mirrors the turn_wait
-// precedent (advisory wait → sendWarning, valve abort → sendError).
+// modelGateAcquire bundles what the hook sites need: the chat path fills
+// it from chatRunner fields, the legacy completions path from its locals.
+// There is deliberately NO turn-side wait notice anymore: turn output
+// sits in the delivery buffer until the wait is over, so a turn-side
+// "waiting for…" line displayed STALE (Nov 8 production lesson — the
+// notice was sent truthfully at turn start, buffered 30s, and read after
+// the wait had ended). The wait explanation is the queue-time suffix
+// (modelGateQueueSuffix) instead; only the valve abort still speaks
+// from inside the turn, and "gave up after {wait}" is true whenever it
+// displays.
 type modelGateAcquire struct {
 	ctx       context.Context
 	llamaSvc  bool
@@ -448,19 +454,17 @@ type modelGateAcquire struct {
 	model     string
 	nick      string
 	timeout   time.Duration // the command's turn timeout (valve calibration)
-	warn      func(string)  // advisory wait-notice channel (nil = silent)
 	fail      func(string)  // valve-abort notice channel (nil = silent)
 	logger    logxi.Logger
 }
 
-// acquire resolves gating, sends the wait notice when the turn is about
-// to block, and takes the whole-turn model slot. ok=false means the
-// turn must abort: cancelled waiters silently (the queue already told
-// the user), valve-aborted ones with the timeout notice already sent
-// through fail. NOTE for the chat path: unlike the session gate this
-// sits INSIDE the turn, after chat() persisted the user message — a
-// valve abort leaves the user row, exactly like an API-error turn, so
-// the notice says "try again", never "resend".
+// acquire resolves gating and takes the whole-turn model slot. ok=false
+// means the turn must abort: cancelled waiters silently (the queue
+// already told the user), valve-aborted ones with the timeout notice
+// already sent through fail. NOTE for the chat path: unlike the session
+// gate this sits INSIDE the turn, after chat() persisted the user
+// message — a valve abort leaves the user row, exactly like an
+// API-error turn, so the notice says "try again", never "resend".
 func (h modelGateAcquire) acquire() (func(), bool) {
 	if h.modelsMax < 0 || (h.modelsMax == 0 && !h.llamaSvc) {
 		return func() {}, true
@@ -470,12 +474,6 @@ func (h modelGateAcquire) acquire() (func(), bool) {
 		return func() {}, true
 	}
 	key := normalizeModelGateKey(h.baseURL)
-	if blocked, held := modelGateBusy(key, h.model, capacity); blocked && h.warn != nil {
-		n := getNotices()
-		h.warn(expandNotice(n.Queue.ModelWait, map[string]string{
-			"nick": h.nick, "model": h.model, "held": held,
-		}))
-	}
 	start := time.Now()
 	waitLimit := modelGateWaitLimitFor(h.timeout)
 	release, ok := acquireModelSlot(h.ctx, key, h.model, capacity, waitLimit)
@@ -499,4 +497,45 @@ func (h modelGateAcquire) acquire() (func(), bool) {
 		return nil, false
 	}
 	return release, true
+}
+
+// modelGateQueueSuffix composes the extra context appended to the queue
+// position notice at ENQUEUE time — one IRC line, not two: whether the
+// service has a free execution slot (the request is already processing
+// in the background while its output waits for delivery), and whether
+// the model gate predicts a model swap for this command's model. Sent
+// from the dispatch site via client.Cmd.Reply — unbuffered, so unlike
+// turn-side notices it displays immediately instead of sitting in the
+// delivery output buffer until the wait is already over. Advisory: the
+// gate state may change between send and the turn's acquire — fine,
+// this sets expectations; the gate remains the authority. position <= 0
+// (not queued) yields "" — the started message needs no suffix.
+func modelGateQueueSuffix(service, model string, position int) string {
+	if position <= 0 {
+		return ""
+	}
+	var extra string
+	if queueMgr != nil && queueMgr.ServiceSlotFree(service) {
+		n := getNotices()
+		if n.Queue.BgSuffix != "" {
+			extra += expandNotice(n.Queue.BgSuffix, nil)
+		}
+	}
+	if model == "" {
+		return extra
+	}
+	var svc Service
+	readConfig(func() { svc, _ = config.Services[service] })
+	if svc.ModelsMax < 0 {
+		return extra
+	}
+	if capacity := resolveModelGateCapacity(svc.Type == "llama", svc.ModelsMax, svc.BaseURL, svc.Key, loggerMG); capacity > 0 {
+		if blocked, held := modelGateBusy(normalizeModelGateKey(svc.BaseURL), model, capacity); blocked {
+			n := getNotices()
+			extra += expandNotice(n.Queue.ModelSuffix, map[string]string{
+				"model": model, "held": held,
+			})
+		}
+	}
+	return extra
 }

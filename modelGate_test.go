@@ -604,14 +604,15 @@ func TestRunTurnModelGateSerializesModels(t *testing.T) {
 	}
 	assert.Equal(t, hitsWhileQueued, atomic.LoadInt32(&modelsHits),
 		"queued turn must not probe /v1/models — gate sits BEFORE the load notice")
+	// The turn-side wait notice is GONE by design: turn output sits in the
+	// delivery buffer until the wait is over, so it would display stale
+	// (Nov 8 production lesson). The queue-time suffix on the queued
+	// notice is the wait explanation now.
 	lines := drainOutput(t, outB, 8, 200*time.Millisecond)
-	waited := false
 	for _, l := range lines {
-		if strings.Contains(l, "waiting for") {
-			waited = true
-		}
+		assert.NotContains(t, l, "waiting for", "no turn-side wait notice expected, got %q", lines)
+		assert.NotContains(t, l, "will load after", "no turn-side wait notice expected, got %q", lines)
 	}
-	assert.True(t, waited, "model_wait notice expected, got %q", lines)
 
 	close(releaseA)
 	<-aDone

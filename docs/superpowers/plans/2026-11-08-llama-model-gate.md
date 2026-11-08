@@ -1163,7 +1163,10 @@ func newModelGateTurnRunner(t *testing.T, srvURL, model string, outputCh chan st
 	logger := logxi.New("test")
 	logger.SetLevel(logxi.LevelAll)
 	return &chatRunner{
-		cfg:          AIConfig{Model: model, Timeout: 30 * time.Second},
+		// LoadNotice must be ON: the probe-hit pin in the serialization
+		// test is only real if turns actually probe /v1/models
+		// (maybeNotifyModelLoad no-ops on nil LoadNotice).
+		cfg:          AIConfig{Model: model, Timeout: 30 * time.Second, LoadNotice: boolPtr(true)},
 		openaiClient: &client,
 		transport:    transport,
 		httpClient:   &http.Client{Transport: transport},

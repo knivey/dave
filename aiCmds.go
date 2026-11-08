@@ -63,18 +63,12 @@ func completion(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx
 
 	logger := newLogger(network.Name + ".completion." + cfg.Name)
 
-	// cfg.Timeout cascades command > service > 60s in ApplyDefaults, so it is
-	// always non-zero here; honoring it (instead of a hardcoded 60s) lets a
-	// slow local endpoint be given a longer budget per-command.
-	apiCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
-	defer cancel()
-
 	// Whole-turn model gate (modelGate.go): the same cross-model
 	// serialization the chat path applies in runTurn, ahead of the
 	// load-notice probe for the same ordering reason.
 	releaseModel, modelOK := (modelGateAcquire{
 		ctx: ctx, llamaSvc: svc.Type == "llama", modelsMax: svc.ModelsMax,
-		baseURL: svc.BaseURL, apiKey: svc.Key, model: cfg.Model,
+		baseURL: svcBaseURL, apiKey: svcKey, model: cfg.Model,
 		nick: e.Source.Name, timeout: cfg.Timeout,
 		warn:   func(msg string) { sendToOutput(msg, output, ctx) },
 		fail:   func(msg string) { sendToOutput(msg, output, ctx) },
@@ -84,6 +78,16 @@ func completion(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx
 		return
 	}
 	defer releaseModel()
+
+	// apiCtx is minted AFTER the model gate: a gated wait must not burn
+	// the API-call timeout budget (the chat path grants a fresh budget
+	// after its gate for the same reason).
+	//
+	// cfg.Timeout cascades command > service > 60s in ApplyDefaults, so it is
+	// always non-zero here; honoring it (instead of a hardcoded 60s) lets a
+	// slow local endpoint be given a longer budget per-command.
+	apiCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	defer cancel()
 
 	// Model-load probe for legacy completions (llama-server router /
 	// llama-swap): same pre-request check the chat path does in runTurn.

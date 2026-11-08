@@ -37,6 +37,8 @@ type QueueNotices struct {
 	Stopped               string `toml:"stopped"`
 	TurnWait              string `toml:"turn_wait"`
 	TurnWaitTimeout       string `toml:"turn_wait_timeout"`
+	ModelWait             string `toml:"model_wait"`
+	ModelWaitTimeout      string `toml:"model_wait_timeout"`
 	AsyncDeferred         string `toml:"async_deferred"`
 	AsyncDeferredSwitched string `toml:"async_deferred_switched"`
 }
@@ -233,6 +235,13 @@ func setNoticesDefaults(n *NoticesConfig) {
 	}
 	if n.Queue.TurnWaitTimeout == "" {
 		n.Queue.TurnWaitTimeout = "\x0304⚠️ Your previous message is still generating after {wait} — please resend it once it finishes."
+	}
+	if n.Queue.ModelWait == "" {
+		n.Queue.ModelWait = "\x0307⏳ {nick}: {model} is waiting for {held} to finish (one model at a time on this server)...\x0f"
+	}
+
+	if n.Queue.ModelWaitTimeout == "" {
+		n.Queue.ModelWaitTimeout = "\x0304⚠️ {nick}: gave up after {wait} waiting for the model — nothing was sent, please try again."
 	}
 	if n.Queue.AsyncDeferred == "" {
 		n.Queue.AsyncDeferred = "\x0307⚠️ {nick}: your background task finished but delivery was delayed — send a message and I'll pick it up...\x0f"

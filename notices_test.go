@@ -550,3 +550,17 @@ window_too_large = "stale"
 	assert.NotContains(t, fmt.Sprintf("%+v", cfg.Notices), "stale",
 		"the dead section's values must not leak anywhere")
 }
+
+func TestNoticesModelWaitDefaults(t *testing.T) {
+	n := NoticesConfig{}
+	setNoticesDefaults(&n)
+	assert.Contains(t, n.Queue.ModelWait, "{nick}")
+	assert.Contains(t, n.Queue.ModelWait, "{model}")
+	assert.Contains(t, n.Queue.ModelWait, "{held}")
+	assert.Contains(t, n.Queue.ModelWaitTimeout, "{wait}")
+
+	out := expandNotice(n.Queue.ModelWait, map[string]string{"nick": "shrew", "model": "mB", "held": "mA"})
+	assert.Contains(t, out, "shrew")
+	assert.Contains(t, out, "mB")
+	assert.Contains(t, out, "mA")
+}

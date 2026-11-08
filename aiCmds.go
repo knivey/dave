@@ -50,11 +50,11 @@ func completionMaxTokens(cfg AIConfig) int64 {
 }
 
 func completion(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx context.Context, output chan<- string, args ...string) {
-	var svcKey, svcBaseURL string
+	var svc Service
 	readConfig(func() {
-		svcKey = config.Services[cfg.Service].Key
-		svcBaseURL = config.Services[cfg.Service].BaseURL
+		svc = config.Services[cfg.Service]
 	})
+	svcKey, svcBaseURL := svc.Key, svc.BaseURL
 
 	aiClient := openai.NewClient(
 		option.WithAPIKey(svcKey),
@@ -68,6 +68,22 @@ func completion(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx
 	// slow local endpoint be given a longer budget per-command.
 	apiCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel()
+
+	// Whole-turn model gate (modelGate.go): the same cross-model
+	// serialization the chat path applies in runTurn, ahead of the
+	// load-notice probe for the same ordering reason.
+	releaseModel, modelOK := (modelGateAcquire{
+		ctx: ctx, llamaSvc: svc.Type == "llama", modelsMax: svc.ModelsMax,
+		baseURL: svc.BaseURL, apiKey: svc.Key, model: cfg.Model,
+		nick: e.Source.Name, timeout: cfg.Timeout,
+		warn:   func(msg string) { sendToOutput(msg, output, ctx) },
+		fail:   func(msg string) { sendToOutput(msg, output, ctx) },
+		logger: logger,
+	}).acquire()
+	if !modelOK {
+		return
+	}
+	defer releaseModel()
 
 	// Model-load probe for legacy completions (llama-server router /
 	// llama-swap): same pre-request check the chat path does in runTurn.

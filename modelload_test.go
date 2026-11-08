@@ -404,6 +404,11 @@ func TestCompletionModelLoadNoticeDisabled(t *testing.T) {
 	var modelsHits int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/props":
+			// The completion path's model gate probes /props in auto
+			// mode (llama service, models_max unset). A non-router
+			// answer leaves the endpoint ungated.
+			fmt.Fprint(w, `{"role":"server"}`)
 		case "/v1/models":
 			atomic.AddInt32(&modelsHits, 1)
 			fmt.Fprint(w, `{"data":[{"id":"m","status":{"value":"unloaded"}}]}`)
@@ -445,6 +450,11 @@ func TestCompletionModelLoadNotice(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/props":
+			// The completion path's model gate probes /props in auto
+			// mode (llama service, models_max unset). A non-router
+			// answer leaves the endpoint ungated.
+			fmt.Fprint(w, `{"role":"server"}`)
 		case "/v1/models":
 			fmt.Fprint(w, `{"data":[{"id":"m","status":{"value":"unloaded"}}]}`)
 		case "/v1/completions":

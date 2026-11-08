@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lrstanley/girc"
 	logxi "github.com/mgutz/logxi/v1"
 	openai "github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -740,4 +741,93 @@ func TestRunTurnModelGateValveNotice(t *testing.T) {
 	assert.NotContains(t, strings.Join(lines, "\n"), "{nick}")
 	close(releaseA)
 	drainOutput(t, outA, 8, time.Second)
+}
+
+func TestCompletionModelGateSerializes(t *testing.T) {
+	setupNoticesDefaults(t)
+	clearModelGateCache()
+	t.Cleanup(clearModelGateCache)
+
+	releaseA := make(chan struct{})
+	aParked := make(chan struct{})
+	bArrived := make(chan struct{})
+	var parked int32
+	var bOnce sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/completions":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			w.Header().Set("Content-Type", "application/json")
+			switch body["model"] {
+			case "mA":
+				if atomic.CompareAndSwapInt32(&parked, 0, 1) {
+					close(aParked)
+					<-releaseA
+				}
+				fmt.Fprint(w, `{"id":"a","object":"text_completion","created":1,"model":"mA","choices":[{"text":"a ok","index":0,"finish_reason":"stop"}]}`)
+			case "mB":
+				bOnce.Do(func() { close(bArrived) })
+				fmt.Fprint(w, `{"id":"b","object":"text_completion","created":1,"model":"mB","choices":[{"text":"b ok","index":0,"finish_reason":"stop"}]}`)
+			default:
+				t.Errorf("unexpected model %v", body["model"])
+			}
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	prevServices := config.Services
+	config.Services = map[string]Service{"localsvc": {
+		Type: "llama", BaseURL: server.URL + "/v1", ModelsMax: 1,
+		LoadNotice: boolPtr(false),
+	}}
+	defer func() { config.Services = prevServices }()
+
+	mkCfg := func(model string) AIConfig {
+		cfg := AIConfig{Name: "c", Service: "localsvc", Model: model, Timeout: 30 * time.Second}
+		cfg.ApplyDefaults(config.Services["localsvc"])
+		return cfg
+	}
+	e := girc.Event{Source: &girc.Source{Name: "shrew"}, Params: []string{"#101"}}
+
+	outA := make(chan string, 4)
+	aDone := make(chan struct{})
+	go func() {
+		completion(Network{Name: "testnet"}, nil, e, mkCfg("mA"), context.Background(), outA, "hello")
+		close(aDone)
+	}()
+	select {
+	case <-aParked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("mA completion never reached the server")
+	}
+
+	outB := make(chan string, 4)
+	bDone := make(chan struct{})
+	go func() {
+		completion(Network{Name: "testnet"}, nil, e, mkCfg("mB"), context.Background(), outB, "world")
+		close(bDone)
+	}()
+
+	select {
+	case <-bArrived:
+		t.Fatal("mB completion reached the server while mA held the gate")
+	case <-bDone:
+		t.Fatal("mB completion finished while mA held the gate")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(releaseA)
+	<-aDone
+	select {
+	case <-bArrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("mB completion never ran after mA finished")
+	}
+	<-bDone
+	drainOutput(t, outA, 4, time.Second)
+	drainOutput(t, outB, 4, time.Second)
 }

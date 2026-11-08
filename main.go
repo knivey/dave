@@ -167,7 +167,7 @@ func replyIfQueuedExtra(client *girc.Client, event girc.Event, position int, ext
 func queueDroppedNotice(nick string) string {
 	var msg string
 	readConfig(func() {
-		msg = errorMsg(expandNotice(config.Notices.Queue.Full, map[string]string{"nick": nick}))
+		msg = errorNotice(config.Notices.Queue.Full, map[string]string{"nick": nick})
 	})
 	return msg
 }

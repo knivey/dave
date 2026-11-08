@@ -18,6 +18,23 @@ When it's the user's turn, they see **"▶ Processing your request (waited Xs)..
 
 The parallel setting controls how many commands can hit the AI API simultaneously. It does not change delivery order. With parallel enabled, commands from different users (or the same user) start their API calls at the same time, but their output still lines up and delivers one after another.
 
+## Model gating (llama services)
+
+`parallel` is per **service** and knows nothing about which **model** a
+command uses. On a local llama-server router that can only hold one
+model in memory at a time, two commands requesting different models
+would otherwise trigger a mid-generation model swap (the server unloads
+the running model, serves the new request, reloads, and re-prefills the
+first — a long stall plus wasted work).
+
+The model gate serializes whole turns across **distinct models** on the
+same server, while same-model turns keep running concurrently. Capacity
+is auto-detected from the server (`GET /props`, `max_instances`); a
+service-level `models_max` can force it (see services.toml). A turn
+waiting for another model tells the user (`⏳ … waiting for …`), and a
+safety valve aborts waits that exceed 10 minutes / 3× the command
+timeout.
+
 ## Async Background Tasks (Image Generation)
 
 Some tool calls (like image generation) run in the background. The AI decides to use the tool, the job is submitted to the image server, and the AI's response finishes normally. The image job runs independently.

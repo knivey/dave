@@ -389,6 +389,64 @@ func TestExecutionWaitNotice(t *testing.T) {
 	})
 }
 
+// TestQueueDroppedNotice pins the dropped-request notice: a request the
+// queue could not accept (channel at maxDepth, or shutdown) must be told
+// so instead of left waiting for a reply that never comes.
+func TestQueueDroppedNotice(t *testing.T) {
+	setupNoticesDefaults(t)
+
+	msg := queueDroppedNotice("shrew")
+	assert.Contains(t, msg, "shrew", "{nick} must expand")
+	assert.Contains(t, msg, "couldn't accept", "default wording")
+	assert.NotContains(t, msg, "{nick}", "no unexpanded placeholders")
+}
+
+// TestQueueManagerMaxDepthDropsAndNotifies drives the real queue: a
+// channel at maxDepth gets -1 from EnqueueWithStart, which the dispatch
+// sites translate into queueDroppedNotice (and never into a wait line).
+func TestQueueManagerMaxDepthDropsAndNotifies(t *testing.T) {
+	setupNoticesDefaults(t)
+
+	origQM := queueMgr
+	queueMgr = newTestQM(t) // maxDepth 5, service "svc" parallel 1
+	t.Cleanup(func() { queueMgr = origQM })
+
+	releaseItems := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseAll := func() { releaseOnce.Do(func() { close(releaseItems) }) }
+	t.Cleanup(releaseAll)
+	blocking := func(cx context.Context, output chan<- string) { <-releaseItems }
+
+	// Fill the channel: 1 running (holds the slot, position 0 — empty
+	// channel, immediate delivery) + 4 pending (positions 1-4) = depth 5.
+	for i := 0; i < 5; i++ {
+		pos, started := queueMgr.EnqueueWithStart("net", "#full", int64(i+1), fmt.Sprintf("u%d", i), "svc", "", blocking)
+		if i == 0 {
+			require.Equal(t, 0, pos, "first item in an empty channel delivers immediately")
+			require.True(t, started)
+		} else {
+			require.Positive(t, pos, "item %d queues behind delivery", i)
+			require.False(t, started)
+		}
+	}
+
+	// The sixth item is dropped: position -1 — a drop notice, never a
+	// wait line.
+	pos, started := queueMgr.EnqueueWithStart("net", "#full", 6, "u5", "svc", "", blocking)
+	require.Equal(t, -1, pos, "channel at maxDepth drops the item")
+	require.False(t, started)
+	assert.Empty(t, executionWaitNotice("u5", "svc", "", pos, started),
+		"a dropped request must never be told it is waiting")
+	dropped := queueDroppedNotice("u5")
+	assert.Contains(t, dropped, "u5")
+	assert.Contains(t, dropped, "couldn't accept")
+
+	releaseAll()
+	for i := 1; i <= 5; i++ {
+		waitForNotRunning(t, queueMgr, "net", "#full", int64(i))
+	}
+}
+
 func TestModelGateValveFires(t *testing.T) {
 	key := "gate://valve"
 	releaseA, ok := acquireModelSlot(context.Background(), key, "modelA", 1, time.Minute)

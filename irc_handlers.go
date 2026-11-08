@@ -452,11 +452,12 @@ func handleMention(network Network, client *girc.Client, event girc.Event, chann
 		})
 	// Same enqueue-time context the trigger path gets (see modelGate.go):
 	// suffixes on the queue line when queued, a standalone wait line when
-	// position 0 but not actually starting (slots / model swap).
-	if position > 0 {
-		replyIfQueuedExtra(client, event, position,
-			modelGateQueueSuffix(sessionCfg.Service, sessionCfg.Model, position, started))
-	} else if wait := executionWaitNotice(event.Source.Name, sessionCfg.Service, sessionCfg.Model, position, started); wait != "" {
+	// position 0 but not actually starting (slots / model swap), and the
+	// queue-full notice for dropped items — replyIfQueuedExtra owns all
+	// position handling; the helpers no-op for the other positions.
+	replyIfQueuedExtra(client, event, position,
+		modelGateQueueSuffix(sessionCfg.Service, sessionCfg.Model, position, started))
+	if wait := executionWaitNotice(event.Source.Name, sessionCfg.Service, sessionCfg.Model, position, started); wait != "" {
 		client.Cmd.Reply(event, wait)
 	}
 }
@@ -644,11 +645,12 @@ func handleTrigger(network Network, client *girc.Client, event girc.Event, chann
 	// the turn): QUEUED items carry it as suffixes on the SAME line as the
 	// queue position; position-0 items get a standalone wait line when
 	// they will not actually start generating now (execution slots busy /
-	// model swap predicted).
-	if position > 0 {
-		replyIfQueuedExtra(client, event, position,
-			modelGateQueueSuffix(svc, model, position, started))
-	} else if wait := executionWaitNotice(event.Source.Name, svc, model, position, started); wait != "" {
+	// model swap predicted). replyIfQueuedExtra also handles position < 0
+	// (dropped — queue full/shutdown) with its own notice; both helpers
+	// no-op for the positions that are not theirs.
+	replyIfQueuedExtra(client, event, position,
+		modelGateQueueSuffix(svc, model, position, started))
+	if wait := executionWaitNotice(event.Source.Name, svc, model, position, started); wait != "" {
 		client.Cmd.Reply(event, wait)
 	}
 }

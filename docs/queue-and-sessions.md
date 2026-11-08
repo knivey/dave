@@ -44,8 +44,11 @@ start generating right away — all execution slots busy with other
 channels' requests, or a model swap predicted. In those cases it gets
 one immediate line saying why (`waiting for a free slot…` / `{model} is
 waiting for {held} to finish…`); requests that start free stay silent.
-A safety valve aborts gate waits that exceed 10 minutes / 3× the
-command timeout.
+
+A request the queue cannot accept at all (the channel's queue is at
+capacity) is told so immediately instead of being dropped silently. A
+safety valve aborts gate waits that exceed 10 minutes / 3× the command
+timeout.
 
 ## Async Background Tasks (Image Generation)
 

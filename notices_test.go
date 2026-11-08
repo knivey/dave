@@ -562,6 +562,7 @@ func TestNoticesQueueSuffixDefaults(t *testing.T) {
 	assert.Contains(t, n.Queue.ModelWait, "{nick}", "position-0 model-wait notice default")
 	assert.Contains(t, n.Queue.ModelWait, "{model}")
 	assert.Contains(t, n.Queue.ModelWait, "{held}")
+	assert.Contains(t, n.Queue.Full, "{nick}", "queue-full (dropped request) notice default")
 
 	out := expandNotice(n.Queue.ModelSuffix, map[string]string{"model": "mB", "held": "mA"})
 	assert.Contains(t, out, "mB")

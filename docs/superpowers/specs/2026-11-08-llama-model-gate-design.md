@@ -312,3 +312,10 @@ retired template resurrected with new timing) when it started but the
 gate is predicted to block. Queued items never get the standalone line
 (their suffixes carry it); genuinely-free starts stay silent. Every
 wait now has exactly one explanation.
+
+**Dropped requests (final follow-up).** `Enqueue` position -1 (channel
+queue at maxDepth, or shutdown) was silent in all its history — the
+user waited for a reply that never came. `replyIfQueuedExtra` now owns
+the outcome report: position < 0 sends `[queue] full` ({nick}; neutral
+wording, deliberately not claiming "full" in the shutdown case), which
+`^compact`/`^clone` inherit via `replyIfQueued` delegation.

@@ -42,6 +42,7 @@ type QueueNotices struct {
 	ModelSuffix           string `toml:"model_suffix"`
 	SlotWait              string `toml:"slot_wait"`
 	ModelWait             string `toml:"model_wait"`
+	Full                  string `toml:"full"`
 	AsyncDeferred         string `toml:"async_deferred"`
 	AsyncDeferredSwitched string `toml:"async_deferred_switched"`
 }
@@ -253,6 +254,9 @@ func setNoticesDefaults(n *NoticesConfig) {
 	}
 	if n.Queue.ModelWait == "" {
 		n.Queue.ModelWait = "\x0307⏳ {nick}: {model} is waiting for {held} to finish (one model at a time on this server)...\x0f"
+	}
+	if n.Queue.Full == "" {
+		n.Queue.Full = "\x0304⚠️ {nick}: couldn't accept your request right now — please try again in a moment.\x0f"
 	}
 	if n.Queue.AsyncDeferred == "" {
 		n.Queue.AsyncDeferred = "\x0307⚠️ {nick}: your background task finished but delivery was delayed — send a message and I'll pick it up...\x0f"

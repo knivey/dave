@@ -144,11 +144,32 @@ func replyIfQueued(client *girc.Client, event girc.Event, position int) {
 // modelGateQueueSuffix for why this runs at enqueue time on the direct
 // client path (unbuffered) rather than from inside the turn.
 func replyIfQueuedExtra(client *girc.Client, event girc.Event, position int, extra string) {
+	if position < 0 {
+		// The item was DROPPED — the channel queue is at maxDepth, or the
+		// queue manager is shutting down. The request will never run; the
+		// user gets the queue-full notice instead of silence (this path
+		// used to leave them waiting for a reply that never comes). The
+		// wording is deliberately neutral so it is not a lie in the
+		// shutdown case.
+		client.Cmd.Reply(event, queueDroppedNotice(event.Source.Name))
+		return
+	}
 	if position > 0 {
 		var queueMsg string
 		readConfig(func() { queueMsg = config.Notices.QueueMsg(position, 0) + extra })
 		client.Cmd.Reply(event, queueMsg)
 	}
+}
+
+// queueDroppedNotice builds the message for a request the queue could
+// not accept. Extracted for test coverage — the dispatch branch itself
+// is a direct client reply.
+func queueDroppedNotice(nick string) string {
+	var msg string
+	readConfig(func() {
+		msg = errorMsg(expandNotice(config.Notices.Queue.Full, map[string]string{"nick": nick}))
+	})
+	return msg
 }
 
 func drainToChannel(client *girc.Client, channel string, throttle time.Duration, outCh <-chan string, ctx context.Context, networkName string) {

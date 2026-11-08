@@ -778,6 +778,22 @@ func TestCompletionModelGateSerializes(t *testing.T) {
 		}
 	}))
 	defer server.Close()
+	// Failure-mode safety: if an assertion fatals while mA's handler is
+	// parked on <-releaseA, release it so the deferred server.Close()
+	// (which blocks until outstanding requests complete) doesn't hang
+	// the test until the go test timeout. This must be a FUNCTION-LEVEL
+	// defer registered AFTER server.Close: defers run LIFO, so this
+	// releases the parked handler BEFORE Close runs — a t.Cleanup would
+	// run only after the test function returns, i.e. after the Close
+	// hang it is meant to prevent. The select-guard is idempotent with
+	// the green path's explicit close(releaseA).
+	defer func() {
+		select {
+		case <-releaseA:
+		default:
+			close(releaseA)
+		}
+	}()
 
 	prevServices := config.Services
 	config.Services = map[string]Service{"localsvc": {

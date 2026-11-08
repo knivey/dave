@@ -2,9 +2,14 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	logxi "github.com/mgutz/logxi/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -243,4 +248,134 @@ func TestModelGateWaitLimitFor(t *testing.T) {
 		"short timeouts take the floor")
 	assert.Equal(t, 45*time.Minute, modelGateWaitLimitFor(15*time.Minute),
 		"long timeouts take 3x")
+}
+
+func newPropsServer(t *testing.T, propsBody string, hits *int32) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/props":
+			if hits != nil {
+				atomic.AddInt32(hits, 1)
+			}
+			fmt.Fprint(w, propsBody)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(clearModelGateCache)
+	return srv
+}
+
+func TestProbeModelGateProps(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantCap int
+		wantOK  bool
+	}{
+		{"router max 1", `{"role":"router","max_instances":1}`, 1, true},
+		{"router max 2", `{"role":"router","max_instances":2}`, 2, true},
+		{"not a router", `{"role":"server","max_instances":1}`, 0, false},
+		{"missing max_instances", `{"role":"router"}`, 0, false},
+		{"zero max_instances", `{"role":"router","max_instances":0}`, 0, false},
+		{"garbage", `not json`, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newPropsServer(t, tt.body, nil)
+			cap, ok := probeModelGateProps(srv.URL+"/v1", "")
+			assert.Equal(t, tt.wantOK, ok)
+			assert.Equal(t, tt.wantCap, cap)
+		})
+	}
+}
+
+func TestProbeModelGatePropsFailOpen(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	cap, ok := probeModelGateProps(srv.URL+"/v1", "")
+	assert.False(t, ok)
+	assert.Equal(t, 0, cap)
+}
+
+func TestResolveModelGateCapacityOverrides(t *testing.T) {
+	clearModelGateCache()
+	t.Cleanup(clearModelGateCache)
+	// A props server that would answer 1 — overrides must never probe it.
+	var hits int32
+	srv := newPropsServer(t, `{"role":"router","max_instances":1}`, &hits)
+	logger := logxi.New("test")
+	logger.SetLevel(logxi.LevelAll)
+
+	assert.Equal(t, 0, resolveModelGateCapacity(true, -1, srv.URL+"/v1", "", logger),
+		"-1 disables even a llama service")
+	assert.Equal(t, 0, resolveModelGateCapacity(false, 0, srv.URL+"/v1", "", logger),
+		"auto never engages a non-llama service")
+	assert.Equal(t, 2, resolveModelGateCapacity(false, 2, srv.URL+"/v1", "", logger),
+		"positive override engages even a non-llama service")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&hits),
+		"overrides must pin without probing /props")
+}
+
+func TestResolveModelGateCapacityCachesSuccess(t *testing.T) {
+	clearModelGateCache()
+	t.Cleanup(clearModelGateCache)
+	var hits int32
+	srv := newPropsServer(t, `{"role":"router","max_instances":1}`, &hits)
+	logger := logxi.New("test")
+	logger.SetLevel(logxi.LevelAll)
+	url := srv.URL + "/v1"
+
+	for i := 0; i < 3; i++ {
+		assert.Equal(t, 1, resolveModelGateCapacity(true, 0, url, "", logger),
+			"auto resolution on a router with max_instances 1")
+	}
+	assert.Equal(t, int32(1), atomic.LoadInt32(&hits),
+		"success is cached for the process lifetime — one probe, not one per turn")
+}
+
+func TestResolveModelGateCapacityFailureTTLRetries(t *testing.T) {
+	clearModelGateCache()
+	t.Cleanup(clearModelGateCache)
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	logger := logxi.New("test")
+	logger.SetLevel(logxi.LevelAll)
+	url := srv.URL + "/v1"
+
+	assert.Equal(t, 0, resolveModelGateCapacity(true, 0, url, "", logger), "probe failure fails open")
+	assert.Equal(t, 0, resolveModelGateCapacity(true, 0, url, "", logger), "failure still cached")
+	assert.Equal(t, int32(1), atomic.LoadInt32(&hits), "failure entry suppresses retries within its TTL")
+
+	// Expire the failure entry: the next resolution probes again.
+	modelGateCapMu.Lock()
+	if e, ok := modelGateCapacities[normalizeModelGateKey(url)]; ok {
+		e.retryAfter = time.Now().Add(-time.Second)
+	}
+	modelGateCapMu.Unlock()
+	assert.Equal(t, 0, resolveModelGateCapacity(true, 0, url, "", logger))
+	assert.Equal(t, int32(2), atomic.LoadInt32(&hits), "expired failure entry retries the probe")
+}
+
+func TestPinModelGateCapacityStricterWins(t *testing.T) {
+	clearModelGateCache()
+	t.Cleanup(clearModelGateCache)
+	logger := logxi.New("test")
+	logger.SetLevel(logxi.LevelAll)
+
+	pinModelGateCapacity("gate://pin", 1, logger)
+	pinModelGateCapacity("gate://pin", 2, logger) // conflicting override
+	modelGateCapMu.RLock()
+	got := modelGateCapacities["gate://pin"].capacity
+	modelGateCapMu.RUnlock()
+	assert.Equal(t, 1, got, "conflicting overrides keep the stricter capacity")
 }

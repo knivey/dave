@@ -2,10 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"io"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	logxi "github.com/mgutz/logxi/v1"
 )
 
 var loggerMG = newLogger("modelGate")
@@ -257,4 +262,149 @@ func modelGateBusy(key, model string, capacity int) (blocked bool, held string) 
 	held = strings.Join(models, ", ")
 	blocked = g.resident[model] == 0 && len(g.resident) >= capacity
 	return blocked, held
+}
+
+// ---------------------------------------------------------------------------
+// Capacity resolution: /props probe + per-server cache + models_max override.
+//
+// The router TELLS us its model capacity (GET /props →
+// {"role":"router","max_instances":N}); nothing in services.toml is
+// required in the common case. Anything else — old builds, plain
+// single-model llama-server, llama-swap (whose /props needs ?model=),
+// error, timeout — means ungated, which is correct for single-model
+// servers (no cross-model collision is possible) and fails open like
+// load_notice elsewhere. models_max overrides for setups /props can't
+// answer: 0/unset = auto, >0 = forced capacity (pins the shared gate),
+// -1 = off. Staleness errs safe: a stale LOW capacity over-serializes
+// briefly; it never under-serializes.
+
+const (
+	modelGateProbeTimeout    = 2 * time.Second
+	modelGateProbeFailureTTL = 60 * time.Second
+)
+
+var (
+	modelGateCapMu       sync.RWMutex
+	modelGateCapacities  = map[string]*modelGateCapacityEntry{}
+	modelGateProbeClient = &http.Client{Timeout: modelGateProbeTimeout}
+)
+
+type modelGateCapacityEntry struct {
+	capacity   int
+	pinned     bool      // set by an explicit models_max override
+	retryAfter time.Time // zero = valid forever; set only on probe failure
+}
+
+// clearModelGateCache drops cached /props results. Called on /reload so
+// a server-side max_instances change is picked up without a restart.
+// Gate objects (resident/waiters) are NOT touched: in-flight turns must
+// keep their accounting even if capacity just changed.
+func clearModelGateCache() {
+	modelGateCapMu.Lock()
+	defer modelGateCapMu.Unlock()
+	modelGateCapacities = make(map[string]*modelGateCapacityEntry)
+}
+
+// resolveModelGateCapacity returns the gate capacity for a server, or
+// 0 when the requesting service's turns are ungated. llamaSvc is the
+// service's type = "llama" (auto mode engages only for it); override is
+// the service's models_max (0 auto, >0 forced, -1 off — defensive here
+// so every call site stays correct without pre-checks).
+func resolveModelGateCapacity(llamaSvc bool, override int, baseURL, apiKey string, logger logxi.Logger) int {
+	if override < 0 {
+		return 0
+	}
+	if override == 0 && !llamaSvc {
+		return 0
+	}
+	key := normalizeModelGateKey(baseURL)
+	if override > 0 {
+		pinModelGateCapacity(key, override, logger)
+		return override
+	}
+
+	modelGateCapMu.RLock()
+	e, ok := modelGateCapacities[key]
+	valid := ok && (e.pinned || e.retryAfter.IsZero() || time.Now().Before(e.retryAfter))
+	modelGateCapMu.RUnlock()
+	if valid {
+		return e.capacity
+	}
+
+	if capacity, probed := probeModelGateProps(baseURL, apiKey); probed {
+		modelGateCapMu.Lock()
+		modelGateCapacities[key] = &modelGateCapacityEntry{capacity: capacity}
+		modelGateCapMu.Unlock()
+		return capacity
+	}
+	modelGateCapMu.Lock()
+	modelGateCapacities[key] = &modelGateCapacityEntry{retryAfter: time.Now().Add(modelGateProbeFailureTTL)}
+	modelGateCapMu.Unlock()
+	return 0
+}
+
+// pinModelGateCapacity records an explicit models_max override. Pins
+// are never overwritten by probes; two services on one server pinning
+// different values keep the stricter (smaller) — over-serialization is
+// the safe direction.
+func pinModelGateCapacity(key string, capacity int, logger logxi.Logger) {
+	modelGateCapMu.Lock()
+	defer modelGateCapMu.Unlock()
+	e, ok := modelGateCapacities[key]
+	if !ok {
+		modelGateCapacities[key] = &modelGateCapacityEntry{capacity: capacity, pinned: true}
+		return
+	}
+	if e.pinned {
+		if capacity < e.capacity {
+			e.capacity = capacity
+			if logger != nil {
+				logger.Warn("model gate: conflicting models_max overrides on one server, keeping the stricter",
+					"server", key, "keeping", e.capacity, "saw", capacity)
+			}
+		}
+		return
+	}
+	e.capacity = capacity
+	e.pinned = true
+	e.retryAfter = time.Time{}
+}
+
+// propsURL maps an API baseurl to the router's /props endpoint
+// ("http://host:8000/v1" → "http://host:8000/props").
+func propsURL(baseURL string) string {
+	u := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	u = strings.TrimSuffix(u, "/v1")
+	return u + "/props"
+}
+
+// probeModelGateProps asks the router how many models fit in memory.
+// ok=false means "don't gate" (not an error worth surfacing).
+func probeModelGateProps(baseURL, apiKey string) (int, bool) {
+	req, err := http.NewRequest(http.MethodGet, propsURL(baseURL), nil)
+	if err != nil {
+		return 0, false
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := modelGateProbeClient.Do(req)
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, false
+	}
+	var props struct {
+		Role         string `json:"role"`
+		MaxInstances int    `json:"max_instances"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&props); err != nil {
+		return 0, false
+	}
+	if props.Role != "router" || props.MaxInstances < 1 {
+		return 0, false
+	}
+	return props.MaxInstances, true
 }

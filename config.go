@@ -387,6 +387,7 @@ type Service struct {
 	ToolVerbose           *bool         `toml:"toolverbose"`
 	ParallelToolCalls     *bool         `toml:"paralleltoolcalls"`
 	Parallel              int           `toml:"parallel"`
+	ModelsMax             int           `toml:"models_max"`
 	APIUser               string        `toml:"api_user"`
 	LoadNotice            *bool         `toml:"load_notice"`
 	BBCode                *bool         `toml:"bbcode"`                // output filter: translate BBCode tags to IRC codes
@@ -868,6 +869,9 @@ func loadServicesFile(dir string, config *Config) error {
 		}
 		if service.Parallel <= 0 {
 			service.Parallel = 1
+		}
+		if service.ModelsMax < -1 {
+			return fmt.Errorf("services.%s: models_max must be -1 (off), 0 (auto-detect via /props), or a positive model capacity", name)
 		}
 		if service.DisabledBuiltinTools == nil {
 			service.DisabledBuiltinTools = config.DisabledBuiltinTools

@@ -590,6 +590,7 @@ func reloadAll() error {
 		queueMgr.UpdateServiceLimits(config.Services)
 		queueMgr.UpdateNotices(config.Notices)
 	}
+	clearModelGateCache()
 	loadIgnores(filepath.Join(configDir, "ignores.txt"))
 	r.AddSuccess(fmt.Sprintf("ignores: %d patterns", getIgnoreCount()))
 

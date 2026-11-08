@@ -3667,3 +3667,41 @@ bbcode_styles = false
 	offExplicit.ApplyDefaults(cfg.Services["styleSvc"])
 	assert.False(t, bbcodeStylesEnabled(offExplicit), "command false beats service true")
 }
+
+// TestLoadConfigDirRejectsBadModelsMax pins the service-level validation
+// branch: a models_max below -1 fails the config load naming the service.
+func TestLoadConfigDirRejectsBadModelsMax(t *testing.T) {
+	dir := createTestConfigDir(t, "", map[string]string{
+		"services.toml": `
+[localsvc]
+type = "llama"
+baseurl = "http://localhost:8000/v1"
+models_max = -2
+`,
+	})
+	defer os.RemoveAll(dir)
+
+	_, err := loadConfigDir(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "models_max")
+	assert.Contains(t, err.Error(), "localsvc")
+}
+
+// TestLoadConfigDirAcceptsModelsMax pins the accepted models_max domain:
+// -1 (off), 0 (auto), and positive capacities all load.
+func TestLoadConfigDirAcceptsModelsMax(t *testing.T) {
+	for _, v := range []string{"-1", "0", "1", "3"} {
+		dir := createTestConfigDir(t, "", map[string]string{
+			"services.toml": `
+[localsvc]
+type = "llama"
+baseurl = "http://localhost:8000/v1"
+models_max = ` + v + `
+`,
+		})
+		cfg, err := loadConfigDir(dir)
+		require.NoError(t, err, "models_max = %s must load", v)
+		require.Contains(t, cfg.Services, "localsvc")
+		os.RemoveAll(dir)
+	}
+}

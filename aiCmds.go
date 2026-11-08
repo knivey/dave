@@ -277,6 +277,10 @@ type chatRunner struct {
 	// streaming turns attach the X-Conversation-Id session and release it
 	// on exit — see llamastream.go for the whole story.
 	llamaService bool
+	// modelsMax mirrors the service's models_max gate override: 0 auto
+	// (llama services only), >0 forced capacity, -1 disabled. See
+	// modelGate.go.
+	modelsMax int
 }
 
 func newChatRunner(network Network, client *girc.Client, cfg AIConfig) *chatRunner {
@@ -319,6 +323,7 @@ func newChatRunner(network Network, client *girc.Client, cfg AIConfig) *chatRunn
 		client:       client,
 		logger:       logger,
 		llamaService: svc.Type == "llama",
+		modelsMax:    svc.ModelsMax,
 	}
 }
 
@@ -1323,6 +1328,22 @@ StreamLoop:
 }
 
 func (cr *chatRunner) runTurn(turn *turnContext) bool {
+	// Whole-turn model gate (modelGate.go DESIGN NOTE): serialize turns
+	// across DISTINCT models on single-model llama routers; same-model
+	// turns share. Acquired BEFORE the model-load notice so that notice
+	// only fires once the load is actually imminent — a queued turn
+	// must not emit a misleading "loading" notice (or even probe).
+	releaseModel, modelOK := (modelGateAcquire{
+		ctx: cr.ctx, llamaSvc: cr.llamaService, modelsMax: cr.modelsMax,
+		baseURL: cr.baseURL, apiKey: cr.apiKey, model: cr.cfg.Model,
+		nick: cr.nick, timeout: cr.cfg.Timeout,
+		warn: cr.sendWarning, fail: cr.sendError, logger: cr.logger,
+	}).acquire()
+	if !modelOK {
+		return true
+	}
+	defer releaseModel()
+
 	// Pre-turn model-load probe (llama-server router / llama-swap): if the
 	// service reports our model is not loaded yet, tell the user before the
 	// request blocks on the load. No-op unless load_notice resolved true.

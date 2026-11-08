@@ -2,14 +2,19 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	logxi "github.com/mgutz/logxi/v1"
+	openai "github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/option"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -421,4 +426,315 @@ func TestResolveModelGateCapacityPinDuringProbeWins(t *testing.T) {
 	require.NotNil(t, e)
 	assert.True(t, e.pinned, "the probe must not have overwritten the pin")
 	assert.Equal(t, 1, e.capacity)
+}
+
+// newModelGateTurnRunner builds a chatRunner against an EXISTING test
+// server — contenders MUST share one server so they share one gate key
+// (mirrors newModelLoadTurnRunner, modelload_test.go:360, otherwise).
+func newModelGateTurnRunner(t *testing.T, srvURL, model string, outputCh chan string, llama bool, modelsMax int) *chatRunner {
+	t.Helper()
+	transport := newDaveTransport(nil, nil)
+	client := openai.NewClient(
+		option.WithAPIKey("test-key"),
+		option.WithBaseURL(srvURL+"/v1"),
+		option.WithHTTPClient(&http.Client{Transport: transport}),
+	)
+	logger := logxi.New("test")
+	logger.SetLevel(logxi.LevelAll)
+	return &chatRunner{
+		cfg:          AIConfig{Model: model, Timeout: 30 * time.Second},
+		openaiClient: &client,
+		transport:    transport,
+		httpClient:   &http.Client{Transport: transport},
+		baseURL:      srvURL + "/v1",
+		apiKey:       "test-key",
+		network:      Network{Name: "testnet"},
+		channel:      "#101",
+		nick:         "shrew",
+		logger:       logger,
+		ctx:          context.Background(),
+		outputCh:     outputCh,
+		llamaService: llama,
+		modelsMax:    modelsMax,
+	}
+}
+
+// gateTurnHandler serves /v1/models and a chat-completions endpoint where
+// the FIRST mA request announces itself on aParked and parks until
+// releaseA closes; later mA requests complete immediately; mB arrivals
+// are announced on bArrived (once).
+func gateTurnHandler(t *testing.T, releaseA, aParked, bArrived chan struct{}, modelsHits *int32) http.Handler {
+	var parked int32
+	var bOnce sync.Once
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			atomic.AddInt32(modelsHits, 1)
+			fmt.Fprint(w, `{"data":[]}`)
+		case "/v1/chat/completions":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			w.Header().Set("Content-Type", "application/json")
+			switch body["model"] {
+			case "mA":
+				if atomic.CompareAndSwapInt32(&parked, 0, 1) {
+					close(aParked)
+					<-releaseA
+				}
+				fmt.Fprint(w, `{"id":"a","object":"chat.completion","created":1,"model":"mA","choices":[{"index":0,"message":{"role":"assistant","content":"a done"},"finish_reason":"stop"}]}`)
+			case "mB":
+				bOnce.Do(func() { close(bArrived) })
+				fmt.Fprint(w, `{"id":"b","object":"chat.completion","created":1,"model":"mB","choices":[{"index":0,"message":{"role":"assistant","content":"b done"},"finish_reason":"stop"}]}`)
+			default:
+				t.Errorf("unexpected model %v", body["model"])
+			}
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+}
+
+func seedGateSession(t *testing.T) (int64, []ChatMessage) {
+	t.Helper()
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+	sid := createTestSession(t, "testnet", "#101", "shrew", "testcmd", "svc", "mA")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "hi"}))
+	messages, err := sessionMgr.GetMessages(sid)
+	require.NoError(t, err)
+	return sid, messages
+}
+
+func TestRunTurnModelGateSerializesModels(t *testing.T) {
+	sidA, messages := seedGateSession(t)
+	sidB := createTestSession(t, "testnet", "#101", "plong", "testcmd", "svc", "mB")
+	require.NoError(t, sessionMgr.AddMessage(sidB, ChatMessage{Role: RoleUser, Content: "yo"}))
+	msgsB, err := sessionMgr.GetMessages(sidB)
+	require.NoError(t, err)
+
+	clearModelGateCache()
+	t.Cleanup(clearModelGateCache)
+
+	releaseA := make(chan struct{})
+	aParked := make(chan struct{})
+	bArrived := make(chan struct{})
+	var modelsHits int32
+	server := httptest.NewServer(gateTurnHandler(t, releaseA, aParked, bArrived, &modelsHits))
+	t.Cleanup(server.Close)
+
+	outA := make(chan string, 8)
+	crA := newModelGateTurnRunner(t, server.URL, "mA", outA, true, 1)
+	crA.sessionID = sidA
+	outB := make(chan string, 8)
+	crB := newModelGateTurnRunner(t, server.URL, "mB", outB, true, 1)
+	crB.sessionID = sidB
+
+	aDone := make(chan struct{})
+	go func() { crA.runTurn(newTurnContext(sidA, messages)); close(aDone) }()
+	select {
+	case <-aParked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("mA turn never reached the server")
+	}
+
+	hitsWhileQueued := atomic.LoadInt32(&modelsHits)
+	bDone := make(chan struct{})
+	go func() { crB.runTurn(newTurnContext(sidB, msgsB)); close(bDone) }()
+
+	select {
+	case <-bArrived:
+		t.Fatal("mB reached the server while mA held the gate")
+	case <-bDone:
+		t.Fatal("mB turn finished while mA held the gate")
+	case <-time.After(150 * time.Millisecond):
+	}
+	assert.Equal(t, hitsWhileQueued, atomic.LoadInt32(&modelsHits),
+		"queued turn must not probe /v1/models — gate sits BEFORE the load notice")
+	lines := drainOutput(t, outB, 8, 200*time.Millisecond)
+	waited := false
+	for _, l := range lines {
+		if strings.Contains(l, "waiting for") {
+			waited = true
+		}
+	}
+	assert.True(t, waited, "model_wait notice expected, got %q", lines)
+
+	close(releaseA)
+	<-aDone
+	select {
+	case <-bArrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("mB never reached the server after mA finished")
+	}
+	<-bDone
+	drainOutput(t, outA, 8, time.Second)
+}
+
+func TestRunTurnModelGateSameModelShares(t *testing.T) {
+	sidA, messages := seedGateSession(t)
+	sidB := createTestSession(t, "testnet", "#101", "plong", "testcmd", "svc", "mA")
+	require.NoError(t, sessionMgr.AddMessage(sidB, ChatMessage{Role: RoleUser, Content: "yo"}))
+	msgsB, err := sessionMgr.GetMessages(sidB)
+	require.NoError(t, err)
+
+	clearModelGateCache()
+	t.Cleanup(clearModelGateCache)
+
+	releaseA := make(chan struct{})
+	aParked := make(chan struct{})
+	bArrived := make(chan struct{})
+	var parked int32
+	var bOnce sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			fmt.Fprint(w, `{"data":[]}`)
+		case "/v1/chat/completions":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			w.Header().Set("Content-Type", "application/json")
+			if body["model"] != "mA" {
+				t.Errorf("unexpected model %v", body["model"])
+			}
+			if atomic.CompareAndSwapInt32(&parked, 0, 1) {
+				close(aParked)
+				<-releaseA // A parks, holding the gate
+			} else {
+				bOnce.Do(func() { close(bArrived) }) // B shares while A parks
+			}
+			fmt.Fprint(w, `{"id":"a","object":"chat.completion","created":1,"model":"mA","choices":[{"index":0,"message":{"role":"assistant","content":"a done"},"finish_reason":"stop"}]}`)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	outA := make(chan string, 8)
+	crA := newModelGateTurnRunner(t, server.URL, "mA", outA, true, 1)
+	crA.sessionID = sidA
+	outB := make(chan string, 8)
+	crB := newModelGateTurnRunner(t, server.URL, "mA", outB, true, 1)
+	crB.sessionID = sidB
+
+	go func() { crA.runTurn(newTurnContext(sidA, messages)) }()
+	select {
+	case <-aParked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("mA turn never reached the server")
+	}
+	go func() { crB.runTurn(newTurnContext(sidB, msgsB)) }()
+	select {
+	case <-bArrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("same-model turn must share the server, not wait")
+	}
+	close(releaseA)
+	drainOutput(t, outA, 8, time.Second)
+	drainOutput(t, outB, 8, time.Second)
+}
+
+func TestRunTurnModelGateDisabledByOverride(t *testing.T) {
+	sidA, messages := seedGateSession(t)
+	sidB := createTestSession(t, "testnet", "#101", "plong", "testcmd", "svc", "mB")
+	require.NoError(t, sessionMgr.AddMessage(sidB, ChatMessage{Role: RoleUser, Content: "yo"}))
+	msgsB, err := sessionMgr.GetMessages(sidB)
+	require.NoError(t, err)
+
+	clearModelGateCache()
+	t.Cleanup(clearModelGateCache)
+
+	releaseA := make(chan struct{})
+	aParked := make(chan struct{})
+	bArrived := make(chan struct{})
+	var modelsHits int32
+	server := httptest.NewServer(gateTurnHandler(t, releaseA, aParked, bArrived, &modelsHits))
+	t.Cleanup(server.Close)
+
+	outA := make(chan string, 8)
+	crA := newModelGateTurnRunner(t, server.URL, "mA", outA, true, 1)
+	crA.sessionID = sidA
+	outB := make(chan string, 8)
+	// models_max = -1: gating off even for a llama service.
+	crB := newModelGateTurnRunner(t, server.URL, "mB", outB, true, -1)
+	crB.sessionID = sidB
+
+	go func() { crA.runTurn(newTurnContext(sidA, messages)) }()
+	select {
+	case <-aParked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("mA turn never reached the server")
+	}
+	go func() { crB.runTurn(newTurnContext(sidB, msgsB)) }()
+	select {
+	case <-bArrived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("models_max = -1 must leave turns ungated")
+	}
+	close(releaseA)
+	drainOutput(t, outA, 8, time.Second)
+	drainOutput(t, outB, 8, time.Second)
+}
+
+func TestRunTurnModelGateValveNotice(t *testing.T) {
+	sidA, messages := seedGateSession(t)
+	sidB := createTestSession(t, "testnet", "#101", "plong", "testcmd", "svc", "mB")
+	require.NoError(t, sessionMgr.AddMessage(sidB, ChatMessage{Role: RoleUser, Content: "yo"}))
+	msgsB, err := sessionMgr.GetMessages(sidB)
+	require.NoError(t, err)
+
+	clearModelGateCache()
+	t.Cleanup(clearModelGateCache)
+
+	origLimit := modelGateWaitLimit
+	modelGateWaitLimit = 40 * time.Millisecond
+	t.Cleanup(func() { modelGateWaitLimit = origLimit })
+
+	releaseA := make(chan struct{})
+	aParked := make(chan struct{})
+	bArrived := make(chan struct{})
+	var modelsHits int32
+	server := httptest.NewServer(gateTurnHandler(t, releaseA, aParked, bArrived, &modelsHits))
+	t.Cleanup(server.Close)
+	outA := make(chan string, 8)
+	crA := newModelGateTurnRunner(t, server.URL, "mA", outA, true, 1)
+	crA.sessionID = sidA
+	outB := make(chan string, 8)
+	crB := newModelGateTurnRunner(t, server.URL, "mB", outB, true, 1)
+	crB.sessionID = sidB
+	crB.cfg.Timeout = time.Millisecond // waitLimitFor = max(40ms floor, 3ms) = 40ms
+
+	go func() { crA.runTurn(newTurnContext(sidA, messages)) }()
+	select {
+	case <-aParked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("mA turn never reached the server")
+	}
+
+	bDone := make(chan struct{})
+	go func() { crB.runTurn(newTurnContext(sidB, msgsB)); close(bDone) }()
+	select {
+	case <-bDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("valve-aborted turn never returned")
+	}
+	select {
+	case <-bArrived:
+		t.Fatal("valve-aborted turn must never reach the server")
+	default:
+	}
+	lines := drainOutput(t, outB, 8, 200*time.Millisecond)
+	found := false
+	for _, l := range lines {
+		if strings.Contains(l, "try again") {
+			found = true
+		}
+	}
+	assert.True(t, found, "model_wait_timeout notice expected, got %q", lines)
+	// The default template addresses {nick} — an unfilled placeholder
+	// would leak the literal "{nick}" to IRC.
+	assert.NotContains(t, strings.Join(lines, "\n"), "{nick}")
+	close(releaseA)
+	drainOutput(t, outA, 8, time.Second)
 }

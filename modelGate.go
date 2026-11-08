@@ -423,3 +423,69 @@ func probeModelGateProps(baseURL, apiKey string) (int, bool) {
 	}
 	return props.MaxInstances, true
 }
+
+// modelGateAcquire bundles what the user-facing hook sites need: the
+// chat path fills it from chatRunner fields, the legacy completions
+// path from its locals. warn/fail split mirrors the turn_wait
+// precedent (advisory wait → sendWarning, valve abort → sendError).
+type modelGateAcquire struct {
+	ctx       context.Context
+	llamaSvc  bool
+	modelsMax int // service models_max: 0 auto, >0 forced, -1 off
+	baseURL   string
+	apiKey    string
+	model     string
+	nick      string
+	timeout   time.Duration // the command's turn timeout (valve calibration)
+	warn      func(string)  // advisory wait-notice channel (nil = silent)
+	fail      func(string)  // valve-abort notice channel (nil = silent)
+	logger    logxi.Logger
+}
+
+// acquire resolves gating, sends the wait notice when the turn is about
+// to block, and takes the whole-turn model slot. ok=false means the
+// turn must abort: cancelled waiters silently (the queue already told
+// the user), valve-aborted ones with the timeout notice already sent
+// through fail. NOTE for the chat path: unlike the session gate this
+// sits INSIDE the turn, after chat() persisted the user message — a
+// valve abort leaves the user row, exactly like an API-error turn, so
+// the notice says "try again", never "resend".
+func (h modelGateAcquire) acquire() (func(), bool) {
+	if h.modelsMax < 0 || (h.modelsMax == 0 && !h.llamaSvc) {
+		return func() {}, true
+	}
+	capacity := resolveModelGateCapacity(h.llamaSvc, h.modelsMax, h.baseURL, h.apiKey, h.logger)
+	if capacity < 1 {
+		return func() {}, true
+	}
+	key := normalizeModelGateKey(h.baseURL)
+	if blocked, held := modelGateBusy(key, h.model, capacity); blocked && h.warn != nil {
+		n := getNotices()
+		h.warn(expandNotice(n.Queue.ModelWait, map[string]string{
+			"nick": h.nick, "model": h.model, "held": held,
+		}))
+	}
+	start := time.Now()
+	waitLimit := modelGateWaitLimitFor(h.timeout)
+	release, ok := acquireModelSlot(h.ctx, key, h.model, capacity, waitLimit)
+	if !ok {
+		if h.ctx.Err() != nil {
+			if h.logger != nil {
+				h.logger.Info("turn skipped: cancelled while waiting for the model gate", "model", h.model)
+			}
+			return nil, false
+		}
+		if h.logger != nil {
+			h.logger.Warn("turn aborted: model gate wait exceeded limit", "model", h.model, "limit", waitLimit)
+		}
+		if h.fail != nil {
+			n := getNotices()
+			h.fail(expandNotice(n.Queue.ModelWaitTimeout, map[string]string{
+				"nick": h.nick,
+				"wait": time.Since(start).Round(time.Second).String(),
+			}))
+		}
+		return nil, false
+	}
+	return release, true
+}

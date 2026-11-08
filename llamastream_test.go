@@ -112,6 +112,7 @@ func TestRunTurnStreamLlamaConversationHeaderAndRelease(t *testing.T) {
 	lines := runLlamaStreamTurn(t, server, func(cr *chatRunner) {
 		cr.llamaService = true
 		cr.convID = "conv-abc123"
+		cr.modelsMax = -1 // gate off: this test asserts an exact request log
 	})
 
 	assert.Contains(t, strings.Join(lines, "\n"), "all done text")
@@ -144,6 +145,7 @@ func TestRunTurnStreamConversationHeaderRequiresConvID(t *testing.T) {
 	runLlamaStreamTurn(t, server, func(cr *chatRunner) {
 		cr.llamaService = true
 		cr.convID = ""
+		cr.modelsMax = -1 // gate off: this test asserts an exact request log
 	})
 
 	assert.Equal(t, []string{"POST conv="}, rec.snapshot(), "no header, no release")
@@ -370,6 +372,7 @@ func TestRunTurnStreamReleaseEscapesConvID(t *testing.T) {
 	runLlamaStreamTurn(t, server, func(cr *chatRunner) {
 		cr.llamaService = true
 		cr.convID = "weird id&x=1"
+		cr.modelsMax = -1 // gate off: this test asserts an exact request log
 	})
 
 	events := rec.snapshot()

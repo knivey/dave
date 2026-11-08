@@ -185,9 +185,13 @@ Service-level `models_max` (int, snake_case TOML as usual):
 MCP tool calls, `/tokencount`.
 
 Composition with the queue: the per-service execSlot (`parallel`) is
-untouched; the model gate nests inside it. The waiting turn has already
-been delivered ("▶ Processing…"), so the gate's own notice explains the
-silence.
+untouched; the model gate nests inside it. ~~The waiting turn has
+already been delivered ("▶ Processing…"), so the gate's own notice
+explains the silence.~~ (AMENDED by the addendum below: the waiting
+turn is NOT necessarily delivered — with `parallel = 2` a queued turn
+starts immediately and its turn-side notices sit in the delivery buffer
+until the wait is over, which is the exact assumption production
+disproved; the explanation moved to enqueue time.)
 
 ### Notices + logging
 

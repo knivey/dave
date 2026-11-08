@@ -599,6 +599,19 @@ func callSummarizer(ctx context.Context, cfg AIConfig, summarizerSys string, arc
 		return "", nil, 0, fmt.Errorf("summarizer service %q not found in config", cfg.Service)
 	}
 
+	// Whole-turn model gate (modelGate.go): an ungated summarizer call
+	// could itself swap the resident model mid-turn on a single-model
+	// router. Silent variant — compaction has no IRC channel; a valve
+	// abort surfaces as the error below and flows through compaction's
+	// existing failure handling (session unchanged).
+	if capacity := resolveModelGateCapacity(svc.Type == "llama", svc.ModelsMax, svc.BaseURL, svc.Key, loggerMG); capacity > 0 {
+		releaseModel, ok := acquireModelSlot(ctx, normalizeModelGateKey(svc.BaseURL), cfg.Model, capacity, modelGateWaitLimitFor(cfg.Timeout))
+		if !ok {
+			return "", nil, 0, fmt.Errorf("summarizer service %q model gate wait aborted (model %q busy)", cfg.Service, cfg.Model)
+		}
+		defer releaseModel()
+	}
+
 	transport := newDaveTransport(nil, nil)
 	transport.setAPILogger(apiLogger, sessionID)
 	transport.setCaptureBody(true)

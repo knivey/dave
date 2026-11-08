@@ -2021,3 +2021,103 @@ func TestCompactSession_MaxSummaryTokensCapsRequest(t *testing.T) {
 		run(t, CompactionConfig{Enabled: true, MinTurns: 3}, 256)
 	})
 }
+
+// TestCallSummarizerModelGateWaits pins the compaction summarizer's
+// whole-turn model gate: while one model's summarizer call holds the
+// gate (parked request on a capacity-1 router), a different-model
+// summarizer call must block until the holder finishes.
+func TestCallSummarizerModelGateWaits(t *testing.T) {
+	clearModelGateCache()
+	t.Cleanup(clearModelGateCache)
+
+	releaseHolder := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/chat/completions":
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			w.Header().Set("Content-Type", "application/json")
+			if body["model"] == "mSum" {
+				<-releaseHolder // hold the gate via the request itself
+				fmt.Fprint(w, `{"id":"s","object":"chat.completion","created":1,"model":"mSum","choices":[{"index":0,"message":{"role":"assistant","content":"summary text"},"finish_reason":"stop"}]}`)
+				return
+			}
+			fmt.Fprint(w, `{"id":"s","object":"chat.completion","created":1,"model":"mOther","choices":[{"index":0,"message":{"role":"assistant","content":"other"},"finish_reason":"stop"}]}`)
+		case "/props":
+			fmt.Fprint(w, `{"role":"router","max_instances":1}`)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	// Failure-mode safety: if an assertion fatals while the holder's
+	// handler is parked on <-releaseHolder, release it so the deferred
+	// server.Close() (which blocks until outstanding requests complete)
+	// doesn't hang the test until the go test timeout. Function-level
+	// defer registered AFTER server.Close: defers run LIFO, so this
+	// releases the parked handler BEFORE Close runs. The select-guard is
+	// idempotent with the green path's explicit close(releaseHolder).
+	defer func() {
+		select {
+		case <-releaseHolder:
+		default:
+			close(releaseHolder)
+		}
+	}()
+
+	prevServices := config.Services
+	config.Services = map[string]Service{"sumsvc": {Type: "llama", BaseURL: server.URL + "/v1"}}
+	defer func() { config.Services = prevServices }()
+
+	// Holder: a summarizer call for mSum parks inside the handler,
+	// holding the gate.
+	holderDone := make(chan struct{})
+	go func() {
+		_, _, _, err := callSummarizer(context.Background(),
+			AIConfig{Service: "sumsvc", Model: "mSum", Timeout: 30 * time.Second},
+			"sys", []ChatMessage{{Role: RoleUser, Content: "x"}}, 1, 100)
+		assert.NoError(t, err)
+		close(holderDone)
+	}()
+
+	// Wait until the holder's request is parked: its /props probe has
+	// resolved capacity by then.
+	deadline := time.Now().Add(5 * time.Second)
+	capResolved := false
+	for time.Now().Before(deadline) {
+		modelGateCapMu.RLock()
+		_, ok := modelGateCapacities[normalizeModelGateKey(server.URL+"/v1")]
+		modelGateCapMu.RUnlock()
+		if ok {
+			capResolved = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	require.True(t, capResolved, "holder never resolved gate capacity")
+	time.Sleep(100 * time.Millisecond) // let the mSum request park
+
+	// A different-model summarizer call must block until the holder finishes.
+	otherDone := make(chan error)
+	go func() {
+		_, _, _, err := callSummarizer(context.Background(),
+			AIConfig{Service: "sumsvc", Model: "mOther", Timeout: 30 * time.Second},
+			"sys", []ChatMessage{{Role: RoleUser, Content: "x"}}, 1, 100)
+		otherDone <- err
+	}()
+	select {
+	case err := <-otherDone:
+		t.Fatalf("different-model summarizer ran while gate held (err=%v)", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(releaseHolder)
+	<-holderDone
+	select {
+	case err := <-otherDone:
+		assert.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("waiting summarizer never ran after the holder finished")
+	}
+}

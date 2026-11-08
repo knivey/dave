@@ -326,18 +326,33 @@ func resolveModelGateCapacity(llamaSvc bool, override int, baseURL, apiKey strin
 	modelGateCapMu.RLock()
 	e, ok := modelGateCapacities[key]
 	valid := ok && (e.pinned || e.retryAfter.IsZero() || time.Now().Before(e.retryAfter))
+	var cached int
+	if valid {
+		cached = e.capacity // copy under RLock: pinModelGateCapacity mutates in place
+	}
 	modelGateCapMu.RUnlock()
 	if valid {
-		return e.capacity
+		return cached
 	}
 
 	if capacity, probed := probeModelGateProps(baseURL, apiKey); probed {
 		modelGateCapMu.Lock()
-		modelGateCapacities[key] = &modelGateCapacityEntry{capacity: capacity}
+		// A pin may have landed while the probe was in flight (up to
+		// modelGateProbeTimeout). Pins are never overwritten by probes
+		// — spec invariant; the pin's capacity wins instead.
+		if cur, exists := modelGateCapacities[key]; exists && cur.pinned {
+			capacity = cur.capacity
+		} else {
+			modelGateCapacities[key] = &modelGateCapacityEntry{capacity: capacity}
+		}
 		modelGateCapMu.Unlock()
 		return capacity
 	}
 	modelGateCapMu.Lock()
+	if cur, exists := modelGateCapacities[key]; exists && cur.pinned {
+		modelGateCapMu.Unlock()
+		return cur.capacity
+	}
 	modelGateCapacities[key] = &modelGateCapacityEntry{retryAfter: time.Now().Add(modelGateProbeFailureTTL)}
 	modelGateCapMu.Unlock()
 	return 0

@@ -379,3 +379,46 @@ func TestPinModelGateCapacityStricterWins(t *testing.T) {
 	modelGateCapMu.RUnlock()
 	assert.Equal(t, 1, got, "conflicting overrides keep the stricter capacity")
 }
+
+func TestResolveModelGateCapacityPinDuringProbeWins(t *testing.T) {
+	clearModelGateCache()
+	t.Cleanup(clearModelGateCache)
+
+	probeStarted := make(chan struct{})
+	releaseProbe := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/props":
+			close(probeStarted)
+			<-releaseProbe
+			fmt.Fprint(w, `{"role":"router","max_instances":2}`)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	logger := logxi.New("test")
+	logger.SetLevel(logxi.LevelAll)
+	url := srv.URL + "/v1"
+
+	resolved := make(chan int, 1)
+	go func() { resolved <- resolveModelGateCapacity(true, 0, url, "", logger) }()
+	<-probeStarted
+	// An explicit override pins while the probe is still in flight.
+	pinModelGateCapacity(normalizeModelGateKey(url), 1, logger)
+	close(releaseProbe)
+
+	select {
+	case got := <-resolved:
+		assert.Equal(t, 1, got, "a pin that lands mid-probe must win over the probe result")
+	case <-time.After(5 * time.Second):
+		t.Fatal("resolver never returned")
+	}
+	modelGateCapMu.RLock()
+	e := modelGateCapacities[normalizeModelGateKey(url)]
+	modelGateCapMu.RUnlock()
+	require.NotNil(t, e)
+	assert.True(t, e.pinned, "the probe must not have overwritten the pin")
+	assert.Equal(t, 1, e.capacity)
+}

@@ -741,6 +741,49 @@ func TestPinModelGateCapacityStricterWins(t *testing.T) {
 	modelGateCapMu.RUnlock()
 	assert.Equal(t, 1, got, "conflicting overrides keep the stricter capacity")
 }
+
+func TestResolveModelGateCapacityPinDuringProbeWins(t *testing.T) {
+	clearModelGateCache()
+	t.Cleanup(clearModelGateCache)
+
+	probeStarted := make(chan struct{})
+	releaseProbe := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/props":
+			close(probeStarted)
+			<-releaseProbe
+			fmt.Fprint(w, `{"role":"router","max_instances":2}`)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	logger := logxi.New("test")
+	logger.SetLevel(logxi.LevelAll)
+	url := srv.URL + "/v1"
+
+	resolved := make(chan int, 1)
+	go func() { resolved <- resolveModelGateCapacity(true, 0, url, "", logger) }()
+	<-probeStarted
+	// An explicit override pins while the probe is still in flight.
+	pinModelGateCapacity(normalizeModelGateKey(url), 1, logger)
+	close(releaseProbe)
+
+	select {
+	case got := <-resolved:
+		assert.Equal(t, 1, got, "a pin that lands mid-probe must win over the probe result")
+	case <-time.After(5 * time.Second):
+		t.Fatal("resolver never returned")
+	}
+	modelGateCapMu.RLock()
+	e := modelGateCapacities[normalizeModelGateKey(url)]
+	modelGateCapMu.RUnlock()
+	require.NotNil(t, e)
+	assert.True(t, e.pinned, "the probe must not have overwritten the pin")
+	assert.Equal(t, 1, e.capacity)
+}
 ```
 
 Append to `config_test.go` (mirrors `TestLoadConfigDirRejectsInvalidInjectionRoleService` at config_test.go:478):
@@ -853,18 +896,33 @@ func resolveModelGateCapacity(llamaSvc bool, override int, baseURL, apiKey strin
 	modelGateCapMu.RLock()
 	e, ok := modelGateCapacities[key]
 	valid := ok && (e.pinned || e.retryAfter.IsZero() || time.Now().Before(e.retryAfter))
+	var cached int
+	if valid {
+		cached = e.capacity // copy under RLock: pinModelGateCapacity mutates in place
+	}
 	modelGateCapMu.RUnlock()
 	if valid {
-		return e.capacity
+		return cached
 	}
 
 	if capacity, probed := probeModelGateProps(baseURL, apiKey); probed {
 		modelGateCapMu.Lock()
-		modelGateCapacities[key] = &modelGateCapacityEntry{capacity: capacity}
+		// A pin may have landed while the probe was in flight (up to
+		// modelGateProbeTimeout). Pins are never overwritten by probes
+		// — spec invariant; the pin's capacity wins instead.
+		if cur, exists := modelGateCapacities[key]; exists && cur.pinned {
+			capacity = cur.capacity
+		} else {
+			modelGateCapacities[key] = &modelGateCapacityEntry{capacity: capacity}
+		}
 		modelGateCapMu.Unlock()
 		return capacity
 	}
 	modelGateCapMu.Lock()
+	if cur, exists := modelGateCapacities[key]; exists && cur.pinned {
+		modelGateCapMu.Unlock()
+		return cur.capacity
+	}
 	modelGateCapacities[key] = &modelGateCapacityEntry{retryAfter: time.Now().Add(modelGateProbeFailureTTL)}
 	modelGateCapMu.Unlock()
 	return 0

@@ -43,6 +43,7 @@ type QueueNotices struct {
 	SlotWait              string `toml:"slot_wait"`
 	ModelWait             string `toml:"model_wait"`
 	Full                  string `toml:"full"`
+	GeneratorStarted      string `toml:"generator_started"`
 	AsyncDeferred         string `toml:"async_deferred"`
 	AsyncDeferredSwitched string `toml:"async_deferred_switched"`
 }
@@ -257,6 +258,9 @@ func setNoticesDefaults(n *NoticesConfig) {
 	}
 	if n.Queue.Full == "" {
 		n.Queue.Full = "\x0304⚠️ {nick}: couldn't accept your request right now — please try again in a moment.\x0f"
+	}
+	if n.Queue.GeneratorStarted == "" {
+		n.Queue.GeneratorStarted = "\x0303⚙️ {name} is running, {nick} — the result will follow when it's ready.\x0f"
 	}
 	if n.Queue.AsyncDeferred == "" {
 		n.Queue.AsyncDeferred = "\x0307⚠️ {nick}: your background task finished but delivery was delayed — send a message and I'll pick it up...\x0f"

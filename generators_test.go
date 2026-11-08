@@ -50,6 +50,45 @@ func drainGenOutput(t *testing.T, ch chan string, n int) []string {
 	return drainOutput(t, ch, n, 2*time.Second)
 }
 
+// TestGeneratorStartedNotice pins the started line: generators suppress
+// all intermediate output by design, so the run is otherwise total
+// silence from dispatch to the final answer. The notice rides outputCh
+// BEFORE runTurn — first line out, ahead of any answer text — and
+// cannot go stale ("is running" holds until the answer arrives).
+func TestGeneratorStartedNotice(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	outputCh, runnerCh := withGeneratorRunner(t, AIConfig{Model: "qwen3"}, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, streamChunk(`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"qwen3","choices":[{"index":0,"delta":{"role":"assistant","content":"the answer"},"finish_reason":null}]}`)+
+			streamChunk(`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"qwen3","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`)+
+			"data: [DONE]\n\n")
+	})
+
+	cfg := GeneratorConfig{AIConfig: AIConfig{Name: "summary", Model: "qwen3", Streaming: true,
+		StreamTimeout: 5 * time.Second, Timeout: 10 * time.Second, System: "You are {{.BotNick}}."},
+		Prompt: "Summarize the following channel activity."}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		generator(Network{Name: "testnet"}, nil, genEvent("#chan"), cfg, context.Background(), outputCh, &User{ID: 1, CurrentNick: "shrew"})
+	}()
+	<-done
+	<-runnerCh
+
+	lines := drainGenOutput(t, outputCh, 16)
+	require.NotEmpty(t, lines, "expected the started notice plus the answer")
+	assert.Contains(t, lines[0], "summary", "started notice names the generator")
+	assert.Contains(t, lines[0], "shrew", "started notice names the requester")
+	assert.Contains(t, lines[0], "running", "started notice wording")
+	assert.NotContains(t, lines[0], "{name}", "no unexpanded placeholders")
+	assert.NotContains(t, lines[0], "{nick}", "no unexpanded placeholders")
+	joined := strings.Join(lines, "\n")
+	assert.Contains(t, joined, "the answer", "the answer still arrives")
+}
+
 func TestGeneratorLogCommandBuildsEphemeralTurn(t *testing.T) {
 	setupTestDB(t)
 	setupNoticesDefaults(t)

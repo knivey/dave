@@ -356,6 +356,18 @@ func generator(network Network, c *girc.Client, e girc.Event, cfg GeneratorConfi
 		{Role: RoleSystem, Content: systemContent},
 		{Role: RoleUser, Content: userText},
 	})
+	// Generators suppress ALL intermediate output by design (the output
+	// policy), so a long tool loop is otherwise total silence from
+	// dispatch to the final answer. One line up front says it started:
+	// it rides outputCh — displayed immediately for a delivery-current
+	// run, and right after the ▶ Processing message for a queued one —
+	// and it cannot go stale the way turn-side WAIT notices could ("is
+	// running" holds until the answer arrives).
+	if n := getNotices(); n.Queue.GeneratorStarted != "" {
+		sendToOutput(expandNotice(n.Queue.GeneratorStarted, map[string]string{
+			"nick": nick, "name": cfg.Name,
+		}), output, ctx)
+	}
 	runner.runTurn(turn)
 	runner.logger.Debug("generator finished", "api_log", apiLogger.GetSessionFilePath(runner.apiLogID()))
 }

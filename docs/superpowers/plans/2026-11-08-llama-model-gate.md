@@ -1712,7 +1712,7 @@ Expected: FAIL — `mB completion reached the server while mA held the gate`.
 	svcKey, svcBaseURL := svc.Key, svc.BaseURL
 ```
 
-Then, after the `aiClient` construction and BEFORE the `if cfg.LoadNotice != nil ...` block (~line 72), insert:
+Then, after the `aiClient` construction and `logger :=` line, BEFORE the `apiCtx, cancel := context.WithTimeout(...)` block — and MOVE that apiCtx block to AFTER the gate (the gate wait must not burn the API-call timeout budget: a completion that parks at the gate then gets admitted would hit `context deadline exceeded` immediately; the chat path grants a fresh budget after its gate, this path must too) — insert:
 
 ```go
 	// Whole-turn model gate (modelGate.go): the same cross-model
@@ -1720,7 +1720,7 @@ Then, after the `aiClient` construction and BEFORE the `if cfg.LoadNotice != nil
 	// load-notice probe for the same ordering reason.
 	releaseModel, modelOK := (modelGateAcquire{
 		ctx: ctx, llamaSvc: svc.Type == "llama", modelsMax: svc.ModelsMax,
-		baseURL: svc.BaseURL, apiKey: svc.Key, model: cfg.Model,
+		baseURL: svcBaseURL, apiKey: svcKey, model: cfg.Model,
 		nick: e.Source.Name, timeout: cfg.Timeout,
 		warn: func(msg string) { sendToOutput(msg, output, ctx) },
 		fail: func(msg string) { sendToOutput(msg, output, ctx) },
@@ -1730,6 +1730,9 @@ Then, after the `aiClient` construction and BEFORE the `if cfg.LoadNotice != nil
 		return
 	}
 	defer releaseModel()
+
+	apiCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
+	defer cancel()
 ```
 
 (`logger` already exists at that point — declared at line 64; move nothing, the block sits between `logger := ...` and the LoadNotice `if`.)

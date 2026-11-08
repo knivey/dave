@@ -93,9 +93,11 @@ func modelGateWaitLimitFor(timeout time.Duration) time.Duration {
 }
 
 // normalizeModelGateKey collapses baseurl variants onto one server
-// identity: trim trailing whitespace/slashes and a trailing "/v1",
-// lowercase scheme+host (the path beyond /v1 is not meaningful for
-// llama servers and keeps the rule total).
+// identity: trim trailing whitespace/slashes and a trailing "/v1", then
+// lowercase the WHOLE remaining string. Real llama baseurls carry
+// nothing beyond the trimmed /v1, so this is scheme+host in practice —
+// but folding any residual path's case too keeps the rule total: a
+// residual path differing only by case still maps to one gate.
 func normalizeModelGateKey(baseURL string) string {
 	u := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	u = strings.TrimSuffix(u, "/v1")
@@ -127,9 +129,10 @@ func acquireModelSlot(ctx context.Context, key, model string, capacity int, wait
 	}
 	w := &modelGateWaiter{model: model, ready: make(chan struct{})}
 	g.waiters = append(g.waiters, w)
+	held := g.residentModelsLocked()
 	g.mu.Unlock()
 	loggerMG.Info("model gate wait: model busy on server",
-		"server", key, "model", model, "wait_limit", waitLimit)
+		"server", key, "model", model, "resident", held, "wait_limit", waitLimit)
 
 	timer := time.NewTimer(waitLimit)
 	defer timer.Stop()
@@ -243,6 +246,18 @@ func (g *modelGate) admitWaiterLocked(w *modelGateWaiter) {
 	close(w.ready)
 }
 
+// residentModelsLocked renders the resident set for logs/notices:
+// sorted, comma-joined. Callers must hold g.mu (the snapshot must be
+// taken under the same lock as the admission decision it describes).
+func (g *modelGate) residentModelsLocked() string {
+	models := make([]string, 0, len(g.resident))
+	for m := range g.resident {
+		models = append(models, m)
+	}
+	sort.Strings(models)
+	return strings.Join(models, ", ")
+}
+
 // modelGateBusy reports (advisory, races with acquire/release at worst
 // one notice) whether acquiring `model` would block right now, plus
 // the comma-joined sorted resident models for the wait notice.
@@ -254,12 +269,7 @@ func modelGateBusy(key, model string, capacity int) (blocked bool, held string) 
 	g := v.(*modelGate)
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	models := make([]string, 0, len(g.resident))
-	for m := range g.resident {
-		models = append(models, m)
-	}
-	sort.Strings(models)
-	held = strings.Join(models, ", ")
+	held = g.residentModelsLocked()
 	blocked = g.resident[model] == 0 && len(g.resident) >= capacity
 	return blocked, held
 }
@@ -350,8 +360,9 @@ func resolveModelGateCapacity(llamaSvc bool, override int, baseURL, apiKey strin
 	}
 	modelGateCapMu.Lock()
 	if cur, exists := modelGateCapacities[key]; exists && cur.pinned {
+		pinnedCap := cur.capacity // copy under the write lock: pinModelGateCapacity mutates in place
 		modelGateCapMu.Unlock()
-		return cur.capacity
+		return pinnedCap
 	}
 	modelGateCapacities[key] = &modelGateCapacityEntry{retryAfter: time.Now().Add(modelGateProbeFailureTTL)}
 	modelGateCapMu.Unlock()

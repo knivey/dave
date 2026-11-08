@@ -176,6 +176,54 @@ func TestModelGateCancelledWaiterAbortsAndDoesNotBlockLater(t *testing.T) {
 	releaseC()
 }
 
+// TestModelGateGiveUpAfterAdmissionRollsBack pins the leak invariant: a
+// waiter whose select observed ctx.Done/timer in the same instant the
+// wake pass admitted it must roll its resident count back and re-run the
+// wake pass, so a later queued model is not stranded behind a dead
+// holder. Hand-builds the post-admission state (deterministic — no
+// select race to win).
+func TestModelGateGiveUpAfterAdmissionRollsBack(t *testing.T) {
+	key := "gate://giveup-admitted"
+	g := loadModelGate(key)
+
+	g.mu.Lock()
+	g.resident["mA"] = 1
+	w := &modelGateWaiter{model: "mB", ready: make(chan struct{})}
+	g.waiters = append(g.waiters, w)
+	// Mirror release(): free mA, then run the wake pass, which admits mB
+	// (count 1, removed from the queue, ready closed).
+	g.releaseLocked("mA")
+	g.wakeWaitersLocked(1)
+	g.mu.Unlock()
+	require.True(t, w.admitted, "hand-built state: mB must be admitted")
+
+	// A new model queued behind the (about-to-abandon) holder.
+	wC := &modelGateWaiter{model: "mC", ready: make(chan struct{})}
+	g.mu.Lock()
+	g.waiters = append(g.waiters, wC)
+	g.mu.Unlock()
+
+	// mB's waiter gives up AFTER admission — the race this test pins.
+	g.giveUpWaiter(w, 1)
+
+	require.True(t, wC.admitted, "rollback must re-run the wake pass and admit the queued waiter")
+	g.mu.Lock()
+	_, mBResident := g.resident["mB"]
+	remaining := len(g.waiters)
+	g.mu.Unlock()
+	assert.False(t, mBResident, "admitted-then-abandoned waiter must roll back its resident count")
+	assert.Equal(t, 0, remaining, "no stale queue entries")
+
+	// Clean up via the public API and prove the gate still works. The
+	// rollback's own wake pass admitted wC, so free its slot first — at
+	// capacity 1 the probe acquire below would otherwise queue behind mC
+	// and wedge on the valve.
+	g.release("mC", 1)
+	release, ok := acquireModelSlot(context.Background(), key, "mA", 1, time.Minute)
+	require.True(t, ok, "gate must be usable after the rollback")
+	release()
+}
+
 func TestModelGateValveFires(t *testing.T) {
 	key := "gate://valve"
 	releaseA, ok := acquireModelSlot(context.Background(), key, "modelA", 1, time.Minute)
@@ -218,8 +266,9 @@ func TestModelGateCapacityTwo(t *testing.T) {
 
 	cDone := make(chan bool)
 	go func() {
-		_, ok := acquireModelSlot(context.Background(), key, "mC", 2, time.Minute)
+		release, ok := acquireModelSlot(context.Background(), key, "mC", 2, time.Minute)
 		cDone <- ok
+		release() // registry entries are never deleted — don't leak the admitted slot across -count reruns
 	}()
 	select {
 	case ok := <-cDone:
@@ -733,6 +782,8 @@ func TestRunTurnModelGateValveNotice(t *testing.T) {
 	for _, l := range lines {
 		if strings.Contains(l, "try again") {
 			found = true
+			assert.NotContains(t, l, "{wait}", "valve notice must expand {wait}")
+			assert.NotContains(t, l, "{nick}", "valve notice must expand {nick}")
 		}
 	}
 	assert.True(t, found, "model_wait_timeout notice expected, got %q", lines)

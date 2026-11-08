@@ -192,9 +192,11 @@ silence.
 ### Notices + logging
 
 - ~~`[queue] model_wait` — sent when a turn is about to block on the gate~~
-  (RETIRED post-implementation — see the addendum: turn-side notices
-  display stale because they sit in the delivery output buffer until the
-  wait is over; replaced by enqueue-time suffix composition).
+  (turn-side use RETIRED post-implementation — see the addendum: turn-side
+  notices display stale because they sit in the delivery output buffer
+  until the wait is over. The template was RESURRECTED with new timing in
+  the addendum's follow-up: sent at enqueue, position-0 standalone line
+  only.)
 - `[queue] model_wait_timeout` — on valve fire, `{wait}` = actual
   elapsed wait. Default: `⚠️ {nick}: gave up after {wait} waiting for
   the model — nothing was sent, please try again.`
@@ -292,10 +294,21 @@ unbuffered, displays immediately):
   model swap for the command's model (`modelGateQueueSuffix`, advisory
   gate consult incl. capacity resolution).
 
-Both are suffix templates in notices.toml; `model_wait` is retired.
-`model_wait_timeout` (valve abort) is unchanged — "gave up after {wait}"
-is true whenever it displays. Both the trigger dispatch and the mention
-path (a queued continuation behind a predicted swap) compose the suffix;
-the remaining no-suffix paths are rate-exempt direct-dispatch triggers
-(never enqueue, so no queue notice at all) and position-0 turns (not
-queued — they get the started message).
+Both are suffix templates in notices.toml. `model_wait_timeout` (valve
+abort) is unchanged — "gave up after {wait}" is true whenever it
+displays. Both the trigger dispatch and the mention path (a queued
+continuation behind a predicted swap) compose the suffix.
+
+**Position-0 turns (follow-up, same day): the standalone wait line.**
+Cross-channel requests never queue behind each other for delivery — a
+request in an otherwise-idle channel enqueues at position 0 and gets no
+queue notice, but may still not actually start generating (execution
+slots all busy with OTHER CHANNELS' items — a pre-existing silence,
+older than the model gate; or the model gate predicts a swap). For
+those, the dispatch site sends ONE standalone unbuffered line whose
+reason is the primary blocker in time order: `slot_wait` ({nick}) when
+the item did not start, `model_wait` ({nick},{model},{held} — the
+retired template resurrected with new timing) when it started but the
+gate is predicted to block. Queued items never get the standalone line
+(their suffixes carry it); genuinely-free starts stay silent. Every
+wait now has exactly one explanation.

@@ -545,3 +545,54 @@ func modelGateQueueSuffix(service, model string, position int, started bool) str
 	}
 	return extra
 }
+
+// executionWaitNotice composes the STANDALONE wait line for position-0
+// turns — the requests that get no queue notice because their own
+// channel's delivery is idle, but which will not actually start
+// generating now. A pre-existing silence, older than the model gate:
+//   - !started: the service's execution slots are busy (typically other
+//     CHANNELS' items hold them — cross-channel requests never queue
+//     behind each other for delivery, only for execution slots). The
+//     item sits pending; runJob — and with it the ▶ Processing message —
+//     never fires until a slot frees.
+//   - started, but the gate consult predicts a block: the model swap
+//     wait (the ▶ Processing message never fires here either — it is
+//     gated on having actually waited for delivery).
+//
+// Exactly ONE reason is sent, the primary blocker in time order: the
+// slot wait precedes everything (the turn cannot even start), and once
+// a slot frees the model story arrives via the load notice anyway.
+// Sent as a direct client reply at dispatch — unbuffered, displays
+// immediately. position > 0 (queued) returns "": those items carry
+// their explanation as suffixes on the queue notice instead.
+func executionWaitNotice(nick, service, model string, position int, started bool) string {
+	if position > 0 {
+		return ""
+	}
+	n := getNotices()
+	if !started {
+		if n.Queue.SlotWait == "" {
+			return ""
+		}
+		return warnMsg(expandNotice(n.Queue.SlotWait, map[string]string{"nick": nick}))
+	}
+	if model == "" {
+		return ""
+	}
+	var svc Service
+	readConfig(func() { svc, _ = config.Services[service] })
+	if svc.ModelsMax < 0 {
+		return ""
+	}
+	if capacity := resolveModelGateCapacity(svc.Type == "llama", svc.ModelsMax, svc.BaseURL, svc.Key, loggerMG); capacity > 0 {
+		if blocked, held := modelGateBusy(normalizeModelGateKey(svc.BaseURL), model, capacity); blocked {
+			if n.Queue.ModelWait == "" {
+				return ""
+			}
+			return warnMsg(expandNotice(n.Queue.ModelWait, map[string]string{
+				"nick": nick, "model": model, "held": held,
+			}))
+		}
+	}
+	return ""
+}

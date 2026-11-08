@@ -314,6 +314,63 @@ func TestGetModelForConfigCmd(t *testing.T) {
 	assert.Empty(t, getModelForConfigCmd("=x"), "unknown trigger resolves empty")
 }
 
+// TestExecutionWaitNotice pins the position-0 standalone wait line: the
+// requests that get NO queue notice (their channel's delivery is idle)
+// but which will not actually start generating now — a pre-existing
+// silence older than the model gate. Exactly one reason — the primary
+// blocker in time order (the slot wait precedes the gate: the turn
+// cannot even start until a slot frees).
+func TestExecutionWaitNotice(t *testing.T) {
+	setupNoticesDefaults(t)
+	clearModelGateCache()
+	t.Cleanup(clearModelGateCache)
+
+	// One model resident on the gated server's capacity-1 gate.
+	releaseHold, ok := acquireModelSlot(context.Background(), "gate://execwait", "mA", 1, time.Minute)
+	require.True(t, ok)
+	defer releaseHold()
+
+	origServices := config.Services
+	config.Services = map[string]Service{
+		"gatedsvc": {Type: "llama", BaseURL: "gate://execwait/v1", ModelsMax: 1},
+		"offsvc":   {Type: "llama", BaseURL: "gate://execwait/v1", ModelsMax: -1},
+		"plainsvc": {BaseURL: "https://api.example.com/v1"},
+	}
+	t.Cleanup(func() { config.Services = origServices })
+
+	t.Run("queued items never get the standalone line", func(t *testing.T) {
+		assert.Empty(t, executionWaitNotice("shrew", "gatedsvc", "mB", 1, false))
+	})
+
+	t.Run("slot wait when not started", func(t *testing.T) {
+		out := executionWaitNotice("shrew", "gatedsvc", "mB", 0, false)
+		assert.Contains(t, out, "shrew")
+		assert.Contains(t, out, "free slot")
+		assert.NotContains(t, out, "mB", "slot wait is the primary blocker — no model line")
+	})
+
+	t.Run("model wait when started and gate blocked", func(t *testing.T) {
+		out := executionWaitNotice("shrew", "gatedsvc", "mB", 0, true)
+		assert.Contains(t, out, "shrew")
+		assert.Contains(t, out, "mB")
+		assert.Contains(t, out, "mA")
+		assert.NotContains(t, out, "free slot")
+	})
+
+	t.Run("silent when started and unblocked", func(t *testing.T) {
+		assert.Empty(t, executionWaitNotice("shrew", "gatedsvc", "mA", 0, true))
+	})
+
+	t.Run("silent for off and ungated services", func(t *testing.T) {
+		assert.Empty(t, executionWaitNotice("shrew", "offsvc", "mB", 0, true))
+		assert.Empty(t, executionWaitNotice("shrew", "plainsvc", "mB", 0, true))
+	})
+
+	t.Run("silent with empty model when started", func(t *testing.T) {
+		assert.Empty(t, executionWaitNotice("shrew", "gatedsvc", "", 0, true))
+	})
+}
+
 func TestModelGateValveFires(t *testing.T) {
 	key := "gate://valve"
 	releaseA, ok := acquireModelSlot(context.Background(), key, "modelA", 1, time.Minute)

@@ -558,6 +558,10 @@ func TestNoticesQueueSuffixDefaults(t *testing.T) {
 	assert.Contains(t, n.Queue.ModelSuffix, "{model}")
 	assert.Contains(t, n.Queue.ModelSuffix, "{held}")
 	assert.Contains(t, n.Queue.ModelWaitTimeout, "{wait}", "valve timeout notice unchanged")
+	assert.Contains(t, n.Queue.SlotWait, "{nick}", "position-0 slot-wait notice default")
+	assert.Contains(t, n.Queue.ModelWait, "{nick}", "position-0 model-wait notice default")
+	assert.Contains(t, n.Queue.ModelWait, "{model}")
+	assert.Contains(t, n.Queue.ModelWait, "{held}")
 
 	out := expandNotice(n.Queue.ModelSuffix, map[string]string{"model": "mB", "held": "mA"})
 	assert.Contains(t, out, "mB")

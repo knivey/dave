@@ -451,10 +451,14 @@ func handleMention(network Network, client *girc.Client, event girc.Event, chann
 			chat(network, client, event, sessionCfg, cx, output, resolvedUser, msg)
 		})
 	// Same enqueue-time context the trigger path gets (see modelGate.go):
-	// a queued mention behind a predicted model swap deserves the same
-	// heads-up.
-	replyIfQueuedExtra(client, event, position,
-		modelGateQueueSuffix(sessionCfg.Service, sessionCfg.Model, position, started))
+	// suffixes on the queue line when queued, a standalone wait line when
+	// position 0 but not actually starting (slots / model swap).
+	if position > 0 {
+		replyIfQueuedExtra(client, event, position,
+			modelGateQueueSuffix(sessionCfg.Service, sessionCfg.Model, position, started))
+	} else if wait := executionWaitNotice(event.Source.Name, sessionCfg.Service, sessionCfg.Model, 0, started); wait != "" {
+		client.Cmd.Reply(event, wait)
+	}
 }
 
 func handleTrigger(network Network, client *girc.Client, event girc.Event, channel, msg, stripped string) {
@@ -631,17 +635,22 @@ func handleTrigger(network Network, client *girc.Client, event girc.Event, chann
 		ClearContext(network.Name, channel, userID)
 	}
 	svc := getServiceForConfigCmd(match.trigger)
+	model := getModelForConfigCmd(match.trigger)
 	position, started := queueMgr.EnqueueWithStart(network.Name, channel, userID, event.Source.Name, svc, msg,
 		func(cx context.Context, output chan<- string) {
 			match.cmd(network, client, event, ctxWithResolvedUser(cx, resolvedUser), output, match.args...)
 		})
-	// Enqueue-time context on the SAME line as the queue position
-	// (modelGate.go: why this is here and not inside the turn): whether
-	// the request is already processing in the background, and whether a
-	// model swap is predicted. modelGateQueueSuffix no-ops for
-	// position <= 0 before touching the gate.
-	replyIfQueuedExtra(client, event, position,
-		modelGateQueueSuffix(svc, getModelForConfigCmd(match.trigger), position, started))
+	// Enqueue-time context (modelGate.go: why this is here and not inside
+	// the turn): QUEUED items carry it as suffixes on the SAME line as the
+	// queue position; position-0 items get a standalone wait line when
+	// they will not actually start generating now (execution slots busy /
+	// model swap predicted).
+	if position > 0 {
+		replyIfQueuedExtra(client, event, position,
+			modelGateQueueSuffix(svc, model, position, started))
+	} else if wait := executionWaitNotice(event.Source.Name, svc, model, 0, started); wait != "" {
+		client.Cmd.Reply(event, wait)
+	}
 }
 
 // getModelForConfigCmd resolves the model a trigger's command will

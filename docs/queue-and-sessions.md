@@ -37,8 +37,15 @@ the request is already processing in the background (it started
 immediately — its service had a free `parallel` slot) and whether a
 model swap is predicted for it —
 e.g. `⏳ Queued (position 1) — already processing in the background,
-gemma will load after qwen finishes`. A safety valve aborts gate waits
-that exceed 10 minutes / 3× the command timeout.
+gemma will load after qwen finishes`.
+
+A request in an otherwise-idle channel never queues, but may still not
+start generating right away — all execution slots busy with other
+channels' requests, or a model swap predicted. In those cases it gets
+one immediate line saying why (`waiting for a free slot…` / `{model} is
+waiting for {held} to finish…`); requests that start free stay silent.
+A safety valve aborts gate waits that exceed 10 minutes / 3× the
+command timeout.
 
 ## Async Background Tasks (Image Generation)
 

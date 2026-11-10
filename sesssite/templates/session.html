@@ -9,7 +9,7 @@
 			<span class="badge">{{.Session.ChatCommand}}</span>
 			<span class="badge">{{.Session.Service}}</span>
 			<span class="badge model">{{.Session.Model}}</span>
-			<span class="badge status-{{.Session.Status}}">{{.Session.Status}}</span>
+			<span class="badge status-{{.Session.Status}}" id="status-badge">{{.Session.Status}}</span>
 			{{if .ModelChanged}}<span class="badge changed" title="the model changed mid-session — see the usage details">model changed</span>{{end}}
 		</div>
 		<div class="session-meta">

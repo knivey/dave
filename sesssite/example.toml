@@ -1,0 +1,18 @@
+# sesssite config — session-history website for dave
+#
+# Reference:
+#   [server] addr     string  listen address (default ":8060")
+#   [server] base_url string  external base URL for absolute links/OG tags
+#   [database] driver string  "sqlite" (default) | "postgres"
+#   [database] path   string  sqlite path, binary-relative (default "data/dave.db")
+#   [database] dsn    string  postgres DSN — use a READ-ONLY role; the code never writes
+#
+# [server]
+# addr = ":8060"
+# base_url = "https://sessions.example.com"
+#
+# [database]
+# driver = "sqlite"
+# path = "data/dave.db"
+# # driver = "postgres"
+# # dsn = "postgres://sesssite_ro:pass@localhost:5432/dave?sslmode=disable"

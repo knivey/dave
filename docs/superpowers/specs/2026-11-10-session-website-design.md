@@ -78,8 +78,9 @@ server-rendered HTML templates with small vanilla-JS enhancement, GORM
   `Create(&User{…})`/`Create(&Session{…})` site exists and route them
   through the minter). Shared helper `generateSlug()` in a new `slug.go`.
 - Slugs are minted once and never rotated; they die with their row
-  (`CleanupByAge`/`DeleteSession` ⇒ link 404s — documented behavior: links
-  live exactly as long as the session row, `MaxAgeDays` governs).
+  (explicit deletion/soft-delete ⇒ link 404s — links live as long as the
+  session row; `max_age_days` only completes stale active sessions and
+  never removes one).
 - User merges (`/usermerge`) reassign sessions to the surviving user id;
   the surviving user's slug naturally absorbs them. No special handling.
 - URL shapes: `/s/<slug>` session page, `/u/<slug>` user page. Slug

@@ -93,8 +93,11 @@ integrations (`[website] url` in dave's `config/config.toml`):
 
 ## Link lifetime caveat
 
-Session links live exactly as long as the session rows. dave's
-`[database] max_age_days` cleanup (default 90) deletes old sessions —
-once the row is gone, its link 404s like any unknown slug. Treat a
-pasted session URL as durable for weeks, not forever; archive anything
-you care about.
+Links live exactly as long as the session row. dave's
+`[database] max_age_days` cleanup (default 90) deletes nothing — it only
+flips stale *active* sessions to `completed` (the page's status badge
+changes; the link keeps working). A link dies only with its row:
+explicit deletion (`^delete` / session removal), a soft-delete (the page
+404s immediately), or the manual admin purge utility — none of which run
+automatically on age. Treat a pasted session URL as durable until
+deliberately deleted.

@@ -442,6 +442,23 @@ func (cr *chatRunner) sendWithPastebin(text, rawText string) bool {
 	if chCfg.Pastebin {
 		lines := wrapForIRC(text)
 		if len(lines) >= chCfg.GetMaxLines() {
+			// Website link mode (coexist): when [website] url is set and
+			// this turn has a session, link the already-persisted reply on
+			// the session site instead of uploading a paste. Ephemeral
+			// (sessionID 0) and any link-build failure fall through to the
+			// pastebin path below.
+			if link, ok := websiteMessageLink(cr.sessionID); ok {
+				n := getNotices()
+				preview := chCfg.GetPastebinPreviewLines(config.Pastebin)
+				if preview > len(lines) {
+					preview = len(lines)
+				}
+				for i := 0; i < preview; i++ {
+					cr.sendIRC(lines[i])
+				}
+				cr.sendIRC(expandNotice(n.Website.FullLine, map[string]string{"url": link}))
+				return true
+			}
 			pasteTitle := cr.cfg.Service + "/" + cr.cfg.Model
 			url, err := uploadToPastebin(rawText, pasteTitle)
 			n := getNotices()

@@ -582,6 +582,23 @@ func getDBSessionByID(id int64) (*Session, error) {
 	return &session, nil
 }
 
+// latestAssistantMessageID returns the newest assistant-role message row
+// id for a session. Used by the website-link path: the final assistant
+// message is persisted BEFORE the send (turn.Add → sendFinalText) and the
+// session turn gate serializes writers, so at link-build time this IS the
+// reply being sent. The reasoning-fallback edge lands on the nearest
+// assistant row — accepted (spec).
+func latestAssistantMessageID(sessionID int64) (int64, bool) {
+	var id int64
+	err := theDB.Model(&Message{}).
+		Where("session_id = ? AND role = ?", sessionID, RoleAssistant).
+		Order("id DESC").Limit(1).Pluck("id", &id).Error
+	if err != nil || id == 0 {
+		return 0, false
+	}
+	return id, true
+}
+
 func deleteDBSession(id int64) error {
 	return theDB.Where("id = ?", id).Delete(&Session{}).Error
 }

@@ -1,0 +1,39 @@
+{{range $i, $v := .Views}}
+	{{if and $.Comps (index $.CompBefore $i)}}{{range $c := index $.CompBefore $i}}
+	<div class="compaction-divider" id="c{{.ID}}">
+		<span class="tag">🗜 compacted</span>
+		{{.Trigger}} · {{.Model}} · {{.ArchivedCount}} messages · {{.PromptTokens}}→{{.CompletionTokens}} tok
+		{{if .SummaryHTML}}<details class="compaction-summary"><summary>summary</summary>{{.SummaryHTML}}</details>{{end}}
+	</div>
+	{{end}}{{end}}
+	<div class="msg role-{{$v.Role}}{{if $v.Archived}} archived{{end}}" id="m{{$v.ID}}">
+		<div class="meta">
+			<span class="role">{{$v.Role}}</span>
+			<time title="{{$v.Time.Format "2006-01-02 15:04:05"}}">{{$v.Time.Format "15:04:05"}}</time>
+			{{if $v.Archived}}<span class="tag">archived</span>{{end}}
+			<a class="rawlink" href="{{$v.RawURL}}">raw</a>
+		</div>
+		{{if $v.IsSystem}}
+			<details class="system"><summary>system prompt</summary><div class="content md">{{$v.ContentHTML}}</div></details>
+		{{else if eq $v.Role "tool"}}
+			<details class="toolresult"><summary>tool result · {{$v.ToolCallID}}</summary><pre class="content">{{$v.Content}}</pre></details>
+		{{else}}
+			<div class="content md">{{$v.ContentHTML}}</div>
+		{{end}}
+		{{range $v.ImageParts}}<img class="chatimg" src="{{safeImageURL .}}" alt="conversation image" loading="lazy">{{end}}
+		{{range $v.ToolCalls}}
+			<div class="toolcall"><span class="name">{{.Name}}</span><pre class="args">{{.ArgsJSON}}</pre></div>
+		{{end}}
+		{{if $v.HasReasoning}}
+			<details class="reasoning"><summary>reasoning</summary>
+				{{if $v.ReasoningSummary}}<div class="summary md">summary: {{$v.ReasoningSummary}}</div>{{end}}
+				{{if $v.ReasoningContent}}<pre class="content">{{$v.ReasoningContent}}</pre>{{end}}
+			</details>
+		{{end}}
+		{{if $v.Usage}}
+			<details class="usage"><summary>{{$v.Usage.Model}} · {{$v.Usage.PromptTokens}}→{{$v.Usage.CompletionTokens}} tok · {{$v.Usage.DurationMs}}ms</summary>
+				cached {{$v.Usage.CachedTokens}} · reasoning {{$v.Usage.ReasoningTokens}} · {{$v.Usage.Service}} · {{$v.Usage.FinishReason}} · {{$v.Usage.APIPath}}
+			</details>
+		{{end}}
+	</div>
+{{end}}

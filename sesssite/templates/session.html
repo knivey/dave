@@ -1,0 +1,34 @@
+{{define "title"}}{{.Session.Network}} {{.Session.Channel}} — dave session{{end}}
+{{define "head"}}{{if .BaseURL}}<meta property="og:url" content="{{.BaseURL}}/s/{{.Session.Slug}}">
+{{end}}{{end}}
+{{define "content"}}
+<main class="session">
+	<header class="session-header">
+		<h1>{{.Session.Network}} / {{.Session.Channel}}</h1>
+		<div class="badges">
+			<span class="badge">{{.Session.ChatCommand}}</span>
+			<span class="badge">{{.Session.Service}}</span>
+			<span class="badge model">{{.Session.Model}}</span>
+			<span class="badge status-{{.Session.Status}}">{{.Session.Status}}</span>
+			{{if .ModelChanged}}<span class="badge changed" title="the model changed mid-session — see the usage details">model changed</span>{{end}}
+		</div>
+		<div class="session-meta">
+			created <time title="{{.Session.CreatedAt.Format "2006-01-02 15:04:05"}}">{{.Session.CreatedAt.Format "2006-01-02 15:04"}}</time>
+			· last active <time title="{{.Session.LastActive.Format "2006-01-02 15:04:05"}}">{{.Session.LastActive.Format "2006-01-02 15:04"}}</time>
+			· {{.MessageCount}} messages
+			{{if .UserSlug}} · <a href="/u/{{.UserSlug}}">user page</a>{{end}}
+		</div>
+		{{if .UsageByModel}}
+		<details class="usage-by-model">
+			<summary>token usage by model</summary>
+			<ul>
+				{{range .UsageByModel}}<li><span class="model">{{.Model}}</span> · {{.PromptTokens}} in → {{.CompletionTokens}} out · {{.Turns}} turns</li>{{end}}
+			</ul>
+		</details>
+		{{end}}
+	</header>
+	<div id="msgs">{{.Rows}}</div>
+	{{if .HasOlder}}<button id="load-older" data-oldest="{{.OldestID}}">load older</button>{{end}}
+	{{if .Session.Slug}}<script src="/static/session.js" data-slug="{{.Session.Slug}}" defer></script>{{end}}
+</main>
+{{end}}

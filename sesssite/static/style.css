@@ -1,0 +1,185 @@
+/* sesssite — Dracula palette, ported from markdown-parsebin's dave-web
+ * stylesheet (MIT, dave project). The .irc-* classes are emitted by
+ * sesssite/renderer's IRC control-code transformer. */
+
+:root { color-scheme: dark; }
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+	background: #282a36;
+	color: #f8f8f2;
+	line-height: 1.6;
+	min-height: 100vh;
+}
+main { max-width: 60rem; margin: 1.5rem auto; padding: 0 1rem; }
+h1 { font-size: 1.3rem; margin-bottom: 0.5rem; }
+a { color: #8be9fd; text-decoration: none; }
+a:hover { text-decoration: underline; }
+code, pre { font-family: "Fira Code", ui-monospace, "Cascadia Mono", monospace; font-variant-ligatures: none; }
+
+/* landing */
+.landing p { color: #bdc0d4; max-width: 42rem; }
+
+/* session header */
+.session-header { border-bottom: 1px solid #44475a; padding-bottom: 0.8rem; margin-bottom: 0.8rem; }
+.badges { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.4rem 0; }
+.badge { background: #44475a; border-radius: 4px; padding: 0.05rem 0.5rem; font-size: 0.8rem; }
+.badge.model { color: #bd93f9; }
+.badge.status-active { color: #50fa7b; }
+.badge.status-completed { color: #6272a4; }
+.badge.changed { color: #ffb86c; }
+.session-meta { color: #6272a4; font-size: 0.85rem; }
+.usage-by-model { margin-top: 0.5rem; font-size: 0.85rem; color: #bd93f9; }
+.usage-by-model ul { margin: 0.3rem 0 0 1.2rem; color: #bdc0d4; }
+
+/* transcript rows */
+.msg { padding: 0.55rem 0.4rem; border-bottom: 1px solid #343746; }
+.msg .meta { display: flex; align-items: baseline; gap: 0.7rem; font-size: 0.78rem; color: #6272a4; margin-bottom: 0.2rem; }
+.msg .meta .role { font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+.role-user .meta .role { color: #50fa7b; }
+.role-assistant .meta .role { color: #bd93f9; }
+.role-system .meta .role { color: #6272a4; }
+.role-tool .meta .role { color: #ffb86c; }
+.msg .meta .rawlink { margin-left: auto; font-size: 0.72rem; }
+.msg:target { outline: 2px solid #bd93f9; outline-offset: 3px; border-radius: 3px; }
+.archived { opacity: .55; }
+.tag { background: #44475a; border-radius: 3px; padding: 0 0.35rem; font-size: 0.72rem; }
+.compaction-divider { border-top: 2px dashed #6272a4; margin: 0.6rem 0; padding: 0.35rem 0.1rem; color: #6272a4; font-size: 0.82rem; }
+.compaction-summary { margin-top: 0.25rem; }
+
+/* markdown content (renderer output; Chroma's inline styles are CSP-blocked,
+ * so plain <pre> carries the code-block colors) */
+.content.md p { margin: 0.3rem 0; }
+.content.md pre { background: #21222c; color: #f8f8f2; border-radius: 6px; padding: 0.7rem; overflow-x: auto; font-size: 0.86rem; margin: 0.4rem 0; }
+.content.md code { background: #44475a; color: #ff79c6; border-radius: 3px; padding: 0.08em 0.35em; font-size: 0.88em; }
+.content.md pre code { background: none; padding: 0; color: inherit; }
+.content.md blockquote { border-left: 3px solid #bd93f9; padding-left: 0.8rem; margin: 0.4rem 0; color: #a2a6c4; }
+.content.md ul, .content.md ol { margin: 0.4rem 0; padding-left: 1.6rem; }
+.content.md table { border-collapse: collapse; margin: 0.5rem 0; }
+.content.md th, .content.md td { border: 1px solid #44475a; padding: 0.25rem 0.55rem; }
+.content.md th { background: #44475a; }
+.content.md img { max-width: 100%; border-radius: 6px; }
+
+/* tool calls / results, reasoning, system, usage */
+.toolcall { margin: 0.3rem 0; }
+.toolcall .name { color: #ffb86c; font-weight: 600; }
+.toolcall pre, .toolresult pre, .reasoning pre, .system pre {
+	background: #21222c; color: #f8f8f2; padding: 0.55rem; border-radius: 6px;
+	overflow-x: auto; font-size: 0.82rem; white-space: pre-wrap; word-break: break-word;
+}
+details > summary { cursor: pointer; color: #8be9fd; font-size: 0.8rem; }
+.chatimg { max-width: 100%; border-radius: 6px; margin: 0.25rem 0; }
+
+/* pagination */
+#load-older { display: block; margin: 1rem auto; background: #44475a; color: #f8f8f2; border: 1px solid #6272a4; border-radius: 6px; padding: 0.45rem 1.4rem; cursor: pointer; font: inherit; }
+#load-older:hover { background: #4b4f66; }
+
+/* IRC control-code classes below — ported verbatim from parsebin */
+.irc-bold { font-weight: bold; }
+.irc-italic { font-style: italic; }
+.irc-underline { text-decoration: underline; }
+.irc-strikethrough { text-decoration: line-through; }
+.irc-monospace { font-family: monospace; }
+
+.irc-spoiler { color: transparent !important; background-color: transparent !important; }
+.irc-spoiler:hover { color: inherit !important; background-color: rgba(255,255,255,0.2) !important; }
+
+.irc-fg-0 { color: #ffffff; }  .irc-bg-0 { background-color: #ffffff; }
+.irc-fg-1 { color: #000000; }  .irc-bg-1 { background-color: #000000; }
+.irc-fg-2 { color: #000080; }  .irc-bg-2 { background-color: #000080; }
+.irc-fg-3 { color: #008000; }  .irc-bg-3 { background-color: #008000; }
+.irc-fg-4 { color: #ff0000; }  .irc-bg-4 { background-color: #ff0000; }
+.irc-fg-5 { color: #800000; }  .irc-bg-5 { background-color: #800000; }
+.irc-fg-6 { color: #800080; }  .irc-bg-6 { background-color: #800080; }
+.irc-fg-7 { color: #ff6600; }  .irc-bg-7 { background-color: #ff6600; }
+.irc-fg-8 { color: #ffff00; }  .irc-bg-8 { background-color: #ffff00; }
+.irc-fg-9 { color: #00ff00; }  .irc-bg-9 { background-color: #00ff00; }
+.irc-fg-10 { color: #008080; }  .irc-bg-10 { background-color: #008080; }
+.irc-fg-11 { color: #00ffff; }  .irc-bg-11 { background-color: #00ffff; }
+.irc-fg-12 { color: #4169e1; }  .irc-bg-12 { background-color: #4169e1; }
+.irc-fg-13 { color: #ff00ff; }  .irc-bg-13 { background-color: #ff00ff; }
+.irc-fg-14 { color: #808080; }  .irc-bg-14 { background-color: #808080; }
+.irc-fg-15 { color: #c0c0c0; }  .irc-bg-15 { background-color: #c0c0c0; }
+.irc-fg-16 { color: #470000; }  .irc-bg-16 { background-color: #470000; }
+.irc-fg-17 { color: #472100; }  .irc-bg-17 { background-color: #472100; }
+.irc-fg-18 { color: #474700; }  .irc-bg-18 { background-color: #474700; }
+.irc-fg-19 { color: #324700; }  .irc-bg-19 { background-color: #324700; }
+.irc-fg-20 { color: #004700; }  .irc-bg-20 { background-color: #004700; }
+.irc-fg-21 { color: #00472c; }  .irc-bg-21 { background-color: #00472c; }
+.irc-fg-22 { color: #004747; }  .irc-bg-22 { background-color: #004747; }
+.irc-fg-23 { color: #002747; }  .irc-bg-23 { background-color: #002747; }
+.irc-fg-24 { color: #000047; }  .irc-bg-24 { background-color: #000047; }
+.irc-fg-25 { color: #2e0047; }  .irc-bg-25 { background-color: #2e0047; }
+.irc-fg-26 { color: #470047; }  .irc-bg-26 { background-color: #470047; }
+.irc-fg-27 { color: #47002a; }  .irc-bg-27 { background-color: #47002a; }
+.irc-fg-28 { color: #740000; }  .irc-bg-28 { background-color: #740000; }
+.irc-fg-29 { color: #743a00; }  .irc-bg-29 { background-color: #743a00; }
+.irc-fg-30 { color: #747400; }  .irc-bg-30 { background-color: #747400; }
+.irc-fg-31 { color: #517400; }  .irc-bg-31 { background-color: #517400; }
+.irc-fg-32 { color: #007400; }  .irc-bg-32 { background-color: #007400; }
+.irc-fg-33 { color: #007449; }  .irc-bg-33 { background-color: #007449; }
+.irc-fg-34 { color: #007474; }  .irc-bg-34 { background-color: #007474; }
+.irc-fg-35 { color: #004074; }  .irc-bg-35 { background-color: #004074; }
+.irc-fg-36 { color: #000074; }  .irc-bg-36 { background-color: #000074; }
+.irc-fg-37 { color: #4b0074; }  .irc-bg-37 { background-color: #4b0074; }
+.irc-fg-38 { color: #740074; }  .irc-bg-38 { background-color: #740074; }
+.irc-fg-39 { color: #740045; }  .irc-bg-39 { background-color: #740045; }
+.irc-fg-40 { color: #b50000; }  .irc-bg-40 { background-color: #b50000; }
+.irc-fg-41 { color: #b56300; }  .irc-bg-41 { background-color: #b56300; }
+.irc-fg-42 { color: #b5b500; }  .irc-bg-42 { background-color: #b5b500; }
+.irc-fg-43 { color: #7db500; }  .irc-bg-43 { background-color: #7db500; }
+.irc-fg-44 { color: #00b500; }  .irc-bg-44 { background-color: #00b500; }
+.irc-fg-45 { color: #00b571; }  .irc-bg-45 { background-color: #00b571; }
+.irc-fg-46 { color: #00b5b5; }  .irc-bg-46 { background-color: #00b5b5; }
+.irc-fg-47 { color: #0063b5; }  .irc-bg-47 { background-color: #0063b5; }
+.irc-fg-48 { color: #0000b5; }  .irc-bg-48 { background-color: #0000b5; }
+.irc-fg-49 { color: #7500b5; }  .irc-bg-49 { background-color: #7500b5; }
+.irc-fg-50 { color: #b500b5; }  .irc-bg-50 { background-color: #b500b5; }
+.irc-fg-51 { color: #b5006b; }  .irc-bg-51 { background-color: #b5006b; }
+.irc-fg-52 { color: #ff0000; }  .irc-bg-52 { background-color: #ff0000; }
+.irc-fg-53 { color: #ff8c00; }  .irc-bg-53 { background-color: #ff8c00; }
+.irc-fg-54 { color: #ffff00; }  .irc-bg-54 { background-color: #ffff00; }
+.irc-fg-55 { color: #b2ff00; }  .irc-bg-55 { background-color: #b2ff00; }
+.irc-fg-56 { color: #00ff00; }  .irc-bg-56 { background-color: #00ff00; }
+.irc-fg-57 { color: #00ffa0; }  .irc-bg-57 { background-color: #00ffa0; }
+.irc-fg-58 { color: #00ffff; }  .irc-bg-58 { background-color: #00ffff; }
+.irc-fg-59 { color: #008cff; }  .irc-bg-59 { background-color: #008cff; }
+.irc-fg-60 { color: #0000ff; }  .irc-bg-60 { background-color: #0000ff; }
+.irc-fg-61 { color: #a500ff; }  .irc-bg-61 { background-color: #a500ff; }
+.irc-fg-62 { color: #ff00ff; }  .irc-bg-62 { background-color: #ff00ff; }
+.irc-fg-63 { color: #ff0098; }  .irc-bg-63 { background-color: #ff0098; }
+.irc-fg-64 { color: #ff5959; }  .irc-bg-64 { background-color: #ff5959; }
+.irc-fg-65 { color: #ffb459; }  .irc-bg-65 { background-color: #ffb459; }
+.irc-fg-66 { color: #ffff71; }  .irc-bg-66 { background-color: #ffff71; }
+.irc-fg-67 { color: #cfff60; }  .irc-bg-67 { background-color: #cfff60; }
+.irc-fg-68 { color: #6fff6f; }  .irc-bg-68 { background-color: #6fff6f; }
+.irc-fg-69 { color: #65ffc9; }  .irc-bg-69 { background-color: #65ffc9; }
+.irc-fg-70 { color: #6dffff; }  .irc-bg-70 { background-color: #6dffff; }
+.irc-fg-71 { color: #59b4ff; }  .irc-bg-71 { background-color: #59b4ff; }
+.irc-fg-72 { color: #5959ff; }  .irc-bg-72 { background-color: #5959ff; }
+.irc-fg-73 { color: #c459ff; }  .irc-bg-73 { background-color: #c459ff; }
+.irc-fg-74 { color: #ff66ff; }  .irc-bg-74 { background-color: #ff66ff; }
+.irc-fg-75 { color: #ff59bc; }  .irc-bg-75 { background-color: #ff59bc; }
+.irc-fg-76 { color: #ff9c9c; }  .irc-bg-76 { background-color: #ff9c9c; }
+.irc-fg-77 { color: #ffd39c; }  .irc-bg-77 { background-color: #ffd39c; }
+.irc-fg-78 { color: #ffff9c; }  .irc-bg-78 { background-color: #ffff9c; }
+.irc-fg-79 { color: #e2ff9c; }  .irc-bg-79 { background-color: #e2ff9c; }
+.irc-fg-80 { color: #9cff9c; }  .irc-bg-80 { background-color: #9cff9c; }
+.irc-fg-81 { color: #9cffdb; }  .irc-bg-81 { background-color: #9cffdb; }
+.irc-fg-82 { color: #9cffff; }  .irc-bg-82 { background-color: #9cffff; }
+.irc-fg-83 { color: #9cd3ff; }  .irc-bg-83 { background-color: #9cd3ff; }
+.irc-fg-84 { color: #9c9cff; }  .irc-bg-84 { background-color: #9c9cff; }
+.irc-fg-85 { color: #dc9cff; }  .irc-bg-85 { background-color: #dc9cff; }
+.irc-fg-86 { color: #ff9cff; }  .irc-bg-86 { background-color: #ff9cff; }
+.irc-fg-87 { color: #ff94d3; }  .irc-bg-87 { background-color: #ff94d3; }
+.irc-fg-88 { color: #000000; }  .irc-bg-88 { background-color: #000000; }
+.irc-fg-89 { color: #131313; }  .irc-bg-89 { background-color: #131313; }
+.irc-fg-90 { color: #282828; }  .irc-bg-90 { background-color: #282828; }
+.irc-fg-91 { color: #363636; }  .irc-bg-91 { background-color: #363636; }
+.irc-fg-92 { color: #4d4d4d; }  .irc-bg-92 { background-color: #4d4d4d; }
+.irc-fg-93 { color: #656565; }  .irc-bg-93 { background-color: #656565; }
+.irc-fg-94 { color: #818181; }  .irc-bg-94 { background-color: #818181; }
+.irc-fg-95 { color: #9f9f9f; }  .irc-bg-95 { background-color: #9f9f9f; }
+.irc-fg-96 { color: #bcbcbc; }  .irc-bg-96 { background-color: #bcbcbc; }
+.irc-fg-97 { color: #e2e2e2; }  .irc-bg-97 { background-color: #e2e2e2; }
+.irc-fg-98 { color: #ffffff; }  .irc-bg-98 { background-color: #ffffff; }

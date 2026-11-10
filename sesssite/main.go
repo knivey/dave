@@ -4,11 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
-
-	"gorm.io/gorm"
 )
 
 func main() {
@@ -39,20 +36,4 @@ func main() {
 	if err := srv.Run(cfg.Server.Addr); err != nil {
 		log.Fatalf("server: %v", err)
 	}
-}
-
-// Task 8 replaces this stub wholesale with server.go. It exists only so
-// the package builds and main() has its two seams (db + config) wired.
-type dbType = *gorm.DB
-
-type server struct {
-	db  dbType
-	cfg *Config
-}
-
-func NewServer(db *gorm.DB, cfg *Config) *server { return &server{db: db, cfg: cfg} }
-
-func (s *server) Run(addr string) error {
-	http.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) })
-	return http.ListenAndServe(addr, nil)
 }

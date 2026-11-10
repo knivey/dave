@@ -3,6 +3,7 @@ package main
 import (
 	"html/template"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,7 +106,11 @@ func TestSafeImageURL(t *testing.T) {
 	out := string(html)
 	assert.Contains(t, out, `src="https://img.example.com/x.png"`)
 	assert.Contains(t, out, `src="data:image/png;base64,iVBORw0KGgo="`)
-	assert.Contains(t, out, `src=""`) // javascript: part blanked
+	// javascript: part: NO img element at all — a blanked URL must never
+	// render src="" (carried fix from the Task 7 review; the template
+	// gates the img on safeImageURL).
+	assert.Equal(t, 2, strings.Count(out, "<img"))
+	assert.NotContains(t, out, `src=""`)
 	assert.NotContains(t, out, "ZgotmplZ")
 	assert.NotContains(t, out, "javascript:")
 }

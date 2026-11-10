@@ -1,6 +1,8 @@
 package main
 
 import (
+	"io"
+	"net/http"
 	"path/filepath"
 	"testing"
 	"time"
@@ -10,6 +12,15 @@ import (
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
+
+func readBody(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	b, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return string(b)
+}
+
+func ptrInt64(i int64) *int64 { return &i }
 
 // newTestDB creates a schema compatible with the columns sesssite reads.
 // sesssite NEVER AutoMigrates in production (read-only contract); tests

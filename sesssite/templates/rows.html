@@ -14,13 +14,18 @@
 			<a class="rawlink" href="{{$v.RawURL}}">raw</a>
 		</div>
 		{{if $v.IsSystem}}
-			<details class="system"><summary>system prompt</summary><div class="content md">{{$v.ContentHTML}}</div></details>
+		{{/* System rows carry no markdown render (buildMessageView renders
+		     only user/assistant); the escaped raw content fills the
+		     collapsed body — escaped by html/template, never live HTML. */}}
+			<details class="system"><summary>system prompt</summary><div class="content"><pre>{{$v.Content}}</pre></div></details>
 		{{else if eq $v.Role "tool"}}
 			<details class="toolresult"><summary>tool result · {{$v.ToolCallID}}</summary><pre class="content">{{$v.Content}}</pre></details>
 		{{else}}
 			<div class="content md">{{$v.ContentHTML}}</div>
 		{{end}}
-		{{range $v.ImageParts}}<img class="chatimg" src="{{safeImageURL .}}" alt="conversation image" loading="lazy">{{end}}
+		{{/* Gate on safeImageURL: an allowlist-failing URL renders NO img at
+	     all — a blanked src would otherwise emit a broken src="" element. */}}
+	{{range $v.ImageParts}}{{if safeImageURL .}}<img class="chatimg" src="{{safeImageURL .}}" alt="conversation image" loading="lazy">{{end}}{{end}}
 		{{range $v.ToolCalls}}
 			<div class="toolcall"><span class="name">{{.Name}}</span><pre class="args">{{.ArgsJSON}}</pre></div>
 		{{end}}

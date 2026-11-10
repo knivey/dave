@@ -22,7 +22,15 @@
 	};
 
 	const es = new EventSource("/u/" + slug + "/events");
-	es.addEventListener("updated", () => {
+	// Reconnect catch-up: this stream carries change PINGS only — no
+	// replay, no since. A change that happens while the stream is down
+	// (including the render→connect window at page load) would be
+	// swallowed, because the (re)connecting poller snapshots the
+	// already-changed state as its baseline. Refetching page 1 on every
+	// open closes the gap; the full replace is idempotent — the same
+	// data renders the same DOM, so repeated pings and refetches can
+	// never duplicate rows (unlike the session page's appends).
+	const refetch = () => {
 		fetch(location.pathname + "?fragment=list")
 			.then((r) => (r.ok ? r.text() : ""))
 			.then((html) => {
@@ -30,7 +38,9 @@
 				const { rows } = listFragment(html);
 				if (rows) list.innerHTML = rows.innerHTML;
 			});
-	});
+	};
+	es.onopen = refetch;
+	es.addEventListener("updated", refetch);
 
 	const older = document.getElementById("user-load-older");
 	if (older) older.addEventListener("click", () => {

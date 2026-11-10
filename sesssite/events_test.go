@@ -299,3 +299,25 @@ func TestStaticServesScripts(t *testing.T) {
 		assert.Contains(t, body, "EventSource", name)
 	}
 }
+
+// Source-level pin (imgsite's JS-pinning style): the reconnect
+// contract must survive future edits. EventSource auto-reconnects with
+// the CONSTRUCTED URL — a since frozen at page load — and the server's
+// gap-fill would then replay every row since load, so the script must
+// take over the reconnect with a fresh since and filter replayed ids.
+func TestSessionJSReconnectContract(t *testing.T) {
+	_, ts := newPageServer(t)
+	defer ts.Close()
+	resp, err := http.Get(ts.URL + "/static/session.js")
+	require.NoError(t, err)
+	body := readBody(t, resp)
+	resp.Body.Close()
+	assert.Contains(t, body, "RECONNECT CONTRACT")
+	assert.Contains(t, body, "EventSource.CONNECTING")
+	assert.Contains(t, body, "es.close()")
+	assert.Contains(t, body, "connect();")
+	// the idempotency second net: skip elements whose id already exists
+	assert.Contains(t, body, "document.getElementById(el.id)")
+	// reconnects must re-derive since from the live DOM, not a constant
+	assert.Contains(t, body, "events?since=\" + lastId()")
+}

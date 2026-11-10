@@ -22,13 +22,20 @@ func userBySlug(db *gorm.DB, slug string) (*User, error) {
 	return &u, nil
 }
 
+// liveTranscriptCond is the transcript-liveness predicate shared by
+// EVERY query that fetches or counts transcript rows: tail-copies
+// (source_compaction_id set — compaction re-inserted rows whose
+// content duplicates the archived originals) and superseded rows are
+// excluded, so the flat transcript shows each message exactly once
+// (spec). It lived as four drifting string literals before this
+// constant; appending a new liveness rule here fixes every consumer.
+const liveTranscriptCond = "superseded = false AND source_compaction_id IS NULL"
+
 // sessionMessagesPage returns up to limit messages ending at beforeID
-// (exclusive; 0 = newest), oldest-first. Tail-copies (source_compaction_id
-// set — compaction re-inserted rows whose content duplicates the archived
-// originals) and superseded rows are excluded: the flat transcript shows
-// each message exactly once (spec).
+// (exclusive; 0 = newest), oldest-first. Tail-copies and superseded
+// rows are excluded via liveTranscriptCond (see its comment).
 func sessionMessagesPage(db *gorm.DB, sessionID int64, beforeID int64, limit int) ([]Message, error) {
-	q := db.Where("session_id = ? AND superseded = false AND source_compaction_id IS NULL", sessionID)
+	q := db.Where("session_id = ? AND "+liveTranscriptCond, sessionID)
 	if beforeID > 0 {
 		q = q.Where("id < ?", beforeID)
 	}

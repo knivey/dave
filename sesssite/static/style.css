@@ -47,8 +47,9 @@ code, pre { font-family: "Fira Code", ui-monospace, "Cascadia Mono", monospace; 
 .compaction-divider { border-top: 2px dashed #6272a4; margin: 0.6rem 0; padding: 0.35rem 0.1rem; color: #6272a4; font-size: 0.82rem; }
 .compaction-summary { margin-top: 0.25rem; }
 
-/* markdown content (renderer output; Chroma's inline styles are CSP-blocked,
- * so plain <pre> carries the code-block colors) */
+/* markdown content (renderer output; code-block colors are CLASS-based —
+ * Chroma emits .chroma token classes under the strict CSP, styled by the
+ * generated /static/chroma.css) */
 .content.md p { margin: 0.3rem 0; }
 .content.md pre { background: #21222c; color: #f8f8f2; border-radius: 6px; padding: 0.7rem; overflow-x: auto; font-size: 0.86rem; margin: 0.4rem 0; }
 .content.md code { background: #44475a; color: #ff79c6; border-radius: 3px; padding: 0.08em 0.35em; font-size: 0.88em; }

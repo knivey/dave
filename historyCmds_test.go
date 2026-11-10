@@ -61,6 +61,11 @@ func TestHistoryRegexesTolerateTrailingWhitespace(t *testing.T) {
 		{name: "session with arg rejected", re: session_re, input: "session 12", want: false},
 		{name: "sessions does not match session_re", re: session_re, input: "sessions", want: false},
 		{name: "session does not match sessions_re", re: sessions_re, input: "session", want: false},
+
+		{name: "link plain", re: link_re, input: "link", want: true, wantArg: ""},
+		{name: "link trailing space", re: link_re, input: "link ", want: true, wantArg: ""},
+		{name: "link trailing tab", re: link_re, input: "link\t", want: true, wantArg: ""},
+		{name: "link with arg rejected", re: link_re, input: "link x", want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

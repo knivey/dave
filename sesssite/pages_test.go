@@ -163,6 +163,9 @@ func TestOlderRowsFragment(t *testing.T) {
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, 200, resp.StatusCode)
+	// explicit like the user-list fragment handler (final-review
+	// symmetry finding) — never left to sniffing
+	assert.Equal(t, "text/html; charset=utf-8", resp.Header.Get("Content-Type"))
 	body := readBody(t, resp)
 	assert.Contains(t, body, `id="m3"`)
 	assert.NotContains(t, body, `id="m4"`)
@@ -250,6 +253,11 @@ func TestSessionPageHeaderUsageByModel(t *testing.T) {
 	} {
 		require.NoError(t, db.Create(&row).Error)
 	}
+	// an assistant row after ALL the usage rows joins them to the
+	// message (window (user, assistant]); the per-message line renders
+	// below. Explicit CreatedAt: mkMessage's time.Now() can land before
+	// the later usage rows' base+Ns stamps.
+	mkMessage(t, db, s.ID, "assistant", "a", func(m *Message) { m.CreatedAt = base.Add(3 * time.Second) })
 
 	resp, err := http.Get(ts.URL + "/s/aaaaaaaa")
 	require.NoError(t, err)
@@ -257,6 +265,8 @@ func TestSessionPageHeaderUsageByModel(t *testing.T) {
 	require.Equal(t, 200, resp.StatusCode)
 	body := readBody(t, resp)
 	assert.Contains(t, body, "usage-by-model")
+	// the aggregate is exact (full-session rows) — "totals" wording
+	assert.Contains(t, body, "token usage totals by model")
 	assert.Contains(t, body, "m-a")
 	assert.Contains(t, body, "m-b")
 	assert.Contains(t, body, "model changed") // marker: >1 distinct model
@@ -265,6 +275,9 @@ func TestSessionPageHeaderUsageByModel(t *testing.T) {
 	// Aggregated totals: 150 in / 15 out for m-a.
 	assert.Contains(t, body, "150 in")
 	assert.Contains(t, body, "15 out")
+	// the per-message line is approximate by construction (assignUsage
+	// windows by time; usage rows carry no message id) — labeled ≈
+	assert.Contains(t, body, "≈ m-b · 157→17 tok")
 }
 
 // TestSessionPageSystemPromptBody pins carried fix 1 (Task 7 review):
@@ -408,6 +421,95 @@ func TestFragmentCompactionDividerChunked(t *testing.T) {
 	body := readBody(t, resp)
 	assert.Equal(t, 1, strings.Count(body, "compaction-divider")) // exactly once, in the owning chunk
 	assert.Contains(t, body, `id="m4"`)                           // divider sits before the first row past the range
+}
+
+// TestFragmentCompactionDividerBoundaryAligned pins the final-review
+// fix: a compaction whose archived range ends EXACTLY at a chunk
+// boundary (LastArchivedID == the newer page's lo-1) must render its
+// divider — before the NEWER page's first row. The old intersect
+// predicate included it in the older chunk only, where no row follows
+// the range, so the divider rendered nowhere.
+func TestFragmentCompactionDividerBoundaryAligned(t *testing.T) {
+	db := newTestDB(t)
+	srv := NewServer(db, &Config{})
+	ts := httptest.NewServer(srv.mux())
+	defer ts.Close()
+	s := mkSession(t, db, "aaaaaaaa")
+	for i := 0; i < 205; i++ {
+		mkMessage(t, db, s.ID, "user", "row")
+	}
+	// ids 1..205; newest page spans 6..205. Archive ids 1..5 — the
+	// range ends exactly at the boundary (LastArchivedID = 6-1).
+	comp := Compaction{SessionID: s.ID, SummaryMessageID: 2, FirstArchivedID: 1, LastArchivedID: 5,
+		ArchivedCount: 5, Trigger: "auto", Model: "m", CreatedAt: time.Now()}
+	require.NoError(t, db.Create(&comp).Error)
+
+	resp, err := http.Get(ts.URL + "/s/aaaaaaaa")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, 200, resp.StatusCode)
+	body := readBody(t, resp)
+	assert.Equal(t, 1, strings.Count(body, "compaction-divider")) // on the newer page now
+	// and it sits before the page's first row (m6), not merely anywhere
+	require.Less(t, strings.Index(body, "compaction-divider"), strings.Index(body, `id="m6"`))
+
+	// the older fragment (rows 1..5) must NOT repeat it — no row there
+	// follows the range.
+	resp2, err := http.Get(ts.URL + "/s/aaaaaaaa?fragment=rows&before=6")
+	require.NoError(t, err)
+	defer resp2.Body.Close()
+	require.Equal(t, 200, resp2.StatusCode)
+	assert.NotContains(t, readBody(t, resp2), "compaction-divider")
+}
+
+// TestCompsForChunkDispositions unit-pins the final-review predicate
+// (lo <= LastArchivedID+1 && hi > LastArchivedID) across all four
+// chunk/range dispositions. The two false rows are the behavior change:
+// the old intersect predicate included both, rendering nothing for
+// either (the aligned case rendered nowhere at all — the bug; the
+// past-hi case was a harmless include-but-render-nothing).
+func TestCompsForChunkDispositions(t *testing.T) {
+	msgs := func(ids ...int64) []Message {
+		out := make([]Message, len(ids))
+		for i, id := range ids {
+			out[i] = Message{ID: id}
+		}
+		return out
+	}
+	tests := []struct {
+		name              string
+		ids               []int64
+		first, last       int64
+		wantIncluded      bool
+		wantDividerBefore int64 // row id the divider precedes (0 = none)
+	}{
+		{"boundary aligned: range ends at lo-1", []int64{6, 7, 205}, 1, 5, true, 6},
+		{"range inside chunk, rows follow", []int64{1, 2, 3, 4, 5}, 1, 3, true, 4},
+		{"range straddles lo", []int64{4, 5, 6, 9}, 2, 5, true, 6},
+		{"range entirely above chunk", []int64{6, 7, 205}, 1, 3, false, 0},
+		{"range extends past chunk newest (include-nothing dropped)", []int64{1, 2, 3, 4, 5}, 3, 10, false, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			comp := CompactionView{Compaction: Compaction{FirstArchivedID: tt.first, LastArchivedID: tt.last}}
+			got := compsForChunk([]CompactionView{comp}, msgs(tt.ids...))
+			if !tt.wantIncluded {
+				assert.Empty(t, got)
+				return
+			}
+			require.Len(t, got, 1)
+			// cross-check against the renderer's actual placement so
+			// the predicate and the placement rule cannot drift apart
+			var before int64
+			for _, m := range tt.ids {
+				if m > tt.last {
+					before = m
+					break
+				}
+			}
+			assert.Equal(t, tt.wantDividerBefore, before, "divider placement row")
+		})
+	}
 }
 
 // --- Task 9: user page ---

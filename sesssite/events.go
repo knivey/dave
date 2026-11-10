@@ -145,7 +145,7 @@ func writeSSEComment(w io.Writer, comment string) {
 func (s *Server) renderRowsAfter(sess *Session, afterID int64) (string, int64, error) {
 	var msgs []Message
 	if err := s.db.
-		Where("session_id = ? AND id > ? AND superseded = false AND source_compaction_id IS NULL", sess.ID, afterID).
+		Where("session_id = ? AND id > ? AND "+liveTranscriptCond, sess.ID, afterID).
 		Order("id ASC").Limit(sseRowsLimit).Find(&msgs).Error; err != nil {
 		return "", 0, err
 	}
@@ -190,7 +190,7 @@ func (s *Server) sessionEventState(sess *Session) (sessionEventState, error) {
 		return st, err
 	}
 	if err := s.db.Model(&Message{}).
-		Where("session_id = ? AND superseded = false AND source_compaction_id IS NULL", sess.ID).
+		Where("session_id = ? AND "+liveTranscriptCond, sess.ID).
 		Count(&st.count).Error; err != nil {
 		return st, err
 	}

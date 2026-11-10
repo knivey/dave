@@ -36,7 +36,10 @@
 			</details>
 		{{end}}
 		{{if $v.Usage}}
-			<details class="usage"><summary>{{$v.Usage.Model}} · {{$v.Usage.PromptTokens}}→{{$v.Usage.CompletionTokens}} tok · {{$v.Usage.DurationMs}}ms</summary>
+			{{/* ≈ marks the usage join approximate by construction (usage
+			     rows carry no message id; assignUsage windows by time) —
+			     spec: "Display-only and labeled approximate." */}}
+			<details class="usage"><summary>≈ {{$v.Usage.Model}} · {{$v.Usage.PromptTokens}}→{{$v.Usage.CompletionTokens}} tok · {{$v.Usage.DurationMs}}ms</summary>
 				cached {{$v.Usage.CachedTokens}} · reasoning {{$v.Usage.ReasoningTokens}} · {{$v.Usage.Service}} · {{$v.Usage.FinishReason}} · {{$v.Usage.APIPath}}
 			</details>
 		{{end}}

@@ -19,8 +19,10 @@
 			{{if .UserSlug}} · <a href="/u/{{.UserSlug}}">user page</a>{{end}}
 		</div>
 		{{if .UsageByModel}}
+		{{/* "totals": unlike per-message rows, this aggregate is exact —
+	     summed over the session's full turn_usage rows. */}}
 		<details class="usage-by-model">
-			<summary>token usage by model</summary>
+			<summary>token usage totals by model</summary>
 			<ul>
 				{{range .UsageByModel}}<li><span class="model">{{.Model}}</span> · {{.PromptTokens}} in → {{.CompletionTokens}} out · {{.Turns}} turns</li>{{end}}
 			</ul>

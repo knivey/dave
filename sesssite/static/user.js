@@ -6,6 +6,7 @@
 	const slug = document.body.dataset.userSlug;
 	if (!slug) return;
 	const list = document.getElementById("session-list");
+	const older = document.getElementById("user-load-older");
 
 	// listFragment parses a ?fragment=list response. The fragment ships
 	// a whole <ul id="session-list"> (plus the refreshed load-older
@@ -19,6 +20,24 @@
 			rows: tpl.content.querySelector("#session-list"),
 			older: tpl.content.querySelector("#user-load-older"),
 		};
+	};
+
+	// CURSOR-ADOPTION CONTRACT: refetch must adopt the fragment's
+	// load-older button state, not just its rows. Page 1's LAST row is
+	// the new load-older frontier; keeping the pre-refetch dataset
+	// would make load-older fetch from a stale (last_active, id) cursor
+	// — every row between page 1's tail and that cursor becomes
+	// unreachable, and the append path's dedupe below is insurance
+	// against duplicates, not a fix for a wrong cursor.
+	const adoptOlder = (fresh) => {
+		if (!older) return;
+		if (fresh) {
+			older.dataset.lastActive = fresh.dataset.lastActive;
+			older.dataset.id = fresh.dataset.id;
+			older.hidden = false;
+		} else {
+			older.hidden = true;
+		}
 	};
 
 	const es = new EventSource("/u/" + slug + "/events");
@@ -35,14 +54,14 @@
 			.then((r) => (r.ok ? r.text() : ""))
 			.then((html) => {
 				if (!html || !list) return;
-				const { rows } = listFragment(html);
+				const { rows, older: fresh } = listFragment(html);
 				if (rows) list.innerHTML = rows.innerHTML;
+				adoptOlder(fresh);
 			});
 	};
 	es.onopen = refetch;
 	es.addEventListener("updated", refetch);
 
-	const older = document.getElementById("user-load-older");
 	if (older) older.addEventListener("click", () => {
 		fetch(location.pathname + "?fragment=list&before_last_active=" +
 			encodeURIComponent(older.dataset.lastActive) +
@@ -52,9 +71,22 @@
 				if (!html || !list) return;
 				const { rows, older: next } = listFragment(html);
 				if (!rows || !rows.children.length) { older.hidden = true; return; }
+				// id-dedupe second net (session.js's replay filter):
+				// a refetch that landed while paged into history re-arms
+				// the cursor at page 1's tail, so a subsequent load-older
+				// fetches rows already appended below — skip those. Rows
+				// carry no id attribute; the session href keys them.
+				const seen = new Set();
+				for (const a of list.querySelectorAll("li.session-row > a")) {
+					seen.add(a.getAttribute("href"));
+				}
 				// snapshot first: appendChild moves nodes out of the
 				// fragment's live collection as it iterates
-				for (const li of [...rows.children]) list.appendChild(li);
+				for (const li of [...rows.children]) {
+					const a = li.querySelector("a");
+					if (a && seen.has(a.getAttribute("href"))) continue;
+					list.appendChild(li);
+				}
 				if (next) {
 					older.dataset.lastActive = next.dataset.lastActive;
 					older.dataset.id = next.dataset.id;

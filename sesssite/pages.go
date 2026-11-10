@@ -154,6 +154,9 @@ func (s *Server) serveRowsFragment(w http.ResponseWriter, r *http.Request, sess 
 		http.Error(w, "render failure", http.StatusInternalServerError)
 		return
 	}
+	// Explicit like serveUserListFragment: the fragment is bare row
+	// HTML meant for innerHTML adoption, never a standalone document.
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Write([]byte(rows))
 }
@@ -179,7 +182,7 @@ func (s *Server) serveSessionPage(w http.ResponseWriter, r *http.Request, sess *
 	}
 	var count int64
 	if err := s.db.Model(&Message{}).
-		Where("session_id = ? AND superseded = false AND source_compaction_id IS NULL", sess.ID).
+		Where("session_id = ? AND "+liveTranscriptCond, sess.ID).
 		Count(&count).Error; err != nil {
 		http.Error(w, "query failure", http.StatusInternalServerError)
 		return
@@ -288,17 +291,31 @@ func (s *Server) fetchCompactionViews(sessionID int64) ([]CompactionView, error)
 	return views, nil
 }
 
-// compsForChunk filters compactions to those whose archived id range
-// [FirstArchivedID, LastArchivedID] intersects the chunk's rows, so
-// each divider renders in exactly ONE chunk — the one whose rows touch
-// the archived range. Without the filter, renderRowsHTML's
-// "divider before the first row after the range" placement repeats the
-// divider at the top of EVERY chunk lying entirely above the boundary
-// (a Task 7 review finding: fragments + the initial page are chunks of
-// one stream; the top-of-page fallback exists for single-shot renders
-// only). Harmless no-op case: a range intersecting a chunk whose rows
-// are all ≤ LastArchivedID renders nothing — the divider belongs to a
-// newer chunk.
+// compsForChunk filters compactions to the ONE whose divider belongs
+// in this chunk: renderRowsHTML places a compaction's divider before
+// the first row with ID > LastArchivedID, so the owning chunk is the
+// one containing that boundary row. The predicate
+// lo <= LastArchivedID+1 && hi > LastArchivedID says exactly that —
+// the boundary row is at or after this chunk's first row, and some row
+// of the chunk follows the range. Two edge dispositions fall out:
+//
+//   - ALIGNED boundary (LastArchivedID == lo-1): INCLUDED — the
+//     divider renders before this chunk's first row. The old
+//     intersect predicate (range ∩ chunk ≠ ∅) excluded it here and
+//     included it in the OLDER chunk instead, where no row follows the
+//     range — the divider rendered NOWHERE (final-review finding:
+//     205 live messages, newest page ids 6..205, range ending at 5).
+//   - Range extending past the chunk's newest row (hi <=
+//     LastArchivedID): EXCLUDED — the old predicate included it, but
+//     renderRowsHTML renders nothing (no row > LastArchivedID); the
+//     divider belongs to a newer chunk.
+//
+// Without any filter, renderRowsHTML's placement repeats the divider
+// at the top of EVERY chunk lying entirely above the boundary (a Task
+// 7 review finding: fragments + the initial page are chunks of one
+// stream; the top-of-page fallback exists for single-shot renders
+// only). Consecutive chunks' windows [lo-1, hi-1] partition the id
+// line, so exactly one chunk claims each boundary.
 func compsForChunk(comps []CompactionView, msgs []Message) []CompactionView {
 	if len(msgs) == 0 || len(comps) == 0 {
 		return nil
@@ -306,7 +323,7 @@ func compsForChunk(comps []CompactionView, msgs []Message) []CompactionView {
 	lo, hi := msgs[0].ID, msgs[len(msgs)-1].ID
 	var out []CompactionView
 	for _, c := range comps {
-		if c.LastArchivedID >= lo && c.FirstArchivedID <= hi {
+		if lo <= c.LastArchivedID+1 && hi > c.LastArchivedID {
 			out = append(out, c)
 		}
 	}

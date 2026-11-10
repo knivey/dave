@@ -480,3 +480,27 @@ func TestSessionJSReconnectContract(t *testing.T) {
 	// reconnects must re-derive since from the live DOM, not a constant
 	assert.Contains(t, body, "events?since=\" + lastId()")
 }
+
+// Source-level pin (TestSessionJSReconnectContract's pattern): user.js's
+// cursor-adoption contract must survive future edits. The live-refetch
+// path replaces the list with page 1 — it must ALSO adopt the refreshed
+// load-older button state, or the visible button keeps a stale
+// (last_active, id) cursor and load-older fetches past rows between
+// page 1's tail and that cursor. The append path's href-keyed dedupe is
+// the second net (session.js's replay filter).
+func TestUserJSCursorAdoption(t *testing.T) {
+	_, ts := newPageServer(t)
+	defer ts.Close()
+	resp, err := http.Get(ts.URL + "/static/user.js")
+	require.NoError(t, err)
+	body := readBody(t, resp)
+	resp.Body.Close()
+	assert.Contains(t, body, "CURSOR-ADOPTION CONTRACT")
+	// refetch adopts the fragment's button, not just its rows
+	assert.Contains(t, body, "adoptOlder(fresh);")
+	assert.Contains(t, body, "older.dataset.lastActive = fresh.dataset.lastActive")
+	assert.Contains(t, body, "older.hidden = false")
+	// append dedupe keys rows by session href
+	assert.Contains(t, body, "li.session-row > a")
+	assert.Contains(t, body, "seen.has(a.getAttribute(\"href\"))")
+}

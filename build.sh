@@ -21,6 +21,7 @@ usage() {
     echo "  (none)           Build all targets"
     echo "  dave             Build main binary only"
     echo "  imgsite          Build image site only"
+    echo "  sesssite         Build session site only"
     echo "  img-mcp          Build specific MCP server"
     echo "  <name>           Build by target name"
 }
@@ -84,6 +85,7 @@ add_target() {
 
 add_target "dave" "." "dave"
 add_target "imgsite" "./imgsite" "imgsite/imgsite"
+add_target "sesssite" "./sesssite" "sesssite/sesssite"
 
 for mainfile in mcps/*/main.go; do
     [[ -f "$mainfile" ]] || continue

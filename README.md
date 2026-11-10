@@ -767,6 +767,7 @@ graph LR
 - **SQLite sessions** — chat history persisted in SQLite with auto-migrations, session resume, and cleanup
 - **Async job delivery** — background MCP jobs (e.g. image generation) auto-deliver results via the queue
 - **MCP auto-reconnect** — exponential backoff (2^n seconds, capped at 60s) with jitter, cancellable backoff sleep
+- **Session website (`sesssite`)** — read-only sibling binary serving session history over the same DB (unlisted capability-slug URLs, live SSE updates); over-long replies link there instead of the pastebin when `[website] url` is set
 
 ---
 

@@ -268,10 +268,17 @@ func TestSessionEventsBatchingOverCap(t *testing.T) {
 }
 
 // A transient render failure must not lose rows: the emission
-// watermark only advances through successfully rendered rows, so the
-// failed span is re-rendered on the next tick. Injected by dropping
-// the turn_usage table — readState never touches it, renderRowsAfter
-// does — then restoring it.
+// watermark only advances through successfully rendered rows, so a
+// span whose render failed is re-rendered on a later tick. Injected
+// by dropping the turn_usage table — readState never touches it (the
+// tick keeps running), renderRowsAfter's sessionUsageRows does.
+//
+// Timing is the point: m2 lands, the outage starts, and a poll tick
+// fires INSIDE the outage window (failed render, no event, watermark
+// must not advance). Healing delivers nothing new — the next tick must
+// re-render the failed span itself. Under the old watermark code the
+// failed tick advanced to the DB watermark and the stream stayed
+// silent forever (readSSE times out).
 func TestSessionEventsRenderFailureSelfHeals(t *testing.T) {
 	db := newTestDB(t)
 	srv := NewServer(db, &Config{})
@@ -280,29 +287,32 @@ func TestSessionEventsRenderFailureSelfHeals(t *testing.T) {
 	drainSSEConns(t)
 	s := mkSession(t, db, "aaaaaaaa")
 	m1 := mkMessage(t, db, s.ID, "user", "first")
-	// Connect with since=m1 (no gap: since == the connect-time
-	// watermark), so m2 and m3 can only arrive through the stream.
 
-	require.NoError(t, db.Migrator().DropTable(&TurnUsage{}))
+	// Connect with since=m1 (no gap: since == connect-time watermark),
+	// so m2 can only arrive through the stream.
 	resp, err := http.Get(ts.URL + "/s/aaaaaaaa/events?since=" + fmtInt(m1.ID))
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	reader := bufio.NewReader(resp.Body)
 
-	// This row's render fails (turn_usage is gone) — no event for it
-	// must go out yet, and its rows must NOT be skipped over.
+	// m2 lands while the stream is healthy; the outage starts
+	// immediately after — long before the first tick (~1s), so the
+	// drop can never race a healthy render of m2.
 	m2 := mkMessage(t, db, s.ID, "assistant", "during outage")
+	require.NoError(t, db.Migrator().DropTable(&TurnUsage{}))
 
-	// Heal: restore the table, add one more row.
+	// Outage window: a tick fires at ~1s and its render FAILS (the
+	// 1.5s margin absorbs handler-start scheduling delay on loaded
+	// CI). No messages event is emitted and the watermark stays at m1.
+	time.Sleep(1500 * time.Millisecond)
+
+	// Heal — and insert nothing further: the next tick must itself
+	// re-render the failed span and deliver m2.
 	require.NoError(t, db.AutoMigrate(&TurnUsage{}))
-	m3 := mkMessage(t, db, s.ID, "assistant", "after healing")
-
 	name, data := readSSE(t, reader, "messages")
 	assert.Equal(t, "messages", name)
-	assert.Contains(t, data, "during outage", "row from the failed-render window must not be lost")
-	assert.Contains(t, data, "after healing")
+	assert.Contains(t, data, "during outage", "row from the failed-render tick must not be lost")
 	assert.Contains(t, data, `id="m`+fmtInt(m2.ID)+`"`)
-	assert.Contains(t, data, `id="m`+fmtInt(m3.ID)+`"`)
 }
 
 // X-Forwarded-For keys the per-IP cap when the direct peer is a

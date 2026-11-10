@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func newPageServer(t *testing.T) (*Server, *httptest.Server) {
@@ -406,4 +408,257 @@ func TestFragmentCompactionDividerChunked(t *testing.T) {
 	body := readBody(t, resp)
 	assert.Equal(t, 1, strings.Count(body, "compaction-divider")) // exactly once, in the owning chunk
 	assert.Contains(t, body, `id="m4"`)                           // divider sits before the first row past the range
+}
+
+// --- Task 9: user page ---
+
+func mkUser(t *testing.T, db *gorm.DB, mods ...func(*User)) *User {
+	t.Helper()
+	u := &User{Slug: "uuuuuuuu", Network: "libera", CurrentNick: "shrew", CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	for _, f := range mods {
+		f(u)
+	}
+	require.NoError(t, db.Create(u).Error)
+	return u
+}
+
+func TestUserPageListsSessions(t *testing.T) {
+	db := newTestDB(t)
+	srv := NewServer(db, &Config{})
+	ts := httptest.NewServer(srv.mux())
+	defer ts.Close()
+
+	u := mkUser(t, db, func(x *User) { x.IRCAccount = "shrewacct" })
+	uid := u.ID
+	mkSession(t, db, "aaaaaaaa", func(s *Session) { s.UserID = &uid; s.FirstMessage = "tell me about shrews" })
+	mkSession(t, db, "bbbbbbbb", func(s *Session) { s.UserID = &uid; s.FirstMessage = "another one" })
+	other := int64(2)
+	mkSession(t, db, "cccccccc", func(s *Session) { s.UserID = &other })
+
+	resp, err := http.Get(ts.URL + "/u/uuuuuuuu")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, 200, resp.StatusCode)
+	body := readBody(t, resp)
+	assert.Contains(t, body, "shrew")
+	assert.Contains(t, body, "account: shrewacct")        // IRC account, display-only
+	assert.Contains(t, body, `data-user-slug="uuuuuuuu"`) // Task 10 user.js wiring
+	assert.Contains(t, body, "tell me about shrews")
+	assert.Contains(t, body, `href="/s/aaaaaaaa"`)
+	assert.Contains(t, body, `href="/s/bbbbbbbb"`)
+	assert.NotContains(t, body, "/s/cccccccc") // other user's sessions never listed
+	assert.Contains(t, body, `class="badge status-active"`)
+	assert.Contains(t, body, "#dave")
+	assert.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
+	assert.Equal(t, "default-src 'none'; img-src * data:; style-src 'self'; script-src 'self'; connect-src 'self'",
+		resp.Header.Get("Content-Security-Policy"))
+	assert.Equal(t, "nosniff", resp.Header.Get("X-Content-Type-Options"))
+	assert.Equal(t, "no-referrer", resp.Header.Get("Referrer-Policy"))
+	// Short page (2 < 50) is the whole list: no load-older affordance.
+	assert.NotContains(t, body, "user-load-older")
+}
+
+func TestUserPageNotFound(t *testing.T) {
+	db := newTestDB(t)
+	srv := NewServer(db, &Config{})
+	ts := httptest.NewServer(srv.mux())
+	defer ts.Close()
+	mkUser(t, db)
+
+	for _, slug := range []string{"short", "toolongslug1", "SYMBOLS!", "", "aaaaaaaa "} {
+		resp, err := http.Get(ts.URL + "/u/" + slug)
+		require.NoError(t, err)
+		resp.Body.Close()
+		assert.Equal(t, 404, resp.StatusCode, "slug %q", slug)
+	}
+	// Well-formed slug, no such user.
+	resp, err := http.Get(ts.URL + "/u/zzzzzzzz")
+	require.NoError(t, err)
+	resp.Body.Close()
+	assert.Equal(t, 404, resp.StatusCode)
+}
+
+func TestUserPageFragmentPagination(t *testing.T) {
+	db := newTestDB(t)
+	srv := NewServer(db, &Config{})
+	ts := httptest.NewServer(srv.mux())
+	defer ts.Close()
+	u := mkUser(t, db)
+	uid := u.ID
+	var last *Session
+	for i := 0; i < 3; i++ {
+		last = mkSession(t, db, "aaaaaaaa"+strings.Repeat("b", i), func(s *Session) { s.UserID = &uid })
+	}
+	resp, err := http.Get(ts.URL + "/u/uuuuuuuu?fragment=list&before_last_active=" +
+		urlQueryTime(last.LastActive) + "&before_id=" + fmtInt(last.ID))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, 200, resp.StatusCode)
+	body := readBody(t, resp)
+	assert.Contains(t, body, `id="session-list"`)
+	assert.Contains(t, body, `href="/s/aaaaaaaa"`) // the older two rows
+	assert.Contains(t, body, `href="/s/aaaaaaaab"`)
+	assert.NotContains(t, body, `href="/s/aaaaaaaabb"`) // the cursor row itself
+	assert.Equal(t, "text/html; charset=utf-8", resp.Header.Get("Content-Type"))
+	assert.Equal(t, "no-store", resp.Header.Get("Cache-Control"))
+
+	// Exhausted cursor: one past the oldest row → empty list, no button.
+	page, err := userSessionsPage(db, uid, time.Time{}, 0, 50)
+	require.NoError(t, err)
+	oldest := page[len(page)-1]
+	resp, err = http.Get(ts.URL + "/u/uuuuuuuu?fragment=list&before_last_active=" +
+		urlQueryTime(oldest.LastActive) + "&before_id=" + fmtInt(oldest.ID))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, 200, resp.StatusCode)
+	empty := readBody(t, resp)
+	assert.NotContains(t, empty, `href="/s/`)
+	assert.NotContains(t, empty, "user-load-older")
+}
+
+// TestUserPageLoadOlderCursor pins the load-older contract: a full page
+// with more rows beyond it renders the button carrying the LAST row's
+// (last_active, id) — the oldest of the batch — and that exact cursor
+// fetches the next page.
+func TestUserPageLoadOlderCursor(t *testing.T) {
+	db := newTestDB(t)
+	srv := NewServer(db, &Config{})
+	ts := httptest.NewServer(srv.mux())
+	defer ts.Close()
+	u := mkUser(t, db)
+	uid := u.ID
+	for i := 1; i <= 51; i++ {
+		mkSession(t, db, fmt.Sprintf("aaa%05d", i), func(s *Session) { s.UserID = &uid })
+	}
+	// ids 1..51, last_active increasing with id: page = ids 51..2, so the
+	// button cursor is row 2 and only row 1 lies beyond it.
+	page, err := userSessionsPage(db, uid, time.Time{}, 0, 50)
+	require.NoError(t, err)
+	require.Len(t, page, 50)
+	cursor := page[49]
+	require.EqualValues(t, 2, cursor.ID)
+
+	resp, err := http.Get(ts.URL + "/u/uuuuuuuu")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, 200, resp.StatusCode)
+	body := readBody(t, resp)
+	assert.Contains(t, body, `id="user-load-older"`)
+	assert.Contains(t, body, `data-id="2"`)
+	assert.Contains(t, body, `data-last-active="`+urlQueryTime(cursor.LastActive)+`"`)
+
+	resp, err = http.Get(ts.URL + "/u/uuuuuuuu?fragment=list&before_last_active=" +
+		urlQueryTime(cursor.LastActive) + "&before_id=" + fmtInt(cursor.ID))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, 200, resp.StatusCode)
+	next := readBody(t, resp)
+	assert.Contains(t, next, `href="/s/aaa00001"`)
+	assert.NotContains(t, next, "user-load-older") // 1 row < 50: exhausted
+}
+
+// TestUserPageZeroLastActiveTailNoCursor pins the carried Task 5 review
+// requirement: zero-last_active sessions (dave leaves LastActive zero
+// until the first AddMessage) sort LAST in DESC order, and a zero-time
+// cursor passed back would be treated as "no cursor" by
+// userSessionsPage's IsZero sentinel — an infinite page-1 loop. When
+// the last row of a page has zero last_active, no further page is
+// offered (no button, no cursor params).
+func TestUserPageZeroLastActiveTailNoCursor(t *testing.T) {
+	db := newTestDB(t)
+	srv := NewServer(db, &Config{})
+	ts := httptest.NewServer(srv.mux())
+	defer ts.Close()
+	u := mkUser(t, db)
+	uid := u.ID
+	for i := 1; i <= 49; i++ {
+		mkSession(t, db, fmt.Sprintf("aaa%05d", i), func(s *Session) { s.UserID = &uid })
+	}
+	mkSession(t, db, "zero0000", func(s *Session) { s.UserID = &uid; s.LastActive = time.Time{} })
+
+	resp, err := http.Get(ts.URL + "/u/uuuuuuuu")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, 200, resp.StatusCode)
+	body := readBody(t, resp)
+	assert.Contains(t, body, `href="/s/zero0000"`) // the zero row itself is listed (sorts last)
+	assert.NotContains(t, body, "user-load-older") // ...but no cursor is ever offered from it
+	assert.NotContains(t, body, "data-last-active")
+}
+
+// TestUserPagePreviewClampAndEscape pins the preview contract: the
+// first-message preview clamps at 120 runes server-side (ellipsis when
+// cut) and the template's contextual escaping applies — no double
+// escape, no live HTML from message content.
+func TestUserPagePreviewClampAndEscape(t *testing.T) {
+	db := newTestDB(t)
+	srv := NewServer(db, &Config{})
+	ts := httptest.NewServer(srv.mux())
+	defer ts.Close()
+	uid := int64(1)
+	mkUser(t, db, func(u *User) { u.ID = uid })
+	mkSession(t, db, "aaaaaaaa", func(s *Session) { s.UserID = &uid; s.FirstMessage = strings.Repeat("x", 200) })
+	mkSession(t, db, "bbbbbbbb", func(s *Session) {
+		s.UserID = &uid
+		s.FirstMessage = `<script>alert(1)</script> & "quotes" 'single'`
+	})
+
+	resp, err := http.Get(ts.URL + "/u/uuuuuuuu?fragment=list")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, 200, resp.StatusCode)
+	body := readBody(t, resp)
+	assert.Contains(t, body, strings.Repeat("x", 120)+"…")
+	assert.NotContains(t, body, strings.Repeat("x", 121))
+	assert.Contains(t, body, "&lt;script&gt;alert(1)&lt;/script&gt;")
+	assert.Contains(t, body, "&amp; &#34;quotes&#34; &#39;single&#39;") // Go's full escaper: & < > " ' all escaped
+	assert.NotContains(t, body, "<script")
+}
+
+// TestUserPageFragmentCursorValidation pins the fragment param
+// handling: cursors travel as the PAIR (before_last_active,
+// before_id); a malformed or half-present pair is a 400 (Task 8's
+// "bad before" pattern), while fragment=list with no cursor is the
+// first page — what user.js refetches on live updates.
+func TestUserPageFragmentCursorValidation(t *testing.T) {
+	db := newTestDB(t)
+	srv := NewServer(db, &Config{})
+	ts := httptest.NewServer(srv.mux())
+	defer ts.Close()
+	u := mkUser(t, db)
+	uid := u.ID
+	mkSession(t, db, "aaaaaaaa", func(s *Session) { s.UserID = &uid; s.FirstMessage = "first page row" })
+
+	good := urlQueryTime(time.Now())
+	for _, q := range []string{
+		"fragment=list&before_last_active=garbage&before_id=1",
+		"fragment=list&before_last_active=" + good + "&before_id=garbage",
+		"fragment=list&before_last_active=" + good, // lone pair member
+		"fragment=list&before_id=1",                // lone pair member
+		"fragment=list&before_last_active=" + good + "&before_id=-1",
+		"fragment=list&before_last_active=&before_id=",
+	} {
+		resp, err := http.Get(ts.URL + "/u/uuuuuuuu?" + q)
+		require.NoError(t, err)
+		resp.Body.Close()
+		assert.Equal(t, 400, resp.StatusCode, "query %q", q)
+	}
+
+	// No cursor: the first page — user.js's live-update refetch mode.
+	resp, err := http.Get(ts.URL + "/u/uuuuuuuu?fragment=list")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, 200, resp.StatusCode)
+	body := readBody(t, resp)
+	assert.Contains(t, body, `id="session-list"`)
+	assert.Contains(t, body, "first page row")
+	assert.NotContains(t, body, "<html") // fragment, never the full skeleton
+
+	// Unknown fragment value falls back to the full page (session-page
+	// pattern: only the exact value is a fragment).
+	resp, err = http.Get(ts.URL + "/u/uuuuuuuu?fragment=other")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, 200, resp.StatusCode)
+	assert.Contains(t, readBody(t, resp), "<html")
 }

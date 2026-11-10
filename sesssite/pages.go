@@ -5,7 +5,9 @@ import (
 	"errors"
 	"html/template"
 	"net/http"
+	"net/url"
 	"strconv"
+	"time"
 
 	"gorm.io/gorm"
 )
@@ -17,7 +19,8 @@ const pageSize = 200
 
 // pageFuncs mirrors rowsTpl's funcmap (render.go): safeImageURL must be
 // attached to any template that renders image URLs directly.
-var pageFuncs = template.FuncMap{"safeImageURL": safeImageURL}
+// runesClamp serves the user page's first-message previews.
+var pageFuncs = template.FuncMap{"safeImageURL": safeImageURL, "runesClamp": runesClamp}
 
 // templatesFS is embedded in render.go; the page templates parse from
 // the same FS. base.html carries the skeleton; session.html and
@@ -31,6 +34,24 @@ var sessionTpl = template.Must(template.Must(baseTpl.Clone()).
 
 var landingTpl = template.Must(template.Must(baseTpl.Clone()).
 	ParseFS(templatesFS, "templates/landing.html"))
+
+var userTpl = template.Must(template.Must(baseTpl.Clone()).
+	ParseFS(templatesFS, "templates/user.html"))
+
+// runesClamp truncates s to at most max runes, appending an ellipsis
+// when it actually cut something (user-page first-message previews;
+// a byte-slice cut would split multibyte characters). The template's
+// contextual escaping applies to the result — this never pre-escapes.
+func runesClamp(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
+}
 
 // modelUsage is one per-model aggregate for the header's collapsed
 // usage details (spec: aggregate token usage per model).
@@ -343,4 +364,165 @@ func (s *Server) userSlugFor(userID *int64) string {
 		return ""
 	}
 	return u.Slug
+}
+
+// userPageSize is the user page's session-list page (spec: keyset by
+// last_active DESC, 50 per page).
+const userPageSize = 50
+
+// userPageData feeds user.html. Sessions is the current page NEWEST
+// first; LastActive/LastID describe the page's LAST row — the oldest
+// of the batch — as user.js's "load older" keyset cursor (Task 10).
+type userPageData struct {
+	User       *User
+	Sessions   []Session
+	HasOlder   bool
+	LastActive time.Time
+	LastID     int64
+}
+
+// handleUserPage serves /u/{slug}: the user's session list, keyset
+// paginated by (last_active DESC, id DESC). The slug is validated
+// BEFORE any DB hit (session-page pattern). ?fragment=list serves the
+// bare list fragment — with no cursor the first page (user.js's
+// live-update refetch), with the (before_last_active, before_id) pair
+// the next page for load-older. Any other fragment value (or none) is
+// the full page.
+func (s *Server) handleUserPage(w http.ResponseWriter, r *http.Request) {
+	slug := r.PathValue("slug")
+	if !validSlug(slug) {
+		http.NotFound(w, r)
+		return
+	}
+	u, ok := s.lookupUser(w, r, slug)
+	if !ok {
+		return
+	}
+	if r.URL.Query().Get("fragment") == "list" {
+		s.serveUserListFragment(w, r, u)
+		return
+	}
+	s.serveUserPage(w, r, u)
+}
+
+// lookupUser is lookupSession's twin for the users table: missing row
+// is a plain 404, anything else a 500.
+func (s *Server) lookupUser(w http.ResponseWriter, r *http.Request, slug string) (*User, bool) {
+	u, err := userBySlug(s.db, slug)
+	if err == nil {
+		return u, true
+	}
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		http.NotFound(w, r)
+		return nil, false
+	}
+	http.Error(w, "lookup failure", http.StatusInternalServerError)
+	return nil, false
+}
+
+// parseUserCursor reads the (before_last_active, before_id) keyset
+// pair from the query. The pair travels together or not at all: a lone
+// member cannot form a cursor, and a malformed value is a plain 400
+// (Task 8's "bad before" pattern). A well-formed zero time is passed
+// through to userSessionsPage's IsZero sentinel (first page); the
+// load-older button never emits one — see buildUserPageData.
+func parseUserCursor(q url.Values) (time.Time, int64, error) {
+	if !q.Has("before_last_active") && !q.Has("before_id") {
+		return time.Time{}, 0, nil
+	}
+	if !q.Has("before_last_active") || !q.Has("before_id") {
+		return time.Time{}, 0, errors.New("incomplete cursor pair")
+	}
+	t, err := time.Parse(time.RFC3339Nano, q.Get("before_last_active"))
+	if err != nil {
+		return time.Time{}, 0, errors.New("bad before_last_active")
+	}
+	id, err := strconv.ParseInt(q.Get("before_id"), 10, 64)
+	if err != nil || id < 0 {
+		return time.Time{}, 0, errors.New("bad before_id")
+	}
+	return t, id, nil
+}
+
+// serveUserListFragment answers ?fragment=list: the session rows (plus
+// the load-older button when more pages exist) as bare HTML — never
+// the full skeleton.
+func (s *Server) serveUserListFragment(w http.ResponseWriter, r *http.Request, u *User) {
+	beforeActive, beforeID, err := parseUserCursor(r.URL.Query())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	sessions, err := userSessionsPage(s.db, u.ID, beforeActive, beforeID, userPageSize)
+	if err != nil {
+		http.Error(w, "query failure", http.StatusInternalServerError)
+		return
+	}
+	data, err := s.buildUserPageData(u, sessions)
+	if err != nil {
+		http.Error(w, "query failure", http.StatusInternalServerError)
+		return
+	}
+	var buf bytes.Buffer
+	if err := userTpl.ExecuteTemplate(&buf, "user-list", data); err != nil {
+		http.Error(w, "render failure", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	buf.WriteTo(w)
+}
+
+// serveUserPage renders the full user page: identity header and the
+// first page of sessions.
+func (s *Server) serveUserPage(w http.ResponseWriter, r *http.Request, u *User) {
+	sessions, err := userSessionsPage(s.db, u.ID, time.Time{}, 0, userPageSize)
+	if err != nil {
+		http.Error(w, "query failure", http.StatusInternalServerError)
+		return
+	}
+	data, err := s.buildUserPageData(u, sessions)
+	if err != nil {
+		http.Error(w, "query failure", http.StatusInternalServerError)
+		return
+	}
+	var buf bytes.Buffer
+	if err := userTpl.Execute(&buf, data); err != nil {
+		http.Error(w, "render failure", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	buf.WriteTo(w)
+}
+
+// buildUserPageData assembles the template data including the
+// load-older decision. The cursor is the page's LAST row (newest-first
+// page ⇒ the oldest of the batch). Two guards:
+//
+//   - A ZERO last_active row (dave leaves LastActive zero until the
+//     first AddMessage) must never carry the cursor: zero rows sort
+//     last in DESC order, and a zero time passed back is
+//     userSessionsPage's "no cursor" IsZero sentinel — the button
+//     would refetch page 1 forever. A page ending on a zero row
+//     offers no further pages (carried Task 5 review requirement);
+//     everything that could follow it is zero rows anyway.
+//   - The one-row probe only runs on a FULL page — a short page is
+//     exhausted by definition (session page's HasOlder pattern).
+func (s *Server) buildUserPageData(u *User, sessions []Session) (userPageData, error) {
+	data := userPageData{User: u, Sessions: sessions}
+	if len(sessions) == 0 {
+		return data, nil
+	}
+	last := sessions[len(sessions)-1]
+	data.LastActive = last.LastActive
+	data.LastID = last.ID
+	if last.LastActive.IsZero() || len(sessions) < userPageSize {
+		return data, nil
+	}
+	older, err := userSessionsPage(s.db, u.ID, last.LastActive, last.ID, 1)
+	if err != nil {
+		return data, err
+	}
+	data.HasOlder = len(older) > 0
+	return data, nil
 }

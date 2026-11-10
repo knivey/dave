@@ -71,8 +71,17 @@ details > summary { cursor: pointer; color: #8be9fd; font-size: 0.8rem; }
 .chatimg { max-width: 100%; border-radius: 6px; margin: 0.25rem 0; }
 
 /* pagination */
-#load-older { display: block; margin: 1rem auto; background: #44475a; color: #f8f8f2; border: 1px solid #6272a4; border-radius: 6px; padding: 0.45rem 1.4rem; cursor: pointer; font: inherit; }
-#load-older:hover { background: #4b4f66; }
+#load-older, #user-load-older { display: block; margin: 1rem auto; background: #44475a; color: #f8f8f2; border: 1px solid #6272a4; border-radius: 6px; padding: 0.45rem 1.4rem; cursor: pointer; font: inherit; }
+#load-older:hover, #user-load-older:hover { background: #4b4f66; }
+
+/* user page */
+.user-header { border-bottom: 1px solid #44475a; padding-bottom: 0.8rem; margin-bottom: 0.8rem; }
+#session-list { list-style: none; }
+.session-row { border-bottom: 1px solid #343746; }
+.session-row > a { display: block; padding: 0.55rem 0.4rem; }
+.session-row .row-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.4rem; font-size: 0.8rem; }
+.session-row .row-meta time { margin-left: auto; color: #6272a4; font-size: 0.78rem; }
+.session-row .preview { display: block; margin-top: 0.15rem; color: #bdc0d4; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* IRC control-code classes below — ported verbatim from parsebin */
 .irc-bold { font-weight: bold; }

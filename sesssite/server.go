@@ -31,14 +31,14 @@ func (s *Server) Run(addr string) error { return http.ListenAndServe(addr, s.mux
 // mux builds the route table. Go 1.22+ method patterns give 405s for
 // free and {slug}/{id} capture PathValues; "{$}" pins the landing to
 // the exact root so unknown paths fall through to the mux's own 404.
-// Task 9 adds /u/{slug}; Task 10 adds the /s/{slug}/events and
-// /u/{slug}/events SSE routes.
+// Task 10 adds the /s/{slug}/events and /u/{slug}/events SSE routes.
 func (s *Server) mux() *http.ServeMux {
 	m := http.NewServeMux()
 	m.HandleFunc("GET /{$}", secure(s.handleLanding))
 	m.HandleFunc("GET /static/", secure(s.handleStatic))
 	m.HandleFunc("GET /s/{slug}", secure(s.handleSessionPage))
 	m.HandleFunc("GET /s/{slug}/m/{id}/raw", secure(s.handleRawMessage))
+	m.HandleFunc("GET /u/{slug}", secure(s.handleUserPage))
 	return m
 }
 

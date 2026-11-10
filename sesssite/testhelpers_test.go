@@ -22,6 +22,12 @@ func readBody(t *testing.T, resp *http.Response) string {
 
 func ptrInt64(i int64) *int64 { return &i }
 
+// urlQueryTime renders t in the RFC3339Nano form the user page's
+// keyset cursor travels as (before_last_active). UTC matches how the
+// sqlite driver normalizes stored times, so the round-trip compares
+// cleanly against stored values.
+func urlQueryTime(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
+
 // newTestDB creates a schema compatible with the columns sesssite reads.
 // sesssite NEVER AutoMigrates in production (read-only contract); tests
 // are the only place the models create tables.

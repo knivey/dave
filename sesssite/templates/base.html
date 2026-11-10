@@ -7,7 +7,7 @@
 {{block "head" .}}{{end}}<link rel="stylesheet" href="/static/style.css">
 <link rel="stylesheet" href="/static/chroma.css">
 </head>
-<body>
+<body{{block "bodyattrs" .}}{{end}}>
 {{template "content" .}}
 </body>
 </html>

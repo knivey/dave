@@ -1,0 +1,24 @@
+{{define "title"}}{{.User.CurrentNick}} — dave sessions{{end}}
+{{define "bodyattrs"}} data-user-slug="{{.User.Slug}}"{{end}}
+{{define "user-list"}}<ul id="session-list">
+{{range .Sessions}}	<li class="session-row">
+		<a href="/s/{{.Slug}}">
+			<span class="row-meta"><span class="badge">{{.ChatCommand}}</span> <span class="badge">{{.Network}} {{.Channel}}</span> <span class="badge model">{{.Model}}</span> <span class="badge status-{{.Status}}">{{.Status}}</span> <time title="{{.LastActive.Format "2006-01-02 15:04:05"}}">{{.LastActive.Format "2006-01-02 15:04"}}</time></span>
+			<span class="preview">{{runesClamp .FirstMessage 120}}</span>
+		</a>
+	</li>
+{{end}}</ul>
+{{if .HasOlder}}<button id="user-load-older" data-last-active="{{.LastActive.Format "2006-01-02T15:04:05.999999999Z07:00"}}" data-id="{{.LastID}}">load older</button>{{end}}
+{{end}}
+{{define "content"}}
+<main class="user">
+	<header class="user-header">
+		<h1>{{.User.CurrentNick}}</h1>
+		<div class="badges">
+			<span class="badge">{{.User.Network}}</span>
+			{{if .User.IRCAccount}}<span class="badge">account: {{.User.IRCAccount}}</span>{{end}}
+		</div>
+	</header>
+	{{template "user-list" .}}
+</main>
+{{end}}

@@ -568,3 +568,13 @@ func TestNoticesQueueSuffixDefaults(t *testing.T) {
 	assert.Contains(t, out, "mB")
 	assert.Contains(t, out, "mA")
 }
+
+func TestNoticesWebsiteDefaults(t *testing.T) {
+	n := NoticesConfig{}
+	setNoticesDefaults(&n)
+	assert.Contains(t, n.Website.FullLine, "{url}")
+	assert.Contains(t, n.Website.Link, "{user_url}")
+	assert.Contains(t, n.Website.Link, "{session_url}")
+	assert.Contains(t, n.Website.LinkNoSession, "{user_url}")
+	assert.NotEmpty(t, n.Website.FullLine)
+}

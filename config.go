@@ -31,6 +31,7 @@ type Config struct {
 	APILog               APILogConfig        `toml:"api_log"`
 	IncidentLog          IncidentConfig      `toml:"incident_log"`
 	Pastebin             PastebinConfig      `toml:"pastebin"`
+	Website              WebsiteConfig       `toml:"website"`
 	TemplateVars         map[string]string   `toml:"-"`
 	SessionsDisplayLimit int                 `toml:"sessions_display_limit"`
 	Notices              NoticesConfig       `toml:"-"`
@@ -91,6 +92,13 @@ type PastebinConfig struct {
 	PastebinPreviewLines *int   `toml:"pastebin_preview_lines"`
 }
 
+// WebsiteConfig points dave at the session-history website (sesssite).
+// url is the ONLY knob: set = link long replies to the site instead of
+// the pastebin (coexist switch); unset/empty = old pastebin behavior.
+type WebsiteConfig struct {
+	URL string `toml:"url"`
+}
+
 type TUIConfig struct {
 	ScrollbackLines int                `toml:"scrollback_lines"`
 	Scrollbar       TUIScrollbarConfig `toml:"scrollbar"`
@@ -144,6 +152,14 @@ func (c ChannelConfig) GetPastebinPreviewLines(pastebinCfg PastebinConfig) int {
 		return maxLines - 1
 	}
 	return value
+}
+
+// websiteURL returns the configured session-site base URL (no trailing
+// slash), or "" when unset.
+func websiteURL() string {
+	var u string
+	readConfig(func() { u = config.Website.URL })
+	return strings.TrimRight(u, "/")
 }
 
 type SASLConfig struct {

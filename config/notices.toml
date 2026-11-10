@@ -94,6 +94,12 @@
 #   link             (string)    Pastebin URL link. Placeholders: {url}
 #   failed           (string)    Pastebin fallback when upload fails
 #
+# [website] options:
+#   full_line        (string)    Sent after the preview lines when a reply overflows and the website is configured
+#                                (replaces the pastebin link). Placeholders: {url}
+#   link             (string)    ^link reply when the user has an active session. Placeholders: {session_url}, {user_url}
+#   link_no_session  (string)    ^link reply when there is no active session. Placeholders: {user_url}
+#
 # [jobs] options:
 #   no_jobs          (string)    No active jobs
 #   queue_header     (string)    Queue section header
@@ -240,6 +246,11 @@
 # [pastebin]
 # link = "... ( full output: {url} )"
 # failed = "... (full output could not be pasted)"
+#
+# [website]
+# full_line = "full message: {url}"
+# link = "session: {session_url} · all your sessions: {user_url}"
+# link_no_session = "all your sessions: {user_url}"
 #
 # [jobs]
 # no_jobs = "No active jobs or queue items."

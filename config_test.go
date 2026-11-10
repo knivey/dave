@@ -3705,3 +3705,24 @@ models_max = ` + v + `
 		os.RemoveAll(dir)
 	}
 }
+
+func TestLoadConfigDirWebsite(t *testing.T) {
+	dir := createTestConfigDir(t, `
+[website]
+url = "https://sessions.example.com"
+`, nil)
+	defer os.RemoveAll(dir)
+
+	cfg, err := loadConfigDir(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "https://sessions.example.com", cfg.Website.URL)
+}
+
+func TestWebsiteURLEmptyByDefault(t *testing.T) {
+	dir := createTestConfigDir(t, "", nil)
+	defer os.RemoveAll(dir)
+
+	cfg, err := loadConfigDir(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "", cfg.Website.URL)
+}

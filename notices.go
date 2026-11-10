@@ -21,6 +21,7 @@ type NoticesConfig struct {
 	Images     ImageNotices      `toml:"images"`
 	Tools      ToolNotices       `toml:"tools"`
 	Pastebin   PastebinNotices   `toml:"pastebin"`
+	Website    WebsiteNotices    `toml:"website"`
 	Jobs       JobNotices        `toml:"jobs"`
 	Bans       BanNotices        `toml:"bans"`
 	Compaction CompactionNotices `toml:"compaction"`
@@ -126,6 +127,16 @@ type ToolNotices struct {
 type PastebinNotices struct {
 	Link   string `toml:"link"`
 	Failed string `toml:"failed"`
+}
+
+type WebsiteNotices struct {
+	// FullLine is sent after the preview lines when a reply overflows and
+	// the website is configured (replaces the pastebin link).
+	FullLine string `toml:"full_line"`
+	// Link is the ^link reply when the user has an active session.
+	Link string `toml:"link"`
+	// LinkNoSession is the ^link reply when there is no active session.
+	LinkNoSession string `toml:"link_no_session"`
 }
 
 type JobNotices struct {
@@ -423,6 +434,15 @@ func setNoticesDefaults(n *NoticesConfig) {
 	}
 	if n.Pastebin.Failed == "" {
 		n.Pastebin.Failed = "... (full output could not be pasted)"
+	}
+	if n.Website.FullLine == "" {
+		n.Website.FullLine = "full message: {url}"
+	}
+	if n.Website.Link == "" {
+		n.Website.Link = "session: {session_url} · all your sessions: {user_url}"
+	}
+	if n.Website.LinkNoSession == "" {
+		n.Website.LinkNoSession = "all your sessions: {user_url}"
 	}
 	if n.Jobs.NoJobs == "" {
 		n.Jobs.NoJobs = "No active jobs or queue items."

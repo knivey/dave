@@ -74,6 +74,16 @@
 #   api_key            (string)               API key for authentication
 #   pastebin_preview_lines (int, default: 3)  Default preview lines sent before pastebin URL (0 = no preview, must be < max_lines)
 #
+# [website] — session-history website (sesssite)
+# url: base URL of the session site (e.g. "https://sessions.example.com").
+#      When set, over-long replies link to the site's session page instead
+#      of uploading to the pastebin (the pastebin stays configured as the
+#      fallback for ^help and ephemeral generator output). Unset = always
+#      pastebin. See docs/superpowers/specs/2026-11-10-session-website-design.md
+#
+# [website]
+# url = ""
+#
 # [logging] options:
 #   enabled            (bool, default: false)    Enable IRC channel log storage
 #   dir                (string, default: "data/logs") Directory for SQLite log files
@@ -184,6 +194,9 @@
 # url = "http://localhost:8181"
 # api_key = "dave_YOUR_KEY_HERE"
 # pastebin_preview_lines = 3
+#
+# [website]
+# url = ""
 #
 # [logging]
 # enabled = false

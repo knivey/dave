@@ -74,6 +74,7 @@
 #   process_images   (string)    Image processing error. Placeholders: {error}
 #   pastebin_upload  (string)    Pastebin upload error. Placeholders: {error}
 #   internal_error   (string)    Internal/panic error. Placeholders: {error}
+#   no_website_url   (string)    ^link invoked but website.url is not configured (also sent when the caller cannot be resolved)
 #
 # [images] options:
 #   limit_reached    (string)    Image context limit hit. Placeholders: {max}
@@ -227,6 +228,7 @@
 # process_images = "failed to process images: {error}"
 # pastebin_upload = "pastebin: {error}"
 # internal_error = "internal error: {error}"
+# no_website_url = "website url not configured"
 #
 # [images]
 # limit_reached = "image limit reached ({max} max in context), send text only"

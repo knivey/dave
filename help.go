@@ -67,6 +67,7 @@ func buildHelpText(botnick, trigger string, network Network) string {
 			{"jobs", fmt.Sprintf("  %sjobs \u2014 List your chat queue and background jobs", trigger)},
 			{"compact", fmt.Sprintf("  %scompact \u2014 Summarize old messages in your active session to free context", trigger)},
 			{"clone", fmt.Sprintf("  %sclone <nick|id> \u2014 Clone another user's session (or your own, to fork it)", trigger)},
+			{"link", fmt.Sprintf("  %slink \u2014 Get web links to your current session and session history", trigger)},
 		}
 		for _, h := range histBuiltins {
 			if !isNetworkCommandDisabled(network, h.name) {
@@ -296,6 +297,7 @@ func buildPastebinHelpText(botnick, trigger string, network Network) string {
 			{"jobs", fmt.Sprintf("%s | %s", pastebinCmd(trigger+"jobs"), escapeDescPipe("List your chat queue and background jobs"))},
 			{"compact", fmt.Sprintf("%s | %s", pastebinCmd(trigger+"compact"), escapeDescPipe("Summarize old messages to free context"))},
 			{"clone", fmt.Sprintf("%s | %s", pastebinCmd(trigger+"clone <nick|id>"), escapeDescPipe("Clone another user's session"))},
+			{"link", fmt.Sprintf("%s | %s", pastebinCmd(trigger+"link"), escapeDescPipe("Get web links to your current session and session history"))},
 		}
 		for _, h := range histBuiltins {
 			if !isNetworkCommandDisabled(network, h.name) {
@@ -568,6 +570,7 @@ var builtinHelpEntries = map[string]struct {
 	"jobs":     {"jobs", "List your chat queue status and pending/running/completed background jobs"},
 	"compact":  {"compact", "Summarize the first 2/3 of your active session into a single message to free context tokens"},
 	"clone":    {"clone <nick|id>", "Clone another user's session (or your own, to fork it). Creates a new session with a copy of the source's message history"},
+	"link":     {"link", "Get web links to your current session and session history"},
 	"support":  {"support", "Support dave's development"},
 }
 

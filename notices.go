@@ -105,6 +105,7 @@ type DBNotices struct {
 	ProcessImages  string `toml:"process_images"`
 	PastebinUpload string `toml:"pastebin_upload"`
 	InternalError  string `toml:"internal_error"`
+	NoWebsiteURL   string `toml:"no_website_url"`
 }
 
 type ImageNotices struct {
@@ -395,6 +396,9 @@ func setNoticesDefaults(n *NoticesConfig) {
 	}
 	if n.DB.InternalError == "" {
 		n.DB.InternalError = "internal error: {error}"
+	}
+	if n.DB.NoWebsiteURL == "" {
+		n.DB.NoWebsiteURL = "website url not configured"
 	}
 	if n.Images.LimitReached == "" {
 		n.Images.LimitReached = "image limit reached ({max} max in context), send text only"

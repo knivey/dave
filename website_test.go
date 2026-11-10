@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lrstanley/girc"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -192,3 +193,158 @@ func newSendTestRunner(t *testing.T) (*chatRunner, chan string) {
 }
 
 func fmtInt(i int64) string { return strconv.FormatInt(i, 10) }
+
+// newLinkTestClient builds an unconnected girc client — linkCommand's only
+// client use is accountFromEvent's LookupUser fallback, which panics on a
+// nil client (girc's LookupUser dereferences c.Config). Same construction
+// as TestAccountFromEvent (main_test.go).
+func newLinkTestClient() *girc.Client {
+	return girc.New(girc.Config{Server: "localhost", Port: 6667, Nick: "testbot"})
+}
+
+// drainLinkOutput closes out and returns everything linkCommand sent.
+func drainLinkOutput(t *testing.T, out chan string) []string {
+	t.Helper()
+	close(out)
+	var got []string
+	for l := range out {
+		got = append(got, l)
+	}
+	return got
+}
+
+// TestLinkCommand: the happy path — caller resolves, has an active session,
+// and both the user row and the session row carry slugs. The reply carries
+// the session URL (/s/<slug>) and the user URL (/u/<slug>).
+func TestLinkCommand(t *testing.T) {
+	_, cleanup := setupMigrationDB(t)
+	defer cleanup()
+	setupNoticesDefaults(t)
+
+	uid := ensureTestUser(t, "libera", "shrew")
+	sid, err := sessionMgr.CreateSession("libera", "#dave", uid, "dave", "svc", "m")
+	require.NoError(t, err)
+	sess, err := sessionMgr.GetSession(sid)
+	require.NoError(t, err)
+	var u User
+	require.NoError(t, theDB.First(&u, uid).Error)
+
+	setWebsiteURL(t, "https://s.example.com")
+
+	out := make(chan string, 8)
+	linkCommand(Network{Name: "libera", Trigger: "^"}, newLinkTestClient(),
+		makeHistoryEvent("#dave", "shrew"), context.Background(), out)
+	got := drainLinkOutput(t, out)
+
+	joined := strings.Join(got, "\n")
+	assert.Contains(t, joined, "https://s.example.com/s/"+sess.Slug)
+	assert.Contains(t, joined, "https://s.example.com/u/"+u.Slug)
+}
+
+// TestLinkCommandNoWebsiteConfigured: website.url unset — the command must
+// not touch the DB or silently drop; an error line naming the config comes
+// back (nil client is safe: the base=="" branch returns before any client
+// use).
+func TestLinkCommandNoWebsiteConfigured(t *testing.T) {
+	_, cleanup := setupMigrationDB(t)
+	defer cleanup()
+	setupNoticesDefaults(t)
+	setWebsiteURL(t, "")
+
+	out := make(chan string, 8)
+	linkCommand(Network{Name: "libera"}, nil,
+		makeHistoryEvent("#dave", "shrew"), context.Background(), out)
+	got := drainLinkOutput(t, out)
+
+	// Some error line must come back naming the config.
+	assert.NotEmpty(t, got)
+	assert.Contains(t, strings.Join(got, "\n"), "website url not configured")
+}
+
+// TestLinkCommandNoActiveSession: caller has a slug but no active session —
+// the LinkNoSession template carries the user URL alone.
+func TestLinkCommandNoActiveSession(t *testing.T) {
+	_, cleanup := setupMigrationDB(t)
+	defer cleanup()
+	setupNoticesDefaults(t)
+
+	uid := ensureTestUser(t, "libera", "shrew")
+	var u User
+	require.NoError(t, theDB.First(&u, uid).Error)
+
+	setWebsiteURL(t, "https://s.example.com")
+
+	out := make(chan string, 8)
+	linkCommand(Network{Name: "libera", Trigger: "^"}, newLinkTestClient(),
+		makeHistoryEvent("#dave", "shrew"), context.Background(), out)
+	got := drainLinkOutput(t, out)
+
+	joined := strings.Join(got, "\n")
+	assert.Contains(t, joined, "https://s.example.com/u/"+u.Slug)
+	assert.NotContains(t, joined, "https://s.example.com/s/", "no session to link")
+}
+
+// TestLinkCommandUserSlugMissing: the caller has an active session but the
+// user row lacks a slug (legacy pre-migration shape) — the session URL
+// rides the {user_url} placeholder of LinkNoSession rather than failing.
+func TestLinkCommandUserSlugMissing(t *testing.T) {
+	_, cleanup := setupMigrationDB(t)
+	defer cleanup()
+	setupNoticesDefaults(t)
+
+	uid := insertMigrationUser(t, "libera", "shrew") // raw insert: no slug
+	sid, err := sessionMgr.CreateSession("libera", "#dave", uid, "dave", "svc", "m")
+	require.NoError(t, err)
+	sess, err := sessionMgr.GetSession(sid)
+	require.NoError(t, err)
+
+	setWebsiteURL(t, "https://s.example.com")
+
+	out := make(chan string, 8)
+	linkCommand(Network{Name: "libera", Trigger: "^"}, newLinkTestClient(),
+		makeHistoryEvent("#dave", "shrew"), context.Background(), out)
+	got := drainLinkOutput(t, out)
+
+	joined := strings.Join(got, "\n")
+	assert.Contains(t, joined, "https://s.example.com/s/"+sess.Slug)
+	assert.NotContains(t, joined, "https://s.example.com/u/", "no user slug to link")
+}
+
+// TestLinkCommandNothingToLink: no active session AND no user slug (a
+// caller whose rows predate slugs entirely) — the generic "no sessions"
+// notice is the reply; no half-empty website link is sent.
+func TestLinkCommandNothingToLink(t *testing.T) {
+	_, cleanup := setupMigrationDB(t)
+	defer cleanup()
+	setupNoticesDefaults(t)
+
+	insertMigrationUser(t, "libera", "shrew") // raw insert: no slug
+	setWebsiteURL(t, "https://s.example.com")
+
+	out := make(chan string, 8)
+	linkCommand(Network{Name: "libera", Trigger: "^"}, newLinkTestClient(),
+		makeHistoryEvent("#dave", "shrew"), context.Background(), out)
+	got := drainLinkOutput(t, out)
+
+	joined := strings.Join(got, "\n")
+	n := getNotices()
+	assert.Contains(t, joined, n.Sessions.None)
+	assert.NotContains(t, joined, "https://s.example.com/", "nothing linkable")
+}
+
+// TestLinkCommandUnresolvableUser: an event with no source cannot resolve a
+// user — the command must still say something (the shared no-website error
+// notice), never silently return.
+func TestLinkCommandUnresolvableUser(t *testing.T) {
+	_, cleanup := setupMigrationDB(t)
+	defer cleanup()
+	setupNoticesDefaults(t)
+	setWebsiteURL(t, "https://s.example.com")
+
+	out := make(chan string, 8)
+	linkCommand(Network{Name: "libera", Trigger: "^"}, newLinkTestClient(),
+		girc.Event{Params: []string{"#dave"}}, context.Background(), out)
+	got := drainLinkOutput(t, out)
+
+	assert.NotEmpty(t, got, "no silent return on unresolvable user")
+}

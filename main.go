@@ -314,6 +314,7 @@ var jobs_re = regexp.MustCompile("^jobs$")
 var support_re = regexp.MustCompile("^support$")
 var compact_re = regexp.MustCompile("^compact$")
 var clone_re = regexp.MustCompile("^clone\\s+(\\S+)\\s*$") // \s*$ tolerates trailing space from tab nick-completion
+var link_re = regexp.MustCompile("^link$")
 
 type CmdMap map[*regexp.Regexp]CmdFunc
 
@@ -387,6 +388,9 @@ var builtInCmds = CmdMap{
 	clone_re: func(n Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, s ...string) {
 		historyClone(n, c, e, ctx, output, s...)
 	},
+	link_re: func(n Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, s ...string) {
+		linkCommand(n, c, e, ctx, output, s...)
+	},
 }
 var configCmds map[string]CmdFunc
 var configCmdNames map[string]string
@@ -403,7 +407,7 @@ var configCmdOptionalArgs map[string]bool
 var builtinCommandNames = []string{
 	"stop", "help", "sessions", "session", "history",
 	"mystats", "delete", "resume", "jobs",
-	"support", "compact", "clone",
+	"support", "compact", "clone", "link",
 }
 
 var builtInNames = map[*regexp.Regexp]string{
@@ -419,6 +423,7 @@ var builtInNames = map[*regexp.Regexp]string{
 	support_re:  "support",
 	compact_re:  "compact",
 	clone_re:    "clone",
+	link_re:     "link",
 }
 
 func isBuiltinDisabled(name string) bool {

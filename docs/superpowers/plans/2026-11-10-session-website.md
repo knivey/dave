@@ -1505,7 +1505,7 @@ git commit -m "feat(sesssite): port markdown+IRC renderer from markdown-parsebin
   - `buildMessageView(m Message, sessionSlug string) MessageView`
   - `buildMessageViews(msgs []Message, sessionSlug string) []MessageView`
   - `assignUsage(views []MessageView, msgs []Message, usage []TurnUsage)` — time-window join `(prev assistant msg, this assistant msg]`, sets `views[i].Usage` for assistant rows (last row in window wins if several; nil when none — line omitted).
-  - `renderRowsHTML(views []MessageView, comps []CompactionView, opts rowsOpts) (template.HTML, error)` — executes `rows.html` with dividers interleaved before the first archived row of each compaction range.
+  - `renderRowsHTML(views []MessageView, comps []CompactionView) (template.HTML, error)` — executes `rows.html` with dividers interleaved before the first archived row of each compaction range.
 
 - [ ] **Step 1: Write failing tests**
 
@@ -1530,7 +1530,7 @@ func TestBuildMessageViewMarkdown(t *testing.T) {
 	v := buildMessageView(m, s.Slug)
 	assert.Contains(t, string(v.ContentHTML), "<strong>bold</strong>")
 	assert.Contains(t, string(v.ContentHTML), "<code>code</code>")
-	assert.Equal(t, "/s/aaaaaaaa/m/"+itoa(m.ID)+"/raw", v.RawURL)
+	assert.Equal(t, "/s/aaaaaaaa/m/"+strconv.FormatInt(m.ID, 10)+"/raw", v.RawURL)
 }
 
 func TestBuildMessageViewIRCCodes(t *testing.T) {
@@ -1623,11 +1623,9 @@ func TestRenderRowsCompactionDivider(t *testing.T) {
 	assert.Contains(t, string(html), "compaction-divider")
 	assert.Contains(t, string(html), "archived") // archived tag on m1
 }
-
-func itoa(i int64) string { return time.Time{}.AppendFormat(nil, "")[:0].String() + fmtInt(i) }
 ```
 
-(If `fmtInt` doesn't exist here, use `strconv.FormatInt` — define `func fmtInt(i int64) string { return strconv.FormatInt(i, 10) }` in render_test.go and drop the silly itoa helper.)
+(The `strconv` import is needed in the test file; no `itoa` helper — use `strconv.FormatInt` directly. If `fmtInt` doesn't exist in the package yet, define `func fmtInt(i int64) string { return strconv.FormatInt(i, 10) }` in render_test.go.)
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -2506,7 +2504,7 @@ Routes in `server.go`:
 	const es = new EventSource("/s/" + slug + "/events?since=" + lastId());
 	es.addEventListener("messages", (ev) => {
 		const stick = pinned();
-		list.insertAdjacentHTML("beforeend", ev.data.replace(/^data: /, ""));
+		list.insertAdjacentHTML("beforeend", ev.data);
 		if (stick) window.scrollTo(0, document.body.scrollHeight);
 	});
 	es.addEventListener("session", (ev) => {

@@ -18,10 +18,10 @@ const (
 	ssePollInterval = time.Second
 	sseHeartbeat    = 15 * time.Second
 	ssePerIPLimit   = 10
-	// sseRowsLimit bounds one emitted batch. Rows arrive at turn
-	// granularity; 500 covers the largest single-turn burst many times
-	// over while keeping a pathological burst from rendering an
-	// unbounded fragment.
+	// sseRowsLimit bounds ONE emitted batch, not a whole gap: a larger
+	// gap renders as successive batches on following ticks because the
+	// emission watermark (lastSent) only advances through the rows a
+	// successful render actually sent.
 	sseRowsLimit = 500
 )
 
@@ -43,29 +43,72 @@ func hostOnly(addr string) string {
 	return addr
 }
 
-// acquireSSE takes a per-host connection slot, reporting whether one
+// trustedProxy reports whether peer is a configured trusted proxy.
+// Entries and the peer are compared as IPs when both parse (so "::1"
+// matches "0:0:0:0:0:0:0:1"), else as literal strings. A nil/empty
+// list (or a nil config, e.g. hand-built test configs) trusts nothing
+// — fail closed.
+func (s *Server) trustedProxy(peer string) bool {
+	for _, t := range s.cfg.Server.TrustedProxies {
+		if pi, ti := net.ParseIP(peer), net.ParseIP(t); pi != nil && ti != nil {
+			if pi.Equal(ti) {
+				return true
+			}
+			continue
+		}
+		if peer == t {
+			return true
+		}
+	}
+	return false
+}
+
+// sseCapKey resolves the per-IP cap key for a request: X-Forwarded-
+// For's first value (the original client, imgsite's clientIP parsing)
+// ONLY when the direct peer is a configured trusted proxy — behind a
+// reverse proxy every viewer shares the proxy's RemoteAddr, so keying
+// on it would give the whole site ssePerIPLimit streams total. An
+// untrusted peer's XFF is attacker-controlled and ignored: forged
+// headers cannot multiply capacity. No XFF (or a blank one) from a
+// trusted proxy keys on the proxy itself — correct for a local proxy
+// fronting one viewer.
+func (s *Server) sseCapKey(r *http.Request) string {
+	peer := hostOnly(r.RemoteAddr)
+	if !s.trustedProxy(peer) {
+		return peer
+	}
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if i := strings.IndexByte(xff, ','); i >= 0 {
+			xff = xff[:i]
+		}
+		if first := strings.TrimSpace(xff); first != "" {
+			return first
+		}
+	}
+	return peer
+}
+
+// acquireSSE takes a connection slot for key, reporting whether one
 // was free.
-func acquireSSE(r *http.Request) bool {
-	host := hostOnly(r.RemoteAddr)
+func acquireSSE(key string) bool {
 	sseMu.Lock()
 	defer sseMu.Unlock()
-	if sseConns[host] >= ssePerIPLimit {
+	if sseConns[key] >= ssePerIPLimit {
 		return false
 	}
-	sseConns[host]++
+	sseConns[key]++
 	return true
 }
 
 // releaseSSE returns a slot taken by acquireSSE. Handlers run it via
 // defer, so every exit path — client disconnect, write failure, normal
 // return — releases exactly once.
-func releaseSSE(r *http.Request) {
-	host := hostOnly(r.RemoteAddr)
+func releaseSSE(key string) {
 	sseMu.Lock()
 	defer sseMu.Unlock()
-	sseConns[host]--
-	if sseConns[host] <= 0 {
-		delete(sseConns, host)
+	sseConns[key]--
+	if sseConns[key] <= 0 {
+		delete(sseConns, key)
 	}
 }
 
@@ -90,43 +133,40 @@ func writeSSEComment(w io.Writer, comment string) {
 	fmt.Fprintf(w, ":%s\n", comment)
 }
 
-func maxI64(a, b int64) int64 {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 // renderRowsAfter renders the live-transcript rows with id > afterID —
 // the same row shape, view pipeline, usage join, and compaction-divider
 // chunking as the page and its fragments, so a live append is exactly
-// what a reload would show minus what the viewer already has. An empty
-// result renders as "" so callers can skip the event entirely.
-func (s *Server) renderRowsAfter(sess *Session, afterID int64) (string, error) {
+// what a reload would show minus what the viewer already has. It
+// returns the fragment plus renderedThrough, the newest row id
+// actually included (0 when nothing matched) — the caller's emission
+// watermark advances ONLY through rows a successful render actually
+// sent, which bounds one batch at sseRowsLimit (larger gaps continue
+// on following ticks) and self-heals render/query failures.
+func (s *Server) renderRowsAfter(sess *Session, afterID int64) (string, int64, error) {
 	var msgs []Message
 	if err := s.db.
 		Where("session_id = ? AND id > ? AND superseded = false AND source_compaction_id IS NULL", sess.ID, afterID).
 		Order("id ASC").Limit(sseRowsLimit).Find(&msgs).Error; err != nil {
-		return "", err
+		return "", 0, err
 	}
 	if len(msgs) == 0 {
-		return "", nil
+		return "", 0, nil
 	}
 	usage, err := sessionUsageRows(s.db, sess.ID)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	comps, err := s.fetchCompactionViews(sess.ID)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
 	views := buildMessageViews(msgs, sess.Slug)
 	assignUsage(views, msgs, usageFrom(usage, msgs))
 	rows, err := renderRowsHTML(views, compsForChunk(comps, msgs))
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
-	return string(rows), nil
+	return string(rows), msgs[len(msgs)-1].ID, nil
 }
 
 // sessionEventState is the per-tick session fingerprint, read by four
@@ -237,11 +277,14 @@ func (s *Server) handleSessionEvents(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !acquireSSE(r) {
+	// Resolve the cap key ONCE — acquire and the deferred release must
+	// never disagree about which viewer they counted.
+	capKey := s.sseCapKey(r)
+	if !acquireSSE(capKey) {
 		http.Error(w, "too many event-stream connections", http.StatusServiceUnavailable)
 		return
 	}
-	defer releaseSSE(r)
+	defer releaseSSE(capKey)
 
 	fl, ok := w.(http.Flusher)
 	if !ok {
@@ -260,12 +303,28 @@ func (s *Server) handleSessionEvents(w http.ResponseWriter, r *http.Request) {
 	since := int64(0)
 	fmt.Sscanf(r.URL.Query().Get("since"), "%d", &since)
 
+	// lastSent is the emission watermark: the newest row id whose
+	// rendering has actually been SENT on this stream. It starts at the
+	// viewer's claimed position (since) — or the connect-time DB
+	// watermark for a since-less fresh page — and advances ONLY through
+	// rows a successful render actually sent. That makes sseRowsLimit a
+	// true per-batch bound (a larger gap continues on following ticks)
+	// and lets a failed render retry next tick instead of silently
+	// skipping the span (the DB watermark `last` must NEVER gate
+	// emission — advancing past unsent rows loses them forever).
+	lastSent := last.maxID
+	if since > 0 {
+		lastSent = since
+	}
+
 	// Gap fill: a reconnecting viewer sends ?since={last id it has};
 	// everything newer is emitted immediately — before the first poll
-	// tick — so the disconnect window is invisible.
+	// tick — so the disconnect window is invisible. A gap larger than
+	// sseRowsLimit continues batch-by-batch on the ticks below.
 	if since > 0 && since < last.maxID {
-		if frag, err := s.renderRowsAfter(sess, since); err == nil && frag != "" {
+		if frag, through, err := s.renderRowsAfter(sess, lastSent); err == nil && through > 0 {
 			writeSSE(w, "messages", frag)
+			lastSent = through
 		}
 	}
 	writeSSEComment(w, "ready")
@@ -288,14 +347,14 @@ func (s *Server) handleSessionEvents(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				continue // transient read failure: keep `last`, retry next tick
 			}
-			if cur.maxID > last.maxID {
-				// maxI64: a viewer whose since sits above the DB's
-				// watermark (its newest row was superseded as a
-				// compaction tail-copy) keeps its own position as the
-				// emission floor.
-				if frag, err := s.renderRowsAfter(sess, maxI64(last.maxID, since)); err == nil && frag != "" {
+			if cur.maxID > lastSent {
+				frag, through, err := s.renderRowsAfter(sess, lastSent)
+				if err == nil && through > 0 {
 					writeSSE(w, "messages", frag)
+					lastSent = through
 				}
+				// render failure or an empty render: lastSent unchanged —
+				// the next tick re-renders the same span
 			}
 			if cur.status != last.status || cur.comps != last.comps {
 				payload, _ := json.Marshal(map[string]any{"status": cur.status})
@@ -326,11 +385,12 @@ func (s *Server) handleUserEvents(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !acquireSSE(r) {
+	capKey := s.sseCapKey(r)
+	if !acquireSSE(capKey) {
 		http.Error(w, "too many event-stream connections", http.StatusServiceUnavailable)
 		return
 	}
-	defer releaseSSE(r)
+	defer releaseSSE(capKey)
 
 	fl, ok := w.(http.Flusher)
 	if !ok {

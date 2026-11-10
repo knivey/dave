@@ -17,6 +17,11 @@ type Config struct {
 type ServerConfig struct {
 	Addr    string `toml:"addr"`
 	BaseURL string `toml:"base_url"`
+	// TrustedProxies lists direct peers whose X-Forwarded-For may be
+	// trusted when keying the SSE per-IP cap (events.go). Absent
+	// (nil) defaults to loopback only — the local-nginx deployment;
+	// an explicitly empty list never trusts XFF (RemoteAddr always).
+	TrustedProxies []string `toml:"trusted_proxies"`
 }
 
 type DatabaseConfig struct {
@@ -34,6 +39,12 @@ func (c *Config) setDefaults() {
 	}
 	if c.Database.Path == "" {
 		c.Database.Path = "data/dave.db"
+	}
+	// Absent → loopback-only default; an explicitly empty
+	// `trusted_proxies = []` decodes as an empty non-nil slice and is
+	// preserved (never trust XFF).
+	if c.Server.TrustedProxies == nil {
+		c.Server.TrustedProxies = []string{"127.0.0.1", "::1"}
 	}
 }
 

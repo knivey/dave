@@ -1,8 +1,11 @@
 # sesssite config — session-history website for dave
 #
 # Reference:
-#   [server] addr     string  listen address (default ":8060")
-#   [server] base_url string  external base URL for absolute links/OG tags
+#   [server] addr            string   listen address (default ":8060")
+#   [server] base_url        string   external base URL for absolute links/OG tags
+#   [server] trusted_proxies []string peers whose X-Forwarded-For keys the SSE per-IP
+#                                          cap (default loopback: ["127.0.0.1", "::1"];
+#                                          empty list = never trust XFF)
 #   [database] driver string  "sqlite" (default) | "postgres"
 #   [database] path   string  sqlite path, binary-relative (default "data/dave.db")
 #   [database] dsn    string  postgres DSN — use a READ-ONLY role; the code never writes
@@ -10,6 +13,7 @@
 # [server]
 # addr = ":8060"
 # base_url = "https://sessions.example.com"
+# trusted_proxies = ["127.0.0.1", "::1"]
 #
 # [database]
 # driver = "sqlite"

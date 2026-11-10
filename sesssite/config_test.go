@@ -50,6 +50,31 @@ func TestLoadConfigMalformed(t *testing.T) {
 	require.Error(t, err)
 }
 
+// The trusted_proxies semantics: absent → loopback-only default (the
+// local-nginx deployment); explicitly empty → never trust XFF; an
+// explicit list parses as given.
+func TestLoadConfigTrustedProxies(t *testing.T) {
+	t.Run("absent defaults to loopback", func(t *testing.T) {
+		cfg, err := loadConfig(filepath.Join(t.TempDir(), "missing.toml"))
+		require.NoError(t, err)
+		assert.Equal(t, []string{"127.0.0.1", "::1"}, cfg.Server.TrustedProxies)
+	})
+	t.Run("explicit empty never trusts", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "empty.toml")
+		require.NoError(t, os.WriteFile(path, []byte("[server]\ntrusted_proxies = []\n"), 0o644))
+		cfg, err := loadConfig(path)
+		require.NoError(t, err)
+		assert.Equal(t, []string{}, cfg.Server.TrustedProxies)
+	})
+	t.Run("explicit list parses", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "list.toml")
+		require.NoError(t, os.WriteFile(path, []byte("[server]\ntrusted_proxies = [\"10.0.0.1\", \"192.168.1.1\"]\n"), 0o644))
+		cfg, err := loadConfig(path)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"10.0.0.1", "192.168.1.1"}, cfg.Server.TrustedProxies)
+	})
+}
+
 func TestResolvePath(t *testing.T) {
 	tests := []struct {
 		name      string

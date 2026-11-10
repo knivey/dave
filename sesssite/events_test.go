@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -228,6 +229,154 @@ func TestSessionEventsHeadRejected(t *testing.T) {
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
+}
+
+// A gap larger than sseRowsLimit must arrive in successive batches
+// (gap fill emits the OLDEST sseRowsLimit; the poller continues from
+// the emission watermark) — nothing silently truncated.
+func TestSessionEventsBatchingOverCap(t *testing.T) {
+	db := newTestDB(t)
+	srv := NewServer(db, &Config{})
+	ts := httptest.NewServer(srv.mux())
+	defer ts.Close()
+	drainSSEConns(t)
+	s := mkSession(t, db, "aaaaaaaa")
+	m0 := mkMessage(t, db, s.ID, "user", "anchor")
+	for i := 1; i <= sseRowsLimit+100; i++ {
+		mkMessage(t, db, s.ID, "assistant", fmt.Sprintf("bulk-%04d", i))
+	}
+
+	resp, err := http.Get(ts.URL + "/s/aaaaaaaa/events?since=" + fmtInt(m0.ID))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	reader := bufio.NewReader(resp.Body)
+
+	// Batch 1 (gap fill): oldest sseRowsLimit bulk rows.
+	name, data := readSSE(t, reader, "messages")
+	assert.Equal(t, "messages", name)
+	assert.Contains(t, data, "bulk-0001")
+	assert.Contains(t, data, fmt.Sprintf("bulk-%04d", sseRowsLimit))
+	assert.NotContains(t, data, fmt.Sprintf("bulk-%04d", sseRowsLimit+1))
+	assert.NotContains(t, data, fmt.Sprintf("bulk-%04d", sseRowsLimit+100))
+
+	// Batch 2 (first tick): the remainder, through the newest row.
+	name2, data2 := readSSE(t, reader, "messages")
+	assert.Equal(t, "messages", name2)
+	assert.Contains(t, data2, fmt.Sprintf("bulk-%04d", sseRowsLimit+1))
+	assert.Contains(t, data2, fmt.Sprintf("bulk-%04d", sseRowsLimit+100))
+	assert.NotContains(t, data2, "bulk-0001")
+}
+
+// A transient render failure must not lose rows: the emission
+// watermark only advances through successfully rendered rows, so the
+// failed span is re-rendered on the next tick. Injected by dropping
+// the turn_usage table — readState never touches it, renderRowsAfter
+// does — then restoring it.
+func TestSessionEventsRenderFailureSelfHeals(t *testing.T) {
+	db := newTestDB(t)
+	srv := NewServer(db, &Config{})
+	ts := httptest.NewServer(srv.mux())
+	defer ts.Close()
+	drainSSEConns(t)
+	s := mkSession(t, db, "aaaaaaaa")
+	m1 := mkMessage(t, db, s.ID, "user", "first")
+	// Connect with since=m1 (no gap: since == the connect-time
+	// watermark), so m2 and m3 can only arrive through the stream.
+
+	require.NoError(t, db.Migrator().DropTable(&TurnUsage{}))
+	resp, err := http.Get(ts.URL + "/s/aaaaaaaa/events?since=" + fmtInt(m1.ID))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	reader := bufio.NewReader(resp.Body)
+
+	// This row's render fails (turn_usage is gone) — no event for it
+	// must go out yet, and its rows must NOT be skipped over.
+	m2 := mkMessage(t, db, s.ID, "assistant", "during outage")
+
+	// Heal: restore the table, add one more row.
+	require.NoError(t, db.AutoMigrate(&TurnUsage{}))
+	m3 := mkMessage(t, db, s.ID, "assistant", "after healing")
+
+	name, data := readSSE(t, reader, "messages")
+	assert.Equal(t, "messages", name)
+	assert.Contains(t, data, "during outage", "row from the failed-render window must not be lost")
+	assert.Contains(t, data, "after healing")
+	assert.Contains(t, data, `id="m`+fmtInt(m2.ID)+`"`)
+	assert.Contains(t, data, `id="m`+fmtInt(m3.ID)+`"`)
+}
+
+// X-Forwarded-For keys the per-IP cap when the direct peer is a
+// configured trusted proxy: two viewers behind one proxy count
+// separately (the default config trusts loopback; the httptest server
+// connects from 127.0.0.1).
+func TestSSECapXFFHonoredBehindTrustedProxy(t *testing.T) {
+	db := newTestDB(t)
+	srv := NewServer(db, &Config{Server: ServerConfig{TrustedProxies: []string{"127.0.0.1"}}})
+	ts := httptest.NewServer(srv.mux())
+	defer ts.Close()
+	drainSSEConns(t)
+	mkSession(t, db, "aaaaaaaa")
+
+	held := make([]*http.Response, 0, ssePerIPLimit)
+	get := func(xff string) *http.Response {
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/s/aaaaaaaa/events", nil)
+		require.NoError(t, err)
+		req.Header.Set("X-Forwarded-For", xff)
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		return resp
+	}
+	// Fill viewer A's budget from behind the proxy.
+	for i := 0; i < ssePerIPLimit; i++ {
+		resp := get("203.0.113.7")
+		require.Equal(t, http.StatusOK, resp.StatusCode, "viewer A conn %d", i)
+		held = append(held, resp)
+	}
+	// Viewer B, same proxy, different XFF: distinct key — not capped.
+	// (Never readBody a 200 here: an SSE stream's body is infinite.)
+	respB := get("198.51.100.9")
+	respB.Body.Close()
+	assert.Equal(t, http.StatusOK, respB.StatusCode)
+
+	for _, r := range held {
+		r.Body.Close()
+	}
+}
+
+// From an UNTRUSTED peer, XFF is ignored: forged headers cannot
+// multiply capacity (explicit empty trusted list = never trust XFF).
+func TestSSECapXFFIgnoredFromUntrustedPeer(t *testing.T) {
+	db := newTestDB(t)
+	srv := NewServer(db, &Config{Server: ServerConfig{TrustedProxies: []string{}}})
+	ts := httptest.NewServer(srv.mux())
+	defer ts.Close()
+	drainSSEConns(t)
+	mkSession(t, db, "aaaaaaaa")
+
+	held := make([]*http.Response, 0, ssePerIPLimit)
+	get := func(xff string) *http.Response {
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/s/aaaaaaaa/events", nil)
+		require.NoError(t, err)
+		req.Header.Set("X-Forwarded-For", xff)
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		return resp
+	}
+	// ssePerIPLimit conns, each forging a DIFFERENT XFF — all must
+	// count against the one real peer address.
+	for i := 0; i < ssePerIPLimit; i++ {
+		resp := get(fmt.Sprintf("10.0.0.%d", i+1))
+		require.Equal(t, http.StatusOK, resp.StatusCode, "conn %d", i)
+		held = append(held, resp)
+	}
+	respNext := get("10.0.0.99")
+	readBody(t, respNext) // 503: finite error body, safe to drain
+	respNext.Body.Close()
+	assert.Equal(t, http.StatusServiceUnavailable, respNext.StatusCode)
+
+	for _, r := range held {
+		r.Body.Close()
+	}
 }
 
 func TestSessionEventsPerIPCap(t *testing.T) {

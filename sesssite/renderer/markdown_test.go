@@ -48,12 +48,21 @@ func TestRender_CodeBlock(t *testing.T) {
 	assert.Contains(t, result, "<code")
 }
 
-func TestRender_CodeBlockDracula(t *testing.T) {
+func TestRender_CodeBlockClasses(t *testing.T) {
+	// Controller ruling (Chroma/CSP): the renderer emits CLASS-based
+	// Chroma output, never inline style= attributes — the strict CSP
+	// (style-src 'self') blocks inline styles, and the spec promises
+	// highlighted code. The Dracula palette itself now lives in
+	// static/chroma.css (pinned by the page-level
+	// TestSessionPageCodeBlockClasses). This test replaced
+	// TestRender_CodeBlockDracula, which asserted the palette via inline
+	// style hex colors.
 	input := "```python\nprint(\"hello\")\n```"
 	result, err := Render(input)
 	assert.NoError(t, err)
-	assert.Contains(t, result, "#282a36")
-	assert.Contains(t, result, "#f8f8f2")
+	assert.Contains(t, result, "class=")
+	assert.Contains(t, result, "<span class=\"")
+	assert.NotContains(t, result, "style=")
 }
 
 func TestRender_Linkify(t *testing.T) {

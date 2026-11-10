@@ -4,12 +4,19 @@
 // Chroma/Dracula highlighting, linkify, and the IRC control-code
 // transformer below (IRC clients embed \x02/\x03/… codes in user text;
 // the transformer maps them to styled spans).
+//
+// Deliberate divergence from the parsebin original (controller ruling,
+// Nov 2026): Chroma emits CLASSES, not inline styles — the site's CSP
+// blocks inline styles, and the Dracula palette ships as a generated
+// stylesheet (static/chroma.css) instead. See the WithClasses note in
+// init().
 package renderer
 
 import (
 	"bytes"
 	"fmt"
 
+	chromahtml "github.com/alecthomas/chroma/v2/formatters/html"
 	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/yuin/goldmark"
 	highlighting "github.com/yuin/goldmark-highlighting/v2"
@@ -36,7 +43,14 @@ func init() {
 			),
 			highlighting.NewHighlighting(
 				highlighting.WithStyle("dracula"),
-				highlighting.WithFormatOptions(),
+				// DIVERGENCE from the parsebin original (controller
+				// ruling, Nov 2026): class-based Chroma output instead
+				// of inline style= attributes. The site's strict CSP
+				// (style-src 'self') blocks inline styles, so the
+				// parsebin inline form shipped uncolored code — and the
+				// spec promises Chroma highlighting. The Dracula colors
+				// ship as a generated stylesheet at static/chroma.css.
+				highlighting.WithFormatOptions(chromahtml.WithClasses(true)),
 			),
 			IRCExtension,
 		),

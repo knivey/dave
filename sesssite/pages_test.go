@@ -309,6 +309,41 @@ func TestSessionPageNoBlankImageSrc(t *testing.T) {
 	assert.NotContains(t, body, `src=""`)
 }
 
+// TestSessionPageCodeBlockClasses pins the controller ruling on the
+// Chroma/CSP gap: fenced code blocks render with CLASS-based Chroma
+// output (colors from /static/chroma.css, linked in base.html), never
+// inline style= attributes — the strict CSP (style-src 'self') blocks
+// inline styles, and the spec promises highlighted code.
+func TestSessionPageCodeBlockClasses(t *testing.T) {
+	db := newTestDB(t)
+	srv := NewServer(db, &Config{})
+	ts := httptest.NewServer(srv.mux())
+	defer ts.Close()
+	s := mkSession(t, db, "aaaaaaaa")
+	mkMessage(t, db, s.ID, "assistant", "```go\nfmt.Println(\"hello\")\n```")
+
+	resp, err := http.Get(ts.URL + "/s/aaaaaaaa")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, 200, resp.StatusCode)
+	body := readBody(t, resp)
+	assert.Contains(t, body, `class="chroma"`)
+	assert.Contains(t, body, `<span class="`) // token classes present
+	assert.NotContains(t, body, "style=")     // no inline styles anywhere
+	assert.Contains(t, body, `<link rel="stylesheet" href="/static/chroma.css">`)
+
+	// The Dracula palette lives in the served stylesheet now (this is
+	// where TestRender_CodeBlockDracula's hex-color pin moved to).
+	respCSS, err := http.Get(ts.URL + "/static/chroma.css")
+	require.NoError(t, err)
+	defer respCSS.Body.Close()
+	require.Equal(t, 200, respCSS.StatusCode)
+	css := readBody(t, respCSS)
+	assert.Contains(t, css, "#282a36") // dracula background
+	assert.Contains(t, css, "#50fa7b") // dracula green (functions)
+	assert.Contains(t, css, ".chroma")
+}
+
 // TestSessionPageHasOlderButton pins the pagination affordance: the
 // button renders (with the oldest loaded id as its keyset cursor) only
 // when older rows exist beyond the initial 200-message page.

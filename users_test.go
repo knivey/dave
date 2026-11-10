@@ -306,6 +306,7 @@ func TestMergeUser(t *testing.T) {
 		Network:     "testnet",
 		Channel:     "#test",
 		ChatCommand: "chat",
+		Slug:        mustSlug(t),
 		UserID:      &ghost.ID,
 		Status:      "completed",
 		CreatedAt:   time.Now(),
@@ -492,6 +493,7 @@ func TestNickTakeoverScenario(t *testing.T) {
 		Network:     "testnet",
 		Channel:     "#test",
 		ChatCommand: "chat",
+		Slug:        mustSlug(t),
 		UserID:      &userA.ID,
 		Status:      "completed",
 		CreatedAt:   time.Now(),
@@ -508,6 +510,7 @@ func TestNickTakeoverScenario(t *testing.T) {
 		Network:     "testnet",
 		Channel:     "#test",
 		ChatCommand: "chat",
+		Slug:        mustSlug(t),
 		UserID:      &userB.ID,
 		Status:      "completed",
 		CreatedAt:   time.Now(),
@@ -561,6 +564,7 @@ func TestNickTakeoverMergeGhostScenario(t *testing.T) {
 		Network:     "testnet",
 		Channel:     "#test",
 		ChatCommand: "chat",
+		Slug:        mustSlug(t),
 		UserID:      &ghost.ID,
 		Status:      "completed",
 		CreatedAt:   time.Now(),
@@ -576,6 +580,7 @@ func TestNickTakeoverMergeGhostScenario(t *testing.T) {
 		Network:     "testnet",
 		Channel:     "#test",
 		ChatCommand: "chat",
+		Slug:        mustSlug(t),
 		UserID:      &userB.ID,
 		Status:      "completed",
 		CreatedAt:   time.Now(),
@@ -611,6 +616,7 @@ func TestGetUserInfo(t *testing.T) {
 		Network:     "testnet",
 		Channel:     "#test",
 		ChatCommand: "chat",
+		Slug:        mustSlug(t),
 		UserID:      &user.ID,
 		Status:      "completed",
 		CreatedAt:   time.Now(),
@@ -848,7 +854,7 @@ func TestGetUserDBStatsAllNetworks(t *testing.T) {
 
 	s1 := Session{
 		Network: "testnet", Channel: "#chan1", ChatCommand: "chat",
-		UserID: &user.ID, Status: "completed",
+		Slug: mustSlug(t), UserID: &user.ID, Status: "completed",
 		CreatedAt: time.Now(), LastActive: time.Now(),
 	}
 	require.NoError(t, theDB.Create(&s1).Error)
@@ -857,7 +863,7 @@ func TestGetUserDBStatsAllNetworks(t *testing.T) {
 
 	s2 := Session{
 		Network: "testnet", Channel: "#chan2", ChatCommand: "chat",
-		UserID: &user.ID, Status: "completed",
+		Slug: mustSlug(t), UserID: &user.ID, Status: "completed",
 		CreatedAt: time.Now(), LastActive: time.Now(),
 	}
 	require.NoError(t, theDB.Create(&s2).Error)
@@ -904,6 +910,7 @@ func TestResolveUserAccountPathReleasesCollidingRealUser(t *testing.T) {
 		Network:        "gamesurge",
 		CurrentNick:    "SpartaN",
 		NormalizedNick: "spartan",
+		Slug:           mustSlug(t),
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
@@ -963,13 +970,13 @@ func TestResolveUserAccountPathMergesGhostHoldingNick(t *testing.T) {
 	// Give the ghost a couple of sessions to verify reassignment.
 	s1 := Session{
 		Network: "testnet", Channel: "#chan1", ChatCommand: "chat",
-		UserID: &ghost.ID, Status: "completed",
+		Slug: mustSlug(t), UserID: &ghost.ID, Status: "completed",
 		CreatedAt: time.Now(), LastActive: time.Now(),
 	}
 	require.NoError(t, theDB.Create(&s1).Error)
 	s2 := Session{
 		Network: "testnet", Channel: "#chan2", ChatCommand: "chat",
-		UserID: &ghost.ID, Status: "completed",
+		Slug: mustSlug(t), UserID: &ghost.ID, Status: "completed",
 		CreatedAt: time.Now(), LastActive: time.Now(),
 	}
 	require.NoError(t, theDB.Create(&s2).Error)
@@ -1168,6 +1175,7 @@ func TestResolveUserFallbackCreatesFlaggedRow(t *testing.T) {
 		Network:        "gamesurge",
 		CurrentNick:    "SpartaN",
 		NormalizedNick: "spartan",
+		Slug:           mustSlug(t),
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
@@ -1211,6 +1219,7 @@ func TestFlaggedUserRowSkippedByAccountLookup(t *testing.T) {
 		IRCAccount:     "shared_account",
 		Flagged:        true,
 		FlaggedReason:  FlaggedReasonCollision,
+		Slug:           mustSlug(t),
 		CreatedAt:      time.Now(),
 		UpdatedAt:      time.Now(),
 	}
@@ -1234,6 +1243,7 @@ func TestFlaggedUserRowSkippedByNickLookup(t *testing.T) {
 		NormalizedNick: "ghost",
 		Flagged:        true,
 		FlaggedReason:  FlaggedReasonCollision,
+		Slug:           mustSlug(t),
 		CreatedAt:      time.Now(),
 		UpdatedAt:      time.Now(),
 	}
@@ -1269,6 +1279,7 @@ func TestGetFlaggedUsers(t *testing.T) {
 			NormalizedNick: spec.norm,
 			Flagged:        spec.flagged,
 			FlaggedReason:  "",
+			Slug:           mustSlug(t),
 			CreatedAt:      time.Now().Add(time.Duration(i) * time.Second),
 			UpdatedAt:      time.Now(),
 		}
@@ -1304,6 +1315,7 @@ func TestCountFlaggedUsers(t *testing.T) {
 		NormalizedNick: "x",
 		Flagged:        true,
 		FlaggedReason:  FlaggedReasonCollision,
+		Slug:           mustSlug(t),
 		CreatedAt:      time.Now(),
 		UpdatedAt:      time.Now(),
 	}
@@ -1456,6 +1468,7 @@ func TestResolveUserReleasedNickFallback_HostRecoveryWinsFirst(t *testing.T) {
 		CurrentNick:    "userA",
 		NormalizedNick: "usera",
 		Released:       true,
+		Slug:           mustSlug(t),
 		CreatedAt:      now,
 		UpdatedAt:      now.Add(1 * time.Hour), // newer
 	}
@@ -1481,6 +1494,7 @@ func TestResolveUserReleasedNickFallback_MultipleMatchesPicksNewest(t *testing.T
 		CurrentNick:    "userA",
 		NormalizedNick: "usera",
 		Released:       true,
+		Slug:           mustSlug(t),
 		CreatedAt:      now.Add(-2 * time.Hour),
 		UpdatedAt:      now.Add(-2 * time.Hour),
 	}
@@ -1491,6 +1505,7 @@ func TestResolveUserReleasedNickFallback_MultipleMatchesPicksNewest(t *testing.T
 		CurrentNick:    "userA",
 		NormalizedNick: "usera",
 		Released:       true,
+		Slug:           mustSlug(t),
 		CreatedAt:      now.Add(-1 * time.Hour),
 		UpdatedAt:      now.Add(-1 * time.Hour),
 	}
@@ -1516,6 +1531,7 @@ func TestResolveUserReleasedNickFallback_NoMatchCreatesNew(t *testing.T) {
 		CurrentNick:    "someoneElse",
 		NormalizedNick: "someoneelse",
 		Released:       true,
+		Slug:           mustSlug(t),
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
@@ -1544,6 +1560,7 @@ func TestResolveUserReleasedNickFallback_AccountBranch(t *testing.T) {
 		CurrentNick:    "userA",
 		NormalizedNick: "usera",
 		Released:       true,
+		Slug:           mustSlug(t),
 		CreatedAt:      now.Add(-1 * time.Hour),
 		UpdatedAt:      now.Add(-1 * time.Hour),
 	}
@@ -1574,6 +1591,7 @@ func TestResolveUserReleasedNickFallback_DoesNotMatchFlagged(t *testing.T) {
 		Released:       true, // flagged AND released — still must not match
 		Flagged:        true,
 		FlaggedReason:  FlaggedReasonCollision,
+		Slug:           mustSlug(t),
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
@@ -1693,6 +1711,7 @@ func TestReleasedNickFallbackAccountEligibility(t *testing.T) {
 		NormalizedNick: "shrew",
 		IRCAccount:     "shrew",
 		Released:       true,
+		Slug:           mustSlug(t),
 		CreatedAt:      now.Add(-1 * time.Hour),
 		UpdatedAt:      now.Add(-1 * time.Hour),
 	}
@@ -1739,6 +1758,7 @@ func TestReleasedNickFallbackAccountEligibility(t *testing.T) {
 			NormalizedNick: "crow",
 			IRCAccount:     "crowacct",
 			Released:       true,
+			Slug:           mustSlug(t),
 			CreatedAt:      now.Add(-1 * time.Hour),
 			UpdatedAt:      now.Add(-1 * time.Hour),
 		}

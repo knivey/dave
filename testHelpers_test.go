@@ -14,6 +14,17 @@ import (
 
 var ensureTestUserMu sync.Mutex
 
+// mustSlug mints a website slug for tests that create Session/User rows via
+// direct struct literals (bypassing the minting creation paths). The slug
+// column carries a unique index — two ”-slugged rows in one test DB fail
+// the insert.
+func mustSlug(t *testing.T) string {
+	t.Helper()
+	s, err := generateSlug()
+	require.NoError(t, err)
+	return s
+}
+
 func ensureTestUser(t *testing.T, network, nick string) int64 {
 	t.Helper()
 	ensureTestUserMu.Lock()
@@ -27,6 +38,7 @@ func ensureTestUser(t *testing.T, network, nick string) int64 {
 		Network:        network,
 		CurrentNick:    nick,
 		NormalizedNick: normalizeIRC(nick, "rfc1459"),
+		Slug:           mustSlug(t),
 		CreatedAt:      time.Now(),
 		UpdatedAt:      time.Now(),
 	}

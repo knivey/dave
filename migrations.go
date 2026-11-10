@@ -43,6 +43,7 @@ var migrations = []migration{
 	{ID: 7, Name: "convert_sentinels_to_released_column", Up: convertSentinelsToReleasedColumn},
 	{ID: 8, Name: "add_sessions_cloned_from", Up: addSessionsClonedFrom},
 	{ID: 9, Name: "drop_messages_encrypted_reasoning", Up: dropMessagesEncryptedReasoning},
+	{ID: 10, Name: "add_session_user_slugs", Up: addSessionUserSlugs},
 }
 
 func runMigrations(db *gorm.DB, dbPath string) error {
@@ -202,10 +203,15 @@ func createUsersFromSessions(db *gorm.DB) error {
 			continue
 		}
 
+		slug, err := generateSlug()
+		if err != nil {
+			return fmt.Errorf("minting user slug: %w", err)
+		}
 		user := User{
 			Network:        p.Network,
 			CurrentNick:    p.Nick,
 			NormalizedNick: norm,
+			Slug:           slug,
 			CreatedAt:      now,
 			UpdatedAt:      now,
 		}
@@ -693,5 +699,44 @@ func addSessionsClonedFrom(db *gorm.DB) error {
 		}
 	}
 
+	return nil
+}
+
+// addSessionUserSlugs backfills website slugs for rows created before the
+// slug columns existed. The columns + unique indexes are created by
+// AutoMigrate from the struct tags; this migration only fills data. NULL
+// (legacy rows) is the backfill target — ” never occurs because the
+// creation paths mint before insert.
+func addSessionUserSlugs(db *gorm.DB) error {
+	for _, table := range []string{"sessions", "users"} {
+		var ids []int64
+		if err := db.Table(table).Where("slug IS NULL").Pluck("id", &ids).Error; err != nil {
+			return fmt.Errorf("migration 10: listing %s: %w", table, err)
+		}
+		for _, id := range ids {
+			slug, err := generateSlug()
+			if err != nil {
+				return fmt.Errorf("migration 10: minting slug: %w", err)
+			}
+			// Retry on collision: the unique index rejects it, we redraw.
+			// (Practically unreachable — 8 base62 chars vs table size.)
+			for retry := 0; retry < 5; retry++ {
+				res := db.Table(table).Where("id = ? AND slug IS NULL", id).Update("slug", slug)
+				if res.Error != nil {
+					if isUniqueConstraintErr(res.Error) && retry < 4 {
+						slug, err = generateSlug()
+						if err != nil {
+							return fmt.Errorf("migration 10: minting slug: %w", err)
+						}
+						continue
+					}
+					return fmt.Errorf("migration 10: updating %s id %d: %w", table, id, res.Error)
+				}
+				if res.RowsAffected > 0 {
+					break
+				}
+			}
+		}
+	}
 	return nil
 }

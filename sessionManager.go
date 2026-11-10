@@ -69,12 +69,17 @@ func (sm *SessionManager) CreateSession(network, channel string, userID int64, c
 	}
 
 	convID := generateConvID()
+	slug, err := generateSlug()
+	if err != nil {
+		return 0, fmt.Errorf("minting session slug: %w", err)
+	}
 	session := Session{
 		Network:     network,
 		Channel:     channel,
 		UserID:      &userID,
 		ChatCommand: chatCommand,
 		ConvID:      &convID,
+		Slug:        slug,
 		Service:     service,
 		Model:       model,
 		Status:      StatusActive,

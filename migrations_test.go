@@ -440,6 +440,7 @@ func TestMigration7_ResolvesDuplicates(t *testing.T) {
 		NormalizedNick: "dupe",
 		Released:       false,
 		Flagged:        false,
+		Slug:           mustSlug(t),
 		CreatedAt:      now.Add(-2 * time.Hour),
 		UpdatedAt:      now.Add(-2 * time.Hour),
 	}
@@ -451,6 +452,7 @@ func TestMigration7_ResolvesDuplicates(t *testing.T) {
 		NormalizedNick: "dupe",
 		Released:       false,
 		Flagged:        false,
+		Slug:           mustSlug(t),
 		CreatedAt:      now.Add(-1 * time.Hour),
 		UpdatedAt:      now.Add(-1 * time.Hour),
 	}

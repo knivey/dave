@@ -51,7 +51,12 @@ type Session struct {
 	ChatCommand  string  `gorm:"column:chat_command;not null"`
 	FirstMessage string  `gorm:"column:first_message;not null;default:''"`
 	ConvID       *string `gorm:"column:conv_id;index:idx_sessions_conv_id"`
-	ResponseID   *string `gorm:"column:response_id;index:idx_sessions_response_id"`
+	// Slug is the public 8-char identifier for the session-history
+	// website. Minted once at creation; empty only on legacy rows before
+	// migration #10 backfilled them. Unique index; '' never reaches the
+	// DB because the only writers mint before insert.
+	Slug       string  `gorm:"uniqueIndex"`
+	ResponseID *string `gorm:"column:response_id;index:idx_sessions_response_id"`
 	// ResponseModel is the model that produced ResponseID. Responses API
 	// chains (previous_response_id) must never cross a model switch: the
 	// provider either errors with wording we may not recognize or — worse —
@@ -211,11 +216,13 @@ type User struct {
 	CurrentNick    string `gorm:"not null"`
 	NormalizedNick string `gorm:"not null"`
 	IRCAccount     string `gorm:"column:account;index:idx_users_account"`
-	Released       bool   `gorm:"not null;default:false;index:idx_users_released"`
-	Flagged        bool   `gorm:"not null;default:false;index:idx_users_flagged"`
-	FlaggedReason  string `gorm:"not null;default:''"`
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	// Slug: public website identifier, see Session.Slug.
+	Slug          string `gorm:"uniqueIndex"`
+	Released      bool   `gorm:"not null;default:false;index:idx_users_released"`
+	Flagged       bool   `gorm:"not null;default:false;index:idx_users_flagged"`
+	FlaggedReason string `gorm:"not null;default:''"`
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
 func (User) TableName() string { return "users" }
@@ -812,12 +819,17 @@ func cloneDBSession(sourceSessionID int64, targetNetwork, targetChannel string, 
 	}
 
 	convID := generateConvID()
+	slug, err := generateSlug()
+	if err != nil {
+		return 0, fmt.Errorf("minting session slug: %w", err)
+	}
 	newSession := Session{
 		Network:        targetNetwork,
 		Channel:        targetChannel,
 		UserID:         &targetUserID,
 		ChatCommand:    source.ChatCommand,
 		ConvID:         &convID,
+		Slug:           slug,
 		ResponseID:     nil,
 		Service:        source.Service,
 		Model:          source.Model,

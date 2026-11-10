@@ -381,11 +381,16 @@ func resolveUserOnce(network, nick, ident, host, account, casemapping string) (*
 func resolveUserFallback(network, nick, ident, host, account, casemapping string, cause error) (*User, error) {
 	norm := normalizeIRC(nick, casemapping)
 	now := time.Now()
+	slug, err := generateSlug()
+	if err != nil {
+		return nil, fmt.Errorf("minting user slug: %w", err)
+	}
 	user := &User{
 		Network:        network,
 		CurrentNick:    nick,
 		NormalizedNick: norm,
 		IRCAccount:     account,
+		Slug:           slug,
 		Flagged:        true,
 		FlaggedReason:  FlaggedReasonCollision,
 		CreatedAt:      now,
@@ -599,11 +604,16 @@ func recoverByKnownHost(network, ident, host, normalizedNick, account string) (*
 
 func createNewUser(network, nick, normalizedNick, account, ident, host string) (*User, error) {
 	now := time.Now()
+	slug, err := generateSlug()
+	if err != nil {
+		return nil, fmt.Errorf("minting user slug: %w", err)
+	}
 	user := User{
 		Network:        network,
 		CurrentNick:    nick,
 		NormalizedNick: normalizedNick,
 		IRCAccount:     account,
+		Slug:           slug,
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}

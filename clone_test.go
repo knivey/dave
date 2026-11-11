@@ -156,6 +156,35 @@ func TestSessionHasIncompleteToolCalls_MultipleRoundsAllComplete(t *testing.T) {
 	assert.False(t, result, "session with multiple complete tool call rounds should not be incomplete")
 }
 
+// TestCloneDBSession_SetsLastActive pins the fix for cloned sessions
+// never appearing at the top of session lists: cloneDBSession inserts
+// messages via direct tx.Create, bypassing AddMessage/AddMessages —
+// the only paths that update last_active — so a clone's last_active
+// stayed zero (0001-01-01). That sorted the user's freshly-cloned
+// ACTIVE session to the bottom of every last_active-DESC list
+// (sesssite user page, ^sessions) and made cleanupDBSessions treat it
+// as stale on the next boot (status=active AND last_active<cutoff →
+// silently completed, so the next message started a NEW session
+// instead of continuing the clone).
+func TestCloneDBSession_SetsLastActive(t *testing.T) {
+	setupTestDB(t)
+
+	srcUserID := ensureTestUser(t, "net", "srcnick")
+	srcSid, err := sessionMgr.CreateSession("net", "#c", srcUserID, "testchat", "svc", "model")
+	require.NoError(t, err)
+	require.NoError(t, sessionMgr.AddMessage(srcSid, ChatMessage{Role: RoleUser, Content: "hello"}))
+
+	before := time.Now().Add(-time.Minute)
+	tgtUserID := ensureTestUser(t, "net", "tgtnick")
+	newSid, err := cloneDBSession(srcSid, "net", "#c", tgtUserID, "new sys", "")
+	require.NoError(t, err)
+
+	clone, err := sessionMgr.GetSession(newSid)
+	require.NoError(t, err)
+	assert.False(t, clone.LastActive.Before(before),
+		"clone's last_active must be set at creation, got %v", clone.LastActive)
+}
+
 func TestCloneDBSession_BasicClone(t *testing.T) {
 	setupTestDB(t)
 

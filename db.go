@@ -840,6 +840,12 @@ func cloneDBSession(sourceSessionID int64, targetNetwork, targetChannel string, 
 	if err != nil {
 		return 0, fmt.Errorf("minting session slug: %w", err)
 	}
+	// LastActive must be set HERE: the clone's messages insert via
+	// tx.Create below, bypassing AddMessage/AddMessages — the only
+	// paths that update last_active. A zero last_active sorted the
+	// fresh clone to the bottom of every last_active-DESC list (user
+	// page, ^sessions) and let cleanupDBSessions complete it as stale
+	// on the next boot.
 	newSession := Session{
 		Network:        targetNetwork,
 		Channel:        targetChannel,
@@ -851,6 +857,7 @@ func cloneDBSession(sourceSessionID int64, targetNetwork, targetChannel string, 
 		Service:        source.Service,
 		Model:          source.Model,
 		Status:         StatusActive,
+		LastActive:     time.Now(),
 		SettingsID:     newSettingsID,
 		ClonedFromID:   &source.ID,
 		ClonedFromNick: sourceNick,

@@ -46,6 +46,11 @@ type MessageView struct {
 	ToolCallID       string
 	HasReasoning     bool
 	ReasoningContent string
+	// ReasoningHTML is the reasoning content rendered through the same
+	// markdown pipeline as ContentHTML (models emit headers/code/lists
+	// in their thinking; an escaped <pre> lost all of it). Degradation
+	// mirrors ContentHTML: escaped plain text when Render errors.
+	ReasoningHTML    template.HTML
 	ReasoningSummary string
 	ImageParts       []string
 	Archived         bool
@@ -99,6 +104,13 @@ func buildMessageView(m Message, sessionSlug string) MessageView {
 	if m.ReasoningContent != nil && *m.ReasoningContent != "" {
 		v.HasReasoning = true
 		v.ReasoningContent = *m.ReasoningContent
+		if html, err := renderer.Render(*m.ReasoningContent); err == nil {
+			v.ReasoningHTML = template.HTML(html)
+		} else {
+			// Degradation equals ContentHTML's: escaped plain text —
+			// content is never lost.
+			v.ReasoningHTML = template.HTML(template.HTMLEscapeString(*m.ReasoningContent))
+		}
 		if m.ReasoningSummary != nil {
 			v.ReasoningSummary = *m.ReasoningSummary
 		}

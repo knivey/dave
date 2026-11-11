@@ -64,7 +64,7 @@ code, pre { font-family: "Fira Code", ui-monospace, "Cascadia Mono", monospace; 
 /* tool calls / results, reasoning, system, usage */
 .toolcall { margin: 0.3rem 0; }
 .toolcall .name { color: #ffb86c; font-weight: 600; }
-.toolcall pre, .toolresult pre, .reasoning pre, .system pre {
+.toolcall pre, .toolresult pre, .system pre {
 	background: #21222c; color: #f8f8f2; padding: 0.55rem; border-radius: 6px;
 	overflow-x: auto; font-size: 0.82rem; white-space: pre-wrap; word-break: break-word;
 }

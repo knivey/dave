@@ -59,6 +59,37 @@ func TestBuildMessageViewReasoningCollapsed(t *testing.T) {
 	assert.Equal(t, "chain of thought", v.ReasoningContent)
 }
 
+// TestBuildMessageViewReasoningMarkdown: reasoning renders through the
+// markdown pipeline like content (models emit headers/code/lists in
+// their thinking), not as an escaped <pre>.
+func TestBuildMessageViewReasoningMarkdown(t *testing.T) {
+	db := newTestDB(t)
+	s := mkSession(t, db, "aaaaaaaa")
+	m := mkMessage(t, db, s.ID, "assistant", "answer", func(msg *Message) {
+		r := "thinking **hard** about `code`"
+		msg.ReasoningContent = &r
+	})
+	v := buildMessageView(m, s.Slug)
+	assert.Contains(t, string(v.ReasoningHTML), "<strong>hard</strong>")
+	assert.Contains(t, string(v.ReasoningHTML), "<code>code</code>")
+
+	// Through the template: markdown block class, no escaped pre.
+	// The md-class assertion is reasoning-scoped (index after the
+	// details.reasoning opener) — the message content block emits the
+	// identical class, so a bare Contains would pass even if reasoning
+	// reverted to a non-md wrapper.
+	html, err := renderRowsHTML([]MessageView{v}, nil)
+	require.NoError(t, err)
+	frag := string(html)
+	reasonIdx := strings.Index(frag, `<details class="reasoning">`)
+	require.NotEqual(t, -1, reasonIdx, "reasoning details block renders")
+	strongIdx := strings.Index(frag, "<strong>hard</strong>")
+	require.NotEqual(t, -1, strongIdx, "reasoning markdown renders")
+	assert.Greater(t, strongIdx, reasonIdx, "<strong> must come from the reasoning block")
+	assert.Contains(t, frag[reasonIdx:], `<div class="content md">`, "reasoning block uses the markdown wrapper")
+	assert.NotContains(t, frag, "<pre class=")
+}
+
 func TestBuildMessageViewImages(t *testing.T) {
 	db := newTestDB(t)
 	s := mkSession(t, db, "aaaaaaaa")

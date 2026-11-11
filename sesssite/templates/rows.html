@@ -32,7 +32,7 @@
 		{{if $v.HasReasoning}}
 			<details class="reasoning"><summary>reasoning</summary>
 				{{if $v.ReasoningSummary}}<div class="summary md">summary: {{$v.ReasoningSummary}}</div>{{end}}
-				{{if $v.ReasoningContent}}<pre class="content">{{$v.ReasoningContent}}</pre>{{end}}
+				{{if $v.ReasoningContent}}<div class="content md">{{$v.ReasoningHTML}}</div>{{end}}
 			</details>
 		{{end}}
 		{{if $v.Usage}}

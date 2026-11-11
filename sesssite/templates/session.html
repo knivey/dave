@@ -11,6 +11,7 @@
 			<span class="badge model">{{.Session.Model}}</span>
 			<span class="badge status-{{.Session.Status}}" id="status-badge">{{.Session.Status}}</span>
 			{{if .ModelChanged}}<span class="badge changed" title="the model changed mid-session — see the usage details">model changed</span>{{end}}
+			{{if or .Session.ClonedFromNick .Session.ClonedFromID}}{{if .ClonedFromURL}}<a class="badge cloned" href="{{.ClonedFromURL}}" title="this session was cloned from another session">⤺ cloned from {{if .Session.ClonedFromNick}}{{.Session.ClonedFromNick}}{{else}}session #{{.Session.ClonedFromID}}{{end}}</a>{{else}}<span class="badge cloned" title="this session was cloned from another session">⤺ cloned from {{if .Session.ClonedFromNick}}{{.Session.ClonedFromNick}}{{else}}session #{{.Session.ClonedFromID}}{{end}}</span>{{end}}{{end}}
 		</div>
 		<div class="session-meta">
 			created <time title="{{.Session.CreatedAt.Format "2006-01-02 15:04:05"}}">{{.Session.CreatedAt.Format "2006-01-02 15:04"}}</time>

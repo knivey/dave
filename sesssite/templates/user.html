@@ -3,7 +3,10 @@
 {{define "user-list"}}<ul id="session-list">
 {{range .Sessions}}	<li class="session-row">
 		<a href="/s/{{.Slug}}">
-			<span class="row-meta"><span class="badge">{{.ChatCommand}}</span> <span class="badge">{{.Network}} {{.Channel}}</span> <span class="badge model">{{.Model}}</span> <span class="badge status-{{.Status}}">{{.Status}}</span> <time title="{{.LastActive.Format "2006-01-02 15:04:05"}}">{{.LastActive.Format "2006-01-02 15:04"}}</time></span>
+			<span class="row-meta"><span class="badge">{{.ChatCommand}}</span> <span class="badge">{{.Network}} {{.Channel}}</span> <span class="badge model">{{.Model}}</span> <span class="badge status-{{.Status}}">{{.Status}}</span> {{/* nick-only tier: a nick-less clone lineage (id but no nick)
+		     is not meaningful in a compact row — the session page
+		     shows it as "session #<id>". */}}
+			{{if .ClonedFromNick}}<span class="badge cloned" title="cloned from {{.ClonedFromNick}}'s session">⤺ {{.ClonedFromNick}}</span>{{end}} <time title="{{.LastActive.Format "2006-01-02 15:04:05"}}">{{.LastActive.Format "2006-01-02 15:04"}}</time></span>
 			<span class="preview">{{runesClamp .FirstMessage 120}}</span>
 		</a>
 	</li>

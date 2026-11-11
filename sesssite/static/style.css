@@ -28,6 +28,9 @@ code, pre { font-family: "Fira Code", ui-monospace, "Cascadia Mono", monospace; 
 .badge.status-active { color: #50fa7b; }
 .badge.status-completed { color: #6272a4; }
 .badge.changed { color: #ffb86c; }
+.badge.cloned { color: #8be9fd; }
+a.badge.cloned { text-decoration: none; }
+a.badge.cloned:hover { background: #44475a; color: #f8f8f2; }
 .session-meta { color: #6272a4; font-size: 0.85rem; }
 .usage-by-model { margin-top: 0.5rem; font-size: 0.85rem; color: #bd93f9; }
 .usage-by-model ul { margin: 0.3rem 0 0 1.2rem; color: #bdc0d4; }

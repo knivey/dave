@@ -75,6 +75,10 @@ type sessionPageData struct {
 	MessageCount int64
 	UsageByModel []modelUsage
 	ModelChanged bool
+	// ClonedFromURL is the source session's page link when the session
+	// is a clone AND the source still resolves (exists, not
+	// soft-deleted, has a slug); "" renders an unlinked badge.
+	ClonedFromURL string
 }
 
 // handleLanding renders the landing page: what the site is, and that
@@ -232,15 +236,16 @@ func (s *Server) serveSessionPage(w http.ResponseWriter, r *http.Request, sess *
 
 	byModel := aggregateUsageByModel(usage)
 	data := sessionPageData{
-		Session:      sess,
-		Rows:         rows,
-		HasOlder:     hasOlder,
-		OldestID:     oldest,
-		BaseURL:      s.cfg.Server.BaseURL,
-		UserSlug:     s.userSlugFor(sess.UserID),
-		MessageCount: count,
-		UsageByModel: byModel,
-		ModelChanged: len(byModel) > 1,
+		Session:       sess,
+		Rows:          rows,
+		HasOlder:      hasOlder,
+		OldestID:      oldest,
+		BaseURL:       s.cfg.Server.BaseURL,
+		UserSlug:      s.userSlugFor(sess.UserID),
+		MessageCount:  count,
+		UsageByModel:  byModel,
+		ModelChanged:  len(byModel) > 1,
+		ClonedFromURL: s.clonedFromURL(sess),
 	}
 	var buf bytes.Buffer
 	if err := sessionTpl.Execute(&buf, data); err != nil {
@@ -404,6 +409,24 @@ func (s *Server) userSlugFor(userID *int64) string {
 		return ""
 	}
 	return u.Slug
+}
+
+// clonedFromURL resolves a clone's source session page link, best
+// effort: "" when the session isn't a clone, or the source row is
+// gone/soft-deleted/slug-less (the badge then renders unlinked — the
+// nick still tells the story).
+func (s *Server) clonedFromURL(sess *Session) string {
+	if sess.ClonedFromID == nil {
+		return ""
+	}
+	var src Session
+	if err := s.db.Select("slug").Where("id = ?", *sess.ClonedFromID).First(&src).Error; err != nil {
+		return ""
+	}
+	if !validSlug(src.Slug) {
+		return ""
+	}
+	return "/s/" + src.Slug
 }
 
 // userPageSize is the user page's session-list page (spec: keyset by

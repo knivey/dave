@@ -30,6 +30,11 @@ type Session struct {
 	// handling & edges").
 	DeletedAt gorm.DeletedAt
 	UserID    *int64
+	// Clone lineage (dave's ^clone): the source session id and the
+	// source owner's nick AT CLONE TIME — displayed as a cloned-from
+	// badge on the session page and user-page rows.
+	ClonedFromID   *int64 `gorm:"column:cloned_from_id"`
+	ClonedFromNick string `gorm:"column:cloned_from_nick"`
 }
 
 func (Session) TableName() string { return "sessions" }

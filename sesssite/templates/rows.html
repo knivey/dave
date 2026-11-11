@@ -19,15 +19,32 @@
 		     collapsed body — escaped by html/template, never live HTML. */}}
 			<details class="system"><summary>system prompt</summary><div class="content"><pre>{{$v.Content}}</pre></div></details>
 		{{else if eq $v.Role "tool"}}
-			<details class="toolresult"><summary>tool result · {{$v.ToolCallID}}</summary><pre class="content">{{$v.Content}}</pre></details>
+			{{/* ORPHAN result only — paired results render inside their
+			     call's toolpair unit (pairToolCalls). data-callid pairs
+			     with the client-side replay filter (session.js): an
+			     orphan replay is skipped when its toolpair already
+			     rendered. */}}
+			<details class="toolresult" data-callid="{{$v.ToolCallID}}"><summary>tool result · {{$v.ToolCallID}}</summary><pre class="content">{{$v.Content}}</pre></details>
 		{{else}}
 			<div class="content md">{{$v.ContentHTML}}</div>
 		{{end}}
 		{{/* Gate on safeImageURL: an allowlist-failing URL renders NO img at
 	     all — a blanked src would otherwise emit a broken src="" element. */}}
 	{{range $v.ImageParts}}{{if safeImageURL .}}<img class="chatimg" src="{{safeImageURL .}}" alt="conversation image" loading="lazy">{{end}}{{end}}
+		{{/* Tool round-trips: pairToolCalls (render.go) merges each call
+		     with its result row; the paired shape is ONE collapsed unit
+		     with params and result nested. An unpaired call (result not
+		     landed / outside the chunk) keeps the bare card; an orphan
+		     RESULT renders via the role-tool branch above. */}}
 		{{range $v.ToolCalls}}
-			<div class="toolcall"><span class="name">{{.Name}}</span><pre class="args">{{.ArgsJSON}}</pre></div>
+			{{if .Result}}
+				<details class="toolpair" data-callid="{{.ID}}"><summary>tool · {{.Name}}</summary>
+					<details class="params"><summary>params</summary><pre class="args">{{.ArgsJSON}}</pre></details>
+					<details class="result"><summary>result</summary><pre class="content">{{.Result.Content}}</pre></details>
+				</details>
+			{{else}}
+				<div class="toolcall" data-callid="{{.ID}}"><span class="name">{{.Name}}</span><pre class="args">{{.ArgsJSON}}</pre></div>
+			{{end}}
 		{{end}}
 		{{if $v.HasReasoning}}
 			<details class="reasoning"><summary>reasoning</summary>

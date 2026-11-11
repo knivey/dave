@@ -481,6 +481,43 @@ func TestSessionJSReconnectContract(t *testing.T) {
 	assert.Contains(t, body, "events?since=\" + lastId()")
 }
 
+// Source-level pin (TestSessionJSReconnectContract's pattern): the
+// code-copy affordances — a hover-revealed button on every <pre>
+// (paste-site parity) and click-to-copy inline code — must survive
+// future edits. The MutationObserver is load-bearing: SSE-appended and
+// load-older-prepended rows arrive after DOMContentLoaded, so a
+// one-shot listener would leave their code blocks unwired. The button
+// payload is stashed at wire time (dataset.copyText) BEFORE the
+// button's own text pollutes pre.textContent.
+func TestSessionJSCopyWiring(t *testing.T) {
+	_, ts := newPageServer(t)
+	defer ts.Close()
+	resp, err := http.Get(ts.URL + "/static/session.js")
+	require.NoError(t, err)
+	body := readBody(t, resp)
+	resp.Body.Close()
+	assert.Contains(t, body, "wireCopyButtons")
+	assert.Contains(t, body, "copy-btn")
+	assert.Contains(t, body, "dataset.copyText")
+	assert.Contains(t, body, "MutationObserver")
+	assert.Contains(t, body, "navigator.clipboard")
+	// inline code copies; pre>code (chroma blocks) does not double-fire
+	assert.Contains(t, body, `ev.target.closest("code")`)
+	assert.Contains(t, body, `code.closest("pre")`)
+	// toolpair replay filter: consumed results must not resurrect as
+	// orphan rows on reconnect (only skipped when PAIRED already)
+	assert.Contains(t, body, `.toolresult[data-callid]`)
+	assert.Contains(t, body, `.toolpair[data-callid=`)
+
+	css, err := http.Get(ts.URL + "/static/style.css")
+	require.NoError(t, err)
+	cssBody := readBody(t, css)
+	css.Body.Close()
+	assert.Contains(t, cssBody, ".copy-btn")
+	assert.Contains(t, cssBody, "#msgs pre { position: relative; }")
+	assert.Contains(t, cssBody, "code.copied")
+}
+
 // Source-level pin (TestSessionJSReconnectContract's pattern): user.js's
 // cursor-adoption contract must survive future edits. The live-refetch
 // path replaces the list with page 1 — it must ALSO adopt the refreshed

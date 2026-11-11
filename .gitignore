@@ -26,6 +26,7 @@ tools/prompt-eval/results/
 todo.md
 mcps/brave-mcp/brave-mcp
 mcps/fetch-mcp/fetch-mcp
+sesssite/sesssite
 imgsite/imgsite
 imgsite/config.toml
 imgsite/data/*

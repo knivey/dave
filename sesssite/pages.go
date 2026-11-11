@@ -163,7 +163,7 @@ func (s *Server) serveRowsFragment(w http.ResponseWriter, r *http.Request, sess 
 		return
 	}
 	chunkComps := compsForChunk(comps, msgs)
-	views := s.applyHideSystemPrompts(buildMessageViews(msgs, slug), chunkComps)
+	views := pairToolCalls(s.applyHideSystemPrompts(buildMessageViews(msgs, slug), chunkComps))
 	rows, err := renderRowsHTML(views, chunkComps)
 	if err != nil {
 		http.Error(w, "render failure", http.StatusInternalServerError)
@@ -206,7 +206,7 @@ func (s *Server) serveSessionPage(w http.ResponseWriter, r *http.Request, sess *
 	views := buildMessageViews(msgs, slug)
 	assignUsage(views, msgs, usageFrom(usage, msgs))
 	chunkComps := compsForChunk(comps, msgs)
-	views = s.applyHideSystemPrompts(views, chunkComps)
+	views = pairToolCalls(s.applyHideSystemPrompts(views, chunkComps))
 	rows, err := renderRowsHTML(views, chunkComps)
 	if err != nil {
 		http.Error(w, "render failure", http.StatusInternalServerError)

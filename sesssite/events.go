@@ -163,7 +163,7 @@ func (s *Server) renderRowsAfter(sess *Session, afterID int64) (string, int64, e
 	views := buildMessageViews(msgs, sess.Slug)
 	assignUsage(views, msgs, usageFrom(usage, msgs))
 	chunkComps := compsForChunk(comps, msgs)
-	views = s.applyHideSystemPrompts(views, chunkComps)
+	views = pairToolCalls(s.applyHideSystemPrompts(views, chunkComps))
 	if len(views) == 0 {
 		// Every row in the span was filtered (hide_system_prompts).
 		// Return truly-empty — rendering zero views through rows.html

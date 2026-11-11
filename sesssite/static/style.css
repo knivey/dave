@@ -64,10 +64,34 @@ code, pre { font-family: "Fira Code", ui-monospace, "Cascadia Mono", monospace; 
 /* tool calls / results, reasoning, system, usage */
 .toolcall { margin: 0.3rem 0; }
 .toolcall .name { color: #ffb86c; font-weight: 600; }
-.toolcall pre, .toolresult pre, .system pre {
+.toolpair, .params, .result { margin: 0.3rem 0; }
+.toolpair > summary { color: #ffb86c; font-weight: 600; }
+.toolcall pre, .toolresult pre, .toolpair pre, .system pre {
 	background: #21222c; color: #f8f8f2; padding: 0.55rem; border-radius: 6px;
 	overflow-x: auto; font-size: 0.82rem; white-space: pre-wrap; word-break: break-word;
 }
+/* every pre under #msgs gets a copy button (session.js): anchor */
+#msgs pre { position: relative; }
+
+/* code copy affordances (paste-site parity; buttons created by
+   session.js on load and via MutationObserver for late rows) */
+.copy-btn {
+	position: absolute; top: 0.4rem; right: 0.4rem;
+	background: transparent; border: none; color: #6272a4;
+	font-size: 0.72rem; font-family: inherit; cursor: pointer;
+	opacity: 0; transition: opacity 0.2s;
+	padding: 0.2rem 0.5rem; border-radius: 3px;
+}
+pre:hover .copy-btn, .copy-btn:focus-visible { opacity: 1; }
+.copy-btn:hover { color: #f8f8f2; background: #44475a; }
+
+/* inline code: click copies (session.js); pre>code keeps normal cursor.
+   Scoped to #msgs :not(pre)>code so markdown content, compaction
+   summaries, and summary lines all get the affordance while chroma
+   blocks (pre>code) stay normal. */
+#msgs :not(pre) > code { cursor: pointer; border-bottom: 1px dotted #6272a4; }
+#msgs pre code { cursor: auto; border-bottom: none; }
+#msgs code.copied { color: #50fa7b; border-bottom-color: #50fa7b; }
 details > summary { cursor: pointer; color: #8be9fd; font-size: 0.8rem; }
 .chatimg { max-width: 100%; border-radius: 6px; margin: 0.25rem 0; }
 

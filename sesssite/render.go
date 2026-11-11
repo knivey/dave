@@ -27,6 +27,17 @@ type ToolCallView struct {
 	ID       string
 	Name     string
 	ArgsJSON string
+	// Result is the paired role=tool row's content when one follows in
+	// the same rendered set (matched by call id). Nil = orphan call —
+	// the result has not landed (mid-turn snapshot) or sits outside the
+	// chunk — rendered as the unpaired call card. See pairToolCalls.
+	Result *ToolResultView
+}
+
+// ToolResultView carries a paired tool result's content (escaped by
+// the template).
+type ToolResultView struct {
+	Content string
 }
 
 type UsageView struct {
@@ -261,6 +272,53 @@ func fillCompactionSummaries(comps []CompactionView, views []MessageView) {
 			}
 		}
 	}
+}
+
+// pairToolCalls merges each assistant tool call with its role=tool
+// result row (matched by call id): the call gains a Result and the
+// consumed tool row drops from the transcript, so a healthy stream
+// renders ONE collapsed unit per round-trip instead of two scattered
+// rows. Orphans survive by design — a call with no landed result keeps
+// its unpaired card, a result with no preceding call in the same set
+// (page starts mid-round, async round-trips) keeps the standalone row.
+// Runs AFTER assignUsage (index-parallel join) and AFTER any row
+// filtering — it drops rows.
+func pairToolCalls(views []MessageView) []MessageView {
+	type loc struct{ view, call int }
+	pending := make(map[string]loc)
+	dropped := make(map[int]bool)
+	for i := range views {
+		switch views[i].Role {
+		case "assistant":
+			for j := range views[i].ToolCalls {
+				id := views[i].ToolCalls[j].ID
+				if id == "" {
+					continue
+				}
+				if _, ok := pending[id]; !ok {
+					pending[id] = loc{view: i, call: j}
+				}
+			}
+		case "tool":
+			l, ok := pending[views[i].ToolCallID]
+			if !ok {
+				continue // orphan result: standalone row
+			}
+			views[l.view].ToolCalls[l.call].Result = &ToolResultView{Content: views[i].Content}
+			delete(pending, views[i].ToolCallID)
+			dropped[i] = true
+		}
+	}
+	if len(dropped) == 0 {
+		return views
+	}
+	out := make([]MessageView, 0, len(views)-len(dropped))
+	for i := range views {
+		if !dropped[i] {
+			out = append(out, views[i])
+		}
+	}
+	return out
 }
 
 // dropSystemViews removes system rows for the hide_system_prompts

@@ -44,6 +44,16 @@ base_url = "https://sessions.example.com"
 #                 empty list [] = never trust XFF, key on RemoteAddr)
 trusted_proxies = ["127.0.0.1", "::1"]
 
+[render]
+# hide_system_prompts  omit role=system rows (the bot's instruction
+#                      prompt, guidance injections) from transcripts and
+#                      404 their raw endpoints. Compaction summaries are
+#                      system rows but stay visible through the
+#                      compaction divider's inline summary — they are
+#                      conversation-derived, not instructions.
+#                      (default false)
+hide_system_prompts = false
+
 [database]
 # driver  "sqlite" (default) | "postgres"
 driver = "sqlite"
@@ -58,6 +68,13 @@ every viewer then shares the proxy's address, so the SSE connection cap
 (10 per IP) keys on `X-Forwarded-For` — but only when the direct peer
 is a listed proxy. Forged `X-Forwarded-For` from an untrusted peer is
 ignored and cannot multiply capacity.
+
+`hide_system_prompts` is for operators who don't want the bot's
+instructions readable on the (unlisted but public-to-anyone-with-the-link)
+session pages: system rows disappear from transcripts, their `/raw`
+endpoints 404, and live SSE never delivers them. Compaction summaries
+survive through the divider because they summarize the conversation
+rather than instruct the model.
 
 ## Deploying
 

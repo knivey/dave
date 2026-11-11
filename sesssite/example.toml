@@ -6,6 +6,11 @@
 #   [server] trusted_proxies []string peers whose X-Forwarded-For keys the SSE per-IP
 #                                          cap (default loopback: ["127.0.0.1", "::1"];
 #                                          empty list = never trust XFF)
+#   [render] hide_system_prompts bool  omit role=system rows (bot instructions,
+#                                          guidance injections) from transcripts and
+#                                          404 their raw endpoints; compaction
+#                                          summaries stay via the divider's inline
+#                                          summary (default false)
 #   [database] driver string  "sqlite" (default) | "postgres"
 #   [database] path   string  sqlite path, binary-relative (default "data/dave.db")
 #   [database] dsn    string  postgres DSN — use a READ-ONLY role; the code never writes
@@ -14,6 +19,9 @@
 # addr = ":8060"
 # base_url = "https://sessions.example.com"
 # trusted_proxies = ["127.0.0.1", "::1"]
+#
+# [render]
+# hide_system_prompts = false
 #
 # [database]
 # driver = "sqlite"

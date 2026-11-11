@@ -11,6 +11,7 @@ import (
 // Config mirrors the reference block in example.toml (repo convention).
 type Config struct {
 	Server   ServerConfig   `toml:"server"`
+	Render   RenderConfig   `toml:"render"`
 	Database DatabaseConfig `toml:"database"`
 }
 
@@ -22,6 +23,19 @@ type ServerConfig struct {
 	// (nil) defaults to loopback only — the local-nginx deployment;
 	// an explicitly empty list never trusts XFF (RemoteAddr always).
 	TrustedProxies []string `toml:"trusted_proxies"`
+}
+
+// RenderConfig controls transcript rendering.
+//
+// hide_system_prompts removes role=system rows (the bot's instruction
+// prompt, guidance injections) from transcripts AND 404s their raw
+// endpoints — hiding the display while leaving raw readable would be
+// pointless. Compaction summaries are system rows too, but they are
+// conversation-derived rather than instructions: their content keeps
+// rendering through the compaction divider's inline summary (the row
+// itself is filtered like any other system row). Default false.
+type RenderConfig struct {
+	HideSystemPrompts bool `toml:"hide_system_prompts"`
 }
 
 type DatabaseConfig struct {

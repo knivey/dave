@@ -127,6 +127,19 @@ func (s *Server) handleSessionPage(w http.ResponseWriter, r *http.Request) {
 	s.serveSessionPage(w, r, sess, slug)
 }
 
+// applyHideSystemPrompts fills compaction summaries from the full view
+// set, then drops system rows when [render] hide_system_prompts is on.
+// Call AFTER assignUsage (the usage join walks views and msgs
+// index-parallel) and with comps already chunk-filtered — the summary
+// fill must see the summary rows before they're dropped.
+func (s *Server) applyHideSystemPrompts(views []MessageView, comps []CompactionView) []MessageView {
+	if !s.cfg.Render.HideSystemPrompts {
+		return views
+	}
+	fillCompactionSummaries(comps, views)
+	return dropSystemViews(views)
+}
+
 // serveRowsFragment answers ?fragment=rows&before={id}: the previous
 // pageSize chunk (keyset id DESC) as bare rows HTML for session.js to
 // prepend. Fragments carry no usage lines — assignUsage windows rows
@@ -149,7 +162,9 @@ func (s *Server) serveRowsFragment(w http.ResponseWriter, r *http.Request, sess 
 		http.Error(w, "query failure", http.StatusInternalServerError)
 		return
 	}
-	rows, err := renderRowsHTML(buildMessageViews(msgs, slug), compsForChunk(comps, msgs))
+	chunkComps := compsForChunk(comps, msgs)
+	views := s.applyHideSystemPrompts(buildMessageViews(msgs, slug), chunkComps)
+	rows, err := renderRowsHTML(views, chunkComps)
 	if err != nil {
 		http.Error(w, "render failure", http.StatusInternalServerError)
 		return
@@ -190,7 +205,9 @@ func (s *Server) serveSessionPage(w http.ResponseWriter, r *http.Request, sess *
 
 	views := buildMessageViews(msgs, slug)
 	assignUsage(views, msgs, usageFrom(usage, msgs))
-	rows, err := renderRowsHTML(views, compsForChunk(comps, msgs))
+	chunkComps := compsForChunk(comps, msgs)
+	views = s.applyHideSystemPrompts(views, chunkComps)
+	rows, err := renderRowsHTML(views, chunkComps)
 	if err != nil {
 		http.Error(w, "render failure", http.StatusInternalServerError)
 		return
@@ -262,6 +279,12 @@ func (s *Server) handleRawMessage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.Error(w, "lookup failure", http.StatusInternalServerError)
+		return
+	}
+	// hide_system_prompts hides system rows everywhere — a raw endpoint
+	// that still served them would make the option pointless.
+	if s.cfg.Render.HideSystemPrompts && m.Role == "system" {
+		http.NotFound(w, r)
 		return
 	}
 	body := m.Content

@@ -212,18 +212,9 @@ type rowsData struct {
 // renderer.Render when that message is among the page's views (lookup
 // by SummaryMessageID); else empty.
 func renderRowsHTML(views []MessageView, comps []CompactionView) (template.HTML, error) {
+	fillCompactionSummaries(comps, views)
 	compBefore := make(map[int][]CompactionView)
 	for _, c := range comps {
-		for i := range views {
-			if views[i].ID == c.SummaryMessageID {
-				if html, err := renderer.Render(views[i].Content); err == nil {
-					c.SummaryHTML = template.HTML(html)
-				} else {
-					c.SummaryHTML = template.HTML(template.HTMLEscapeString(views[i].Content))
-				}
-				break
-			}
-		}
 		for i := range views {
 			if views[i].ID > c.LastArchivedID {
 				compBefore[i] = append(compBefore[i], c)
@@ -236,6 +227,44 @@ func renderRowsHTML(views []MessageView, comps []CompactionView) (template.HTML,
 		return "", err
 	}
 	return template.HTML(buf.String()), nil
+}
+
+// fillCompactionSummaries fills each compaction's SummaryHTML from the
+// summary system message when it is among the views (lookup by
+// SummaryMessageID); missing rows leave the previous value untouched.
+// Extracted from renderRowsHTML so hide_system_prompts callers can fill
+// BEFORE dropping system rows — renderRowsHTML's internal call then
+// finds no matching row and the pre-filled summary survives in the
+// divider.
+func fillCompactionSummaries(comps []CompactionView, views []MessageView) {
+	for k := range comps {
+		for i := range views {
+			if views[i].ID == comps[k].SummaryMessageID {
+				if html, err := renderer.Render(views[i].Content); err == nil {
+					comps[k].SummaryHTML = template.HTML(html)
+				} else {
+					comps[k].SummaryHTML = template.HTML(template.HTMLEscapeString(views[i].Content))
+				}
+				break
+			}
+		}
+	}
+}
+
+// dropSystemViews removes system rows for the hide_system_prompts
+// option. Call AFTER fillCompactionSummaries (summaries are system rows
+// whose content rides the divider) and AFTER assignUsage (the usage
+// join walks views and msgs index-parallel). Guidance injections are
+// system rows too and hide with the prompts by design — dave stores no
+// kind column distinguishing prompt from guidance.
+func dropSystemViews(views []MessageView) []MessageView {
+	out := make([]MessageView, 0, len(views))
+	for _, v := range views {
+		if !v.IsSystem {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // safeImageURL allowlists conversation-image src schemes and returns the

@@ -17,6 +17,18 @@ func TestLoadConfigDefaults(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, ":8060", cfg.Server.Addr)
 	assert.Equal(t, "sqlite", cfg.Database.Driver)
+	assert.False(t, cfg.Render.HideSystemPrompts, "hide_system_prompts defaults off")
+}
+
+func TestLoadConfigRenderOptions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+[render]
+hide_system_prompts = true
+`), 0o644))
+	cfg, err := loadConfig(path)
+	require.NoError(t, err)
+	assert.True(t, cfg.Render.HideSystemPrompts)
 }
 
 func TestLoadConfigFile(t *testing.T) {

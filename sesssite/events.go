@@ -162,10 +162,15 @@ func (s *Server) renderRowsAfter(sess *Session, afterID int64) (string, int64, e
 	}
 	views := buildMessageViews(msgs, sess.Slug)
 	assignUsage(views, msgs, usageFrom(usage, msgs))
-	rows, err := renderRowsHTML(views, compsForChunk(comps, msgs))
+	chunkComps := compsForChunk(comps, msgs)
+	views = s.applyHideSystemPrompts(views, chunkComps)
+	rows, err := renderRowsHTML(views, chunkComps)
 	if err != nil {
 		return "", 0, err
 	}
+	// The watermark advances through skipped system rows too (deliberate
+	// skip, unlike a render failure): they will never render later, so
+	// holding lastSent back would re-scan them on every tick.
 	return string(rows), msgs[len(msgs)-1].ID, nil
 }
 

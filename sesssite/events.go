@@ -164,6 +164,13 @@ func (s *Server) renderRowsAfter(sess *Session, afterID int64) (string, int64, e
 	assignUsage(views, msgs, usageFrom(usage, msgs))
 	chunkComps := compsForChunk(comps, msgs)
 	views = s.applyHideSystemPrompts(views, chunkComps)
+	if len(views) == 0 {
+		// Every row in the span was filtered (hide_system_prompts).
+		// Return truly-empty — rendering zero views through rows.html
+		// still emits the template's skeleton whitespace, which would
+		// defeat the callers' frag != "" no-empty-event guard.
+		return "", msgs[len(msgs)-1].ID, nil
+	}
 	rows, err := renderRowsHTML(views, chunkComps)
 	if err != nil {
 		return "", 0, err
@@ -328,7 +335,13 @@ func (s *Server) handleSessionEvents(w http.ResponseWriter, r *http.Request) {
 	// sseRowsLimit continues batch-by-batch on the ticks below.
 	if since > 0 && since < last.maxID {
 		if frag, through, err := s.renderRowsAfter(sess, lastSent); err == nil && through > 0 {
-			writeSSE(w, "messages", frag)
+			// Empty fragment = every row in the span was filtered
+			// (hide_system_prompts skipped system rows): advance the
+			// watermark silently — an empty `messages` event would be
+			// wire noise the client can only ignore.
+			if frag != "" {
+				writeSSE(w, "messages", frag)
+			}
 			lastSent = through
 		}
 	}
@@ -355,11 +368,18 @@ func (s *Server) handleSessionEvents(w http.ResponseWriter, r *http.Request) {
 			if cur.maxID > lastSent {
 				frag, through, err := s.renderRowsAfter(sess, lastSent)
 				if err == nil && through > 0 {
-					writeSSE(w, "messages", frag)
+					// Empty fragment = the whole span was filtered
+					// system rows (hide_system_prompts): a deliberate
+					// skip, so the watermark still advances — they
+					// never render later — but no empty `messages`
+					// event goes on the wire.
+					if frag != "" {
+						writeSSE(w, "messages", frag)
+					}
 					lastSent = through
 				}
-				// render failure or an empty render: lastSent unchanged —
-				// the next tick re-renders the same span
+				// render failure: lastSent unchanged — the next tick
+				// re-renders the same span
 			}
 			if cur.status != last.status || cur.comps != last.comps {
 				payload, _ := json.Marshal(map[string]any{"status": cur.status})

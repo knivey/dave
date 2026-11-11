@@ -12,7 +12,9 @@ import (
 )
 
 // newHideServer builds a server with [render] hide_system_prompts on.
-func newHideServer(t *testing.T) (*httptest.Server, *Session, Message, Message) {
+// Returns the server, session, the system-prompt row, the user row, and
+// the assistant row — in insertion order.
+func newHideServer(t *testing.T) (*httptest.Server, *Session, Message, Message, Message) {
 	t.Helper()
 	db := newTestDB(t)
 	srv := NewServer(db, &Config{Render: RenderConfig{HideSystemPrompts: true}})
@@ -29,10 +31,9 @@ func newHideServer(t *testing.T) (*httptest.Server, *Session, Message, Message) 
 		FirstArchivedID: sys.ID, LastArchivedID: summary.ID,
 		ArchivedCount: 2, Trigger: "auto", Model: "m", CreatedAt: time.Now()}
 	require.NoError(t, db.Create(&comp).Error)
-	_ = comp
 	user := mkMessage(t, db, s.ID, "user", "VISIBLE-USER-TEXT hello")
 	asst := mkMessage(t, db, s.ID, "assistant", "VISIBLE-ASSISTANT-TEXT hi")
-	return ts, s, user, asst
+	return ts, s, sys, user, asst
 }
 
 // TestSessionPageHideSystemPrompts: with [render] hide_system_prompts,
@@ -40,7 +41,7 @@ func newHideServer(t *testing.T) (*httptest.Server, *Session, Message, Message) 
 // divider's inline summary (a system row itself) keeps rendering and
 // user/assistant content is untouched.
 func TestSessionPageHideSystemPrompts(t *testing.T) {
-	ts, s, _, _ := newHideServer(t)
+	ts, s, _, _, _ := newHideServer(t)
 
 	resp, err := http.Get(ts.URL + "/s/" + s.Slug)
 	require.NoError(t, err)
@@ -60,9 +61,9 @@ func TestSessionPageHideSystemPrompts(t *testing.T) {
 // system rows (hiding the transcript while leaving raw readable would
 // be pointless) and leaves non-system rows byte-for-byte.
 func TestRawEndpointHideSystemPrompts(t *testing.T) {
-	ts, s, user, _ := newHideServer(t)
+	ts, s, sys, user, _ := newHideServer(t)
 
-	resp, err := http.Get(ts.URL + "/s/" + s.Slug + "/m/1/raw") // row 1 = the system prompt
+	resp, err := http.Get(ts.URL + "/s/" + s.Slug + "/m/" + fmtInt(sys.ID) + "/raw")
 	require.NoError(t, err)
 	resp.Body.Close()
 	assert.Equal(t, 404, resp.StatusCode, "system row raw must 404 when hidden")
@@ -94,7 +95,7 @@ func TestRawEndpointSystemRowsServedWhenUnhidden(t *testing.T) {
 // TestSessionFragmentHideSystemPrompts: the older-rows fragment path
 // filters system rows too.
 func TestSessionFragmentHideSystemPrompts(t *testing.T) {
-	ts, s, _, asst := newHideServer(t)
+	ts, s, _, _, asst := newHideServer(t)
 
 	resp, err := http.Get(ts.URL + "/s/" + s.Slug + "?fragment=rows&before=" + fmtInt(asst.ID))
 	require.NoError(t, err)
@@ -122,4 +123,22 @@ func TestRenderRowsAfterSkipsSystemRows(t *testing.T) {
 	assert.Contains(t, frag, "LIVE-USER-TEXT")
 	assert.NotContains(t, frag, "SECRET-PROMPT-INSTRUCTIONS")
 	assert.Equal(t, user.ID, through, "watermark advances through the skipped system row")
+}
+
+// TestRenderRowsAfterSystemOnlyBatch: a span whose every row is system
+// (the post-compaction shape: fresh prompt + summary, tail copies
+// excluded by liveTranscriptCond) renders EMPTY while the watermark
+// still advances — the caller's contract is "empty fragment, no event,
+// advance" (see the tick-loop guard in events.go).
+func TestRenderRowsAfterSystemOnlyBatch(t *testing.T) {
+	db := newTestDB(t)
+	srv := NewServer(db, &Config{Render: RenderConfig{HideSystemPrompts: true}})
+	s := mkSession(t, db, "aaaaaaaa")
+	sys1 := mkMessage(t, db, s.ID, "system", "PROMPT-ONE")
+	sys2 := mkMessage(t, db, s.ID, "system", "PROMPT-TWO")
+
+	frag, through, err := srv.renderRowsAfter(s, sys1.ID-1)
+	require.NoError(t, err)
+	assert.Empty(t, frag, "system-only span renders empty")
+	assert.Equal(t, sys2.ID, through, "watermark advances through the skipped span")
 }

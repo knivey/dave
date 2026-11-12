@@ -1630,6 +1630,11 @@ func (cr *chatRunner) executeToolCalls(turn *turnContext, toolCalls []ToolCall) 
 		turn.Add(msg)
 	}
 	cr.pendingInjections = nil
+	// Mid-turn absorption (midturn.go): messages a user sent while this
+	// turn was running, handed over by dispatch. Drained AFTER tool
+	// results and view_image injections — same seam, same wire shape the
+	// view_image injections already proved in production.
+	drainAbsorbedIntoTurn(cr, turn)
 	return registeredJob
 }
 

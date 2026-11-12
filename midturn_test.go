@@ -216,3 +216,92 @@ func TestHandleMentionFallsBackWhenNoMailbox(t *testing.T) {
 	}
 	assert.True(t, found, "closed-mailbox mention must fall back to the queue path")
 }
+
+// Review Focus #2: an over-budget absorbed message must persist text-only
+// instead of being dropped (chat() drops; the drain may not — the user
+// got the receipt).
+func TestDrainAbsorbedOverBudgetPersistsTextOnly(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+	cr := newImageViewTestRunner(t, AIConfig{DetectImages: true, MaxContextImages: 1}, 9)
+	turn := newTurnContext(9, nil)
+	turn.Add(ChatMessage{Role: RoleUser, MultiContent: []MessagePart{
+		{Type: PartTypeImageURL, ImageURL: &ImageURL{URL: "data:image/jpeg;base64,AAA"}},
+	}}) // 1 existing image against a budget of 1 → remaining 0
+
+	mb := openTurnMailbox(9)
+	t.Cleanup(func() { mb.closeAndDrain() })
+	require.True(t, mb.push("see https://img.example.com/x.jpg now"))
+
+	drainAbsorbedIntoTurn(cr, turn)
+	last := turn.Messages()[len(turn.Messages())-1]
+	assert.Equal(t, RoleUser, last.Role)
+	assert.Equal(t, "see https://img.example.com/x.jpg now", last.Content,
+		"text kept when the image budget is exhausted")
+	assert.Empty(t, last.MultiContent)
+}
+
+func TestExecuteToolCallsDrainsAbsorbedAfterToolResults(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+	cr := newImageViewTestRunner(t, AIConfig{}, 9)
+	turn := newTurnContext(9, nil)
+	turn.Add(ChatMessage{Role: RoleAssistant, ToolCalls: []ToolCall{{ID: "call_1"}}})
+
+	mb := openTurnMailbox(9)
+	t.Cleanup(func() { mb.closeAndDrain() })
+	require.True(t, mb.push("just make it look like this"))
+
+	cr.executeToolCalls(turn, []ToolCall{
+		{ID: "call_1", Type: "function", Function: FunctionCall{Name: "unknown_tool_zz", Arguments: "{}"}},
+	})
+
+	msgs := turn.Messages()
+	require.NotEmpty(t, msgs)
+	last := msgs[len(msgs)-1]
+	assert.Equal(t, RoleUser, last.Role, "absorbed message flushed after tool results")
+	assert.Equal(t, "just make it look like this", last.Content)
+
+	// Persisted too (non-ephemeral turn), same as tool rows.
+	dbMsgs, err := sessionMgr.GetMessages(9)
+	require.NoError(t, err)
+	assert.Equal(t, RoleUser, dbMsgs[len(dbMsgs)-1].Role, "absorbed message persisted to the session")
+}
+
+func TestDrainNoMailboxIsNoop(t *testing.T) {
+	setupTestDB(t)
+	cr := newImageViewTestRunner(t, AIConfig{}, 12345)
+	turn := newTurnContext(12345, nil)
+	before := len(turn.Messages())
+	drainAbsorbedIntoTurn(cr, turn)
+	assert.Len(t, turn.Messages(), before)
+}
+
+func TestDrainSequentialBudget(t *testing.T) {
+	// Two absorbed image messages against a 2-image budget: both attach.
+	// (DetectImages with a working image server.)
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+	config.ImagesDir = t.TempDir()
+	t.Cleanup(func() { config.ImagesDir = "" })
+	config.TrustedImageHosts = []string{"127.0.0.1"}
+	t.Cleanup(func() { config.TrustedImageHosts = nil })
+	srv := newTestImageServer(t)
+	t.Cleanup(srv.Close)
+
+	cr := newImageViewTestRunner(t, AIConfig{DetectImages: true, MaxContextImages: 2, ImageFormat: "jpg", ImageQuality: 75}, 9)
+	turn := newTurnContext(9, nil)
+
+	mb := openTurnMailbox(9)
+	t.Cleanup(func() { mb.closeAndDrain() })
+	require.True(t, mb.push("one "+srv.URL+"/pic.jpg"))
+	require.True(t, mb.push("two "+srv.URL+"/pic.jpg"))
+
+	drainAbsorbedIntoTurn(cr, turn)
+	msgs := turn.Messages()
+	require.Len(t, msgs, 2)
+	for _, m := range msgs {
+		assert.Equal(t, RoleUser, m.Role)
+		assert.NotEmpty(t, m.MultiContent, "both messages should attach their image")
+	}
+}

@@ -103,3 +103,29 @@ func tryAbsorbMention(sessionID int64, msg, nick string) (string, bool) {
 	n := getNotices()
 	return expandNotice(n.Mentions.Absorbed, map[string]string{"nick": nick}), true
 }
+
+// drainAbsorbedIntoTurn flushes absorbed messages into the turn at a
+// round boundary: after all tool results and after view_image's
+// pendingInjections, so the newest human input sits closest to the
+// generation prompt. Row order: tool results → view_image injections →
+// absorbed user messages (mirrors the flush order in executeToolCalls).
+func drainAbsorbedIntoTurn(cr *chatRunner, turn *turnContext) {
+	if cr.sessionID == 0 {
+		return
+	}
+	mb := turnMailboxFor(cr.sessionID)
+	if mb == nil {
+		return
+	}
+	for _, raw := range mb.drain() {
+		msg, fallback, ok := buildUserChatMessage(cr, raw, countContextImages(turn.Messages()))
+		if !ok {
+			// The warning already went out via the helper. The user was
+			// told their message was absorbed — never drop it; keep the
+			// text, skip the images.
+			turn.Add(ChatMessage{Role: RoleUser, Content: fallback})
+			continue
+		}
+		turn.Add(msg)
+	}
+}

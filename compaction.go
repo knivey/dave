@@ -1297,6 +1297,9 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 				MultiContent:       orig.MultiContent,
 				IsAsyncResult:      orig.IsAsyncResult,
 				SourceCompactionID: &compIDForTag,
+				// Tail copies keep their author (per-message
+				// attribution survives compaction — see Message.UserID).
+				UserID: orig.UserID,
 			}
 			if err := tx.Create(&newRow).Error; err != nil {
 				return fmt.Errorf("re-insert tail: %w", err)

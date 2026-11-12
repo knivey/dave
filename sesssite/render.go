@@ -63,11 +63,15 @@ type MessageView struct {
 	// mirrors ContentHTML: escaped plain text when Render errors.
 	ReasoningHTML    template.HTML
 	ReasoningSummary string
-	ImageParts       []string
-	Archived         bool
-	RawURL           string
-	Usage            *UsageView
-	IsSystem         bool
+	// Author is the human speaker's nick on user-role rows (per-message
+	// attribution; empty elsewhere and on unattributed legacy rows —
+	// the template then falls back to the bare role label).
+	Author     string
+	ImageParts []string
+	Archived   bool
+	RawURL     string
+	Usage      *UsageView
+	IsSystem   bool
 }
 
 // CompactionView is a Compaction row plus the rendered summary message
@@ -269,6 +273,19 @@ func fillCompactionSummaries(comps []CompactionView, views []MessageView) {
 					comps[k].SummaryHTML = template.HTML(template.HTMLEscapeString(views[i].Content))
 				}
 				break
+			}
+		}
+	}
+}
+
+// applyAuthors labels user-role views with their author's nick.
+// Index-parallel with msgs — run BEFORE any row-filtering pass
+// (assignUsage ordering discipline; see pairToolCalls).
+func applyAuthors(views []MessageView, msgs []Message, authors map[int64]string) {
+	for i := range views {
+		if msgs[i].UserID != nil && msgs[i].Role == "user" {
+			if nick, ok := authors[*msgs[i].UserID]; ok && nick != "" {
+				views[i].Author = nick
 			}
 		}
 	}

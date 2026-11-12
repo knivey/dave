@@ -44,6 +44,11 @@ type ChatMessage struct {
 	ToolCalls        []ToolCall
 	ToolCallID       string
 	Name             string
+	// UserID attributes a human author to user-role rows (per-message
+	// attribution — see Message.UserID). AddMessage/AddMessages fill it
+	// from the session's owner when nil; cloneDBSession copies it
+	// VERBATIM so authorship survives clone-of-clone chains.
+	UserID *int64
 }
 
 func toolResultMsg(callID, content string) ChatMessage {

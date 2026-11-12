@@ -166,8 +166,10 @@ func (s *Server) serveRowsFragment(w http.ResponseWriter, r *http.Request, sess 
 		http.Error(w, "query failure", http.StatusInternalServerError)
 		return
 	}
+	views := buildMessageViews(msgs, slug)
+	applyAuthors(views, msgs, s.authorsFor(msgs))
 	chunkComps := compsForChunk(comps, msgs)
-	views := pairToolCalls(s.applyHideSystemPrompts(buildMessageViews(msgs, slug), chunkComps))
+	views = pairToolCalls(s.applyHideSystemPrompts(views, chunkComps))
 	rows, err := renderRowsHTML(views, chunkComps)
 	if err != nil {
 		http.Error(w, "render failure", http.StatusInternalServerError)
@@ -209,6 +211,7 @@ func (s *Server) serveSessionPage(w http.ResponseWriter, r *http.Request, sess *
 
 	views := buildMessageViews(msgs, slug)
 	assignUsage(views, msgs, usageFrom(usage, msgs))
+	applyAuthors(views, msgs, s.authorsFor(msgs))
 	chunkComps := compsForChunk(comps, msgs)
 	views = pairToolCalls(s.applyHideSystemPrompts(views, chunkComps))
 	rows, err := renderRowsHTML(views, chunkComps)
@@ -409,6 +412,32 @@ func (s *Server) userSlugFor(userID *int64) string {
 		return ""
 	}
 	return u.Slug
+}
+
+// authorsFor resolves the distinct message authors' nicks in one
+// query (per-message attribution display). Best effort: nil on query
+// failure — rows fall back to the bare role label.
+func (s *Server) authorsFor(msgs []Message) map[int64]string {
+	seen := make(map[int64]bool)
+	ids := make([]int64, 0, 4)
+	for i := range msgs {
+		if msgs[i].UserID != nil && !seen[*msgs[i].UserID] {
+			seen[*msgs[i].UserID] = true
+			ids = append(ids, *msgs[i].UserID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	var users []User
+	if err := s.db.Select("id", "current_nick").Where("id IN ?", ids).Find(&users).Error; err != nil {
+		return nil
+	}
+	m := make(map[int64]string, len(users))
+	for _, u := range users {
+		m[u.ID] = u.CurrentNick
+	}
+	return m
 }
 
 // clonedFromURL resolves a clone's source session page link, best

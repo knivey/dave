@@ -91,7 +91,7 @@ func TestModelColumnsMatchDave(t *testing.T) {
 	expected := map[string][]string{
 		"sessions":    {"id", "slug", "network", "channel", "chat_command", "first_message", "service", "model", "status", "created_at", "last_active", "deleted_at", "user_id", "cloned_from_id", "cloned_from_nick"},
 		"users":       {"id", "slug", "network", "current_nick", "account", "created_at", "updated_at"},
-		"messages":    {"id", "session_id", "role", "content", "tool_calls", "tool_call_id", "reasoning_content", "reasoning_summary", "multi_content", "archived", "compaction_id", "source_compaction_id", "superseded", "created_at"},
+		"messages":    {"id", "session_id", "role", "content", "tool_calls", "tool_call_id", "reasoning_content", "reasoning_summary", "multi_content", "archived", "compaction_id", "source_compaction_id", "superseded", "created_at", "user_id"},
 		"turn_usage":  {"id", "session_id", "model", "service", "reasoning_effort", "prompt_tokens", "completion_tokens", "cached_tokens", "reasoning_tokens", "finish_reason", "api_path", "duration_ms", "created_at"},
 		"compactions": {"id", "session_id", "summary_message_id", "first_archived_id", "last_archived_id", "archived_count", "service", "model", "trigger", "prompt_tokens", "completion_tokens", "duration_ms", "created_at"},
 	}

@@ -162,6 +162,7 @@ func (s *Server) renderRowsAfter(sess *Session, afterID int64) (string, int64, e
 	}
 	views := buildMessageViews(msgs, sess.Slug)
 	assignUsage(views, msgs, usageFrom(usage, msgs))
+	applyAuthors(views, msgs, s.authorsFor(msgs))
 	chunkComps := compsForChunk(comps, msgs)
 	views = pairToolCalls(s.applyHideSystemPrompts(views, chunkComps))
 	if len(views) == 0 {

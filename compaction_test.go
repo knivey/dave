@@ -688,10 +688,20 @@ func TestCompactSession_TagsTailCopiesWithSourceCompactionID(t *testing.T) {
 
 	tailCopies := 0
 	reasoningCarried := false
+	authorCarried := false
+	sess, err := sessionMgr.GetSession(sid)
+	require.NoError(t, err)
+	require.NotNil(t, sess.UserID, "test session must have an owner")
 	for _, m := range live[2:] {
 		require.NotNil(t, m.SourceCompactionID,
 			"every preserved-tail row must be tagged with SourceCompactionID")
 		assert.Equal(t, res.CompactionID, *m.SourceCompactionID)
+		if m.Role == RoleUser {
+			// per-message attribution survives compaction tail-copies
+			require.NotNil(t, m.UserID, "user-role tail copy keeps its author")
+			assert.Equal(t, *sess.UserID, *m.UserID)
+			authorCarried = true
+		}
 		if m.ReasoningContent != nil && *m.ReasoningContent == "the real thinking" {
 			reasoningCarried = true
 			require.NotNil(t, m.ReasoningSummary,
@@ -710,6 +720,8 @@ func TestCompactSession_TagsTailCopiesWithSourceCompactionID(t *testing.T) {
 	assert.Greater(t, tailCopies, 0)
 	assert.True(t, reasoningCarried,
 		"the seeded reasoning-bearing assistant row must survive in the preserved tail")
+	assert.True(t, authorCarried,
+		"at least one user-role tail copy must carry the owner's user id")
 }
 
 // TestRepeatCompaction_DoesNotInflateArchivedCount is the core regression for

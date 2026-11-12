@@ -44,6 +44,7 @@ var migrations = []migration{
 	{ID: 8, Name: "add_sessions_cloned_from", Up: addSessionsClonedFrom},
 	{ID: 9, Name: "drop_messages_encrypted_reasoning", Up: dropMessagesEncryptedReasoning},
 	{ID: 10, Name: "add_session_user_slugs", Up: addSessionUserSlugs},
+	{ID: 11, Name: "backfill_message_user_ids", Up: backfillMessageUserIDs},
 }
 
 func runMigrations(db *gorm.DB, dbPath string) error {
@@ -735,6 +736,128 @@ func addSessionUserSlugs(db *gorm.DB) error {
 				if res.RowsAffected > 0 {
 					break
 				}
+			}
+		}
+	}
+	return nil
+}
+
+// cloneInheritWindow bounds how far after a clone session's creation a
+// user-role message can have been written by the CLONE TRANSACTION
+// (which stamps session + copied messages with effectively the same
+// created_at). Two accepted, historical-data-only failure directions
+// (new clones are exact — the writer copies user ids verbatim): the
+// cloner's first message inside the window would be misattributed to
+// the source chain, and a copy row landing OUTSIDE the window (a huge
+// session on slow storage breaching 2s of single-row inserts) would
+// fall to the cloner update. Both are documented here rather than
+// papered over with a bigger window, which would only trade one
+// direction for the other.
+const cloneInheritWindow = 2 * time.Second
+
+// backfillMessageUserIDs attributes pre-existing user-role messages
+// with their human authors (per-message attribution, Nov 2026):
+//
+//   - plain sessions: every user-role row ← the session owner.
+//   - cloned sessions: the inherited block (rows written by the clone
+//     transaction — created_at within cloneInheritWindow of the session
+//     row) is aligned ROW-BY-ROW against the SOURCE session's user
+//     messages by verbatim content (copies are exact), inheriting the
+//     source's per-message attribution; unmatched rows fall back to
+//     the source session's owner. Rows past the window ← the cloner.
+//
+// Chains (clones of clones from multiple users) resolve transitively:
+// sessions are processed oldest-first (a source always predates its
+// clones), so each alignment reads already-backfilled rows — A's words
+// stay A's through any chain depth. A hard-deleted source leaves its
+// inherited rows NULL (the site displays the plain role label) rather
+// than guessing; a SOFT-deleted source still resolves (Unscoped).
+// Idempotent: every UPDATE targets user_id IS NULL.
+func backfillMessageUserIDs(db *gorm.DB) error {
+	type sessRow struct {
+		ID           int64
+		UserID       *int64
+		ClonedFromID *int64
+		CreatedAt    time.Time
+	}
+	var sessions []sessRow
+	if err := db.Model(&Session{}).
+		Select("id, user_id, cloned_from_id, created_at").
+		Order("created_at ASC, id ASC").Find(&sessions).Error; err != nil {
+		return fmt.Errorf("migration 11: listing sessions: %w", err)
+	}
+	for _, s := range sessions {
+		if s.ClonedFromID == nil {
+			// Plain session: every user-role row belongs to the owner.
+			if s.UserID == nil {
+				continue
+			}
+			if err := db.Model(&Message{}).
+				Where("session_id = ? AND role = ? AND user_id IS NULL", s.ID, RoleUser).
+				Update("user_id", *s.UserID).Error; err != nil {
+				return fmt.Errorf("migration 11: owner backfill session %d: %w", s.ID, err)
+			}
+			continue
+		}
+
+		cutoff := s.CreatedAt.Add(cloneInheritWindow)
+		if s.UserID != nil {
+			// Post-clone rows: the cloner's own words. Compaction
+			// tail-copies are EXCLUDED: a pre-migration compaction
+			// re-inserted preserved-tail rows (possibly A's inherited
+			// words) with fresh created_at past the cutoff — stamping
+			// those with the cloner would be a one-shot WRONG write
+			// (every update targets user_id IS NULL, so it could never
+			// self-heal). They stay NULL — honest, and costless: the
+			// site never renders tail-copies (the archived ORIGINALS
+			// display instead, and those keep their original
+			// created_at ≤ cutoff so the alignment handles them).
+			if err := db.Model(&Message{}).
+				Where("session_id = ? AND role = ? AND user_id IS NULL AND created_at > ? AND source_compaction_id IS NULL",
+					s.ID, RoleUser, cutoff).
+				Update("user_id", *s.UserID).Error; err != nil {
+				return fmt.Errorf("migration 11: cloner backfill session %d: %w", s.ID, err)
+			}
+		}
+
+		// Inherited block: align against the source's user messages.
+		var inherited []Message
+		if err := db.Where("session_id = ? AND role = ? AND user_id IS NULL AND created_at <= ?",
+			s.ID, RoleUser, cutoff).Order("id ASC").Find(&inherited).Error; err != nil {
+			return fmt.Errorf("migration 11: listing inherited session %d: %w", s.ID, err)
+		}
+		if len(inherited) == 0 {
+			continue
+		}
+		var srcMsgs []Message
+		if err := db.Where("session_id = ? AND role = ? AND superseded = false",
+			*s.ClonedFromID, RoleUser).Order("id ASC").Find(&srcMsgs).Error; err != nil {
+			return fmt.Errorf("migration 11: listing source messages session %d: %w", s.ID, err)
+		}
+		var srcOwner *int64
+		var srcSess Session
+		if err := db.Unscoped().Select("user_id").Where("id = ?", *s.ClonedFromID).First(&srcSess).Error; err == nil {
+			srcOwner = srcSess.UserID
+		}
+		pi := 0
+		for _, m := range inherited {
+			uid := srcOwner
+			for pi < len(srcMsgs) {
+				if srcMsgs[pi].Content == m.Content {
+					if srcMsgs[pi].UserID != nil {
+						uid = srcMsgs[pi].UserID
+					}
+					pi++
+					break
+				}
+				pi++
+			}
+			if uid == nil {
+				continue // missing source owner: leave NULL, never guess
+			}
+			if err := db.Model(&Message{}).Where("id = ?", m.ID).
+				Update("user_id", *uid).Error; err != nil {
+				return fmt.Errorf("migration 11: inherited backfill msg %d: %w", m.ID, err)
 			}
 		}
 	}

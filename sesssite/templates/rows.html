@@ -8,7 +8,10 @@
 	{{end}}{{end}}
 	<div class="msg role-{{$v.Role}}{{if $v.Archived}} archived{{end}}" id="m{{$v.ID}}">
 		<div class="meta">
-			<span class="role">{{$v.Role}}</span>
+			{{/* Per-message attribution: user rows carry the speaker's
+			     nick (clone chains can mix several speakers in one
+			     transcript); everything else shows the bare role. */}}
+			{{if $v.Author}}<span class="role author" title="{{$v.Role}}">{{$v.Author}}</span>{{else}}<span class="role">{{$v.Role}}</span>{{end}}
 			<time title="{{$v.Time.Format "2006-01-02 15:04:05"}}">{{$v.Time.Format "15:04:05"}}</time>
 			{{if $v.Archived}}<span class="tag">archived</span>{{end}}
 			<a class="rawlink" href="{{$v.RawURL}}">raw</a>

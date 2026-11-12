@@ -91,6 +91,15 @@ func (sm *SessionManager) CreateSession(network, channel string, userID int64, c
 }
 
 func (sm *SessionManager) AddMessage(sessionID int64, msg ChatMessage) error {
+	// Per-message authorship: user-role rows carry the session owner's
+	// user id unless the caller supplied one (clone copies set their
+	// own). Synthetic user-role injections (images, guidance) also land
+	// under the owner — the owner's turn triggered them.
+	if msg.Role == RoleUser && msg.UserID == nil {
+		if uid, err := sm.sessionUserID(sessionID); err == nil {
+			msg.UserID = uid
+		}
+	}
 	row := buildDBMessage(sessionID, msg)
 	if err := theDB.Create(&row).Error; err != nil {
 		return err
@@ -152,6 +161,7 @@ func buildDBMessage(sessionID int64, msg ChatMessage) Message {
 		ReasoningSummary: reasoningSummary,
 		ReasoningDetails: reasoningDetails,
 		MultiContent:     multiContentJSON,
+		UserID:           msg.UserID,
 	}
 }
 
@@ -162,6 +172,24 @@ func buildDBMessage(sessionID int64, msg ChatMessage) Message {
 func (sm *SessionManager) AddMessages(sessionID int64, msgs []ChatMessage) error {
 	if len(msgs) == 0 {
 		return nil
+	}
+	// Per-message authorship chokepoint (see AddMessage). The resolved
+	// flag matters: an ownerless session resolves to (nil, nil), and
+	// without it every user-role row in the batch would re-query.
+	var ownerID *int64
+	ownerResolved := false
+	for i := range msgs {
+		if msgs[i].Role == RoleUser && msgs[i].UserID == nil {
+			if !ownerResolved {
+				uid, err := sm.sessionUserID(sessionID)
+				if err != nil {
+					break
+				}
+				ownerID = uid
+				ownerResolved = true
+			}
+			msgs[i].UserID = ownerID
+		}
 	}
 	rows := make([]Message, len(msgs))
 	for i, m := range msgs {
@@ -259,6 +287,17 @@ func (sm *SessionManager) GetSession(id int64) (*Session, error) {
 	return getDBSessionByID(id)
 }
 
+// sessionUserID returns the session owner's user id (nil when the
+// session is missing or has no owner) — the attribution source for
+// user-role messages written through AddMessage/AddMessages.
+func (sm *SessionManager) sessionUserID(sessionID int64) (*int64, error) {
+	var s Session
+	if err := sm.db.Select("user_id").Where("id = ?", sessionID).First(&s).Error; err != nil {
+		return nil, err
+	}
+	return s.UserID, nil
+}
+
 // CreateSessionSettings records the creation-time config snapshot for the
 // session (what it started with) and updates the session's settings_id
 // foreign key. Provenance only — stored settings are never applied to live
@@ -305,6 +344,7 @@ func messageFromDB(dm Message) ChatMessage {
 	msg := ChatMessage{
 		Role:    dm.Role,
 		Content: dm.Content,
+		UserID:  dm.UserID,
 	}
 	if dm.ToolCallID != nil {
 		msg.ToolCallID = *dm.ToolCallID

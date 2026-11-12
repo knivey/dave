@@ -133,7 +133,15 @@ type Message struct {
 	// excluded from loadDBSessionMessagesAll and from the historySessions
 	// archived count. They are NOT visible in any UI surface.
 	Superseded bool `gorm:"not null;default:false;index:idx_messages_superseded"`
-	CreatedAt  time.Time
+	// UserID attributes a human author to user-role rows (per-message
+	// attribution, Nov 2026): the session owner's users.id on live rows,
+	// and — on cloned sessions — the ORIGINAL author's id copied verbatim
+	// through any clone-of-clone chain (never re-stamped with the source
+	// session's owner). NULL on non-user roles and on pre-migration rows
+	// (migration #11 backfills those). The session-history site resolves
+	// it to nicks for display.
+	UserID    *int64 `gorm:"column:user_id;index:idx_messages_user"`
+	CreatedAt time.Time
 }
 
 // Compaction records a single session-compaction event. Archived messages
@@ -908,6 +916,10 @@ func cloneDBSession(sourceSessionID int64, targetNetwork, targetChannel string, 
 			CompactionID:       nil,
 			SourceCompactionID: nil,
 			Superseded:         false,
+			// Authorship copies VERBATIM: never re-stamp with the source
+			// session's owner — a clone-of-clone's inherited block carries
+			// mixed authors (A's words stay A's through any chain depth).
+			UserID: m.UserID,
 		}
 		if err := tx.Create(&newMsg).Error; err != nil {
 			return 0, fmt.Errorf("copy message: %w", err)

@@ -69,7 +69,11 @@ type Message struct {
 	// an archived original; excluded from the flat transcript.
 	SourceCompactionID *int64 `gorm:"column:source_compaction_id"`
 	Superseded         bool   `gorm:"column:superseded"`
-	CreatedAt          time.Time
+	// UserID attributes the human author of user-role rows (dave's
+	// per-message attribution, migration #11) — on cloned sessions the
+	// ORIGINAL author's id, copied verbatim through clone chains.
+	UserID    *int64 `gorm:"column:user_id"`
+	CreatedAt time.Time
 }
 
 func (Message) TableName() string { return "messages" }

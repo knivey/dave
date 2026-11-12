@@ -1030,7 +1030,7 @@ git commit -m "midturn: drain absorbed messages at the tool-round boundary"
 
 **Interfaces:**
 - Consumes: Tasks 2, 5, 6.
-- Produces: `func persistUndrainedAfterCancel(runner *chatRunner, mb *turnMailbox, ctx context.Context)`.
+- Produces: `func persistUndrainedAbsorbed(runner *chatRunner, mb *turnMailbox)`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1186,23 +1186,26 @@ Expected: FAIL — no mailbox is open during chat() (`tryAbsorbMention` returns 
 Append to `midturn.go`:
 
 ```go
-// persistUndrainedAfterCancel is the cancellation tail of the absorption
-// obligation: every accepted push must be drained or persisted. On a
-// cancelled turn (stop/shutdown) messages still in the mailbox are
-// written as plain text-only user rows so the user's words survive into
-// their next turn; nothing is sent (the queue already told the user the
-// turn stopped). DB writes do not depend on the queue ctx. On a normal
-// exit the quiescent-close loop already closed the mailbox and this is a
-// no-op.
-func persistUndrainedAfterCancel(runner *chatRunner, mb *turnMailbox, ctx context.Context) {
+// persistUndrainedAbsorbed is the loss-tail of the absorption obligation:
+// every accepted push must be drained or persisted — exactly once, on
+// every exit path. Two paths reach it with a non-empty mailbox: a
+// cancelled turn (stop/shutdown — the post-turn loop bails on ctx.Done)
+// and chat()'s early returns after the mailbox opened (image-budget
+// drop, history-load failure). Either way the messages are written as
+// plain text-only user rows so the user's words survive into their next
+// turn; nothing is sent (the turn is over — cancelled turns were
+// announced by the queue, early returns already sent their own error).
+// On a normal exit the quiescent-close loop already closed the mailbox
+// and this is a no-op. DB writes do not depend on the queue ctx.
+func persistUndrainedAbsorbed(runner *chatRunner, mb *turnMailbox) {
 	remaining := mb.closeAndDrain()
-	if len(remaining) == 0 || ctx.Err() == nil {
+	if len(remaining) == 0 {
 		return
 	}
 	for _, raw := range remaining {
 		sessionMgr.AddMessage(runner.sessionID, ChatMessage{Role: RoleUser, Content: raw})
 	}
-	runner.logger.Warn("mid-turn absorption: persisted undrained messages after cancellation",
+	runner.logger.Warn("mid-turn absorption: persisted undrained messages after turn end",
 		"session", runner.sessionID, "count", len(remaining))
 }
 ```
@@ -1216,7 +1219,7 @@ In `aiCmds.go` `chat()`:
 	// gate hold — executeToolCalls drains it at round boundaries, and the
 	// post-turn loop below drains it between continuation turns.
 	mb := openTurnMailbox(session.ID)
-	defer persistUndrainedAfterCancel(runner, mb, ctx)
+	defer persistUndrainedAbsorbed(runner, mb)
 ```
 
 2. Replace the post-turn inline loop block (lines ~2369-2398, from `if theDB != nil && sessionMgr.IsSessionActive(runner.sessionID) {` through its closing brace) with:

@@ -446,3 +446,79 @@ func TestChatCancelPersistsUndrainedAbsorbed(t *testing.T) {
 	}
 	assert.True(t, found, "cancelled turn must persist undrained absorbed messages as text rows")
 }
+
+// The wire pin: round 1 returns a tool call; the absorbed message is
+// pushed while round 1 is being answered; round 2's REQUEST must carry
+// the tool result followed by the absorbed user row, in that order. An
+// unknown tool name is deliberate — executeToolCalls turns it into an
+// error tool result, which is all the wire shape needs (no MCP/gating
+// setup required).
+func TestChatAbsorbedRidesAfterToolResultsWire(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	userID := ensureTestUser(t, "testnet", "wireuser")
+	resolved := chatGateUser(userID, "wireuser")
+
+	var mu sync.Mutex
+	var bodies []string
+	reqNo := 0
+	firstHit := make(chan struct{})
+	var once sync.Once
+	pushed := make(chan struct{})
+	var pushedOnce sync.Once
+	doPush := func() { pushedOnce.Do(func() { close(pushed) }) }
+
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		reqNo++
+		n := reqNo
+		bodies = append(bodies, string(raw))
+		mu.Unlock()
+		once.Do(func() { close(firstHit) })
+		if n == 1 {
+			<-pushed // hold the round-1 answer until the message is absorbed
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"id":"c1","object":"chat.completion","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"unknown_tool_zz","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`)
+			return
+		}
+		chatGateCompletion(w, "final answer")
+	}))
+	t.Cleanup(func() { api.Close() })
+	t.Cleanup(doPush)
+	setChatGateServices(t, api.URL+"/v1")
+
+	network := Network{Name: "testnet"}
+	client := chatGateClient()
+	cfg := makeTestAIConfig()
+
+	out := make(chan string, 50)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer close(out)
+		chat(network, client, chatGateEvent("wireuser", "#wire"), cfg, context.Background(), out, resolved, "first question")
+	}()
+
+	<-firstHit
+	sess, err := sessionMgr.GetActiveSession("testnet", "#wire", userID)
+	require.NoError(t, err)
+	require.NotNil(t, sess)
+	_, ok := tryAbsorbMention(sess.ID, "now change the plan", "wireuser")
+	require.True(t, ok)
+	doPush()
+	<-done
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.GreaterOrEqual(t, len(bodies), 2)
+	round2 := bodies[1]
+	assert.Contains(t, round2, "unknown_tool_zz", "round 2 must carry the tool round-trip")
+	assert.Contains(t, round2, "now change the plan", "round 2 must carry the absorbed message")
+	toolIdx := strings.Index(round2, `"unknown_tool_zz"`)
+	absorbedIdx := strings.Index(round2, "now change the plan")
+	require.GreaterOrEqual(t, toolIdx, 0)
+	require.GreaterOrEqual(t, absorbedIdx, 0)
+	assert.Less(t, toolIdx, absorbedIdx, "the tool result must precede the absorbed user row")
+}

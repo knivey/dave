@@ -1630,6 +1630,11 @@ func (cr *chatRunner) executeToolCalls(turn *turnContext, toolCalls []ToolCall) 
 		turn.Add(msg)
 	}
 	cr.pendingInjections = nil
+	// Mid-turn absorption (midturn.go): messages a user sent while this
+	// turn was running, handed over by dispatch. Drained AFTER tool
+	// results and view_image injections — same seam, same wire shape the
+	// view_image injections already proved in production.
+	drainAbsorbedIntoTurn(cr, turn)
 	return registeredJob
 }
 
@@ -2183,6 +2188,46 @@ streamDone:
 	return completedResponse, nil
 }
 
+// buildUserChatMessage is the shared user-message preprocessing for
+// chat() and mid-turn absorption (midturn.go): detectimages URL handling
+// against the session image budget. Warnings are sent by the helper via
+// the runner. ok=false means images could not be attached (budget or
+// processing failure) — the caller decides: chat() drops the message
+// (historical behavior), the absorption drain persists fallbackText as a
+// plain text row (the user was already told their message was absorbed;
+// dropping is not acceptable).
+func buildUserChatMessage(cr *chatRunner, raw string, existingImages int) (ChatMessage, string, bool) {
+	if !cr.cfg.DetectImages {
+		return ChatMessage{Role: RoleUser, Content: raw}, "", true
+	}
+	_, imageUrls := detectImageURLs(raw)
+	if len(imageUrls) == 0 {
+		return ChatMessage{Role: RoleUser, Content: raw}, "", true
+	}
+	remaining := cr.cfg.MaxContextImages - existingImages
+	n := getNotices()
+	if remaining <= 0 {
+		cr.sendWarning(expandNotice(n.Images.LimitReached, map[string]string{"max": fmt.Sprintf("%d", cr.cfg.MaxContextImages)}))
+		return ChatMessage{}, raw, false
+	}
+	if len(imageUrls) > remaining {
+		cr.sendWarning(expandNotice(n.Images.PartialLimit, map[string]string{
+			"remaining": fmt.Sprintf("%d", remaining),
+			"used":      fmt.Sprintf("%d", existingImages),
+			"max":       fmt.Sprintf("%d", cr.cfg.MaxContextImages),
+		}))
+		return ChatMessage{}, raw, false
+	}
+	var maxImagePixels int
+	readConfig(func() { maxImagePixels = config.MaxImagePixels })
+	msg, err := buildImageMessage(raw, imageUrls, cr.cfg.MaxImages, cr.cfg.ImageFormat, cr.cfg.ImageQuality, cr.cfg.MaxImageWidth, cr.cfg.MaxImageHeight, maxImagePixels, cr.sessionID)
+	if err != nil {
+		cr.sendError(expandNotice(n.DB.ProcessImages, map[string]string{"error": err.Error()}))
+		return ChatMessage{}, raw, false
+	}
+	return msg, "", true
+}
+
 func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx context.Context, output chan<- string, resolvedUser *User, args ...string) {
 	runner := newChatRunnerFn(network, c, cfg, ctx, output).(*chatRunner)
 	nick := e.Source.Name
@@ -2297,55 +2342,40 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 	}
 	defer releaseTurn()
 
-	var userMsg ChatMessage
+	// Mid-turn absorption (midturn.go): the mailbox is open for the whole
+	// gate hold — executeToolCalls drains it at round boundaries, and the
+	// post-turn loop below drains it between continuation turns.
+	//
+	// Defer-order invariant: defers run LIFO, so persistUndrainedAbsorbed
+	// (registered second) closes the mailbox BEFORE releaseTurn releases
+	// the session gate. This ordering is load-bearing — an open mailbox
+	// must never outlive the gate hold: an async-delivery turn acquiring
+	// the gate right after chat() must see a closed mailbox, never one
+	// belonging to a dead turn.
+	mb := openTurnMailbox(session.ID)
+	defer persistUndrainedAbsorbed(runner, mb)
+
+	// Set before buildUserChatMessage: the helper registers image refs
+	// under cr.sessionID (previously buildImageMessage received
+	// session.ID directly at the call site).
+	runner.sessionID = session.ID
+
+	var existingImages int
 	if cfg.DetectImages {
 		messages, err := sessionMgr.GetMessages(session.ID)
 		if err != nil {
 			runner.logger.Error("failed to load messages for image detection", "error", err)
 			messages = nil
 		}
-
-		cleanText, imageUrls := detectImageURLs(args[0])
-
-		if len(imageUrls) > 0 {
-			existingImages := countContextImages(messages)
-			remaining := cfg.MaxContextImages - existingImages
-			n := getNotices()
-
-			if remaining <= 0 {
-				runner.sendWarning(expandNotice(n.Images.LimitReached, map[string]string{"max": fmt.Sprintf("%d", cfg.MaxContextImages)}))
-				return
-			}
-
-			if len(imageUrls) > remaining {
-				runner.sendWarning(expandNotice(n.Images.PartialLimit, map[string]string{"remaining": fmt.Sprintf("%d", remaining), "used": fmt.Sprintf("%d", existingImages), "max": fmt.Sprintf("%d", cfg.MaxContextImages)}))
-				return
-			}
-
-			var err error
-			var maxImagePixels int
-			readConfig(func() { maxImagePixels = config.MaxImagePixels })
-			userMsg, err = buildImageMessage(cleanText, imageUrls, cfg.MaxImages, cfg.ImageFormat, cfg.ImageQuality, cfg.MaxImageWidth, cfg.MaxImageHeight, maxImagePixels, session.ID)
-			if err != nil {
-				runner.sendError(expandNotice(n.DB.ProcessImages, map[string]string{"error": err.Error()}))
-				return
-			}
-		} else {
-			userMsg = ChatMessage{
-				Role:    RoleUser,
-				Content: cleanText,
-			}
-		}
-	} else {
-		userMsg = ChatMessage{
-			Role:    RoleUser,
-			Content: args[0],
-		}
+		existingImages = countContextImages(messages)
+	}
+	userMsg, _, msgOK := buildUserChatMessage(runner, args[0], existingImages)
+	if !msgOK {
+		return // warning already sent by the helper; message dropped (historical behavior)
 	}
 
 	sessionMgr.AddMessage(session.ID, userMsg)
 
-	runner.sessionID = session.ID
 	if session.ConvID != nil {
 		runner.convID = *session.ConvID
 	}
@@ -2373,9 +2403,30 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 				return
 			default:
 			}
+			absorbed := mb.drain()
 			completedJobs, err := getCompletedPendingJobs(runner.sessionID)
-			if err != nil || len(completedJobs) == 0 {
-				break
+			if err != nil {
+				runner.logger.Error("failed to query completed pending jobs", "error", err)
+			}
+			if len(absorbed) == 0 && (err != nil || len(completedJobs) == 0) {
+				// Quiescent: close under the mailbox mutex so a racing
+				// push either lands in the returned stragglers (processed
+				// by exactly one extra cycle) or fails against the closed
+				// mailbox (dispatch enqueues normally). See midturn.go.
+				stragglers := mb.closeAndDrain()
+				if len(stragglers) == 0 {
+					break
+				}
+				absorbed = stragglers
+			}
+			for _, raw := range absorbed {
+				if msg, fallback, ok := buildUserChatMessage(runner, raw, countContextImages(turn.Messages())); ok {
+					turn.Add(msg)
+				} else {
+					// Absorbed messages are never dropped (the user got
+					// the receipt): keep the text, skip the images.
+					turn.Add(ChatMessage{Role: RoleUser, Content: fallback})
+				}
 			}
 			for _, cj := range completedJobs {
 				injectAsyncResultFromDB(runner.sessionID, cfg, cj, network.Name, channel, e.Source.Name)
@@ -2389,8 +2440,8 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 			turn = newTurnContext(runner.sessionID, messages)
 			runner.runTurn(turn)
 			// Same api_log pointer the primary turn logs — continuation
-			// turns (async job delivery) write to the same api log file
-			// and deserve the same breadcrumb.
+			// turns (absorbed messages, async job delivery) write to the
+			// same api log file and deserve the same breadcrumb.
 			runner.logger.Debug("continuation finished", "api_log", apiLogger.GetSessionFilePath(runner.sessionID))
 		}
 	}

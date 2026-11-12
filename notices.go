@@ -61,6 +61,9 @@ type FormatNotices struct {
 type MentionNotices struct {
 	NoContext string `toml:"no_context"`
 	Muted     string `toml:"muted"`
+	// Absorbed is the receipt sent when a mention is handed to the
+	// session's live turn instead of queueing a second turn (midturn.go).
+	Absorbed string `toml:"absorbed"`
 }
 
 type SessionNotices struct {
@@ -294,6 +297,9 @@ func setNoticesDefaults(n *NoticesConfig) {
 	}
 	if n.Mentions.Muted == "" {
 		n.Mentions.Muted = "Further mentions will be ignored until you start a session."
+	}
+	if n.Mentions.Absorbed == "" {
+		n.Mentions.Absorbed = "\x0314📎 {nick}: added to the running turn\x0f"
 	}
 	if n.Sessions.Header == "" {
 		n.Sessions.Header = "\x02Session History ({nick} on {network}):\x02"

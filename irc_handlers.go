@@ -445,6 +445,15 @@ func handleMention(network Network, client *girc.Client, event girc.Event, chann
 	}
 	logger.Info("Running chat completion with existing context")
 
+	// Mid-turn absorption (midturn.go): this session has a live turn that
+	// can still take messages — hand the message over instead of queueing
+	// a second turn behind it. No queue item, no queue notices; one
+	// immediate receipt line.
+	if txt, absorbed := tryAbsorbMention(session.ID, msg, event.Source.Name); absorbed {
+		client.Cmd.Reply(event, txt)
+		return
+	}
+
 	position, started := queueMgr.EnqueueWithStart(network.Name, channel, userID, event.Source.Name,
 		sessionCfg.Service, "chat",
 		func(cx context.Context, output chan<- string) {

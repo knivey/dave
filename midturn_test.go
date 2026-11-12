@@ -516,7 +516,12 @@ func TestChatAbsorbedRidesAfterToolResultsWire(t *testing.T) {
 	round2 := bodies[1]
 	assert.Contains(t, round2, "unknown_tool_zz", "round 2 must carry the tool round-trip")
 	assert.Contains(t, round2, "now change the plan", "round 2 must carry the absorbed message")
-	toolIdx := strings.Index(round2, `"unknown_tool_zz"`)
+	// Anchor the ordering on the tool RESULT row, not the assistant's
+	// tool_calls JSON: the result carries the name unquoted inside its
+	// content ("error: unknown MCP tool: unknown_tool_zz"), while the
+	// quoted name also matches the assistant row — which always precedes
+	// everything and would mask a drain-before-results regression.
+	toolIdx := strings.Index(round2, "error: unknown MCP tool")
 	absorbedIdx := strings.Index(round2, "now change the plan")
 	require.GreaterOrEqual(t, toolIdx, 0)
 	require.GreaterOrEqual(t, absorbedIdx, 0)

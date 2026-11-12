@@ -3646,3 +3646,60 @@ func TestExecuteToolCallsAbortsUnresolvableRef(t *testing.T) {
 	assert.Contains(t, last.Content, "usr_x", "call aborted with an error result naming the ref")
 	assert.Empty(t, cr.pendingInjections)
 }
+
+func TestBuildUserChatMessage(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	t.Run("detectimages off is plain text", func(t *testing.T) {
+		cr := newImageViewTestRunner(t, AIConfig{}, 9)
+		msg, fallback, ok := buildUserChatMessage(cr, "hello there", 0)
+		assert.True(t, ok)
+		assert.Empty(t, fallback)
+		assert.Equal(t, RoleUser, msg.Role)
+		assert.Equal(t, "hello there", msg.Content)
+		assert.Empty(t, msg.MultiContent)
+	})
+
+	t.Run("no urls stays plain", func(t *testing.T) {
+		cr := newImageViewTestRunner(t, AIConfig{DetectImages: true, MaxContextImages: 5}, 9)
+		msg, _, ok := buildUserChatMessage(cr, "no links here", 0)
+		assert.True(t, ok)
+		assert.Equal(t, "no links here", msg.Content)
+		assert.Empty(t, msg.MultiContent)
+	})
+
+	t.Run("image url builds multicontent", func(t *testing.T) {
+		config.ImagesDir = t.TempDir()
+		t.Cleanup(func() { config.ImagesDir = "" })
+		config.TrustedImageHosts = []string{"127.0.0.1"}
+		t.Cleanup(func() { config.TrustedImageHosts = nil })
+		srv := newTestImageServer(t)
+		t.Cleanup(srv.Close)
+
+		cr := newImageViewTestRunner(t, AIConfig{DetectImages: true, MaxContextImages: 5, ImageFormat: "jpg", ImageQuality: 75}, 9)
+		msg, fallback, ok := buildUserChatMessage(cr, "look "+srv.URL+"/pic.jpg", 0)
+		assert.True(t, ok)
+		assert.Empty(t, fallback)
+		assert.Equal(t, RoleUser, msg.Role)
+		require.NotEmpty(t, msg.MultiContent, "image URL should attach image parts")
+	})
+
+	t.Run("over budget warns and returns fallback text", func(t *testing.T) {
+		// cr.outputCh is a send-only field, so the test holds the
+		// bidirectional channel itself to assert on what was sent.
+		outputCh := make(chan string, 100)
+		cr := newImageViewTestRunner(t, AIConfig{DetectImages: true, MaxContextImages: 1}, 9)
+		cr.outputCh = outputCh
+		msg, fallback, ok := buildUserChatMessage(cr, "see https://img.example.com/x.jpg", 1)
+		assert.False(t, ok)
+		assert.Equal(t, "see https://img.example.com/x.jpg", fallback)
+		assert.Empty(t, msg.MultiContent)
+		select {
+		case line := <-outputCh:
+			assert.NotEmpty(t, line, "a warning notice must go out on the output channel")
+		default:
+			t.Fatal("expected a warning notice on the output channel")
+		}
+	})
+}

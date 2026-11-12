@@ -2183,6 +2183,46 @@ streamDone:
 	return completedResponse, nil
 }
 
+// buildUserChatMessage is the shared user-message preprocessing for
+// chat() and mid-turn absorption (midturn.go): detectimages URL handling
+// against the session image budget. Warnings are sent by the helper via
+// the runner. ok=false means images could not be attached (budget or
+// processing failure) — the caller decides: chat() drops the message
+// (historical behavior), the absorption drain persists fallbackText as a
+// plain text row (the user was already told their message was absorbed;
+// dropping is not acceptable).
+func buildUserChatMessage(cr *chatRunner, raw string, existingImages int) (ChatMessage, string, bool) {
+	if !cr.cfg.DetectImages {
+		return ChatMessage{Role: RoleUser, Content: raw}, "", true
+	}
+	_, imageUrls := detectImageURLs(raw)
+	if len(imageUrls) == 0 {
+		return ChatMessage{Role: RoleUser, Content: raw}, "", true
+	}
+	remaining := cr.cfg.MaxContextImages - existingImages
+	n := getNotices()
+	if remaining <= 0 {
+		cr.sendWarning(expandNotice(n.Images.LimitReached, map[string]string{"max": fmt.Sprintf("%d", cr.cfg.MaxContextImages)}))
+		return ChatMessage{}, raw, false
+	}
+	if len(imageUrls) > remaining {
+		cr.sendWarning(expandNotice(n.Images.PartialLimit, map[string]string{
+			"remaining": fmt.Sprintf("%d", remaining),
+			"used":      fmt.Sprintf("%d", existingImages),
+			"max":       fmt.Sprintf("%d", cr.cfg.MaxContextImages),
+		}))
+		return ChatMessage{}, raw, false
+	}
+	var maxImagePixels int
+	readConfig(func() { maxImagePixels = config.MaxImagePixels })
+	msg, err := buildImageMessage(raw, imageUrls, cr.cfg.MaxImages, cr.cfg.ImageFormat, cr.cfg.ImageQuality, cr.cfg.MaxImageWidth, cr.cfg.MaxImageHeight, maxImagePixels, cr.sessionID)
+	if err != nil {
+		cr.sendError(expandNotice(n.DB.ProcessImages, map[string]string{"error": err.Error()}))
+		return ChatMessage{}, raw, false
+	}
+	return msg, "", true
+}
+
 func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx context.Context, output chan<- string, resolvedUser *User, args ...string) {
 	runner := newChatRunnerFn(network, c, cfg, ctx, output).(*chatRunner)
 	nick := e.Source.Name
@@ -2297,55 +2337,27 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 	}
 	defer releaseTurn()
 
-	var userMsg ChatMessage
+	// Set before buildUserChatMessage: the helper registers image refs
+	// under cr.sessionID (previously buildImageMessage received
+	// session.ID directly at the call site).
+	runner.sessionID = session.ID
+
+	var existingImages int
 	if cfg.DetectImages {
 		messages, err := sessionMgr.GetMessages(session.ID)
 		if err != nil {
 			runner.logger.Error("failed to load messages for image detection", "error", err)
 			messages = nil
 		}
-
-		cleanText, imageUrls := detectImageURLs(args[0])
-
-		if len(imageUrls) > 0 {
-			existingImages := countContextImages(messages)
-			remaining := cfg.MaxContextImages - existingImages
-			n := getNotices()
-
-			if remaining <= 0 {
-				runner.sendWarning(expandNotice(n.Images.LimitReached, map[string]string{"max": fmt.Sprintf("%d", cfg.MaxContextImages)}))
-				return
-			}
-
-			if len(imageUrls) > remaining {
-				runner.sendWarning(expandNotice(n.Images.PartialLimit, map[string]string{"remaining": fmt.Sprintf("%d", remaining), "used": fmt.Sprintf("%d", existingImages), "max": fmt.Sprintf("%d", cfg.MaxContextImages)}))
-				return
-			}
-
-			var err error
-			var maxImagePixels int
-			readConfig(func() { maxImagePixels = config.MaxImagePixels })
-			userMsg, err = buildImageMessage(cleanText, imageUrls, cfg.MaxImages, cfg.ImageFormat, cfg.ImageQuality, cfg.MaxImageWidth, cfg.MaxImageHeight, maxImagePixels, session.ID)
-			if err != nil {
-				runner.sendError(expandNotice(n.DB.ProcessImages, map[string]string{"error": err.Error()}))
-				return
-			}
-		} else {
-			userMsg = ChatMessage{
-				Role:    RoleUser,
-				Content: cleanText,
-			}
-		}
-	} else {
-		userMsg = ChatMessage{
-			Role:    RoleUser,
-			Content: args[0],
-		}
+		existingImages = countContextImages(messages)
+	}
+	userMsg, _, msgOK := buildUserChatMessage(runner, args[0], existingImages)
+	if !msgOK {
+		return // warning already sent by the helper; message dropped (historical behavior)
 	}
 
 	sessionMgr.AddMessage(session.ID, userMsg)
 
-	runner.sessionID = session.ID
 	if session.ConvID != nil {
 		runner.convID = *session.ConvID
 	}

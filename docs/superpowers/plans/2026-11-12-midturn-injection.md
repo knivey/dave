@@ -1024,7 +1024,7 @@ git commit -m "midturn: drain absorbed messages at the tool-round boundary"
 ### Task 7: chat() lifecycle — open, quiescent-close loop, cancellation persistence
 
 **Files:**
-- Modify: `midturn.go` (add `persistUndrainedAfterCancel`)
+- Modify: `midturn.go` (add `persistUndrainedAbsorbed`)
 - Modify: `aiCmds.go` chat() — open the mailbox after the gate; replace the post-turn inline loop (lines ~2369-2398) with the quiescent-close loop.
 - Test: `midturn_test.go`
 

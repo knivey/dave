@@ -62,3 +62,31 @@ When the image job completes:
 4. If the user's active session is already the right one, no switch needed — the result is just injected and the AI responds
 
 This means a user can do: `=grk draw me a sunset` → AI says "generating..." → user does `=grk tell me a joke` → joke response → image finishes → bot switches back to the image session, shows the image, AI comments on it. The user can then continue the conversation about the image.
+
+## Mid-turn absorption
+
+When a user sends a same-session continuation (a mention) while their
+session's turn is still running — including while the model is mid
+tool-loop — the message is handed to the live turn instead of queueing a
+second turn behind it:
+
+1. The user gets one quiet receipt line: `📎 {nick}: added to the running
+   turn` (notices `[mentions] absorbed`). No Queued/Processing notices —
+   the message created no queue item.
+2. The message is persisted as a plain user row and sent to the model
+   after the pending tool results of the current round (the same wire
+   position view_image injections use), so the model can pivot
+   immediately instead of finishing a superseded plan.
+3. Messages arriving during the model's final response get a
+   continuation turn after it; messages racing turn shutdown are
+   persisted as text rows and picked up by the user's next message.
+4. A message that cannot attach its images (session image budget
+   exhausted) is kept as text with a warning — absorbed messages are
+   never dropped.
+5. Fresh trigger commands are never absorbed: they complete the old
+   session and start a new one, and queue as before. Async-result
+   deliveries queue as before too (silently — no started notice).
+
+The mailbox (`midturn.go`) guarantees every accepted message is drained
+or persisted exactly once. If the turn is already finishing (mailbox
+closed), dispatch falls back to the queue-a-new-turn behavior unchanged.

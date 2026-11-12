@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestIRC_Bold(t *testing.T) {
@@ -97,6 +98,11 @@ func TestIRC_Spoiler(t *testing.T) {
 	assert.Contains(t, result, `irc-spoiler`)
 }
 
+// DIVERGED from the parsebin original (deliberate, Nov 2026): inline
+// code spans STRIP IRC control codes instead of passing them through
+// — the site runs BBCode translation before Render, and leftover
+// \x03NN bytes inside code text would render the color digits as
+// visible text. The span content still gets no irc-* styling.
 func TestIRC_CodeSpanUntouched(t *testing.T) {
 	input := "normal `\x02bold\x02 code` normal"
 	result, err := Render(input)
@@ -105,7 +111,66 @@ func TestIRC_CodeSpanUntouched(t *testing.T) {
 	codeEnd := strings.Index(result, "</code>")
 	codeContent := result[codeStart+len("<code>") : codeEnd]
 	assert.NotContains(t, codeContent, "irc-bold")
-	assert.Contains(t, codeContent, "\x02")
+	assert.Contains(t, codeContent, "bold code", "text survives, codes stripped")
+	for _, b := range []byte{0x02, 0x03, 0x04, 0x0f, 0x11, 0x16, 0x1d, 0x1e, 0x1f} {
+		assert.NotContains(t, codeContent, string(rune(b)), "control byte %02x stripped", b)
+	}
+}
+
+// TestIRC_CodeSpanFixDoesNotEatSiblings pins the collect-then-mutate
+// discipline: rebuilding a code span DURING the walk broke goldmark's
+// sibling traversal (RemoveChild nils the removed node's next-sibling),
+// silently dropping IRC transformation for everything after the first
+// rebuilt span in the paragraph — and leaving LATER spans unstripped.
+func TestIRC_CodeSpanFixDoesNotEatSiblings(t *testing.T) {
+	input := "a `\x02x\x02` mid \x02bold\x02 and `\x02y\x02` end"
+	result, err := Render(input)
+	assert.NoError(t, err)
+
+	// the styled text BETWEEN the spans keeps its transformation
+	assert.Contains(t, result, `class="irc-bold"`, "bold after the first span still styled")
+
+	// BOTH code spans get stripped (the second one was silently missed
+	// by the mid-walk mutation)
+	chunks := splitCodeChunks(t, result)
+	require.Len(t, chunks, 2)
+	assert.Equal(t, "x", chunks[0])
+	assert.Equal(t, "y", chunks[1])
+	for _, chunk := range chunks {
+		assert.NotContains(t, chunk, "\x02")
+	}
+}
+
+// splitCodeChunks extracts the text between each <code>…</code> pair.
+func splitCodeChunks(t *testing.T, html string) []string {
+	t.Helper()
+	var out []string
+	for {
+		i := strings.Index(html, "<code>")
+		if i < 0 {
+			return out
+		}
+		j := strings.Index(html[i:], "</code>")
+		if j < 0 {
+			t.Fatal("unclosed <code>")
+		}
+		out = append(out, html[i+6:i+j])
+		html = html[i+j+len("</code>"):]
+	}
+}
+
+// TestIRC_MultiLineCodeSpanNotRebuilt: \n inside an inline code span is
+// not an IRC control code — the rebuild path must not trigger (the gate
+// is hasIRCControl, not hasIRCCodes' any-byte-below-0x20).
+func TestIRC_MultiLineCodeSpanNotRebuilt(t *testing.T) {
+	input := "before `line1\nline2` after \x02bold\x02"
+	result, err := Render(input)
+	assert.NoError(t, err)
+	// NOT rebuilt ⇒ goldmark's own code-span renderer handles the
+	// newline (CommonMark: newline → space). A rebuilt span would keep
+	// the literal \n — this assertion isolates the narrow gate.
+	assert.Contains(t, result, "line1 line2")
+	assert.Contains(t, result, `class="irc-bold"`, "the rest of the paragraph still transforms")
 }
 
 func TestIRC_FencedCodeUntouched(t *testing.T) {

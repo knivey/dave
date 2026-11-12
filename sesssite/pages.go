@@ -166,7 +166,7 @@ func (s *Server) serveRowsFragment(w http.ResponseWriter, r *http.Request, sess 
 		http.Error(w, "query failure", http.StatusInternalServerError)
 		return
 	}
-	views := buildMessageViews(msgs, slug)
+	views := buildMessageViews(msgs, slug, s.cfg.Render.viewOptsFor())
 	applyAuthors(views, msgs, s.authorsFor(msgs))
 	chunkComps := compsForChunk(comps, msgs)
 	views = pairToolCalls(s.applyHideSystemPrompts(views, chunkComps))
@@ -209,7 +209,7 @@ func (s *Server) serveSessionPage(w http.ResponseWriter, r *http.Request, sess *
 		return
 	}
 
-	views := buildMessageViews(msgs, slug)
+	views := buildMessageViews(msgs, slug, s.cfg.Render.viewOptsFor())
 	assignUsage(views, msgs, usageFrom(usage, msgs))
 	applyAuthors(views, msgs, s.authorsFor(msgs))
 	chunkComps := compsForChunk(comps, msgs)

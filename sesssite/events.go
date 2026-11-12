@@ -160,7 +160,7 @@ func (s *Server) renderRowsAfter(sess *Session, afterID int64) (string, int64, e
 	if err != nil {
 		return "", 0, err
 	}
-	views := buildMessageViews(msgs, sess.Slug)
+	views := buildMessageViews(msgs, sess.Slug, s.cfg.Render.viewOptsFor())
 	assignUsage(views, msgs, usageFrom(usage, msgs))
 	applyAuthors(views, msgs, s.authorsFor(msgs))
 	chunkComps := compsForChunk(comps, msgs)

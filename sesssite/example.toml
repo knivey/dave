@@ -11,6 +11,11 @@
 #                                          404 their raw endpoints; compaction
 #                                          summaries stay via the divider's inline
 #                                          summary (default false)
+#   [render] bbcode             bool  translate the model's BBCode tags to styled
+#                                          spans on assistant content — the same
+#                                          translator IRC emission uses (default true)
+#   [render] bbcode_styles      bool  also translate [b] [i] [u] [s] toggles; off =
+#                                          verbatim, mirroring dave's knob (default false)
 #   [database] driver string  "sqlite" (default) | "postgres"
 #   [database] path   string  sqlite path, binary-relative (default "data/dave.db")
 #   [database] dsn    string  postgres DSN — use a READ-ONLY role; the code never writes
@@ -22,6 +27,8 @@
 #
 # [render]
 # hide_system_prompts = false
+# bbcode = true
+# bbcode_styles = false
 #
 # [database]
 # driver = "sqlite"

@@ -251,18 +251,74 @@ func isHexDigit(b byte) bool {
 	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')
 }
 
-func isInCode(n ast.Node) bool {
-	for p := n.Parent(); p != nil; p = p.Parent() {
-		if p.Kind() == ast.KindCodeSpan || p.Kind() == ast.KindRawHTML {
+// hasIRCControl reports whether data contains any IRC formatting
+// control byte (the transformer's actual vocabulary). Deliberately NOT
+// a naive byte<0x20 check — that would match \n and \t and route
+// ordinary multi-line code spans down the rebuild path.
+func hasIRCControl(data []byte) bool {
+	for _, b := range data {
+		switch b {
+		case 0x02, 0x03, 0x04, 0x0f, 0x11, 0x16, 0x1d, 0x1e, 0x1f:
 			return true
 		}
 	}
 	return false
 }
 
-func hasIRCCodes(data []byte) bool {
-	for _, b := range data {
-		if b < 0x20 {
+// stripIRCCodes removes IRC control sequences from text destined for
+// contexts that must show plain text (inline code spans). Handles the
+// full vocabulary the site's pipeline can produce: single-byte toggles
+// (\x02 \x11 \x16 \x0f \x1d \x1e \x1f), \x03 with up to two fg digits
+// and an optional ,bg pair, and \x04 with up to six hex digits and an
+// optional ,hex pair.
+func stripIRCCodes(data []byte) []byte {
+	out := make([]byte, 0, len(data))
+	for i := 0; i < len(data); {
+		b := data[i]
+		switch {
+		case b == 0x02, b == 0x11, b == 0x16, b == 0x0f, b == 0x1d, b == 0x1e, b == 0x1f:
+			i++
+		case b == 0x03:
+			i++
+			i += ircDigitLen(data, i)
+			if i < len(data) && data[i] == ',' {
+				i++
+				i += ircDigitLen(data, i)
+			}
+		case b == 0x04:
+			i++
+			i += ircHexLen(data, i)
+			if i < len(data) && data[i] == ',' {
+				i++
+				i += ircHexLen(data, i)
+			}
+		default:
+			out = append(out, b)
+			i++
+		}
+	}
+	return out
+}
+
+func ircDigitLen(data []byte, pos int) int {
+	n := 0
+	for n < 2 && pos+n < len(data) && data[pos+n] >= '0' && data[pos+n] <= '9' {
+		n++
+	}
+	return n
+}
+
+func ircHexLen(data []byte, pos int) int {
+	n := 0
+	for n < 6 && pos+n < len(data) && isHexDigit(data[pos+n]) {
+		n++
+	}
+	return n
+}
+
+func isInCode(n ast.Node) bool {
+	for p := n.Parent(); p != nil; p = p.Parent() {
+		if p.Kind() == ast.KindCodeSpan || p.Kind() == ast.KindRawHTML {
 			return true
 		}
 	}
@@ -280,10 +336,43 @@ func (t *ircTransformer) Transform(doc *ast.Document, reader text.Reader, pc par
 	}
 
 	var textNodes []textNodeInfo
+	// Code spans carrying IRC codes are rebuilt AFTER the walk —
+	// mutating the tree mid-walk breaks goldmark's sibling traversal
+	// (RemoveChild nils the removed node's next-sibling, ending the
+	// parent's child loop early), silently dropping every following
+	// sibling's transformation. Same collect-then-mutate discipline as
+	// the text-node pass below.
+	type codeSpanFix struct {
+		node     ast.Node
+		stripped []byte
+	}
+	var codeSpanFixes []codeSpanFix
 
 	ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
 		if !entering {
 			return ast.WalkContinue, nil
+		}
+		if n.Kind() == ast.KindCodeSpan {
+			// Inline code spans: upstream BBCode translation (the site
+			// runs TranslateBBCode before Render) may have left IRC
+			// control sequences inside code text; leaving them as bytes
+			// shows the color digits ("04text"). Strip the codes and
+			// rebuild the span as raw wrapper + escaped text — the
+			// renderer's code-span walker asserts *ast.Text children,
+			// so swapping the inner text node panics it; replacing the
+			// WHOLE span is safe. hasIRCControl (not a
+			// naive byte<0x20 gate, which would catch \n/\t) keeps
+			// untouched spans on the no-op path.
+			var buf []byte
+			for c := n.FirstChild(); c != nil; c = c.NextSibling() {
+				if t, ok := c.(*ast.Text); ok {
+					buf = append(buf, t.Value(source)...)
+				}
+			}
+			if hasIRCControl(buf) {
+				codeSpanFixes = append(codeSpanFixes, codeSpanFix{node: n, stripped: stripIRCCodes(buf)})
+			}
+			return ast.WalkSkipChildren, nil
 		}
 		if n.Kind() != ast.KindText {
 			return ast.WalkContinue, nil
@@ -298,6 +387,16 @@ func (t *ircTransformer) Transform(doc *ast.Document, reader text.Reader, pc par
 		})
 		return ast.WalkContinue, nil
 	})
+
+	for _, fix := range codeSpanFixes {
+		open := codeString([]byte("<code>"))
+		body := ast.NewString(fix.stripped)
+		close := codeString([]byte("</code>"))
+		p := fix.node.Parent()
+		p.ReplaceChild(p, fix.node, open)
+		p.InsertAfter(p, open, body)
+		p.InsertAfter(p, body, close)
+	}
 
 	var currentState ircState
 	var lastParent ast.Node

@@ -108,7 +108,7 @@ type toolCallJSON struct {
 // Content carries the RAW stored content alongside ContentHTML: the
 // template's tool-result branch interpolates it escaped (html/template
 // does the escaping) — tool output is model/tool text, never markdown.
-func buildMessageView(m Message, sessionSlug string) MessageView {
+func buildMessageView(m Message, sessionSlug string, opts viewOpts) MessageView {
 	v := MessageView{
 		ID: m.ID, Role: m.Role, Time: m.CreatedAt,
 		Content:  m.Content,
@@ -119,12 +119,18 @@ func buildMessageView(m Message, sessionSlug string) MessageView {
 	if m.ReasoningContent != nil && *m.ReasoningContent != "" {
 		v.HasReasoning = true
 		v.ReasoningContent = *m.ReasoningContent
-		if html, err := renderer.Render(*m.ReasoningContent); err == nil {
+		// Reasoning is model output — BBCode translation applies here
+		// exactly like assistant content.
+		r := *m.ReasoningContent
+		if opts.BBCode {
+			r = TranslateBBCode(r, nil, opts.BBCodeStyles)
+		}
+		if html, err := renderer.Render(r); err == nil {
 			v.ReasoningHTML = template.HTML(html)
 		} else {
 			// Degradation equals ContentHTML's: escaped plain text —
 			// content is never lost.
-			v.ReasoningHTML = template.HTML(template.HTMLEscapeString(*m.ReasoningContent))
+			v.ReasoningHTML = template.HTML(template.HTMLEscapeString(r))
 		}
 		if m.ReasoningSummary != nil {
 			v.ReasoningSummary = *m.ReasoningSummary
@@ -163,6 +169,12 @@ func buildMessageView(m Message, sessionSlug string) MessageView {
 		content = strings.Join(textParts, "\n\n")
 	}
 	if content != "" && (m.Role == "user" || m.Role == "assistant") {
+		// BBCode translation is ASSISTANT-ONLY: dave translates model
+		// output at IRC emission and stores everything raw, so user
+		// rows keep their literal brackets — parity with IRC.
+		if m.Role == "assistant" && opts.BBCode {
+			content = TranslateBBCode(content, nil, opts.BBCodeStyles)
+		}
 		if html, err := renderer.Render(content); err == nil {
 			v.ContentHTML = template.HTML(html)
 		} else {
@@ -173,10 +185,21 @@ func buildMessageView(m Message, sessionSlug string) MessageView {
 	return v
 }
 
-func buildMessageViews(msgs []Message, sessionSlug string) []MessageView {
+// viewOpts carries the site's [render] toggles into view construction.
+// BBCode translation applies to ASSISTANT-side content only (message
+// content + reasoning) — dave translates model output at IRC emission
+// and stores user rows raw, so literal brackets in user text stay
+// literal here too, matching what IRC saw.
+type viewOpts struct {
+	BBCode       bool
+	BBCodeStyles bool
+}
+
+// buildMessageViews builds a view per message (1:1, index-parallel).
+func buildMessageViews(msgs []Message, sessionSlug string, opts viewOpts) []MessageView {
 	views := make([]MessageView, len(msgs))
 	for i, m := range msgs {
-		views[i] = buildMessageView(m, sessionSlug)
+		views[i] = buildMessageView(m, sessionSlug, opts)
 	}
 	return views
 }

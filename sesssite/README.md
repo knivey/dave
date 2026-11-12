@@ -76,6 +76,15 @@ endpoints 404, and live SSE never delivers them. Compaction summaries
 survive through the divider because they summarize the conversation
 rather than instruct the model.
 
+`bbcode` (default on) makes assistant replies render the same styled
+spans IRC users saw: dave stores raw model output and translates
+BBCode at IRC emission, so the site re-runs the identical translation
+(the color vocabulary, styles gate, and unknown-tag-verbatim rules are
+a verbatim port of dave's translator). `[color=red]…[/color]` becomes
+a red span; user-typed brackets are never translated, matching IRC.
+`bbcode_styles` (default off) additionally translates `[b] [i] [u] [s]`
+toggles — set it to match your fleet's `bbcode_styles` commands.
+
 ## Deploying
 
 Run the binary on the same host as dave (or anywhere that can reach the

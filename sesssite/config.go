@@ -34,8 +34,32 @@ type ServerConfig struct {
 // conversation-derived rather than instructions: their content keeps
 // rendering through the compaction divider's inline summary (the row
 // itself is filtered like any other system row). Default false.
+//
+// bbcode (default TRUE, pointer so false is explicit) translates the
+// model's BBCode tags to styled spans for ASSISTANT-side content —
+// the same translation dave applies at IRC emission (the site's
+// translator is a verbatim port), so the web shows what IRC saw.
+// bbcode_styles gates the [b] [i] [u] [s] toggle half exactly like
+// dave's knob (default false: single-letter tags are bracket-ambiguous
+// with prose — `a[i]` indexing, [1] citations — so they stay verbatim
+// unless turned on). Compaction summaries are NOT translated (summarizer
+// prose). Set both to match the fleet's command configs.
 type RenderConfig struct {
-	HideSystemPrompts bool `toml:"hide_system_prompts"`
+	HideSystemPrompts bool  `toml:"hide_system_prompts"`
+	BBCode            *bool `toml:"bbcode"`
+	BBCodeStyles      bool  `toml:"bbcode_styles"`
+}
+
+// bbcodeOn resolves the bbcode knob (nil = true, the fix-the-complaint
+// default; explicit false opts out).
+func (c *RenderConfig) bbcodeOn() bool {
+	return c.BBCode == nil || *c.BBCode
+}
+
+// viewOptsFor collapses the render config into the view-construction
+// toggles.
+func (c *RenderConfig) viewOptsFor() viewOpts {
+	return viewOpts{BBCode: c.bbcodeOn(), BBCodeStyles: c.BBCodeStyles}
 }
 
 type DatabaseConfig struct {

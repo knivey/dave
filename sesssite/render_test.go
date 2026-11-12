@@ -16,7 +16,7 @@ func TestBuildMessageViewMarkdown(t *testing.T) {
 	s := mkSession(t, db, "aaaaaaaa")
 	m := mkMessage(t, db, s.ID, "assistant", "**bold** and `code`")
 
-	v := buildMessageView(m, s.Slug)
+	v := buildMessageView(m, s.Slug, viewOpts{})
 	assert.Contains(t, string(v.ContentHTML), "<strong>bold</strong>")
 	assert.Contains(t, string(v.ContentHTML), "<code>code</code>")
 	assert.Equal(t, "/s/aaaaaaaa/m/"+strconv.FormatInt(m.ID, 10)+"/raw", v.RawURL)
@@ -27,7 +27,7 @@ func TestBuildMessageViewIRCCodes(t *testing.T) {
 	s := mkSession(t, db, "aaaaaaaa")
 	m := mkMessage(t, db, s.ID, "user", "\x02bold text\x02 plain")
 
-	v := buildMessageView(m, s.Slug)
+	v := buildMessageView(m, s.Slug, viewOpts{})
 	assert.Contains(t, string(v.ContentHTML), `class="irc-bold"`)
 	assert.NotContains(t, string(v.ContentHTML), "\x02")
 }
@@ -39,7 +39,7 @@ func TestBuildMessageViewToolCalls(t *testing.T) {
 		tc := `[{"id":"call_1","function":{"name":"generate_image","arguments":"{\"prompt\":\"a shrew\"}"}}]`
 		msg.ToolCalls = &tc
 	})
-	v := buildMessageView(m, s.Slug)
+	v := buildMessageView(m, s.Slug, viewOpts{})
 	require.Len(t, v.ToolCalls, 1)
 	assert.Equal(t, "generate_image", v.ToolCalls[0].Name)
 	assert.Contains(t, v.ToolCalls[0].ArgsJSON, "prompt")
@@ -54,7 +54,7 @@ func TestBuildMessageViewReasoningCollapsed(t *testing.T) {
 		sum := "short"
 		msg.ReasoningSummary = &sum
 	})
-	v := buildMessageView(m, s.Slug)
+	v := buildMessageView(m, s.Slug, viewOpts{})
 	assert.True(t, v.HasReasoning)
 	assert.Equal(t, "chain of thought", v.ReasoningContent)
 }
@@ -69,7 +69,7 @@ func TestBuildMessageViewReasoningMarkdown(t *testing.T) {
 		r := "thinking **hard** about `code`"
 		msg.ReasoningContent = &r
 	})
-	v := buildMessageView(m, s.Slug)
+	v := buildMessageView(m, s.Slug, viewOpts{})
 	assert.Contains(t, string(v.ReasoningHTML), "<strong>hard</strong>")
 	assert.Contains(t, string(v.ReasoningHTML), "<code>code</code>")
 
@@ -97,7 +97,7 @@ func TestBuildMessageViewImages(t *testing.T) {
 		mc := `[{"type":"image_url","image_url":{"url":"https://img.example.com/x.png"}},{"type":"text","text":"look"}]`
 		msg.MultiContent = &mc
 	})
-	v := buildMessageView(m, s.Slug)
+	v := buildMessageView(m, s.Slug, viewOpts{})
 	require.Len(t, v.ImageParts, 1)
 	assert.Equal(t, "https://img.example.com/x.png", v.ImageParts[0])
 	// Multicontent text is rendered too — content is empty, parts carry it.
@@ -130,7 +130,7 @@ func TestSafeImageURL(t *testing.T) {
 		`{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}},` +
 		`{"type":"image_url","image_url":{"url":"javascript:alert(1)"}}]`
 	m := mkMessage(t, db, s.ID, "user", "pics", func(msg *Message) { msg.MultiContent = &mc })
-	views := buildMessageViews([]Message{m}, s.Slug)
+	views := buildMessageViews([]Message{m}, s.Slug, viewOpts{})
 	require.Len(t, views[0].ImageParts, 3)
 	html, err := renderRowsHTML(views, nil)
 	require.NoError(t, err)
@@ -161,7 +161,7 @@ func TestAssignUsageWindow(t *testing.T) {
 		{SessionID: s.ID, Model: "m2", PromptTokens: 20, CompletionTokens: 8, CreatedAt: base.Add(4 * time.Second)},
 		{SessionID: s.ID, Model: "m2", PromptTokens: 30, CompletionTokens: 9, CreatedAt: base.Add(4 * time.Second)},
 	}
-	views := buildMessageViews(msgs, s.Slug)
+	views := buildMessageViews(msgs, s.Slug, viewOpts{})
 	assignUsage(views, msgs, usage)
 	require.NotNil(t, views[1].Usage)
 	assert.Equal(t, "m1", views[1].Usage.Model)
@@ -180,7 +180,7 @@ func TestRenderRowsCompactionDivider(t *testing.T) {
 		LastArchivedID: m1.ID, ArchivedCount: 1, Trigger: "auto", Model: "m", CreatedAt: time.Now()}
 	require.NoError(t, db.Create(&comp).Error)
 
-	views := buildMessageViews([]Message{m1, m2}, s.Slug)
+	views := buildMessageViews([]Message{m1, m2}, s.Slug, viewOpts{})
 	comps := []CompactionView{{Compaction: comp}}
 	html, err := renderRowsHTML(views, comps)
 	require.NoError(t, err)

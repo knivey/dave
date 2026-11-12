@@ -297,7 +297,7 @@ func onAsyncJobCompletedWithMgr(mgr *genericJobMgr[asyncJobPayload], qm *QueueMa
 		return
 	}
 
-	qm.Enqueue(entry.network, entry.channel, entry.userID, entry.nick, "", entry.toolName,
+	qm.EnqueueSilent(entry.network, entry.channel, entry.userID, entry.nick, "", entry.toolName,
 		func(ctx context.Context, output chan<- string) {
 			deliverAsyncResult(entry, ctx, output)
 		})
@@ -633,7 +633,7 @@ func recoverPendingJobs() {
 				nick:      nick,
 				userID:    userID,
 			}
-			position := queueMgr.Enqueue(session.Network, session.Channel, userID, nick, "", j.ToolName,
+			position := queueMgr.EnqueueSilent(session.Network, session.Channel, userID, nick, "", j.ToolName,
 				func(ctx context.Context, output chan<- string) {
 					deliverAsyncResult(entry, ctx, output)
 				})

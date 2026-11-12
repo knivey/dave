@@ -27,6 +27,12 @@ type QueueItem struct {
 	ctx            context.Context
 	cancel         context.CancelFunc
 	deliveryWaited bool
+	// Silent suppresses the "Processing your request" started notice at
+	// delivery time. Async-result delivery items set it: the user made no
+	// request, the item may no-op (first-wins delivery elsewhere), and
+	// everything a real delivery says (switch notice, commentary,
+	// deferrals) flows through outputCh in order.
+	Silent bool
 }
 
 type ChannelQueue struct {
@@ -179,6 +185,20 @@ func (qm *QueueManager) getOrCreateChannelQueue(key string) *ChannelQueue {
 
 func (qm *QueueManager) Enqueue(network, channel string, userID int64, nick, service, desc string, fn func(ctx context.Context, output chan<- string)) int {
 	return qm.EnqueueAt(network, channel, userID, nick, service, desc, time.Now(), fn)
+}
+
+// EnqueueSilent is Enqueue for items whose delivery must not announce
+// itself with the started notice (see QueueItem.Silent).
+func (qm *QueueManager) EnqueueSilent(network, channel string, userID int64, nick, service, desc string, fn func(ctx context.Context, output chan<- string)) int {
+	qm.mu.Lock()
+	defer qm.mu.Unlock()
+	item := qm.newQueueItem(network, channel, userID, nick, service, desc, time.Now(), fn)
+	if item == nil {
+		return -1
+	}
+	item.Silent = true
+	pos, _ := qm.enqueueItem(item)
+	return pos
 }
 
 // EnqueueWithStart is Enqueue plus the authoritative started fact: the
@@ -537,13 +557,22 @@ func (qm *QueueManager) runJob(item *QueueItem) {
 	// Sent directly to IRC (not through outputCh) to avoid the race where
 	// startedMsg was computed before waitTurn set deliveryWaited. We send
 	// before the outputCh drain loop, so ordering is: startedMsg → output.
-	if item.deliveryWaited || time.Since(item.Enqueued) > time.Second {
+	if shouldSendStarted(item, time.Now()) {
 		startedMsg := qm.formatStartedMsg(item.Nick, time.Since(item.Enqueued), item.Prompt, item.StartedMsg)
 		bot.Client.Cmd.Message(item.Channel, startedMsg)
 	}
 
 	throttle := time.Millisecond * bot.Network.Throttle
 	drainToChannel(bot.Client, item.Channel, throttle, item.outputCh, item.ctx, bot.Network.Name)
+}
+
+// shouldSendStarted is the started-notice predicate runJob applies after
+// acquiring the delivery turn.
+func shouldSendStarted(item *QueueItem, now time.Time) bool {
+	if item.Silent {
+		return false
+	}
+	return item.deliveryWaited || now.Sub(item.Enqueued) > time.Second
 }
 
 func (qm *QueueManager) executionComplete(item *QueueItem) {

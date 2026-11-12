@@ -975,3 +975,52 @@ func TestQueueManager_SingleParallelReturnsZero(t *testing.T) {
 
 	wg.Wait()
 }
+
+// shouldSendStarted is the started-notice predicate runJob applies after
+// acquiring the delivery turn (extracted so the silent-flag contract is
+// directly testable): silent items never announce; non-silent items
+// announce when they waited for delivery or when execution outran the
+// 1s grace window.
+func TestShouldSendStarted(t *testing.T) {
+	now := time.Now()
+	t.Run("silent never sends", func(t *testing.T) {
+		item := &QueueItem{Silent: true, Enqueued: now.Add(-5 * time.Minute), deliveryWaited: true}
+		assert.False(t, shouldSendStarted(item, now))
+	})
+	t.Run("non-silent waited sends", func(t *testing.T) {
+		item := &QueueItem{Enqueued: now, deliveryWaited: true}
+		assert.True(t, shouldSendStarted(item, now))
+	})
+	t.Run("non-silent slow start sends", func(t *testing.T) {
+		item := &QueueItem{Enqueued: now.Add(-5 * time.Second)}
+		assert.True(t, shouldSendStarted(item, now))
+	})
+	t.Run("non-silent fast does not send", func(t *testing.T) {
+		item := &QueueItem{Enqueued: now}
+		assert.False(t, shouldSendStarted(item, now))
+	})
+}
+
+func TestEnqueueSilentMarksItem(t *testing.T) {
+	qm := setupDeliveryTest(t, 1)
+
+	ran := make(chan struct{})
+	pos := qm.EnqueueSilent("net", "#chan", 1, "u", "svc", "",
+		func(ctx context.Context, output chan<- string) { close(ran) })
+	require.GreaterOrEqual(t, pos, 0, "item dropped at enqueue")
+
+	qm.mu.Lock()
+	var item *QueueItem
+	for _, it := range qm.channels[channelKey("net", "#chan")].running {
+		item = it
+	}
+	qm.mu.Unlock()
+	require.NotNil(t, item)
+	assert.True(t, item.Silent, "EnqueueSilent must mark the item silent")
+
+	select {
+	case <-ran:
+	case <-time.After(5 * time.Second):
+		t.Fatal("silent item never executed")
+	}
+}

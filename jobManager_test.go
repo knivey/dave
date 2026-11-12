@@ -2391,3 +2391,45 @@ func TestDeliverInlinePendingJob_IdempotentOnWrongStatus(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "completed", pj.Status, "status should remain completed (unchanged)")
 }
+
+func TestOnAsyncJobCompletedEnqueuesSilentDelivery(t *testing.T) {
+	setupTestDB(t)
+	setupTestJobManager(t)
+
+	sid := createTestSession(t, "testnet", "#test", "testuser", "testchat", "", "")
+	require.NoError(t, createPendingJob(sid, "job-s1", "generate_image_async", "img-mcp"))
+	require.NoError(t, completePendingJob("job-s1", "result text"))
+
+	qm := setupDeliveryTest(t, 1)
+	// Occupy the ""-service exec slot so the delivery item sits in pending
+	// deterministically instead of racing through deliverAsyncResult.
+	qm.UpdateServiceLimits(map[string]Service{"": {Parallel: 1}})
+	block := make(chan struct{})
+	qm.Enqueue("testnet", "#test", 1, "blocker", "", "",
+		func(ctx context.Context, output chan<- string) { <-block })
+	t.Cleanup(func() { close(block) })
+
+	mgr := newGenericJobMgr[asyncJobPayload]()
+	entry := &jobEntry[asyncJobPayload]{
+		jobID:     "job-s1",
+		payload:   asyncJobPayload{sessionID: sid},
+		toolName:  "generate_image_async",
+		mcpServer: "img-mcp",
+		network:   "testnet",
+		channel:   "#test",
+		nick:      "testuser",
+	}
+	onAsyncJobCompletedWithMgr(mgr, qm, entry, "result text")
+
+	qm.mu.Lock()
+	cq := qm.channels[channelKey("testnet", "#test")]
+	var item *QueueItem
+	if cq != nil {
+		for _, it := range cq.pending {
+			item = it
+		}
+	}
+	qm.mu.Unlock()
+	require.NotNil(t, item, "delivery item was never enqueued")
+	assert.True(t, item.Silent, "async delivery items must be silent (incident 2026-11-12: phantom Processing notices)")
+}

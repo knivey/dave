@@ -1,7 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -304,4 +309,140 @@ func TestDrainSequentialBudget(t *testing.T) {
 		assert.Equal(t, RoleUser, m.Role)
 		assert.NotEmpty(t, m.MultiContent, "both messages should attach their image")
 	}
+}
+
+// Review Focus #3: a message absorbed during the model's final API
+// response has no tool round left to drain it — chat()'s post-turn loop
+// must give it a continuation turn.
+func TestChatAbsorbsMessageDuringFinalResponse(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	userID := ensureTestUser(t, "testnet", "absorber")
+	resolved := chatGateUser(userID, "absorber")
+
+	var mu sync.Mutex
+	var bodies []string
+	firstHit := make(chan struct{})
+	var once sync.Once
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	doRelease := func() { releaseOnce.Do(func() { close(release) }) }
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, string(raw))
+		mu.Unlock()
+		once.Do(func() { close(firstHit) })
+		<-release // block every request until released; closed chan returns instantly
+		chatGateCompletion(w, "first answer")
+	}))
+	t.Cleanup(func() { server.Close() })
+	t.Cleanup(doRelease)
+	setChatGateServices(t, server.URL+"/v1")
+
+	network := Network{Name: "testnet"}
+	client := chatGateClient()
+	cfg := makeTestAIConfig()
+
+	out := make(chan string, 50)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer close(out)
+		chat(network, client, chatGateEvent("absorber", "#abs3"), cfg, context.Background(), out, resolved, "first question")
+	}()
+
+	<-firstHit // primary turn is inside its (final) API call
+
+	sess, err := sessionMgr.GetActiveSession("testnet", "#abs3", userID)
+	require.NoError(t, err)
+	require.NotNil(t, sess)
+
+	txt, ok := tryAbsorbMention(sess.ID, "actually use the reference image", "absorber")
+	require.True(t, ok, "mention during the final response must be absorbed")
+	assert.Contains(t, txt, "absorber")
+
+	doRelease()
+	<-done
+
+	// The continuation request carries the absorbed message after the
+	// primary answer.
+	mu.Lock()
+	defer mu.Unlock()
+	require.GreaterOrEqual(t, len(bodies), 2, "absorbed message never produced a continuation request")
+	assert.Contains(t, bodies[1], "actually use the reference image")
+	assert.Contains(t, bodies[1], "first answer")
+
+	// The mailbox is closed when chat() returns — later mentions enqueue.
+	mb := turnMailboxFor(sess.ID)
+	require.NotNil(t, mb)
+	assert.False(t, mb.push("after close"), "mailbox must be closed when chat() returns")
+
+	// Absorbed messages never wait on the gate — no turn_wait notice.
+	sawWait := false
+	for l := range out {
+		if strings.Contains(l, "still working") {
+			sawWait = true
+		}
+	}
+	assert.False(t, sawWait, "absorbed message must not produce a turn_wait notice")
+}
+
+// Review Focus #4: a cancelled turn (^stop) with undrained absorbed
+// messages persists them as text rows and sends nothing further.
+func TestChatCancelPersistsUndrainedAbsorbed(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	userID := ensureTestUser(t, "testnet", "absorber")
+	resolved := chatGateUser(userID, "absorber")
+
+	firstHit := make(chan struct{})
+	var once sync.Once
+	release := make(chan struct{})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(firstHit) })
+		<-release
+		chatGateCompletion(w, "first answer")
+	}))
+	t.Cleanup(func() { server.Close() })
+	t.Cleanup(func() { close(release) })
+	setChatGateServices(t, server.URL+"/v1")
+
+	network := Network{Name: "testnet"}
+	client := chatGateClient()
+	cfg := makeTestAIConfig()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	out := make(chan string, 50)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer close(out)
+		chat(network, client, chatGateEvent("absorber", "#abs4"), cfg, ctx, out, resolved, "first question")
+	}()
+
+	<-firstHit
+
+	sess, err := sessionMgr.GetActiveSession("testnet", "#abs4", userID)
+	require.NoError(t, err)
+	require.NotNil(t, sess)
+	_, ok := tryAbsorbMention(sess.ID, "words that must survive", "absorber")
+	require.True(t, ok)
+
+	cancel()
+	<-done
+
+	msgs, err := sessionMgr.GetMessages(sess.ID)
+	require.NoError(t, err)
+	found := false
+	for _, m := range msgs {
+		if m.Role == RoleUser && strings.Contains(m.Content, "words that must survive") {
+			found = true
+		}
+	}
+	assert.True(t, found, "cancelled turn must persist undrained absorbed messages as text rows")
 }

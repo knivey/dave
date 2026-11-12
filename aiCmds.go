@@ -2342,6 +2342,12 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 	}
 	defer releaseTurn()
 
+	// Mid-turn absorption (midturn.go): the mailbox is open for the whole
+	// gate hold — executeToolCalls drains it at round boundaries, and the
+	// post-turn loop below drains it between continuation turns.
+	mb := openTurnMailbox(session.ID)
+	defer persistUndrainedAbsorbed(runner, mb)
+
 	// Set before buildUserChatMessage: the helper registers image refs
 	// under cr.sessionID (previously buildImageMessage received
 	// session.ID directly at the call site).
@@ -2390,9 +2396,30 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 				return
 			default:
 			}
+			absorbed := mb.drain()
 			completedJobs, err := getCompletedPendingJobs(runner.sessionID)
-			if err != nil || len(completedJobs) == 0 {
-				break
+			if err != nil {
+				runner.logger.Error("failed to query completed pending jobs", "error", err)
+			}
+			if len(absorbed) == 0 && (err != nil || len(completedJobs) == 0) {
+				// Quiescent: close under the mailbox mutex so a racing
+				// push either lands in the returned stragglers (processed
+				// by exactly one extra cycle) or fails against the closed
+				// mailbox (dispatch enqueues normally). See midturn.go.
+				stragglers := mb.closeAndDrain()
+				if len(stragglers) == 0 {
+					break
+				}
+				absorbed = stragglers
+			}
+			for _, raw := range absorbed {
+				if msg, fallback, ok := buildUserChatMessage(runner, raw, countContextImages(turn.Messages())); ok {
+					turn.Add(msg)
+				} else {
+					// Absorbed messages are never dropped (the user got
+					// the receipt): keep the text, skip the images.
+					turn.Add(ChatMessage{Role: RoleUser, Content: fallback})
+				}
 			}
 			for _, cj := range completedJobs {
 				injectAsyncResultFromDB(runner.sessionID, cfg, cj, network.Name, channel, e.Source.Name)
@@ -2406,8 +2433,8 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 			turn = newTurnContext(runner.sessionID, messages)
 			runner.runTurn(turn)
 			// Same api_log pointer the primary turn logs — continuation
-			// turns (async job delivery) write to the same api log file
-			// and deserve the same breadcrumb.
+			// turns (absorbed messages, async job delivery) write to the
+			// same api log file and deserve the same breadcrumb.
 			runner.logger.Debug("continuation finished", "api_log", apiLogger.GetSessionFilePath(runner.sessionID))
 		}
 	}

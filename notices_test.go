@@ -578,3 +578,13 @@ func TestNoticesWebsiteDefaults(t *testing.T) {
 	assert.Contains(t, n.Website.LinkNoSession, "{user_url}")
 	assert.NotEmpty(t, n.Website.FullLine)
 }
+
+func TestNoticesMentionsAbsorbedDefault(t *testing.T) {
+	n := NoticesConfig{}
+	setNoticesDefaults(&n)
+	assert.Equal(t, "\x0314📎 {nick}: added to the running turn\x0f", n.Mentions.Absorbed)
+
+	out := expandNotice(n.Mentions.Absorbed, map[string]string{"nick": "shrew"})
+	assert.Contains(t, out, "shrew")
+	assert.NotContains(t, out, "{nick}")
+}

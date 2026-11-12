@@ -36,6 +36,9 @@
 #   no_context       (string)    Sent when user mentions bot without a session.
 #                                  Placeholders: {help_url}
 #   muted            (string)    Sent when user hits mention threshold.
+#   absorbed         (string)    Receipt sent when the message is absorbed into the
+#                                  session's running turn instead of queueing a new one.
+#                                  Placeholders: {nick}
 #
 # [sessions] options:
 #   header           (string)    Session list header. Placeholders: {nick}, {network}
@@ -190,6 +193,8 @@
 # [mentions]
 # no_context = "You need to start a chat session first! See {help_url} for help. Once started, reply to my nick to continue the conversation."
 # muted = "Further mentions will be ignored until you start a session."
+# Receipt sent when the message is absorbed into the session's running turn instead of queueing a new one
+# absorbed = "\x0314📎 {nick}: added to the running turn\x0f"
 #
 # [sessions]
 # header = "\x02Session History ({nick} on {network}):\x02"

@@ -91,3 +91,15 @@ func (mb *turnMailbox) closeAndDrain() []string {
 	mb.pending = nil
 	return out
 }
+
+// tryAbsorbMention hands a continuation message to the session's live
+// turn. Returns the receipt notice text and true when absorbed; ("", false)
+// when no mailbox is open (dispatch falls back to the normal queue path).
+func tryAbsorbMention(sessionID int64, msg, nick string) (string, bool) {
+	mb := turnMailboxFor(sessionID)
+	if mb == nil || !mb.push(msg) {
+		return "", false
+	}
+	n := getNotices()
+	return expandNotice(n.Mentions.Absorbed, map[string]string{"nick": nick}), true
+}

@@ -2345,6 +2345,13 @@ func chat(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx conte
 	// Mid-turn absorption (midturn.go): the mailbox is open for the whole
 	// gate hold — executeToolCalls drains it at round boundaries, and the
 	// post-turn loop below drains it between continuation turns.
+	//
+	// Defer-order invariant: defers run LIFO, so persistUndrainedAbsorbed
+	// (registered second) closes the mailbox BEFORE releaseTurn releases
+	// the session gate. This ordering is load-bearing — an open mailbox
+	// must never outlive the gate hold: an async-delivery turn acquiring
+	// the gate right after chat() must see a closed mailbox, never one
+	// belonging to a dead turn.
 	mb := openTurnMailbox(session.ID)
 	defer persistUndrainedAbsorbed(runner, mb)
 

@@ -1004,9 +1004,22 @@ func TestShouldSendStarted(t *testing.T) {
 func TestEnqueueSilentMarksItem(t *testing.T) {
 	qm := setupDeliveryTest(t, 1)
 
+	// Block Execute until the running map has been read: a fast item can
+	// otherwise complete (and leave the running map) before the
+	// assertions below, racing the require.NotNil. The cleanup-safe
+	// close keeps qm.Stop (wg.Wait in t.Cleanup) from hanging if a
+	// require aborts the test first.
 	ran := make(chan struct{})
+	block := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-block:
+		default:
+			close(block)
+		}
+	})
 	pos := qm.EnqueueSilent("net", "#chan", 1, "u", "svc", "",
-		func(ctx context.Context, output chan<- string) { close(ran) })
+		func(ctx context.Context, output chan<- string) { <-block; close(ran) })
 	require.GreaterOrEqual(t, pos, 0, "item dropped at enqueue")
 
 	qm.mu.Lock()
@@ -1018,6 +1031,7 @@ func TestEnqueueSilentMarksItem(t *testing.T) {
 	require.NotNil(t, item)
 	assert.True(t, item.Silent, "EnqueueSilent must mark the item silent")
 
+	close(block)
 	select {
 	case <-ran:
 	case <-time.After(5 * time.Second):

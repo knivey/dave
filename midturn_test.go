@@ -169,6 +169,66 @@ func TestHandleMentionAbsorbsIntoLiveTurn(t *testing.T) {
 	assert.Empty(t, pending)
 }
 
+// Final-review hardening: dispatch gates run BEFORE the mailbox is
+// consulted — a user failing any gate must never reach tryAbsorbMention,
+// even with a mailbox open for their session. The ban gate stands in for
+// the class behaviorally (resolve/ban/no-context/mute/rate all return
+// earlier in handleMention); everything downstream of the ban is set up
+// to be willing, so the ban is provably what stopped the mention.
+func TestHandleMentionBannedUserNeverReachesMailbox(t *testing.T) {
+	setupTestDB(t)
+	setupNoticesDefaults(t)
+
+	userID := ensureTestUser(t, "testnet", "absorbban")
+	sid := createTestSession(t, "testnet", "#absorbban", "absorbban", "testchat", "", "")
+	insertTestMessage(t, sid, "system", "you are helpful")
+
+	// Channel-less ban matches every channel (see TestIsBannedActive).
+	_, err := createBan(theDB, userID, "testnet", "", "", "testing", time.Hour, nil, "admin")
+	require.NoError(t, err)
+
+	// handleMention -> getSessionConfig needs the chat command registered.
+	configMu.Lock()
+	old := config
+	c := config
+	c.Commands.Chats = map[string]AIConfig{"testchat": makeTestAIConfig()}
+	config = c
+	configMu.Unlock()
+	t.Cleanup(func() {
+		configMu.Lock()
+		config = old
+		configMu.Unlock()
+	})
+
+	origQM := queueMgr
+	qm := NewQueueManager(NoticesConfig{}, 5)
+	qm.Start()
+	queueMgr = qm
+	t.Cleanup(func() { queueMgr = origQM; qm.Stop() })
+
+	origTracker := theMentionTracker
+	theMentionTracker = newMentionTracker()
+	t.Cleanup(func() { theMentionTracker = origTracker })
+
+	origLogger := logger
+	logger = newTestLogger()
+	t.Cleanup(func() { logger = origLogger })
+
+	mb := openTurnMailbox(sid)
+	t.Cleanup(func() { mb.closeAndDrain() })
+
+	network := Network{Name: "testnet"}
+	client := chatGateClient()
+	event := chatGateEvent("absorbban", "#absorbban")
+
+	handleMention(network, client, event, "#absorbban", "let me in anyway")
+
+	assert.Empty(t, mb.drain(), "banned user's mention must not reach the mailbox")
+	cur, pending := qm.QueueStatus("testnet", "#absorbban", userID)
+	assert.Nil(t, cur, "banned user's mention must not enqueue a queue item")
+	assert.Empty(t, pending)
+}
+
 func TestHandleMentionFallsBackWhenNoMailbox(t *testing.T) {
 	setupTestDB(t)
 	setupNoticesDefaults(t)

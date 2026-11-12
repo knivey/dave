@@ -110,6 +110,11 @@ func tryAbsorbMention(sessionID int64, msg, nick string) (string, bool) {
 // generation prompt. Row order: tool results → view_image injections →
 // absorbed user messages (mirrors the flush order in executeToolCalls).
 func drainAbsorbedIntoTurn(cr *chatRunner, turn *turnContext) {
+	// Invariant: the mailbox lookup below keys on cr.sessionID while
+	// persistence rides turn.Add under turn.sessionID — identical in
+	// every production path (chat() and deliverAsyncResult set both to
+	// the same session; ephemeral turns are 0-guarded here). A future
+	// caller that lets them diverge must revisit this lookup.
 	if cr.sessionID == 0 {
 		return
 	}
@@ -146,9 +151,15 @@ func persistUndrainedAbsorbed(runner *chatRunner, mb *turnMailbox) {
 	if len(remaining) == 0 {
 		return
 	}
+	persisted := 0
 	for _, raw := range remaining {
-		sessionMgr.AddMessage(runner.sessionID, ChatMessage{Role: RoleUser, Content: raw})
+		if err := sessionMgr.AddMessage(runner.sessionID, ChatMessage{Role: RoleUser, Content: raw}); err != nil {
+			runner.logger.Error("mid-turn absorption: persist failed",
+				"session", runner.sessionID, "error", err)
+			continue
+		}
+		persisted++
 	}
 	runner.logger.Warn("mid-turn absorption: persisted undrained messages after turn end",
-		"session", runner.sessionID, "count", len(remaining))
+		"session", runner.sessionID, "count", persisted, "failed", len(remaining)-persisted)
 }

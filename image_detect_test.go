@@ -101,8 +101,9 @@ func TestHarvestPageImageURLsCap(t *testing.T) {
 // TestHandleViewImageHTMLPageExtractsLabeledImage pins the owner-approved
 // semantics: a page URL is NOT treated as an image — the extraction says
 // so, the label and ref carry the RESOLVED image URL (never the page), and
-// the note teaches that the preview is not the page's content (no
-// "every link is an image" bias confirmation).
+// the note admits the attached image may be a preview or thumbnail rather
+// than the full-size original (no "every link is an image" bias
+// confirmation).
 func TestHandleViewImageHTMLPageExtractsLabeledImage(t *testing.T) {
 	setupTestDB(t)
 	config.ImagesDir = t.TempDir()

@@ -11,8 +11,9 @@ import (
 
 // maxHarvestedImages bounds the images field: filmstrip-heavy pages carry
 // dozens of thumbnail URLs and the field is a pointer for the model ("these
-// are the images on this page"), not an exhaustive inventory. Document order
-// is preserved, so content images that appear before filmstrips always make
+// are the images on this page"), not an exhaustive inventory. Emission is
+// CLASS-RANKED (see harvestImageURLs below); within a class, document order
+// is preserved, so content images that appear before filmstrips still make
 // the cut.
 const maxHarvestedImages = 20
 
@@ -36,7 +37,9 @@ var imageMetaNames = map[string]bool{
 // the images field with page URLs and evict real images from the cap. The
 // cost of the gate: extension-less originals behind lightbox anchors (e.g.
 // "/65D/orig") are missed — but the wrapped <img src> is still harvested, so
-// a directly viewable image URL always lands in the field.
+// a directly viewable image URL always lands in the field. dave's
+// image_detect.go carries a twin list (`imageFileExtensions`) behind an
+// identical gate for view_image's page resolution — keep both in sync.
 var anchorImageExtensions = []string{
 	".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".bmp", ".svg",
 }
@@ -93,6 +96,10 @@ func harvestImageURLs(pageURL *url.URL, body []byte) []string {
 	}
 
 	z := html.NewTokenizer(bytes.NewReader(body))
+	// Deliberate full-tokenize: the old cap break froze document order,
+	// which is incompatible with ranking a late-in-document file link
+	// first. The walk is bounded by the fetch's maxBodySize; the cap
+	// truncates AFTER the class-ranked concat.
 	for {
 		tt := z.Next()
 		if tt == html.ErrorToken {

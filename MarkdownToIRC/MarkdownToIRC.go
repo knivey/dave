@@ -24,6 +24,14 @@ type Renderer struct {
 	listCounter []int
 	source      []byte
 	streaming   bool
+
+	// bb is the BBCode render state (nil = bbcode off, byte-identical
+	// legacy behavior). Set at construction, never inside Render — a
+	// one-shot render builds a fresh state per call, while the
+	// StreamingRenderer injects ONE long-lived state across fragment
+	// renders (BBRenderOptions.state, same package).
+	bb     *bbRenderState
+	bbWarn func(string)
 }
 
 func plainLength(s string) int {
@@ -155,8 +163,20 @@ func (r *Renderer) Render(w io.Writer, source []byte, n ast.Node) error {
 		r.listCounter = nil
 	}
 	var buf bytes.Buffer
+	// With bbcode active, every TEXT byte of the walk flows through the
+	// render state (digit guards, per-line color re-emission); tag nodes
+	// write their codes straight into buf via openInto/closeInto with the
+	// state's outBuf — code emissions must never be seen by textInto as
+	// visible text. No state reset here: one-shot paths construct a
+	// fresh state per call and the StreamingRenderer deliberately reuses
+	// one across fragments.
+	var walkW io.Writer = &buf
+	if r.bb != nil {
+		r.bb.outBuf = &buf
+		walkW = &bbTextWriter{st: r.bb, buf: &buf}
+	}
 	err := ast.Walk(n, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
-		return r.renderNode(&buf, node, entering), nil
+		return r.renderNode(walkW, node, entering), nil
 	})
 	if err != nil {
 		return err
@@ -365,6 +385,18 @@ func (r *Renderer) renderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 			writes(w, node, "\n")
 			r.writeMath(w, node.(*mathBlock).Expression, "$$")
 		}
+	case KindBBCodeColorOpen:
+		// Codes go straight to the walk's buffer (r.bb.outBuf), never
+		// through the wrapped writer — see bbcode_render.go's design
+		// notes. The node's Code was resolved at parse time; "" (an
+		// invalid color) is a transparent placeholder.
+		if entering && r.bb != nil {
+			r.bb.openInto(r.bb.outBuf, node.(*BBCodeColorOpen))
+		}
+	case KindBBCodeColorClose:
+		if entering && r.bb != nil {
+			r.bb.closeInto(r.bb.outBuf, node.(*BBCodeColorClose), r.bbWarn)
+		}
 	case extast.KindTaskCheckBox:
 		tc := node.(*extast.TaskCheckBox)
 		if entering {
@@ -472,59 +504,68 @@ func writePlainCodeBlockFixed(w io.Writer, node ast.Node, text string) {
 	}
 }
 
-func (r *Renderer) renderNodeTo(w io.Writer, node ast.Node) {
+// renderNodeTo renders a table cell's content into buf (extractTableData
+// builds each cell's text here). With bbcode active the writes flow
+// through the render state so digit guards apply inside cells (matching
+// today's translated cell bytes — translation used to run before
+// markdown); cells are single-line, so the newline re-emit cannot fire,
+// but the guard and the color stack must. Signature takes *bytes.Buffer,
+// not io.Writer, so the tag cases can hand the state THIS buffer —
+// openInto/closeInto write codes into it directly while text goes through
+// the guarded path.
+func (r *Renderer) renderNodeTo(buf *bytes.Buffer, node ast.Node) {
 	switch node.Kind() {
 	case ast.KindEmphasis:
 		em := node.(*ast.Emphasis)
 		if em.Level == 2 {
-			fmt.Fprint(w, "\x02")
+			r.cellWrite(buf, "\x02")
 		} else {
-			fmt.Fprint(w, "\x1D")
+			r.cellWrite(buf, "\x1D")
 		}
 		for c := node.FirstChild(); c != nil; c = c.NextSibling() {
-			r.renderNodeTo(w, c)
+			r.renderNodeTo(buf, c)
 		}
 		if em.Level == 2 {
-			fmt.Fprint(w, "\x02")
+			r.cellWrite(buf, "\x02")
 		} else {
-			fmt.Fprint(w, "\x1D")
+			r.cellWrite(buf, "\x1D")
 		}
 	case ast.KindCodeSpan:
-		fmt.Fprintf(w, "\x030,90%s\x03", r.nodeText(node))
+		r.cellWrite(buf, fmt.Sprintf("\x030,90%s\x03", r.nodeText(node)))
 	case ast.KindLink:
 		link := node.(*ast.Link)
 		// Same clickability contract as renderNode's KindLink (see the
 		// DESIGN NOTE there): paren-free "text: url", self-link and
 		// empty-label collapse to the bare URL.
 		if trimmed := strings.TrimSpace(r.nodeText(node)); trimmed == "" || trimmed == string(link.Destination) {
-			fmt.Fprint(w, string(link.Destination))
+			r.cellWrite(buf, string(link.Destination))
 			return
 		}
 		for c := node.FirstChild(); c != nil; c = c.NextSibling() {
-			r.renderNodeTo(w, c)
+			r.renderNodeTo(buf, c)
 		}
-		fmt.Fprintf(w, ": %s", link.Destination)
+		r.cellWrite(buf, fmt.Sprintf(": %s", link.Destination))
 	case ast.KindAutoLink:
 		// Same as renderNode's KindAutoLink: the URL is not walked
 		// children — without this case the cell renders empty.
-		fmt.Fprint(w, string(node.(*ast.AutoLink).URL(r.source)))
+		r.cellWrite(buf, string(node.(*ast.AutoLink).URL(r.source)))
 	case ast.KindImage:
 		img := node.(*ast.Image)
-		fmt.Fprint(w, "[image: ")
+		r.cellWrite(buf, "[image: ")
 		for c := node.FirstChild(); c != nil; c = c.NextSibling() {
-			r.renderNodeTo(w, c)
+			r.renderNodeTo(buf, c)
 		}
-		fmt.Fprintf(w, "] %s", img.Destination)
+		r.cellWrite(buf, fmt.Sprintf("] %s", img.Destination))
 	case ast.KindText:
 		t := node.(*ast.Text)
 		if !t.IsRaw() {
 			txt := r.segmentText(t.Segment)
 			if t.HardLineBreak() {
-				fmt.Fprint(w, strings.TrimRight(txt, "\n")+"\n")
+				r.cellWrite(buf, strings.TrimRight(txt, "\n")+"\n")
 			} else if t.SoftLineBreak() {
-				fmt.Fprint(w, strings.TrimRight(txt, "\n")+" ")
+				r.cellWrite(buf, strings.TrimRight(txt, "\n")+" ")
 			} else {
-				fmt.Fprint(w, strings.TrimRight(txt, "\n"))
+				r.cellWrite(buf, strings.TrimRight(txt, "\n"))
 			}
 		}
 	case ast.KindRawHTML:
@@ -533,22 +574,51 @@ func (r *Renderer) renderNodeTo(w io.Writer, node ast.Node) {
 			seg := html.Segments.At(i)
 			tag := strings.ToLower(string(seg.Value(r.source)))
 			if tag == "<br>" || tag == "<br/>" || tag == "<br />" {
-				fmt.Fprint(w, "\n")
+				r.cellWrite(buf, "\n")
 			} else {
-				fmt.Fprint(w, string(seg.Value(r.source)))
+				r.cellWrite(buf, string(seg.Value(r.source)))
 			}
 		}
 	case KindMathInline:
-		r.writeMath(w, node.(*mathInline).Expression, "$")
+		r.writeMathTo(buf, node.(*mathInline).Expression, "$")
 	case KindMathBlock:
-		r.writeMath(w, node.(*mathBlock).Expression, "$$")
+		r.writeMathTo(buf, node.(*mathBlock).Expression, "$$")
+	case KindBBCodeColorOpen:
+		if r.bb != nil {
+			r.bb.openInto(buf, node.(*BBCodeColorOpen))
+		}
+	case KindBBCodeColorClose:
+		if r.bb != nil {
+			r.bb.closeInto(buf, node.(*BBCodeColorClose), r.bbWarn)
+		}
 	default:
 		if node.Type() == ast.TypeBlock || node.Type() == ast.TypeInline {
 			for c := node.FirstChild(); c != nil; c = c.NextSibling() {
-				r.renderNodeTo(w, c)
+				r.renderNodeTo(buf, c)
 			}
 		}
 	}
+}
+
+// cellWrite is renderNodeTo's write choke point: with bbcode active,
+// every cell byte (text AND renderer-generated emphasis/code-span codes)
+// flows through the render state — a \x02 after a color emission must
+// clear the digit-guard adjacency exactly like the byte-translated cells
+// of today, and a color open inside a cell must arm it.
+func (r *Renderer) cellWrite(buf *bytes.Buffer, s string) {
+	if r.bb != nil {
+		r.bb.textInto(buf, []byte(s))
+		return
+	}
+	buf.WriteString(s)
+}
+
+// writeMathTo is renderNodeTo's math twin of writeMath (same rendering
+// decisions; cell-buffer shaped so it can route through cellWrite).
+func (r *Renderer) writeMathTo(buf *bytes.Buffer, expr []byte, delim string) {
+	var tmp bytes.Buffer
+	r.writeMath(&tmp, expr, delim)
+	r.cellWrite(buf, tmp.String())
 }
 
 // writeMath renders a math node's expression to single-line Unicode via
@@ -578,32 +648,80 @@ func (r *Renderer) writeMath(w io.Writer, expr []byte, delim string) {
 }
 
 func MarkdownToIRC(response string) string {
-	md := goldmark.New(
-		goldmark.WithExtensions(
-			extension.Table,
-			extension.TaskList,
-			&mathExtension{},
-		),
-		goldmark.WithRenderer(&Renderer{}),
-	)
-	var buf bytes.Buffer
-	md.Convert([]byte(response), &buf)
-	return buf.String()
+	return MarkdownToIRCOpts(BBRenderOptions{}, response)
 }
 
 func MarkdownToIRCStream(response string) string {
+	return MarkdownToIRCStreamOpts(BBRenderOptions{}, response)
+}
+
+// BBRenderOptions selects markdown-aware BBCode rendering: BBCode enables
+// the tag extension + render state, Warn receives one message per
+// malformed tag (per parse for invalid colors, per render for stray
+// closes; nil is silent). The unexported state field lets the
+// StreamingRenderer inject its LONG-LIVED state so color spans survive
+// fragment boundaries (same package).
+type BBRenderOptions struct {
+	BBCode bool
+	Warn   func(string)
+	state  *bbRenderState
+}
+
+// MarkdownToIRCOpts is MarkdownToIRC with BBCode rendering options. The
+// one-shot form: a fresh render state per call, and the auto-close tail
+// (a bare \x03 if a real color is still open and something visible
+// followed the last newline) is appended AFTER the render.
+func MarkdownToIRCOpts(opts BBRenderOptions, response string) string {
+	st := opts.state
+	if st == nil && opts.BBCode {
+		st = &bbRenderState{}
+	}
+	r := &Renderer{}
+	if st != nil {
+		r.bb, r.bbWarn = st, opts.Warn
+	}
+	var buf bytes.Buffer
+	bbGoldmark(r, opts).Convert([]byte(response), &buf)
+	out := buf.String()
+	if st != nil {
+		out += st.autoClose()
+	}
+	return out
+}
+
+// MarkdownToIRCStreamOpts is MarkdownToIRCStream with BBCode rendering
+// options. It deliberately does NOT append autoClose: the
+// StreamingRenderer injects its long-lived state here per fragment and
+// owns flush-time auto-close itself (a stream is not finished at a
+// fragment boundary).
+func MarkdownToIRCStreamOpts(opts BBRenderOptions, response string) string {
+	st := opts.state
+	if st == nil && opts.BBCode {
+		st = &bbRenderState{}
+	}
 	r := &Renderer{streaming: true}
-	md := goldmark.New(
-		goldmark.WithExtensions(
-			extension.TaskList,
-			extension.Table,
-			&mathExtension{},
-		),
+	if st != nil {
+		r.bb, r.bbWarn = st, opts.Warn
+	}
+	var buf bytes.Buffer
+	bbGoldmark(r, opts).Convert([]byte(response), &buf)
+	return buf.String()
+}
+
+// bbGoldmark builds the per-call goldmark instance (per-call by design:
+// the BBCode parser warns per PARSE, so each byte range must parse
+// exactly once — task-2 review forward note). The BBCode extension is
+// appended to the slice only when enabled — a nil Extender must never
+// reach goldmark.WithExtensions (preflight P-2).
+func bbGoldmark(r *Renderer, opts BBRenderOptions) goldmark.Markdown {
+	exts := []goldmark.Extender{extension.Table, extension.TaskList, &mathExtension{}}
+	if opts.BBCode {
+		exts = append(exts, &BBCodeExtension{Warn: opts.Warn})
+	}
+	return goldmark.New(
+		goldmark.WithExtensions(exts...),
 		goldmark.WithRenderer(r),
 	)
-	var buf bytes.Buffer
-	md.Convert([]byte(response), &buf)
-	return buf.String()
 }
 
 // StreamingRenderer incrementally converts a markdown stream to IRC text.

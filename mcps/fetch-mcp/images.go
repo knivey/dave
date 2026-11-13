@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"net/url"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 
 	"golang.org/x/net/html"
@@ -60,46 +62,84 @@ var dataURIInMarkdown = regexp.MustCompile(`(?i)(!?)\[([^\]]*)]\(data:[^)]*\)`)
 // <picture> <source srcset>, <a href> with an image extension, og:image /
 // twitter:image meta, and <link rel=preload as=image> / <link rel=image_src>.
 //
-// Emission is CLASS-RANKED, not document order (owner correction, Nov
-// 2026): og:image is preview-sized BY WEB CONVENTITION (confirmed against
-// production imgsite — it is the display thumb), and the field's FIRST
-// entry is what the model treats as "the image behind the page". Direct
-// FILE links (extension-gated anchors + preload/image_src links) come
-// first, then displayed <img>/<source> images, and social-preview metas
-// last — even though the metas sit in <head> and win every document-order
-// race. Within a class, document order is preserved, so content images
-// that appear before filmstrips still make the cut.
+// Emission is IDENTITY-ranked (sessions 3179 + the og:image correction):
+// the field's FIRST entry is what the model treats as "the image behind
+// the page", and an extension'd anchor signals A file link, not THE
+// page's file link (zkpq filmstrips wrap every NEIGHBOR thumb in one).
+// Order: (1) a SINGLE unique file link (anchor/preload/image_src — the
+// "open file" details-page pattern, counted after dedupe so imgsite's
+// twice-appearing orig anchor still qualifies); (2) displayed
+// <img>/<source> candidates by declared size desc (width/height attrs,
+// srcset width descriptors), document order for ties/unknowns, data-*
+// before plain attributes; (3) a BATCH of distinct file links — a gallery
+// filmstrip, neighbors not "the" image — after the displayed images; (4)
+// og:image/twitter:image metas LAST (preview-sized by web convention).
 func harvestImageURLs(pageURL *url.URL, body []byte) []string {
 	seen := make(map[string]bool)
-	var files, displayed, metas []string
+	var files []string
+	var displayedScored []scoredURL
+	var metas []string
 	base := pageURL
 
-	addTo := func(bucket *[]string, raw string) {
+	// resolveValid trims, rejects data:/non-http(s), and resolves against
+	// the current base. Shared by both add paths so they cannot drift.
+	resolveValid := func(raw string) (string, bool) {
 		raw = strings.TrimSpace(raw)
 		if raw == "" || strings.HasPrefix(strings.ToLower(raw), "data:") {
-			return
+			return "", false
 		}
 		u, err := url.Parse(raw)
 		if err != nil {
-			return
+			return "", false
 		}
 		resolved := base.ResolveReference(u)
 		if resolved.Scheme != "http" && resolved.Scheme != "https" {
-			return
+			return "", false
 		}
-		s := resolved.String()
-		if seen[s] {
+		return resolved.String(), true
+	}
+	addTo := func(bucket *[]string, raw string) {
+		s, ok := resolveValid(raw)
+		if !ok || seen[s] {
 			return
 		}
 		seen[s] = true
 		*bucket = append(*bucket, s)
 	}
+	scoreIndex := make(map[string]int)
+	addScored := func(raw string, declared int64) {
+		s, ok := resolveValid(raw)
+		if !ok {
+			return
+		}
+		if i, dup := scoreIndex[s]; dup {
+			// MAX-WINS: a URL may appear as src (carrying the element's
+			// width/height AREA) and inside srcset (carrying a width
+			// DESCRIPTOR) — the larger claim must win, or a small
+			// attr-scored neighbor outranks the page's own viewer image
+			// (review finding 1).
+			if declared > displayedScored[i].declared {
+				displayedScored[i].declared = declared
+			}
+			return
+		}
+		if seen[s] {
+			// Already emitted into another bucket (og:image meta, anchor,
+			// link preload/image_src): never duplicate across buckets — a
+			// duplicate would displace a distinct URL below the cap
+			// (re-review finding).
+			return
+		}
+		seen[s] = true
+		scoreIndex[s] = len(displayedScored)
+		displayedScored = append(displayedScored, scoredURL{url: s, declared: declared})
+	}
 
 	z := html.NewTokenizer(bytes.NewReader(body))
 	// Deliberate full-tokenize: the old cap break froze document order,
-	// which is incompatible with ranking a late-in-document file link
-	// first. The walk is bounded by the fetch's maxBodySize; the cap
-	// truncates AFTER the class-ranked concat.
+	// which is incompatible with ranking late-in-document candidates.
+	// The walk is bounded by the fetch's maxBodySize; the cap truncates
+	// AFTER the ranked concat.
 	for {
 		tt := z.Next()
 		if tt == html.ErrorToken {
@@ -112,27 +152,31 @@ func harvestImageURLs(pageURL *url.URL, body []byte) []string {
 		switch string(nameB) {
 		case "img":
 			attrs := tokenAttrs(z)
-			// data-* first: lazy-load convention puts the real image in
-			// data-src and a 1x placeholder in src, and document order
-			// decides what survives the cap within the class.
-			addTo(&displayed, attrs["data-src"])
-			for _, u := range srcsetURLs(attrs["data-srcset"]) {
-				addTo(&displayed, u)
+			// srcset descriptors first: addScored merges duplicate URLs
+			// with max(existing, new), so processing the descriptor-
+			// carrying occurrences before the attr-scored ones is what
+			// makes a src+srcset duplicate keep BOTH claims. data-*
+			// before plain attributes otherwise (lazy-load convention:
+			// the real image lives in data-src).
+			score := imgDeclaredScore(attrs)
+			for _, pair := range srcsetScored(attrs["data-srcset"]) {
+				addScored(pair.url, pair.declared)
 			}
-			addTo(&displayed, attrs["src"])
-			for _, u := range srcsetURLs(attrs["srcset"]) {
-				addTo(&displayed, u)
+			for _, pair := range srcsetScored(attrs["srcset"]) {
+				addScored(pair.url, pair.declared)
 			}
+			addScored(attrs["data-src"], score)
+			addScored(attrs["src"], score)
 		case "source":
 			// <picture> alternatives. HTML requires <picture> to contain an
 			// <img> fallback, so this only adds sizes/encodings the fallback
 			// would not carry (e.g. avif/webp variants).
 			attrs := tokenAttrs(z)
-			for _, u := range srcsetURLs(attrs["srcset"]) {
-				addTo(&displayed, u)
+			for _, pair := range srcsetScored(attrs["srcset"]) {
+				addScored(pair.url, pair.declared)
 			}
-			for _, u := range srcsetURLs(attrs["data-srcset"]) {
-				addTo(&displayed, u)
+			for _, pair := range srcsetScored(attrs["data-srcset"]) {
+				addScored(pair.url, pair.declared)
 			}
 		case "a":
 			if href := tokenAttrs(z)["href"]; looksLikeImageURL(href) {
@@ -176,7 +220,29 @@ func harvestImageURLs(pageURL *url.URL, body []byte) []string {
 			}
 		}
 	}
-	out := append(append(files, displayed...), metas...)
+
+	// Displayed images: declared size desc, document order stable.
+	sort.SliceStable(displayedScored, func(i, j int) bool {
+		return displayedScored[i].declared > displayedScored[j].declared
+	})
+	var displayed []string
+	for _, c := range displayedScored {
+		displayed = append(displayed, c.url)
+	}
+
+	var out []string
+	if len(files) == 1 {
+		// The open-file pattern: exactly one file link on the page.
+		out = append(out, files[0])
+		out = append(out, displayed...)
+	} else {
+		// No file links, or a gallery filmstrip: displayed images first.
+		out = append(out, displayed...)
+	}
+	if len(files) > 1 {
+		out = append(out, files...)
+	}
+	out = append(out, metas...)
 	if len(out) > maxHarvestedImages {
 		out = out[:maxHarvestedImages]
 	}
@@ -194,6 +260,74 @@ func tokenAttrs(z *html.Tokenizer) map[string]string {
 			return attrs
 		}
 	}
+}
+
+// scoredURL is a harvested image URL with the size the markup DECLARED
+// for it (pixel area from width/height attrs, else the max srcset width
+// descriptor; 0 = undeclared). fetch-mcp ranks by markup only — the
+// image-header probe is dave's view_image selection mechanism.
+type scoredURL struct {
+	url      string
+	declared int64
+}
+
+// imgDeclaredScore derives a pixel-area score from an <img> tag's
+// width/height attributes (both required for area; a lone dim scores its
+// value). Bare integers only — units and percentages do not count.
+func imgDeclaredScore(attrs map[string]string) int64 {
+	w, wok := atoiStrict(attrs["width"])
+	h, hok := atoiStrict(attrs["height"])
+	switch {
+	case wok && hok:
+		return w * h
+	case wok:
+		return w
+	case hok:
+		return h
+	}
+	return 0
+}
+
+func atoiStrict(s string) (int64, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// srcsetScored splits a srcset into (url, descriptor-score) pairs; the
+// pixel-width descriptor doubles as the declared size. The data:-URI
+// continuation guard mirrors srcsetURLs below.
+func srcsetScored(s string) []scoredURL {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	var out []scoredURL
+	prevWasData := false
+	for _, candidate := range strings.Split(s, ",") {
+		raw := strings.TrimSpace(candidate)
+		if raw == "" {
+			continue
+		}
+		fields := strings.Fields(raw)
+		if prevWasData && (!freshSrcsetURL(raw) || !looksLikeImageURL(fields[0])) {
+			continue
+		}
+		prevWasData = strings.HasPrefix(strings.ToLower(raw), "data:")
+		var score int64
+		if len(fields) > 1 && strings.HasSuffix(fields[1], "w") {
+			if n, ok := atoiStrict(strings.TrimSuffix(fields[1], "w")); ok {
+				score = n
+			}
+		}
+		out = append(out, scoredURL{url: fields[0], declared: score})
+	}
+	return out
 }
 
 // srcsetURLs splits a srcset attribute into its URL candidates, dropping the

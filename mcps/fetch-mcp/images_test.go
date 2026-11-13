@@ -50,14 +50,15 @@ func TestHarvestImageURLs(t *testing.T) {
 			want: []string{"https://img.example.com/lazy/1.png", "https://img.example.com/placeholder.gif"},
 		},
 		{
-			// Class-ranked since the Nov 2026 og:image correction: anchors
-			// (files) before displayed imgs, document order within a class.
+			// Identity-ranked since session 3179: TWO distinct anchors =
+			// a batch (not the page's own single file link) — displayed
+			// imgs come first.
 			name: "anchor with image extension harvested with and without wrapped img",
 			html: `<a href="/AAA1/orig.jpg"><img src="/AAA1/full/256.jpg"></a><a href="/files/original.jpeg">download</a>`,
 			want: []string{
+				"https://img.example.com/AAA1/full/256.jpg",
 				"https://img.example.com/AAA1/orig.jpg",
 				"https://img.example.com/files/original.jpeg",
-				"https://img.example.com/AAA1/full/256.jpg",
 			},
 		},
 		{
@@ -192,10 +193,10 @@ func TestHarvestImageURLsPhotoPageFixture(t *testing.T) {
 
 	got := harvestImageURLs(base, body)
 	assert.Equal(t, []string{
-		"https://img.example.com/prev/full/256.jpg",
-		"https://img.example.com/next/full/256.jpg",
 		"https://img.example.com/AAA1/full/256.jpg",
 		"https://img.example.com/thumb1/small.webp",
+		"https://img.example.com/prev/full/256.jpg",
+		"https://img.example.com/next/full/256.jpg",
 	}, got)
 }
 
@@ -243,29 +244,89 @@ func TestElideDataURIs(t *testing.T) {
 	}
 }
 
-// TestHarvestImageURLsClassRanking pins the owner correction (Nov 2026):
-// og:image is preview-sized BY WEB CONVENTITION (production-confirmed
-// against imgsite: og:image = display thumb), and the images field's
-// FIRST entry is what the model treats as "the image behind the page".
-// Full-size FILE links (extension-gated anchors, preload/image_src
-// links) outrank displayed <img>s; social-preview metas are the LAST
-// resort — even though they sit in <head> and win every document-order
-// race. Within a class, document order is preserved.
+// TestHarvestImageURLsClassRanking pins the identity ranking (sessions
+// 3179 + the og:image correction): the field's FIRST entry is what the
+// model treats as "the image behind the page". A SINGLE unique file
+// link (the open-file pattern) wins; displayed images rank by DECLARED
+// size; a BATCH of distinct file links (gallery filmstrip — neighbors,
+// not "the" image) demotes below the displayed images; social-preview
+// metas are the last resort.
 func TestHarvestImageURLsClassRanking(t *testing.T) {
 	base := mustURL(t, "https://img.example.com/AAA1/_DSC1234")
-	html := `<html><head>` +
-		`<meta property="og:image" content="/thumb.jpg">` +
-		`<link rel="image_src" href="/legacy-full.png">` +
-		`</head><body>` +
-		`<img src="/display.webp">` +
-		`<a href="/AAA1/orig.jpg">open file</a>` +
-		`</body></html>`
-	want := []string{
-		"https://img.example.com/legacy-full.png", // link: a real file resource
-		"https://img.example.com/AAA1/orig.jpg",   // anchor: the file itself
-		"https://img.example.com/display.webp",    // displayed image
-		"https://img.example.com/thumb.jpg",       // social preview, last resort
-	}
+
+	t.Run("single file link beats displayed and metas", func(t *testing.T) {
+		html := `<html><head>` +
+			`<meta property="og:image" content="/thumb.jpg">` +
+			`</head><body>` +
+			`<img src="/display.webp">` +
+			`<a href="/AAA1/orig.jpg">open file</a>` +
+			`</body></html>`
+		got := harvestImageURLs(base, []byte(html))
+		assert.Equal(t, []string{
+			"https://img.example.com/AAA1/orig.jpg",
+			"https://img.example.com/display.webp",
+			"https://img.example.com/thumb.jpg",
+		}, got)
+	})
+
+	t.Run("link and anchor count together as the file-link batch", func(t *testing.T) {
+		html := `<html><head>` +
+			`<link rel="image_src" href="/legacy-full.png">` +
+			`</head><body>` +
+			`<img src="/display.webp">` +
+			`<a href="/AAA1/orig.jpg">open file</a>` +
+			`</body></html>`
+		got := harvestImageURLs(base, []byte(html))
+		assert.Equal(t, []string{
+			"https://img.example.com/display.webp",
+			"https://img.example.com/legacy-full.png",
+			"https://img.example.com/AAA1/orig.jpg",
+		}, got, "two distinct file links = a batch, below the displayed image")
+	})
+
+	t.Run("filmstrip batch demoted below the page's own viewer image", func(t *testing.T) {
+		html := `<html><head>` +
+			`<meta property="og:image" content="/thumb.jpg">` +
+			`</head><body>` +
+			`<a href="/691/full/256.jpg"><img src="/691/small.webp"></a>` +
+			`<a href="/692/full/256.jpg"></a>` +
+			`<img src="/AAA1/full/256.jpg" width="2216" height="1713">` +
+			`</body></html>`
+		got := harvestImageURLs(base, []byte(html))
+		assert.Equal(t, []string{
+			"https://img.example.com/AAA1/full/256.jpg", // own viewer, declared big
+			"https://img.example.com/691/small.webp",    // displayed, undeclared
+			"https://img.example.com/691/full/256.jpg",  // neighbor file (batch)
+			"https://img.example.com/692/full/256.jpg",  // neighbor file (batch)
+			"https://img.example.com/thumb.jpg",         // social preview, last
+		}, got)
+	})
+}
+
+// TestHarvestImageURLsAttrAreaBeatsSrcsetDescriptor is the review-1
+// regression: when a URL appears both as src (with width/height attrs —
+// a pixel AREA) and inside srcset (a width DESCRIPTOR), the larger score
+// must win; first-wins dedupe froze it at the descriptor and let a
+// small attr-scored neighbor thumb outrank the page's own viewer image.
+func TestHarvestImageURLsAttrAreaBeatsSrcsetDescriptor(t *testing.T) {
+	base := mustURL(t, "https://img.example.com/AAA1/_DSC1234")
+	html := `<img src="/AAA1/full/256.jpg" srcset="/AAA1/full/256.jpg 2294w" width="2294" height="4080">` +
+		`<img src="/n1/small.webp" width="120" height="90">`
 	got := harvestImageURLs(base, []byte(html))
-	assert.Equal(t, want, got)
+	assert.Equal(t, []string{
+		"https://img.example.com/AAA1/full/256.jpg", // 2294*4080 area wins
+		"https://img.example.com/n1/small.webp",     // 120*90 loses
+	}, got)
+}
+
+// TestHarvestImageURLsCrossBucketDedupe pins the re-review regression: a
+// URL first harvested via a non-img source (og:image meta, anchors, link
+// preload/image_src) and later seen as <img src>/srcset must appear ONCE.
+func TestHarvestImageURLsCrossBucketDedupe(t *testing.T) {
+	base := mustURL(t, "https://img.example.com/AAA1/_DSC1234")
+	html := `<html><head><meta property="og:image" content="/view.jpg"></head>` +
+		`<body><img src="/view.jpg"></body></html>`
+	got := harvestImageURLs(base, []byte(html))
+	assert.Equal(t, []string{"https://img.example.com/view.jpg"}, got,
+		"a URL must never be emitted twice across buckets")
 }

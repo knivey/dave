@@ -18,13 +18,17 @@ import (
 	"net/http/httptest"
 	neturl "net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/chai2010/webp"
 	logxi "github.com/mgutz/logxi/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/image/bmp"
+	"golang.org/x/image/tiff"
 )
 
 // newHTMLPageImageServer serves /pic.jpg (real JPEG) and every other path
@@ -44,15 +48,18 @@ func newHTMLPageImageServer(t *testing.T, pageHTML string) *httptest.Server {
 	}))
 }
 
-// TestHarvestPageImageURLs pins the candidate order and hygiene of the
-// page-image harvest. Owner correction (Nov 2026): og:image is
-// preview-sized BY DESIGN — it must never win when the page links the
-// full-size file. Priority classes: image-extension ANCHORS (the
-// "open file" / original link) first, then <img> tags (data-src before
-// src), og:image/twitter:image metas LAST (exact property/name matches
-// only — og:image:width etc. carry non-URLs). Relative URLs resolve
-// against the page URL; data: and non-http(s) candidates are skipped;
-// deduped, capped.
+// TestHarvestPageImageURLs pins the identity-aware candidate ranking of
+// the page-image harvest (session 3179: extension'd FILMSTRIP anchors —
+// every neighbor thumb wrapped in <a href="/NNN/full/256.jpg"> — outranked
+// the page's own viewer image, and the model edited the wrong photo).
+// Ranking: a SINGLE unique extension'd anchor (the "open file" pattern)
+// first; displayed imgs by DECLARED size (width/height attrs, srcset
+// width descriptors) desc, document order for ties/unknowns; a BATCH of
+// distinct anchors (gallery filmstrip — neighbors, not "the" image)
+// demoted below the imgs; og:image/twitter:image metas LAST (EXACT
+// property/name matches only — og:image:width etc. carry non-URLs).
+// Relative URLs resolve against the page URL; data: and non-http(s)
+// candidates are skipped; deduped, capped.
 func TestHarvestPageImageURLs(t *testing.T) {
 	const base = "https://img.example.com/item/42"
 	tests := []struct {
@@ -60,33 +67,92 @@ func TestHarvestPageImageURLs(t *testing.T) {
 		html string
 		want []string
 	}{
-		{"anchor beats img beats og", `<meta property="og:image" content="/thumb.jpg"><img src="/display.webp"><a href="/orig/full.png">open file</a>`,
-			[]string{"https://img.example.com/orig/full.png", "https://img.example.com/display.webp", "https://img.example.com/thumb.jpg"}},
-		{"img beats og when no anchor", `<meta property="og:image" content="/thumb.jpg"><img src="/display.webp">`,
-			[]string{"https://img.example.com/display.webp", "https://img.example.com/thumb.jpg"}},
-		{"og:image falls back when nothing else", `<meta property="og:image" content="https://cdn.example.com/a.jpg">`,
-			[]string{"https://cdn.example.com/a.jpg"}},
-		{"twitter:image when no og", `<meta name="twitter:image" content="https://cdn.example.com/b.jpg">`,
-			[]string{"https://cdn.example.com/b.jpg"}},
-		{"og:image wins over twitter:image within the meta class", `<meta name="twitter:image" content="https://cdn.example.com/b.jpg"><meta property="og:image" content="https://cdn.example.com/a.jpg">`,
-			[]string{"https://cdn.example.com/a.jpg", "https://cdn.example.com/b.jpg"}},
-		{"og:image:* variants ignored", `<meta property="og:image:width" content="1200"><meta property="og:image" content="https://cdn.example.com/a.jpg">`,
-			[]string{"https://cdn.example.com/a.jpg"}},
-		{"anchors without image extensions are page links, skipped", `<a href="/page/2">next</a><a href="/orig/full.png">open file</a>`,
-			[]string{"https://img.example.com/orig/full.png"}},
-		{"anchor extension check is case-insensitive and query-tolerant", `<a href="/files/Photo.JPEG?download=1">full</a>`,
-			[]string{"https://img.example.com/files/Photo.JPEG?download=1"}},
-		{"img data-src before src, relative resolved", `<img src="placeholder.gif" data-src="/pics/big.webp">`,
-			[]string{"https://img.example.com/pics/big.webp", "https://img.example.com/item/placeholder.gif"}},
-		{"data URIs skipped", `<img src="data:image/gif;base64,R0lGOD"><img src="/real.jpg">`,
-			[]string{"https://img.example.com/real.jpg"}},
-		{"dedupe", `<meta property="og:image" content="/a.jpg"><img src="/a.jpg">`,
-			[]string{"https://img.example.com/a.jpg"}},
-		{"no images at all", `<html><body><p>text only</p></body></html>`, nil},
+		{
+			"filmstrip: own viewer img beats neighbor anchors",
+			`<a href="/691/full/256.jpg"><img src="/691/small.webp"></a>` +
+				`<a href="/692/full/256.png"></a>` +
+				`<img src="/6A5/full/256.png" width="2216" height="1713">`,
+			[]string{
+				"https://img.example.com/6A5/full/256.png",
+				"https://img.example.com/691/small.webp",
+				"https://img.example.com/691/full/256.jpg",
+				"https://img.example.com/692/full/256.png",
+			},
+		},
+		{
+			"single anchor (open-file pattern) beats imgs",
+			`<img src="/display.webp"><a href="/orig/full.png">open file</a>`,
+			[]string{"https://img.example.com/orig/full.png", "https://img.example.com/display.webp"},
+		},
+		{
+			"declared size ranks imgs regardless of document order",
+			`<img src="/small.jpg" width="300"><img src="/big.jpg" width="2216" height="1713">`,
+			[]string{"https://img.example.com/big.jpg", "https://img.example.com/small.jpg"},
+		},
+		{
+			"srcset width descriptor counts as declared size",
+			`<img src="/a.jpg" srcset="/a.jpg 300w, /b.jpg 2216w">`,
+			[]string{"https://img.example.com/b.jpg", "https://img.example.com/a.jpg"},
+		},
+		{
+			"no dims anywhere: imgs in document order, anchor batch after",
+			`<img src="/one.png"><a href="/f1.jpg"></a><img src="/two.png"><a href="/f2.jpg"></a>`,
+			[]string{"https://img.example.com/one.png", "https://img.example.com/two.png",
+				"https://img.example.com/f1.jpg", "https://img.example.com/f2.jpg"},
+		},
+		{
+			"og:image falls back when nothing else",
+			`<meta property="og:image" content="https://cdn.example.com/a.jpg">`,
+			[]string{"https://cdn.example.com/a.jpg"},
+		},
+		{
+			"twitter:image when no og",
+			`<meta name="twitter:image" content="https://cdn.example.com/b.jpg">`,
+			[]string{"https://cdn.example.com/b.jpg"},
+		},
+		{
+			"og:image before twitter:image within the meta class",
+			`<meta name="twitter:image" content="https://cdn.example.com/b.jpg"><meta property="og:image" content="https://cdn.example.com/a.jpg">`,
+			[]string{"https://cdn.example.com/a.jpg", "https://cdn.example.com/b.jpg"},
+		},
+		{
+			"og:image:* variants ignored",
+			`<meta property="og:image:width" content="1200"><meta property="og:image" content="https://cdn.example.com/a.jpg">`,
+			[]string{"https://cdn.example.com/a.jpg"},
+		},
+		{
+			"anchors without image extensions are page links, skipped",
+			`<a href="/page/2">next</a><a href="/orig/full.png">open file</a>`,
+			[]string{"https://img.example.com/orig/full.png"},
+		},
+		{
+			"anchor extension check is case-insensitive and query-tolerant",
+			`<a href="/files/Photo.JPEG?download=1">full</a>`,
+			[]string{"https://img.example.com/files/Photo.JPEG?download=1"},
+		},
+		{
+			"img data-src before src, relative resolved",
+			`<img src="placeholder.gif" data-src="/pics/big.webp">`,
+			[]string{"https://img.example.com/pics/big.webp", "https://img.example.com/item/placeholder.gif"},
+		},
+		{
+			"data URIs skipped",
+			`<img src="data:image/gif;base64,R0lGOD"><img src="/real.jpg">`,
+			[]string{"https://img.example.com/real.jpg"},
+		},
+		{
+			"dedupe across classes keeps first occurrence",
+			`<meta property="og:image" content="/a.jpg"><img src="/a.jpg">`,
+			[]string{"https://img.example.com/a.jpg"},
+		},
+		{
+			"no images at all",
+			`<html><body><p>text only</p></body></html>`, nil,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := harvestPageImageURLs([]byte(tt.html), base)
+			got, _ := harvestPageImageURLs([]byte(tt.html), base)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -94,7 +160,7 @@ func TestHarvestPageImageURLs(t *testing.T) {
 
 func TestHarvestPageImageURLsCap(t *testing.T) {
 	html := `<img src="/1.jpg"><img src="/2.jpg"><img src="/3.jpg"><img src="/4.jpg"><img src="/5.jpg"><img src="/6.jpg"><img src="/7.jpg">`
-	got := harvestPageImageURLs([]byte(html), "https://x.example/p")
+	got, _ := harvestPageImageURLs([]byte(html), "https://x.example/p")
 	assert.Len(t, got, 5, "harvest is capped")
 }
 
@@ -1639,4 +1705,269 @@ func TestFetchViewImageSourceDirectLargeImage(t *testing.T) {
 	assert.Equal(t, srv.URL+"/big.jpg", src)
 	assert.Empty(t, fromPage)
 	assert.NotEmpty(t, fi.DataURI)
+}
+
+// TestProbeImageConfig pins header-only dimension decoding across the
+// common web image formats (owner directive: ALL of them, not just what
+// production has served so far). Each case feeds the first bytes of a
+// real image — exactly what a bounded ranged GET returns.
+func TestProbeImageConfig(t *testing.T) {
+	bigJPEG := func() []byte {
+		var buf bytes.Buffer
+		require.NoError(t, jpeg.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 1920, 1080)), &jpeg.Options{Quality: 60}))
+		return buf.Bytes()
+	}()
+	pngBytes := func() []byte {
+		var buf bytes.Buffer
+		require.NoError(t, png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 800, 600))))
+		return buf.Bytes()
+	}()
+	gifBytes := func() []byte {
+		var buf bytes.Buffer
+		require.NoError(t, gif.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 320, 240)), nil))
+		return buf.Bytes()
+	}()
+
+	t.Run("jpeg", func(t *testing.T) {
+		w, h, ok := probeImageConfig(bigJPEG)
+		assert.True(t, ok)
+		assert.Equal(t, 1920, w)
+		assert.Equal(t, 1080, h)
+	})
+	t.Run("png", func(t *testing.T) {
+		w, h, ok := probeImageConfig(pngBytes)
+		assert.True(t, ok)
+		assert.Equal(t, 800, w)
+		assert.Equal(t, 600, h)
+	})
+	t.Run("gif", func(t *testing.T) {
+		w, h, ok := probeImageConfig(gifBytes)
+		assert.True(t, ok)
+		assert.Equal(t, 320, w)
+		assert.Equal(t, 240, h)
+	})
+	t.Run("truncated jpeg header still decodes dims", func(t *testing.T) {
+		w, _, ok := probeImageConfig(bigJPEG[:2048])
+		assert.True(t, ok, "a 2KB prefix of a JPEG carries the SOF dims")
+		assert.Equal(t, 1920, w)
+	})
+	t.Run("html is not an image", func(t *testing.T) {
+		_, _, ok := probeImageConfig([]byte("<html><body>nope</body></html>"))
+		assert.False(t, ok)
+	})
+	t.Run("empty", func(t *testing.T) {
+		_, _, ok := probeImageConfig(nil)
+		assert.False(t, ok)
+	})
+	t.Run("webp VP8X canvas dims", func(t *testing.T) {
+		// Real encoder output: chai2010/webp (already a dependency) writes
+		// a VP8X-wrapped file whose canvas dims the probe must read.
+		src := image.NewRGBA(image.Rect(0, 0, 640, 480))
+		var buf bytes.Buffer
+		require.NoError(t, webp.Encode(&buf, src, &webp.Options{Lossless: true}))
+		head := buf.Bytes()
+		if len(head) > 2048 {
+			head = head[:2048]
+		}
+		w, h, ok := probeImageConfig(head)
+		assert.True(t, ok)
+		assert.Equal(t, 640, w)
+		assert.Equal(t, 480, h)
+	})
+	t.Run("avif ispe dims", func(t *testing.T) {
+		b := buildTestAVIF(t, 4000, 3000)
+		w, h, ok := probeImageConfig(b)
+		assert.True(t, ok)
+		assert.Equal(t, 4000, w)
+		assert.Equal(t, 3000, h)
+	})
+	t.Run("bmp", func(t *testing.T) {
+		var buf bytes.Buffer
+		require.NoError(t, bmp.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 640, 480))))
+		w, h, ok := probeImageConfig(buf.Bytes())
+		assert.True(t, ok)
+		assert.Equal(t, 640, w)
+		assert.Equal(t, 480, h)
+	})
+	t.Run("tiff", func(t *testing.T) {
+		var buf bytes.Buffer
+		require.NoError(t, tiff.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 1024, 768)), nil))
+		w, h, ok := probeImageConfig(buf.Bytes())
+		assert.True(t, ok)
+		assert.Equal(t, 1024, w)
+		assert.Equal(t, 768, h)
+	})
+	t.Run("ico dir entry dims", func(t *testing.T) {
+		// ICONDIR (6 bytes) + one 16-byte entry: width, height bytes 0
+		// meaning 256.
+		b := []byte{0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+		w, h, ok := probeImageConfig(b)
+		assert.True(t, ok)
+		assert.Equal(t, 256, w)
+		assert.Equal(t, 256, h)
+	})
+}
+
+func putLE32(b []byte, v uint32) {
+	b[0] = byte(v)
+	b[1] = byte(v >> 8)
+	b[2] = byte(v >> 16)
+	b[3] = byte(v >> 24)
+}
+
+// buildTestAVIF assembles the smallest ISOBMFF skeleton whose ispe box
+// declares the given dims: ftyp(heic/avif brand) + meta(iprp>ipco>ispe).
+func buildTestAVIF(t *testing.T, w, h uint32) []byte {
+	t.Helper()
+	putBE32 := func(b []byte, v uint32) {
+		b[0] = byte(v >> 24)
+		b[1] = byte(v >> 16)
+		b[2] = byte(v >> 8)
+		b[3] = byte(v)
+	}
+	box := func(typ string, payload []byte) []byte {
+		out := make([]byte, 8+len(payload))
+		putBE32(out, uint32(len(payload)+8))
+		copy(out[4:], typ)
+		copy(out[8:], payload)
+		return out
+	}
+	ispePayload := make([]byte, 12)
+	putBE32(ispePayload[4:], w)
+	putBE32(ispePayload[8:], h)
+	ispe := box("ispe", ispePayload)
+	ipco := box("ipco", ispe)
+	iprp := box("iprp", ipco)
+	meta := box("meta", append([]byte{0, 0, 0, 0}, iprp...))
+	ftyp := box("ftyp", []byte("avifmif1miafMA1B000"))
+	return append(ftyp, meta...)
+}
+
+// TestRankCandidatesByProbedDims pins the reorder: when markup declared
+// nothing, the candidates are probed (bounded ranged GETs) and reordered
+// by decoded pixel area desc, stable for unknowns.
+func TestRankCandidatesByProbedDims(t *testing.T) {
+	config.TrustedImageHosts = []string{"127.0.0.1"}
+	t.Cleanup(func() { config.TrustedImageHosts = nil })
+
+	big := func() []byte {
+		var buf bytes.Buffer
+		require.NoError(t, jpeg.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 1920, 1080)), &jpeg.Options{Quality: 60}))
+		return buf.Bytes()
+	}()
+	thumb := func() []byte {
+		var buf bytes.Buffer
+		require.NoError(t, jpeg.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 320, 240)), &jpeg.Options{Quality: 60}))
+		return buf.Bytes()
+	}()
+
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch r.URL.Path {
+		case "/neighbor.jpg":
+			w.Write(thumb)
+		case "/own.png":
+			w.Write(big)
+		default:
+			http.Error(w, "not found", 404)
+		}
+	}))
+	defer srv.Close()
+
+	got := rankCandidatesByProbedDims([]string{
+		srv.URL + "/neighbor.jpg",
+		srv.URL + "/own.png",
+		srv.URL + "/missing.jpg",
+	})
+	require.Len(t, got, 3)
+	assert.Equal(t, srv.URL+"/own.png", got[0], "probed pixel area wins")
+	assert.Equal(t, srv.URL+"/neighbor.jpg", got[1])
+	assert.Equal(t, srv.URL+"/missing.jpg", got[2], "unknown keeps relative order after knowns")
+}
+
+// TestHandleViewImageFilmstripPicksOwnImage is the session-3179
+// regression: filmstrip anchors (neighbors' extension'd full files)
+// must NOT outrank the page's own viewer image — with declared dims AND
+// (covered by the probe test above) without.
+func TestHandleViewImageFilmstripPicksOwnImage(t *testing.T) {
+	setupTestDB(t)
+	config.ImagesDir = t.TempDir()
+	t.Cleanup(func() { config.ImagesDir = "" })
+	config.TrustedImageHosts = []string{"127.0.0.1"}
+	t.Cleanup(func() { config.TrustedImageHosts = nil })
+
+	ownBytes := func() []byte {
+		var buf bytes.Buffer
+		require.NoError(t, jpeg.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 2216, 1713)), &jpeg.Options{Quality: 60}))
+		return buf.Bytes()
+	}()
+	neighborBytes := func() []byte {
+		var buf bytes.Buffer
+		require.NoError(t, jpeg.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 300, 200)), &jpeg.Options{Quality: 60}))
+		return buf.Bytes()
+	}()
+
+	var imgHits atomic.Int32
+	mu := sync.Mutex{}
+	imgSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		imgHits.Add(1)
+		mu.Lock()
+		defer mu.Unlock()
+		if strings.HasPrefix(r.URL.Path, "/6A5/") {
+			// JPEG bytes; the .png URL extension is cosmetic — the
+			// pipeline dispatches on the content-type header.
+			w.Header().Set("Content-Type", "image/jpeg")
+			w.Write(ownBytes)
+			return
+		}
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Write(neighborBytes)
+	}))
+	defer imgSrv.Close()
+
+	pageSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(w, `<html><body>
+<a href="%s/691/full/256.jpg"><img src="%s/691/small.webp"></a>
+<a href="%s/692/full/256.jpg"></a>
+<img src="%s/6A5/full/256.png" width="2216" height="1713">
+</body></html>`, imgSrv.URL, imgSrv.URL, imgSrv.URL, imgSrv.URL)
+	}))
+	defer pageSrv.Close()
+
+	cr := newImageViewTestRunner(t, AIConfig{DetectImages: true, MaxContextImages: 5, ImageFormat: "jpg", ImageQuality: 75}, 9)
+	turn := newTurnContext(9, nil)
+	args, _ := json.Marshal(map[string]string{"url": pageSrv.URL + "/6A5/_image.1"})
+	cr.executeToolCalls(turn, []ToolCall{{
+		ID: "call_1", Type: "function",
+		Function: FunctionCall{Name: viewImageToolName, Arguments: string(args)},
+	}})
+
+	msgs := turn.Messages()
+	injected := msgs[len(msgs)-1]
+	require.Equal(t, RoleUser, injected.Role, "extraction must succeed")
+	label := injected.MultiContent[0].Text
+	assert.Contains(t, label, "/6A5/full/256.png", "the page's OWN viewer image must win")
+	assert.NotContains(t, label, "/691/", "a filmstrip neighbor must never be picked")
+
+	// Declared dims were present, so the probe must NOT have run: the
+	// only image request is the winner's own fetch.
+	assert.Equal(t, int32(1), imgHits.Load(),
+		"declared dims must skip the header probe entirely (one winner fetch, zero probes)")
+}
+
+// TestHarvestPageImageURLsSrcsetDataURIGuard is the review-2 regression:
+// srcset terminates URLs at commas, and a data: URI's base64 payload
+// splits into fragments that parse as relative URLs — after a data:
+// candidate, only fresh-looking URLs with an image extension count.
+func TestHarvestPageImageURLsSrcsetDataURIGuard(t *testing.T) {
+	html := `<img srcset="data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ 1x, /real-after.jpg 2x">`
+	got, _ := harvestPageImageURLs([]byte(html), "https://img.example.com/p")
+	assert.Equal(t, []string{"https://img.example.com/real-after.jpg"}, got)
+
+	html2 := `<img srcset="data:image/png;base64,iVBORw0KGgoAAA 1x">`
+	got2, _ := harvestPageImageURLs([]byte(html2), "https://img.example.com/p")
+	assert.Empty(t, got2, "a lone data: srcset yields no candidates")
 }

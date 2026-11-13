@@ -277,7 +277,7 @@ table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
      take the .nodims auto-sizing fallback. Chevrons are flex siblings
      of the stage — outside the image, never over it. */}}
 <button type="button" class="zoom-toggle{{if not .ImgWidth}} nodims{{end}}" id="zoom-toggle" aria-haspopup="dialog" aria-expanded="false" title="zoom in"{{if .ImgWidth}} style="aspect-ratio: {{.ImgWidth}} / {{.ImgHeight}}; max-width: min(100%, {{.ImgWidth}}px, calc(85vh * {{.ImgWidth}} / {{.ImgHeight}}))"{{end}}>
-<img src="{{.OrigURL}}" alt="{{.OriginalPrompt}}">
+<img src="{{.OrigURL}}" alt="{{.OriginalPrompt}}"{{if .ImgWidth}} width="{{.ImgWidth}}" height="{{.ImgHeight}}"{{end}}>
 </button>
 </div>
 {{if .HasNext}}<a class="chevron right" id="nav-next" href="/{{.NextID}}{{.SortQS}}" title="older (→ / n)">&#8250;</a>{{end}}
@@ -389,7 +389,7 @@ table.params td:first-child { width: 9rem; color: #999; white-space: nowrap; }
      on close (see image.js). */}}
 <div class="zoom-overlay" id="zoom-overlay" hidden role="dialog" aria-modal="true" aria-label="zoomed image">
 <button type="button" class="zoom-close" id="zoom-close" title="close (Esc)" aria-label="close zoomed image">&#10005;</button>
-<img src="{{.OrigURL}}" alt="{{.OriginalPrompt}}">
+<img src="{{.OrigURL}}" alt="{{.OriginalPrompt}}"{{if .ImgWidth}} width="{{.ImgWidth}}" height="{{.ImgHeight}}"{{end}}>
 </div>
 <script>
 (function () {

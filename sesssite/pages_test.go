@@ -150,6 +150,39 @@ func TestRawEndpointMalformedID404(t *testing.T) {
 	}
 }
 
+// TestSessionPageReasoningBeforeContent: the collapsed reasoning unit
+// renders ABOVE the reply content — reading order matches chronology
+// (the model thinks first, then answers) — while the meta header
+// (role/time) stays the message's first element. The reply is pinned
+// by its TEXT position: the reasoning block contains its own
+// "content md" div, so a class-based marker would be ambiguous.
+func TestSessionPageReasoningBeforeContent(t *testing.T) {
+	db := newTestDB(t)
+	srv := NewServer(db, &Config{})
+	ts := httptest.NewServer(srv.mux())
+	defer ts.Close()
+	s := mkSession(t, db, "aaaaaaaa")
+	mkMessage(t, db, s.ID, "assistant", "the answer", func(m *Message) {
+		r := "the thought process"
+		m.ReasoningContent = &r
+	})
+
+	resp, err := http.Get(ts.URL + "/s/aaaaaaaa")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, 200, resp.StatusCode)
+	body := readBody(t, resp)
+
+	rIdx := strings.Index(body, `<details class="reasoning"`)
+	aIdx := strings.Index(body, "the answer")
+	mIdx := strings.Index(body, `<div class="meta">`)
+	require.GreaterOrEqual(t, rIdx, 0, "reasoning details present")
+	require.GreaterOrEqual(t, aIdx, 0, "reply content present")
+	assert.Less(t, rIdx, aIdx, "reasoning renders before the reply content")
+	require.GreaterOrEqual(t, mIdx, 0)
+	assert.Less(t, mIdx, rIdx, "meta header stays above reasoning")
+}
+
 func TestOlderRowsFragment(t *testing.T) {
 	db := newTestDB(t)
 	srv := NewServer(db, &Config{})

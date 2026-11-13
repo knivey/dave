@@ -16,6 +16,16 @@
 			{{if $v.Archived}}<span class="tag">archived</span>{{end}}
 			<a class="rawlink" href="{{$v.RawURL}}">raw</a>
 		</div>
+		{{/* Reasoning renders ABOVE the reply content — reading order
+		     matches chronology: the model thinks first, then answers.
+		     (User request, Nov 2026; previously it sat after the tool
+		     calls.) The meta header stays the message's first element. */}}
+		{{if $v.HasReasoning}}
+			<details class="reasoning"><summary>reasoning</summary>
+				{{if $v.ReasoningSummary}}<div class="summary md">summary: {{$v.ReasoningSummary}}</div>{{end}}
+				{{if $v.ReasoningContent}}<div class="content md">{{$v.ReasoningHTML}}</div>{{end}}
+			</details>
+		{{end}}
 		{{if $v.IsSystem}}
 		{{/* System rows carry no markdown render (buildMessageView renders
 		     only user/assistant); the escaped raw content fills the
@@ -48,12 +58,6 @@
 			{{else}}
 				<div class="toolcall" data-callid="{{.ID}}"><span class="name">{{.Name}}</span><pre class="args">{{.ArgsJSON}}</pre></div>
 			{{end}}
-		{{end}}
-		{{if $v.HasReasoning}}
-			<details class="reasoning"><summary>reasoning</summary>
-				{{if $v.ReasoningSummary}}<div class="summary md">summary: {{$v.ReasoningSummary}}</div>{{end}}
-				{{if $v.ReasoningContent}}<div class="content md">{{$v.ReasoningHTML}}</div>{{end}}
-			</details>
 		{{end}}
 		{{if $v.Usage}}
 			{{/* ≈ marks the usage join approximate by construction (usage

@@ -1982,3 +1982,35 @@ func TestResultsCarryGenRefs(t *testing.T) {
 	assert.Equal(t, "gen_"+job.ID+"_0", result.Result.Images[0].Ref)
 	assert.Equal(t, "gen_"+job.ID+"_1", result.Result.Images[1].Ref)
 }
+
+// TestProcessJobResultCarriesDirectImageURL pins the live-path half of the
+// image_url contract: a completed job's result carries the DIRECT asset
+// URL alongside the page link, so a model views its own generation in one
+// view_image call (the 2026-11-12 incident's fetch/view dance dies here).
+func TestProcessJobResultCarriesDirectImageURL(t *testing.T) {
+	mockComfy := newMockComfyFlowServer(t)
+	up := newFakeUploadServer(t)
+
+	cfg := testConfig(mockComfy.URL())
+	wc := cfg.Workflows["test"]
+	wc.WorkflowPath = mustWriteWorkflow(t, t.TempDir())
+	cfg.Workflows["test"] = wc
+	cfg.Upload.URL = up.server.URL
+
+	q, cleanup := setupTestQueue(t, cfg)
+	defer cleanup()
+
+	job, err := q.Submit(JobTypeGenerate, "test", JobInput{Prompt: "a cat"})
+	require.NoError(t, err, "Submit")
+
+	waitForJobDone(t, job, 15*time.Second)
+	assertJobStatus(t, q, job.ID, StatusCompleted)
+
+	res, _, err := buildJobResultFromDB(q.db, job.ID)
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Images)
+	assert.Equal(t, up.server.URL+"/aQ3f9xK", res.Images[0].URL,
+		"url stays the PAGE link (IRC-facing)")
+	assert.Equal(t, up.server.URL+"/aQ3f9xK/orig/test-image.png", res.Images[0].ImageURL,
+		"image_url carries the direct asset the model can view_image")
+}

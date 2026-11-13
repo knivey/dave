@@ -413,3 +413,26 @@ func TestBuildJobResultFromDBIncludesRefs(t *testing.T) {
 	require.Len(t, res.Images, 1)
 	assert.Equal(t, "gen_r1_0", res.Images[0].Ref)
 }
+
+// TestJobImagesImageURLRoundTrip pins the image_url column end to end:
+// dbCompleteJob persists it alongside the page url, and the DB-rebuilt
+// result (restart recovery / TTL path) carries it — the direct URL a
+// model uses to view its own generation without the fetch dance.
+func TestJobImagesImageURLRoundTrip(t *testing.T) {
+	db := setupTestDB(t)
+	_, err := db.Exec(`INSERT INTO jobs (job_id, type, status, workflow, prompt) VALUES ('iu1','generate','running','w','p')`)
+	require.NoError(t, err)
+
+	page := "https://img.example.com/iu1"
+	direct := "https://img.example.com/iu1/orig/2026-11-13-001010__0.webp"
+	require.NoError(t, dbCompleteJob(db, "iu1", &JobResult{
+		Images: []ImageData{{URL: page, ImageURL: direct, MIMEType: "image/webp"}},
+	}, []ComfyImage{{Filename: "f.webp"}}))
+
+	res, _, err := buildJobResultFromDB(db, "iu1")
+	require.NoError(t, err)
+	require.Len(t, res.Images, 1)
+	assert.Equal(t, page, res.Images[0].URL)
+	assert.Equal(t, direct, res.Images[0].ImageURL,
+		"the direct image URL must survive the DB round-trip (recovery viewability)")
+}

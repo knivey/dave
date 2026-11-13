@@ -125,10 +125,11 @@ func TestUploadImageReturnsPageVerbatim(t *testing.T) {
 	direct := "https://img.example.com/aQ3f9xK/orig/2026-09-23-234552__0.webp"
 	f.respondBody = `{"id":"aQ3f9xK","url":"` + direct + `","page":"` + page + `","filename":"2026-09-23-234552__0.webp"}`
 
-	got, err := uploadImage(cfg, []byte("png-bytes"), "test-image.png", UploadMeta{})
+	got, direct, err := uploadImage(cfg, []byte("png-bytes"), "test-image.png", UploadMeta{})
 
 	require.NoError(t, err)
 	assert.Equal(t, page, got, "page link must be preferred over the direct url")
+	assert.Equal(t, direct, "https://img.example.com/aQ3f9xK/orig/2026-09-23-234552__0.webp")
 }
 
 // TestUploadImageFallsBackToURLWhenPageEmpty covers older imgsite
@@ -142,10 +143,11 @@ func TestUploadImageFallsBackToURLWhenPageEmpty(t *testing.T) {
 	direct := f.server.URL + "/aQ3f9xK/orig/test-image.png"
 	f.respondBody = `{"id":"aQ3f9xK","url":"` + direct + `","page":"","filename":"test-image.png"}`
 
-	got, err := uploadImage(cfg, []byte("png-bytes"), "test-image.png", UploadMeta{})
+	got, imageURL, err := uploadImage(cfg, []byte("png-bytes"), "test-image.png", UploadMeta{})
 
 	require.NoError(t, err)
 	assert.Equal(t, direct, got, "empty page must fall back to the direct url")
+	assert.Equal(t, direct, imageURL, "direct return mirrors the fallback link")
 }
 
 // TestUploadImageURLNotRequiredWhenPagePresent: once the page link is the
@@ -158,7 +160,7 @@ func TestUploadImageURLNotRequiredWhenPagePresent(t *testing.T) {
 	page := "https://img.example.com/aQ3f9xK"
 	f.respondBody = `{"id":"aQ3f9xK","page":"` + page + `","filename":"f.png"}`
 
-	got, err := uploadImage(cfg, []byte("png-bytes"), "test-image.png", UploadMeta{})
+	got, _, err := uploadImage(cfg, []byte("png-bytes"), "test-image.png", UploadMeta{})
 
 	require.NoError(t, err)
 	assert.Equal(t, page, got)
@@ -175,7 +177,7 @@ func TestUploadImageSendsAPIKeyFileAndMeta(t *testing.T) {
 		Nick:           "knivey",
 	}
 
-	url, err := uploadImage(cfg, []byte("png-bytes"), "test-image.png", meta)
+	url, _, err := uploadImage(cfg, []byte("png-bytes"), "test-image.png", meta)
 
 	require.NoError(t, err)
 	assert.Equal(t, f.server.URL+"/aQ3f9xK", url, "the page link is the upload result")
@@ -194,7 +196,7 @@ func TestUploadImageFilenameSanitized(t *testing.T) {
 		f := newFakeUploadServer(t)
 		cfg := Config{Upload: UploadConfig{URL: f.server.URL}}
 
-		_, err := uploadImage(cfg, []byte("png-bytes"), "sub/dir/test-image.png", UploadMeta{})
+		_, _, err := uploadImage(cfg, []byte("png-bytes"), "sub/dir/test-image.png", UploadMeta{})
 
 		require.NoError(t, err)
 		assert.Equal(t, "test-image.png", f.gotFileFilename)
@@ -203,7 +205,7 @@ func TestUploadImageFilenameSanitized(t *testing.T) {
 		f := newFakeUploadServer(t)
 		cfg := Config{Upload: UploadConfig{URL: f.server.URL}}
 
-		_, err := uploadImage(cfg, []byte("png-bytes"), "", UploadMeta{})
+		_, _, err := uploadImage(cfg, []byte("png-bytes"), "", UploadMeta{})
 
 		require.NoError(t, err)
 		assert.Equal(t, "image.png", f.gotFileFilename)
@@ -212,7 +214,7 @@ func TestUploadImageFilenameSanitized(t *testing.T) {
 		f := newFakeUploadServer(t)
 		cfg := Config{Upload: UploadConfig{URL: f.server.URL}}
 
-		_, err := uploadImage(cfg, []byte("png-bytes"), "..", UploadMeta{})
+		_, _, err := uploadImage(cfg, []byte("png-bytes"), "..", UploadMeta{})
 
 		require.NoError(t, err)
 		assert.Equal(t, "image.png", f.gotFileFilename, "'..' must never reach the site's /orig/ URL path")
@@ -221,7 +223,7 @@ func TestUploadImageFilenameSanitized(t *testing.T) {
 		f := newFakeUploadServer(t)
 		cfg := Config{Upload: UploadConfig{URL: f.server.URL}}
 
-		_, err := uploadImage(cfg, []byte("png-bytes"), "bad\r\n.png", UploadMeta{})
+		_, _, err := uploadImage(cfg, []byte("png-bytes"), "bad\r\n.png", UploadMeta{})
 
 		require.NoError(t, err)
 		assert.Equal(t, "image.png", f.gotFileFilename, "control characters would corrupt the multipart part header")
@@ -230,7 +232,7 @@ func TestUploadImageFilenameSanitized(t *testing.T) {
 		f := newFakeUploadServer(t)
 		cfg := Config{Upload: UploadConfig{URL: f.server.URL}}
 
-		_, err := uploadImage(cfg, []byte("png-bytes"), `C:\Users\img.png`, UploadMeta{})
+		_, _, err := uploadImage(cfg, []byte("png-bytes"), `C:\Users\img.png`, UploadMeta{})
 
 		require.NoError(t, err)
 		assert.Equal(t, "image.png", f.gotFileFilename, "filepath.Base does not split Windows separators on Linux")
@@ -239,7 +241,7 @@ func TestUploadImageFilenameSanitized(t *testing.T) {
 		f := newFakeUploadServer(t)
 		cfg := Config{Upload: UploadConfig{URL: f.server.URL}}
 
-		_, err := uploadImage(cfg, []byte("png-bytes"), "café.png", UploadMeta{})
+		_, _, err := uploadImage(cfg, []byte("png-bytes"), "café.png", UploadMeta{})
 
 		require.NoError(t, err)
 		assert.Equal(t, "image.png", f.gotFileFilename, "only printable ASCII is safe to embed in the returned URL")
@@ -294,7 +296,7 @@ func TestUploadImageErrors(t *testing.T) {
 			f.respondBody = tt.respondBody
 			cfg := Config{Upload: UploadConfig{URL: f.server.URL, APIKey: "secret-key"}}
 
-			url, err := uploadImage(cfg, []byte("png-bytes"), "test-image.png", UploadMeta{})
+			url, _, err := uploadImage(cfg, []byte("png-bytes"), "test-image.png", UploadMeta{})
 
 			require.Error(t, err)
 			assert.Empty(t, url)
@@ -408,7 +410,7 @@ func TestUploadImageServerDown(t *testing.T) {
 
 	cfg := Config{Upload: UploadConfig{URL: url}}
 
-	got, err := uploadImage(cfg, []byte("png-bytes"), "test-image.png", UploadMeta{})
+	got, _, err := uploadImage(cfg, []byte("png-bytes"), "test-image.png", UploadMeta{})
 
 	require.Error(t, err)
 	assert.Empty(t, got)
@@ -444,10 +446,29 @@ func TestUploadImageBodyReadError(t *testing.T) {
 	// The transport intercepts everything, so the URL never needs a listener.
 	cfg := Config{Upload: UploadConfig{URL: "http://img.example.invalid", APIKey: "secret-key"}}
 
-	got, err := uploadImage(cfg, []byte("png-bytes"), "test-image.png", UploadMeta{})
+	got, _, err := uploadImage(cfg, []byte("png-bytes"), "test-image.png", UploadMeta{})
 
 	require.Error(t, err)
 	assert.Empty(t, got)
 	assert.Contains(t, err.Error(), "reading upload response")
 	assert.Contains(t, err.Error(), "connection reset mid-body", "the transport error must be wrapped, not swallowed")
+}
+
+// TestUploadImageReturnsPageAndDirectURL pins the two-value contract: the
+// page link (what dave pastes to IRC) AND the direct asset URL (what the
+// model views via view_image — the 2026-11-12 incident showed the model
+// burning a fetch/view dance to recover the direct URL from the page).
+func TestUploadImageReturnsPageAndDirectURL(t *testing.T) {
+	f := newFakeUploadServer(t)
+	cfg := Config{Upload: UploadConfig{URL: f.server.URL, APIKey: "secret-key"}}
+
+	page := "https://img.example.com/aQ3f9xK"
+	direct := "https://img.example.com/aQ3f9xK/orig/2026-09-23-234552__0.webp"
+	f.respondBody = `{"id":"aQ3f9xK","url":"` + direct + `","page":"` + page + `","filename":"2026-09-23-234552__0.webp"}`
+
+	link, imageURL, err := uploadImage(cfg, []byte("png-bytes"), "test-image.png", UploadMeta{})
+
+	require.NoError(t, err)
+	assert.Equal(t, page, link, "page link is the primary return (IRC-facing)")
+	assert.Equal(t, direct, imageURL, "direct asset URL is the second return (model-facing)")
 }

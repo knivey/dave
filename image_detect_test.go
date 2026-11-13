@@ -13,6 +13,7 @@ import (
 	"image/gif"
 	"image/jpeg"
 	"image/png"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	neturl "net/url"
@@ -25,6 +26,178 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/image/bmp"
 )
+
+// newHTMLPageImageServer serves /pic.jpg (real JPEG) and every other path
+// as the given HTML with content-type text/html — the imgsite details-page
+// shape that motivated labeled page extraction.
+func newHTMLPageImageServer(t *testing.T, pageHTML string) *httptest.Server {
+	t.Helper()
+	jpegBytes := createTestJPEG(t)
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/pic.jpg" {
+			w.Header().Set("Content-Type", "image/jpeg")
+			w.Write(jpegBytes)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(pageHTML))
+	}))
+}
+
+// TestHarvestPageImageURLs pins the candidate order and hygiene of the
+// page-image harvest: og:image/twitter:image metas (EXACT names only —
+// og:image:width etc. carry non-URLs) before <img> tags, data-src before
+// src, relative URLs resolved against the page URL, data: URIs skipped,
+// deduped, capped.
+func TestHarvestPageImageURLs(t *testing.T) {
+	const base = "https://img.example.com/item/42"
+	tests := []struct {
+		name string
+		html string
+		want []string
+	}{
+		{"og:image absolute", `<meta property="og:image" content="https://cdn.example.com/a.jpg">`,
+			[]string{"https://cdn.example.com/a.jpg"}},
+		{"twitter:image when no og", `<meta name="twitter:image" content="https://cdn.example.com/b.jpg">`,
+			[]string{"https://cdn.example.com/b.jpg"}},
+		{"og:image wins over twitter:image", `<meta name="twitter:image" content="https://cdn.example.com/b.jpg"><meta property="og:image" content="https://cdn.example.com/a.jpg">`,
+			[]string{"https://cdn.example.com/a.jpg", "https://cdn.example.com/b.jpg"}},
+		{"og:image:* variants ignored", `<meta property="og:image:width" content="1200"><meta property="og:image" content="https://cdn.example.com/a.jpg">`,
+			[]string{"https://cdn.example.com/a.jpg"}},
+		{"img data-src before src, relative resolved", `<img src="placeholder.gif" data-src="/pics/big.webp">`,
+			[]string{"https://img.example.com/pics/big.webp", "https://img.example.com/item/placeholder.gif"}},
+		{"data URIs skipped", `<img src="data:image/gif;base64,R0lGOD"><img src="/real.jpg">`,
+			[]string{"https://img.example.com/real.jpg"}},
+		{"dedupe", `<meta property="og:image" content="/a.jpg"><img src="/a.jpg">`,
+			[]string{"https://img.example.com/a.jpg"}},
+		{"no images at all", `<html><body><p>text only</p></body></html>`, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := harvestPageImageURLs([]byte(tt.html), base)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestHarvestPageImageURLsCap(t *testing.T) {
+	html := `<img src="/1.jpg"><img src="/2.jpg"><img src="/3.jpg"><img src="/4.jpg"><img src="/5.jpg"><img src="/6.jpg"><img src="/7.jpg">`
+	got := harvestPageImageURLs([]byte(html), "https://x.example/p")
+	assert.Len(t, got, 5, "harvest is capped")
+}
+
+// TestHandleViewImageHTMLPageExtractsLabeledImage pins the owner-approved
+// semantics: a page URL is NOT treated as an image — the extraction says
+// so, the label and ref carry the RESOLVED image URL (never the page), and
+// the note teaches that the preview is not the page's content (no
+// "every link is an image" bias confirmation).
+func TestHandleViewImageHTMLPageExtractsLabeledImage(t *testing.T) {
+	setupTestDB(t)
+	config.ImagesDir = t.TempDir()
+	t.Cleanup(func() { config.ImagesDir = "" })
+	config.TrustedImageHosts = []string{"127.0.0.1"}
+	t.Cleanup(func() { config.TrustedImageHosts = nil })
+
+	imgSrv := newTestImageServer(t) // serves image/jpeg at any path
+	defer imgSrv.Close()
+	pageSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(w, `<html><head><meta property="og:image" content="%s/pic.jpg"></head><body>details page</body></html>`, imgSrv.URL)
+	}))
+	defer pageSrv.Close()
+
+	cr := newImageViewTestRunner(t, AIConfig{DetectImages: true, MaxContextImages: 5, ImageFormat: "jpg", ImageQuality: 75}, 9)
+	turn := newTurnContext(9, nil)
+	pageURL := pageSrv.URL + "/page/1"
+	picURL := imgSrv.URL + "/pic.jpg"
+	args, _ := json.Marshal(map[string]string{"url": pageURL})
+	cr.executeToolCalls(turn, []ToolCall{{
+		ID: "call_1", Type: "function",
+		Function: FunctionCall{Name: viewImageToolName, Arguments: string(args)},
+	}})
+
+	msgs := turn.Messages()
+	require.GreaterOrEqual(t, len(msgs), 2, "tool result + injection expected")
+	toolMsg := msgs[len(msgs)-2]
+	injected := msgs[len(msgs)-1]
+
+	assert.Contains(t, toolMsg.Content, "HTML page, not an image",
+		"the tool result must SAY the URL was a page")
+	assert.Contains(t, toolMsg.Content, "preview image",
+		"the extraction must be labeled as the page's preview")
+	assert.Contains(t, toolMsg.Content, picURL,
+		"the tool result names the RESOLVED image source")
+	assert.Contains(t, toolMsg.Content, "use fetch",
+		"the note must point at fetch for the page's text")
+
+	assert.Equal(t, RoleUser, injected.Role)
+	require.Len(t, injected.MultiContent, 2)
+	label := injected.MultiContent[0].Text
+	assert.Contains(t, label, picURL, "label carries the resolved image URL")
+	assert.NotContains(t, label, "/page/1", "label must not claim the page was the image source")
+
+	// The ref registers the RESOLVED source, not the page.
+	var ref ImageRef
+	require.NoError(t, theDB.Where("session_id = ? AND origin = ?", 9, "view").First(&ref).Error)
+	assert.Equal(t, picURL, ref.SourceURL)
+}
+
+// TestHandleViewImageHTMLPageWithoutImagesTeachesFetch: a page with no
+// extractable image errors with the recovery instruction (the incident's
+// improvised fetch dance, now taught).
+func TestHandleViewImageHTMLPageWithoutImagesTeachesFetch(t *testing.T) {
+	setupTestDB(t)
+	config.TrustedImageHosts = []string{"127.0.0.1"}
+	t.Cleanup(func() { config.TrustedImageHosts = nil })
+
+	srv := newHTMLPageImageServer(t, `<html><body><p>no media here</p></body></html>`)
+	defer srv.Close()
+
+	cr := newImageViewTestRunner(t, AIConfig{DetectImages: true, MaxContextImages: 5}, 9)
+	turn := newTurnContext(9, nil)
+	args, _ := json.Marshal(map[string]string{"url": srv.URL + "/page/2"})
+	cr.executeToolCalls(turn, []ToolCall{{
+		ID: "call_1", Type: "function",
+		Function: FunctionCall{Name: viewImageToolName, Arguments: string(args)},
+	}})
+
+	last := turn.Messages()[len(turn.Messages())-1]
+	assert.Equal(t, RoleTool, last.Role)
+	assert.Contains(t, last.Content, "HTML page")
+	assert.Contains(t, last.Content, "use fetch")
+	assert.Empty(t, cr.pendingInjections, "nothing attached on failure")
+}
+
+// TestHandleViewImageHTMLPageCandidateNotImageFails: no recursion — when
+// the harvested candidate is itself HTML, the call errors instead of
+// chasing chains.
+func TestHandleViewImageHTMLPageCandidateNotImageFails(t *testing.T) {
+	setupTestDB(t)
+	config.TrustedImageHosts = []string{"127.0.0.1"}
+	t.Cleanup(func() { config.TrustedImageHosts = nil })
+
+	// The candidate target is ITSELF an HTML server (any path serves text/html).
+	htmlSrv := newHTMLPageImageServer(t, `<html><body>also just a page</body></html>`)
+	defer htmlSrv.Close()
+	pageSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(w, `<meta property="og:image" content="%s/also-a-page">`, htmlSrv.URL)
+	}))
+	defer pageSrv.Close()
+
+	cr := newImageViewTestRunner(t, AIConfig{DetectImages: true, MaxContextImages: 5}, 9)
+	turn := newTurnContext(9, nil)
+	args, _ := json.Marshal(map[string]string{"url": pageSrv.URL + "/page/3"})
+	cr.executeToolCalls(turn, []ToolCall{{
+		ID: "call_1", Type: "function",
+		Function: FunctionCall{Name: viewImageToolName, Arguments: string(args)},
+	}})
+
+	last := turn.Messages()[len(turn.Messages())-1]
+	assert.Equal(t, RoleTool, last.Role)
+	assert.Contains(t, last.Content, "use fetch")
+	assert.Empty(t, cr.pendingInjections)
+}
 
 func TestFormatSize(t *testing.T) {
 	tests := []struct {
@@ -1419,4 +1592,36 @@ func TestGetBuiltinToolDefsViewImageGatedOnDetectImages(t *testing.T) {
 			assert.NotEqual(t, viewImageToolName, tl.Function.Name, "disabled_builtin_tools opts out")
 		}
 	}
+}
+
+// TestFetchViewImageSourceDirectLargeImage: the FIRST fetch of
+// fetchViewImageSource must keep downloadImage's full maxImageSize budget —
+// a shared page-sized bound (2MiB) would silently reject every direct
+// image between 2 and 10 MiB (camera JPEGs, big /orig/ generations), the
+// exact regression the review caught.
+func TestFetchViewImageSourceDirectLargeImage(t *testing.T) {
+	config.TrustedImageHosts = []string{"127.0.0.1"}
+	t.Cleanup(func() { config.TrustedImageHosts = nil })
+
+	// Random noise compresses poorly: 2200x2200 at q95 lands well over 2MiB.
+	img := image.NewRGBA(image.Rect(0, 0, 2200, 2200))
+	rnd := rand.New(rand.NewSource(1))
+	for i := range img.Pix {
+		img.Pix[i] = byte(rnd.Intn(256))
+	}
+	var buf bytes.Buffer
+	require.NoError(t, jpeg.Encode(&buf, img, &jpeg.Options{Quality: 95}))
+	require.Greater(t, buf.Len(), 2<<20, "test image must exceed the old 2MiB page bound")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Write(buf.Bytes())
+	}))
+	defer srv.Close()
+
+	fi, src, fromPage, err := fetchViewImageSource(srv.URL+"/big.jpg", "jpg", 75, 1024, 1024, rootMaxImagePixels())
+	require.NoError(t, err, "a direct image over 2MiB must still view (10MiB budget)")
+	assert.Equal(t, srv.URL+"/big.jpg", src)
+	assert.Empty(t, fromPage)
+	assert.NotEmpty(t, fi.DataURI)
 }

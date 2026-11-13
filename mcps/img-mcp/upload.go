@@ -87,7 +87,14 @@ type uploadResponse struct {
 // allowed at startup (imgsite is the only consumer and the bot may run with
 // generation temporarily broken) but is logged here, per call, so the
 // failure mode is discoverable from the logs.
-func uploadImage(cfg Config, data []byte, filename string, meta UploadMeta) (string, error) {
+// uploadImage uploads one image and returns the PAGE link (the primary
+// return — what dave pastes to IRC) and the DIRECT asset URL (the second
+// return — what a model views via view_image; the page link is HTML and
+// cost the model a fetch/view recovery dance before this existed). The
+// direct URL is imgsite's url field, which is always present alongside
+// page; when page is empty the link falls back to it and both returns
+// are the same URL.
+func uploadImage(cfg Config, data []byte, filename string, meta UploadMeta) (link string, imageURL string, err error) {
 	filename = sanitizeUploadFilename(filename)
 	base := strings.TrimRight(cfg.Upload.URL, "/")
 	logger.Info("uploading image", "filename", filename, "size", len(data), "url", base)
@@ -99,7 +106,7 @@ func uploadImage(cfg Config, data []byte, filename string, meta UploadMeta) (str
 
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
-		return "", fmt.Errorf("marshaling upload meta: %w", err)
+		return "", "", fmt.Errorf("marshaling upload meta: %w", err)
 	}
 
 	body := &bytes.Buffer{}
@@ -107,17 +114,17 @@ func uploadImage(cfg Config, data []byte, filename string, meta UploadMeta) (str
 
 	formFile, err := wr.CreateFormFile("file", filename)
 	if err != nil {
-		return "", fmt.Errorf("creating form file: %w", err)
+		return "", "", fmt.Errorf("creating form file: %w", err)
 	}
 
 	if _, err := formFile.Write(data); err != nil {
-		return "", fmt.Errorf("writing form data: %w", err)
+		return "", "", fmt.Errorf("writing form data: %w", err)
 	}
 
 	wr.WriteField("meta", string(metaJSON))
 
 	if err := wr.Close(); err != nil {
-		return "", fmt.Errorf("closing multipart writer: %w", err)
+		return "", "", fmt.Errorf("closing multipart writer: %w", err)
 	}
 
 	// httptrace splits post_ms into its real costs: DNS+dial, TLS
@@ -148,7 +155,7 @@ func uploadImage(cfg Config, data []byte, filename string, meta UploadMeta) (str
 		httptrace.WithClientTrace(context.Background(), trace),
 		http.MethodPost, base+"/updo", bytes.NewReader(body.Bytes()))
 	if err != nil {
-		return "", fmt.Errorf("creating upload request: %w", err)
+		return "", "", fmt.Errorf("creating upload request: %w", err)
 	}
 	req.Header.Set("Content-Type", wr.FormDataContentType())
 	if cfg.Upload.APIKey != "" {
@@ -158,18 +165,18 @@ func uploadImage(cfg Config, data []byte, filename string, meta UploadMeta) (str
 	postDur := time.Since(postStart)
 	if err != nil {
 		logger.Error("upload request failed", "filename", filename, "error", err)
-		return "", fmt.Errorf("uploading: %w", err)
+		return "", "", fmt.Errorf("uploading: %w", err)
 	}
 	defer resp.Body.Close()
 	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		logger.Error("upload rejected: unauthorized", "filename", filename, "status", resp.StatusCode)
-		return "", fmt.Errorf("upload rejected with 401 unauthorized: check upload.api_key in the img-mcp config (it must match imgsite's auth.api_key)")
+		return "", "", fmt.Errorf("upload rejected with 401 unauthorized: check upload.api_key in the img-mcp config (it must match imgsite's auth.api_key)")
 	}
 	if resp.StatusCode != http.StatusCreated {
 		logger.Error("upload returned unexpected status", "filename", filename, "status", resp.StatusCode)
-		return "", fmt.Errorf("unexpected status from upload: %d: %s", resp.StatusCode, snippet(string(respBody), 200))
+		return "", "", fmt.Errorf("unexpected status from upload: %d: %s", resp.StatusCode, snippet(string(respBody), 200))
 	}
 
 	// Status came from the response headers, so the status checks above stay
@@ -178,24 +185,24 @@ func uploadImage(cfg Config, data []byte, filename string, meta UploadMeta) (str
 	// confusing parse error. Surface the transport failure instead.
 	if readErr != nil {
 		logger.Error("reading upload response body failed", "filename", filename, "error", readErr)
-		return "", fmt.Errorf("reading upload response: %w", readErr)
+		return "", "", fmt.Errorf("reading upload response: %w", readErr)
 	}
 	var parsed uploadResponse
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		return "", fmt.Errorf("parsing upload response: %w", err)
+		return "", "", fmt.Errorf("parsing upload response: %w", err)
 	}
 
 	// Page link first; empty page (older imgsite) falls back to the
 	// direct url so a version skew degrades to the old paste, never to a
 	// failed job.
-	link := parsed.Page
+	link = parsed.Page
 	if link == "" {
 		logger.Warn("upload response has an empty page field; falling back to the direct url (older imgsite deployment?)",
 			"filename", filename, "image_id", parsed.ID, "url", parsed.URL)
 		link = parsed.URL
 	}
 	if link == "" {
-		return "", fmt.Errorf("upload response missing page and url")
+		return "", "", fmt.Errorf("upload response missing page and url")
 	}
 
 	// Stage boundaries for the log; stages that never fired (reused
@@ -216,7 +223,7 @@ func uploadImage(cfg Config, data []byte, filename string, meta UploadMeta) (str
 		"tls_ms", elapsedMs(connectDone, tlsDone),
 		"send_ms", elapsedMs(connReady, wroteReq),
 		"srv_ms", elapsedMs(wroteReq, firstByte))
-	return link, nil
+	return link, parsed.URL, nil
 }
 
 // elapsedMs reports the milliseconds between two httptrace timestamps,

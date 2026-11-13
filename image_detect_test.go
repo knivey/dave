@@ -2172,3 +2172,48 @@ func TestExecuteToolCallsViewImageRegistersEditVariant(t *testing.T) {
 	assert.Equal(t, 1536, row.EditHeight)
 	assert.LessOrEqual(t, row.Width, 1024, "the view variant stays view-capped")
 }
+
+func TestConvertEditVariantByteCeiling(t *testing.T) {
+	// A within-cap original that is HUGE in bytes (noise PNG) must NOT ride
+	// verbatim: base64 of a multi-MiB original × up to 10 input images would
+	// balloon the edit_image tool args. The re-encode preserves the pixel
+	// dimensions (the knob's contract) at a sane byte size.
+	img := image.NewRGBA(image.Rect(0, 0, 1200, 1200))
+	rnd := rand.New(rand.NewSource(11))
+	for i := range img.Pix {
+		img.Pix[i] = byte(rnd.Intn(256))
+	}
+	var buf bytes.Buffer
+	require.NoError(t, png.Encode(&buf, img))
+	require.Greater(t, buf.Len(), maxEditVariantVerbatimBytes, "test PNG must exceed the verbatim byte ceiling")
+
+	fi, err := convertEditVariant(buf.Bytes(), "image/png", "jpg", 75, 2048, 2048, 0)
+	require.NoError(t, err)
+	assert.NotEqual(t, buf.Bytes(), fi.Encoded, "oversized-in-bytes original is re-encoded despite fitting the pixel cap")
+	assert.Equal(t, "image/jpeg", fi.MIME)
+	assert.Equal(t, 1200, fi.Width, "pixel dimensions preserved by the re-encode")
+	assert.Equal(t, 1200, fi.Height)
+	assert.Less(t, len(fi.Encoded), maxEditVariantVerbatimBytes, "re-encoded variant is byte-bounded")
+}
+
+func TestConvertEditVariantAnimatedGifNotVerbatim(t *testing.T) {
+	// Pre-variant behavior fed edits a STATIC first-frame re-encode; the
+	// verbatim path must not regress that by shipping a whole animated GIF
+	// (frame count is also a byte-amplification lever).
+	pal := palette.Plan9
+	a := image.NewPaletted(image.Rect(0, 0, 20, 20), pal)
+	b := image.NewPaletted(image.Rect(0, 0, 20, 20), pal)
+	for i := 0; i < 20; i++ {
+		a.SetColorIndex(i, i, uint8(i%len(pal)))
+		b.SetColorIndex(i, i, uint8((i+7)%len(pal)))
+	}
+	var buf bytes.Buffer
+	require.NoError(t, gif.EncodeAll(&buf, &gif.GIF{Image: []*image.Paletted{a, b}, Delay: []int{0, 10}}))
+
+	fi, err := convertEditVariant(buf.Bytes(), "image/gif", "jpg", 75, 2048, 2048, 0)
+	require.NoError(t, err)
+	assert.NotEqual(t, buf.Bytes(), fi.Encoded, "animated GIF never rides verbatim")
+	assert.Equal(t, "image/jpeg", fi.MIME, "first-frame static re-encode, like the pre-variant pipeline")
+	assert.Equal(t, 20, fi.Width)
+	assert.Equal(t, 20, fi.Height)
+}

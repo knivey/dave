@@ -11,8 +11,10 @@
 #     model can get more pixels than the LLM ever sees in context (which stays capped by each
 #     chat command's maximagesize). Unset = edit variant is minted at the same cap as the LLM
 #     view size (pre-knob behavior). Originals already within the cap are stored verbatim
-#     (no re-encode); larger ones are resized to fit. Refs minted before a /reload keep the
-#     cap they were minted with.
+#     (no re-encode) UNLESS they are animated or exceed 4 MiB in bytes — those re-encode at the
+#     same pixel dimensions, keeping edit_image's tool args (base64 over the MCP link, up to 10
+#     images per call) bounded; larger originals are resized to fit. Refs minted before a
+#     /reload keep the cap they were minted with.
 #   trusted_image_hosts (string list, default []) — exact hostnames (no wildcards,
 #     case-insensitive) whose image downloads bypass the SSRF private-IP block.
 #     Needed when imgsite resolves privately (LAN/localhost) so dave can fetch its

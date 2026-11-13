@@ -1072,7 +1072,14 @@ type fetchedImage struct {
 // slower of the two, not the sum. Failure semantics: a VIEW failure fails
 // the whole conversion (the image is unusable to the model — same as the
 // pre-variant pipeline); an EDIT failure only degrades to a view-only ref
-// (nil edit), matching the ref store's best-effort contract.
+// (nil edit), matching the ref store's best-effort contract. Reachability
+// note: the editErr branch is currently unreachable by construction — the
+// edit's only unique path (verbatim) cannot fail, and every other path is
+// the identical convertToFetched call the view goroutine makes, so any edit
+// failure implies a view failure that already failed the call. It is kept
+// defensively: a future divergence between the two pipelines (e.g. a
+// different edit encoder) would otherwise turn an edit failure into a
+// broken turn.
 func convertImageVariants(imgData []byte, mimeType, format string, quality, viewW, viewH, editW, editH, maxPixels int) (*fetchedImage, *fetchedImage, error) {
 	var view, edit *fetchedImage
 	var viewErr, editErr error
@@ -1270,21 +1277,34 @@ func editImageCaps(viewW, viewH int) (int, int) {
 	return viewW, viewH
 }
 
+// maxEditVariantVerbatimBytes bounds the verbatim arm of the edit variant:
+// an original within the PIXEL cap but huge in BYTES (e.g. a multi-MiB
+// noise PNG) still gets re-encoded. The edit variant crosses the MCP link
+// as base64 inside edit_image's input_images (×1.33, up to 10 images per
+// call), so verbatim storage is reserved for originals that are already
+// link-sized. The re-encode preserves pixel dimensions — the knob's
+// contract is pixels, not bytes.
+const maxEditVariantVerbatimBytes = 4 << 20 // 4 MiB
+
 // convertEditVariant produces the edit-model variant of a downloaded image.
 // Fidelity rule: an original already within the cap is kept VERBATIM (no
 // re-encode — resize+encode can only lose quality), decided from the image
 // header's claimed dimensions without a decode; anything larger goes through
-// the same resize/encode pipeline the view variant uses. The verbatim path
-// trusting header dims is a fidelity decision only, not a safety one: the
-// view variant's decode re-checks real dimensions against the pixel cap on
-// the same bytes, so a lying header cannot smuggle a bomb past intake.
+// the same resize/encode pipeline the view variant uses. Three things deny
+// verbatim: exceeding the pixel cap, being an ANIMATED image (frames > 1 —
+// the pre-variant pipeline always fed edits a static first-frame encode,
+// and frame count is a byte-amplification lever), and exceeding
+// maxEditVariantVerbatimBytes. The verbatim path trusting header dims is a
+// fidelity decision only, not a safety one: the view variant's decode
+// re-checks real dimensions against the pixel cap on the same bytes, so a
+// lying header cannot smuggle a bomb past intake. The DataURI field stays
+// empty here — edit consumers read Encoded/MIME/dims only, and building the
+// base64 would spend ~2.7× the original in transient allocations for nothing.
 func convertEditVariant(imgData []byte, mimeType, format string, quality, maxW, maxH, maxPixels int) (*fetchedImage, error) {
-	if w, h, _, ok := headerDimensions(imgData, mimeType); ok {
-		if w <= maxW && h <= maxH {
-			enc := base64.StdEncoding.EncodeToString(imgData)
+	if w, h, frames, ok := headerDimensions(imgData, mimeType); ok {
+		if frames <= 1 && w <= maxW && h <= maxH && len(imgData) <= maxEditVariantVerbatimBytes {
 			return &fetchedImage{
 				Encoded: imgData,
-				DataURI: "data:" + mimeType + ";base64," + enc,
 				MIME:    mimeType,
 				Width:   w,
 				Height:  h,

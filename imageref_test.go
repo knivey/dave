@@ -162,7 +162,9 @@ func TestRegisterImageRefWithoutEditVariant(t *testing.T) {
 	row, err := resolveImageRef(ref)
 	require.NoError(t, err)
 	assert.Empty(t, row.EditFilePath, "no edit variant -> no edit file recorded")
-	assert.NoFileExists(t, filepath.Join(config.ImagesDir, filepath.Base(row.FilePath)+".edit.jpg"))
+	edits, err := filepath.Glob(filepath.Join(config.ImagesDir, "*.edit.*"))
+	require.NoError(t, err)
+	assert.Empty(t, edits, "no edit file on disk for a view-only ref")
 }
 
 func TestResolveImageRefArgsPrefersEditVariant(t *testing.T) {

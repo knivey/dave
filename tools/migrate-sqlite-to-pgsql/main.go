@@ -109,7 +109,14 @@ type ImageRef struct {
 	FilePath  string `gorm:"type:text"`
 	Width     int
 	Height    int
-	CreatedAt time.Time
+	// Edit variant columns (see imageref.go): empty EditFilePath = no edit
+	// variant (legacy rows) — the edit file itself lives on disk under
+	// images_dir and is NOT migrated by this tool (files, not rows).
+	EditFilePath string `gorm:"type:text"`
+	EditMIME     string `gorm:"size:64"`
+	EditWidth    int
+	EditHeight   int
+	CreatedAt    time.Time
 }
 
 func (TurnUsage) TableName() string { return "turn_usage" }

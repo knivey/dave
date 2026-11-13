@@ -24,17 +24,6 @@ var loggerImgRef = newLogger("imageref")
 // refs. The store must outlive live history because compaction strips image
 // parts to [image] placeholders — the ref label text survives, the data URI
 // does not.
-// imageRefVariant is one fidelity tier of a conversation image: the view
-// variant (what the LLM saw in context, capped by maximagesize) and the edit
-// variant (what edit tools receive, independently capped by editimagesize —
-// typically larger, verbatim original bytes when the original fits the cap).
-type imageRefVariant struct {
-	MIME   string
-	Width  int
-	Height int
-	Data   []byte
-}
-
 type ImageRef struct {
 	ID        uint64 `gorm:"primaryKey"`
 	Ref       string `gorm:"uniqueIndex;size:64"`
@@ -53,6 +42,17 @@ type ImageRef struct {
 	EditWidth    int
 	EditHeight   int
 	CreatedAt    time.Time
+}
+
+// imageRefVariant is one fidelity tier of a conversation image: the view
+// variant (what the LLM saw in context, capped by maximagesize) and the edit
+// variant (what edit tools receive, independently capped by editimagesize —
+// typically larger, verbatim original bytes when the original fits the cap).
+type imageRefVariant struct {
+	MIME   string
+	Width  int
+	Height int
+	Data   []byte
 }
 
 // imageRefRandLen: 6 random bytes -> 12 hex chars. 48 bits of randomness with
@@ -132,14 +132,24 @@ func registerImageRef(sessionID int64, origin, sourceURL string, view, edit imag
 	row := ImageRef{SessionID: sessionID, Origin: origin, SourceURL: sourceURL,
 		MIME: view.MIME, Width: view.Width, Height: view.Height, CreatedAt: time.Now()}
 
+	// VIEW file first: a view-write failure then leaves nothing on disk.
+	// (Writing the edit file first would orphan it on this path — the sweep
+	// would eventually clean it, but there is no reason to leave the window.)
+	path, werr := writeFile(ref, view.MIME, view.Data)
+	if werr != nil {
+		loggerImgRef.Warn("image ref store: write failed (ref stays labeled, unresolvable)", "ref", ref, "error", werr.Error())
+		return ref, fmt.Errorf("image ref store: %w", werr)
+	}
+	row.FilePath = path
+
 	// Edit-variant write is best-effort INSIDE registration too: a failure
 	// here must not kill the ref (viewing still works, edits fall back to
 	// the view variant).
 	var editPath string
 	if len(edit.Data) > 0 {
-		p, werr := writeFile(ref+".edit", edit.MIME, edit.Data)
-		if werr != nil {
-			loggerImgRef.Warn("image ref store: edit variant write failed (edit falls back to view variant)", "ref", ref, "error", werr.Error())
+		p, ewerr := writeFile(ref+".edit", edit.MIME, edit.Data)
+		if ewerr != nil {
+			loggerImgRef.Warn("image ref store: edit variant write failed (edit falls back to view variant)", "ref", ref, "error", ewerr.Error())
 		} else {
 			editPath = p
 			row.EditFilePath, row.EditMIME, row.EditWidth, row.EditHeight = p, edit.MIME, edit.Width, edit.Height
@@ -147,25 +157,10 @@ func registerImageRef(sessionID int64, origin, sourceURL string, view, edit imag
 	}
 
 	if theDB == nil {
-		path, werr := writeFile(ref, view.MIME, view.Data)
-		if werr != nil {
-			loggerImgRef.Warn("image ref store: write failed (ref stays labeled, unresolvable)", "ref", ref, "error", werr.Error())
-			return ref, fmt.Errorf("image ref store: %w", werr)
-		}
-		row.FilePath = path
 		loggerImgRef.Warn("image ref store: no database (ref stays labeled, unresolvable)", "ref", ref)
 		return ref, errors.New("image ref store: database not initialized")
 	}
 
-	path, werr := writeFile(ref, view.MIME, view.Data)
-	if werr != nil {
-		loggerImgRef.Warn("image ref store: write failed (ref stays labeled, unresolvable)", "ref", ref, "error", werr.Error())
-		if editPath != "" {
-			os.Remove(editPath)
-		}
-		return ref, fmt.Errorf("image ref store: %w", werr)
-	}
-	row.FilePath = path
 	row.Ref = ref
 	if err := theDB.Create(&row).Error; err != nil {
 		// One collision retry (see imageRefRandLen note), then give up —
@@ -251,18 +246,26 @@ func resolveImageRefArgs(toolArgs map[string]any) error {
 		}
 		// Prefer the edit variant (independently capped by editimagesize —
 		// usually larger than the LLM ever saw); fall back to the view
-		// variant for legacy rows or a missing/unreadable edit file.
-		path, mime := row.FilePath, row.MIME
+		// variant for legacy rows or an unreadable edit file. ReadFile
+		// directly (no Stat first): a file deleted between the check and
+		// the read must fall back, not fail the edit.
+		var data []byte
+		var mime string
 		if row.EditFilePath != "" {
-			if _, serr := os.Stat(row.EditFilePath); serr == nil {
-				path, mime = row.EditFilePath, row.EditMIME
+			ed, rerr := os.ReadFile(row.EditFilePath)
+			if rerr != nil {
+				loggerImgRef.Warn("image ref edit file unreadable, falling back to view variant", "ref", s, "error", rerr.Error())
 			} else {
-				loggerImgRef.Warn("image ref edit file unreadable, falling back to view variant", "ref", s, "error", serr.Error())
+				data, mime = ed, row.EditMIME
 			}
 		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return "", fmt.Errorf("image ref %q could not be read: %v", s, err)
+		if data == nil {
+			var verr error
+			data, verr = os.ReadFile(row.FilePath)
+			if verr != nil {
+				return "", fmt.Errorf("image ref %q could not be read: %v", s, verr)
+			}
+			mime = row.MIME
 		}
 		return "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(data), nil
 	}

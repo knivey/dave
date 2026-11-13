@@ -2572,7 +2572,7 @@ var builtinTools = map[string]builtinToolEntry{
 			Type: "function",
 			Function: &FunctionDefinition{
 				Name:        viewImageToolName,
-				Description: "Download an image from a URL and view it. Accepts a direct image URL or an HTML page — for a page, its primary preview image (og:image) is extracted and clearly labeled as the page's PREVIEW, not its content (use fetch for page text). Use for images found in fetched pages, image links, or generated-image results (prefer the result's image_url field — url is the human-facing page). Each call views one image; the image is attached in the message right after the tool result, labeled with a reference ID. Subject to the context image budget.",
+				Description: "Download an image from a URL and view it. Accepts a direct image URL or an HTML page — for a page, its primary image is extracted (a linked full-size file is preferred; social-preview tags are only the fallback) and the result says so: it may be a preview or thumbnail rather than the original. Use fetch for page text. Use for images found in fetched pages, image links, or generated-image results (prefer the result's image_url field — url is the human-facing page). Each call views one image; the image is attached in the message right after the tool result, labeled with a reference ID. Subject to the context image budget.",
 				Parameters: map[string]any{
 					"type": "object",
 					"properties": map[string]any{

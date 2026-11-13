@@ -45,9 +45,13 @@ func newHTMLPageImageServer(t *testing.T, pageHTML string) *httptest.Server {
 }
 
 // TestHarvestPageImageURLs pins the candidate order and hygiene of the
-// page-image harvest: og:image/twitter:image metas (EXACT names only —
-// og:image:width etc. carry non-URLs) before <img> tags, data-src before
-// src, relative URLs resolved against the page URL, data: URIs skipped,
+// page-image harvest. Owner correction (Nov 2026): og:image is
+// preview-sized BY DESIGN — it must never win when the page links the
+// full-size file. Priority classes: image-extension ANCHORS (the
+// "open file" / original link) first, then <img> tags (data-src before
+// src), og:image/twitter:image metas LAST (exact property/name matches
+// only — og:image:width etc. carry non-URLs). Relative URLs resolve
+// against the page URL; data: and non-http(s) candidates are skipped;
 // deduped, capped.
 func TestHarvestPageImageURLs(t *testing.T) {
 	const base = "https://img.example.com/item/42"
@@ -56,14 +60,22 @@ func TestHarvestPageImageURLs(t *testing.T) {
 		html string
 		want []string
 	}{
-		{"og:image absolute", `<meta property="og:image" content="https://cdn.example.com/a.jpg">`,
+		{"anchor beats img beats og", `<meta property="og:image" content="/thumb.jpg"><img src="/display.webp"><a href="/orig/full.png">open file</a>`,
+			[]string{"https://img.example.com/orig/full.png", "https://img.example.com/display.webp", "https://img.example.com/thumb.jpg"}},
+		{"img beats og when no anchor", `<meta property="og:image" content="/thumb.jpg"><img src="/display.webp">`,
+			[]string{"https://img.example.com/display.webp", "https://img.example.com/thumb.jpg"}},
+		{"og:image falls back when nothing else", `<meta property="og:image" content="https://cdn.example.com/a.jpg">`,
 			[]string{"https://cdn.example.com/a.jpg"}},
 		{"twitter:image when no og", `<meta name="twitter:image" content="https://cdn.example.com/b.jpg">`,
 			[]string{"https://cdn.example.com/b.jpg"}},
-		{"og:image wins over twitter:image", `<meta name="twitter:image" content="https://cdn.example.com/b.jpg"><meta property="og:image" content="https://cdn.example.com/a.jpg">`,
+		{"og:image wins over twitter:image within the meta class", `<meta name="twitter:image" content="https://cdn.example.com/b.jpg"><meta property="og:image" content="https://cdn.example.com/a.jpg">`,
 			[]string{"https://cdn.example.com/a.jpg", "https://cdn.example.com/b.jpg"}},
 		{"og:image:* variants ignored", `<meta property="og:image:width" content="1200"><meta property="og:image" content="https://cdn.example.com/a.jpg">`,
 			[]string{"https://cdn.example.com/a.jpg"}},
+		{"anchors without image extensions are page links, skipped", `<a href="/page/2">next</a><a href="/orig/full.png">open file</a>`,
+			[]string{"https://img.example.com/orig/full.png"}},
+		{"anchor extension check is case-insensitive and query-tolerant", `<a href="/files/Photo.JPEG?download=1">full</a>`,
+			[]string{"https://img.example.com/files/Photo.JPEG?download=1"}},
 		{"img data-src before src, relative resolved", `<img src="placeholder.gif" data-src="/pics/big.webp">`,
 			[]string{"https://img.example.com/pics/big.webp", "https://img.example.com/item/placeholder.gif"}},
 		{"data URIs skipped", `<img src="data:image/gif;base64,R0lGOD"><img src="/real.jpg">`,
@@ -89,8 +101,9 @@ func TestHarvestPageImageURLsCap(t *testing.T) {
 // TestHandleViewImageHTMLPageExtractsLabeledImage pins the owner-approved
 // semantics: a page URL is NOT treated as an image — the extraction says
 // so, the label and ref carry the RESOLVED image URL (never the page), and
-// the note teaches that the preview is not the page's content (no
-// "every link is an image" bias confirmation).
+// the note admits the attached image may be a preview or thumbnail rather
+// than the full-size original (no "every link is an image" bias
+// confirmation).
 func TestHandleViewImageHTMLPageExtractsLabeledImage(t *testing.T) {
 	setupTestDB(t)
 	config.ImagesDir = t.TempDir()
@@ -123,8 +136,10 @@ func TestHandleViewImageHTMLPageExtractsLabeledImage(t *testing.T) {
 
 	assert.Contains(t, toolMsg.Content, "HTML page, not an image",
 		"the tool result must SAY the URL was a page")
-	assert.Contains(t, toolMsg.Content, "preview image",
-		"the extraction must be labeled as the page's preview")
+	assert.Contains(t, toolMsg.Content, "primary image",
+		"the extraction names what was extracted")
+	assert.Contains(t, toolMsg.Content, "may be a preview or thumbnail",
+		"the extraction must admit it may not be the full-size original")
 	assert.Contains(t, toolMsg.Content, picURL,
 		"the tool result names the RESOLVED image source")
 	assert.Contains(t, toolMsg.Content, "use fetch",

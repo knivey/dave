@@ -11,8 +11,9 @@ import (
 
 // maxHarvestedImages bounds the images field: filmstrip-heavy pages carry
 // dozens of thumbnail URLs and the field is a pointer for the model ("these
-// are the images on this page"), not an exhaustive inventory. Document order
-// is preserved, so content images that appear before filmstrips always make
+// are the images on this page"), not an exhaustive inventory. Emission is
+// CLASS-RANKED (see harvestImageURLs below); within a class, document order
+// is preserved, so content images that appear before filmstrips still make
 // the cut.
 const maxHarvestedImages = 20
 
@@ -36,7 +37,9 @@ var imageMetaNames = map[string]bool{
 // the images field with page URLs and evict real images from the cap. The
 // cost of the gate: extension-less originals behind lightbox anchors (e.g.
 // "/65D/orig") are missed — but the wrapped <img src> is still harvested, so
-// a directly viewable image URL always lands in the field.
+// a directly viewable image URL always lands in the field. dave's
+// image_detect.go carries a twin list (`imageFileExtensions`) behind an
+// identical gate for view_image's page resolution — keep both in sync.
 var anchorImageExtensions = []string{
 	".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".bmp", ".svg",
 }
@@ -50,22 +53,28 @@ var dataURIInMarkdown = regexp.MustCompile(`(?i)(!?)\[([^\]]*)]\(data:[^)]*\)`)
 // harvestImageURLs walks the RAW page HTML (not the readability output —
 // readability's text-density scoring drops image-only containers entirely,
 // which is how the direct image URL vanished from fetch results on
-// image-centric pages) and returns candidate image URLs in document order:
-// resolved against pageURL (or the first <base href>, which per spec precedes
-// all content), deduped, data:/non-http schemes skipped, capped at
+// image-centric pages) and returns candidate image URLs resolved against
+// pageURL (or the first <base href>, which per spec precedes all
+// content), deduped, data:/non-http schemes skipped, capped at
 // maxHarvestedImages. Sources: <img src/data-src/srcset/data-srcset>,
 // <picture> <source srcset>, <a href> with an image extension, og:image /
 // twitter:image meta, and <link rel=preload as=image> / <link rel=image_src>.
+//
+// Emission is CLASS-RANKED, not document order (owner correction, Nov
+// 2026): og:image is preview-sized BY WEB CONVENTITION (confirmed against
+// production imgsite — it is the display thumb), and the field's FIRST
+// entry is what the model treats as "the image behind the page". Direct
+// FILE links (extension-gated anchors + preload/image_src links) come
+// first, then displayed <img>/<source> images, and social-preview metas
+// last — even though the metas sit in <head> and win every document-order
+// race. Within a class, document order is preserved, so content images
+// that appear before filmstrips still make the cut.
 func harvestImageURLs(pageURL *url.URL, body []byte) []string {
 	seen := make(map[string]bool)
-	var out []string
-	capped := false
+	var files, displayed, metas []string
 	base := pageURL
 
-	add := func(raw string) {
-		if capped {
-			return
-		}
+	addTo := func(bucket *[]string, raw string) {
 		raw = strings.TrimSpace(raw)
 		if raw == "" || strings.HasPrefix(strings.ToLower(raw), "data:") {
 			return
@@ -83,13 +92,14 @@ func harvestImageURLs(pageURL *url.URL, body []byte) []string {
 			return
 		}
 		seen[s] = true
-		out = append(out, s)
-		if len(out) >= maxHarvestedImages {
-			capped = true
-		}
+		*bucket = append(*bucket, s)
 	}
 
 	z := html.NewTokenizer(bytes.NewReader(body))
+	// Deliberate full-tokenize: the old cap break froze document order,
+	// which is incompatible with ranking a late-in-document file link
+	// first. The walk is bounded by the fetch's maxBodySize; the cap
+	// truncates AFTER the class-ranked concat.
 	for {
 		tt := z.Next()
 		if tt == html.ErrorToken {
@@ -104,14 +114,14 @@ func harvestImageURLs(pageURL *url.URL, body []byte) []string {
 			attrs := tokenAttrs(z)
 			// data-* first: lazy-load convention puts the real image in
 			// data-src and a 1x placeholder in src, and document order
-			// decides what survives the cap.
-			add(attrs["data-src"])
+			// decides what survives the cap within the class.
+			addTo(&displayed, attrs["data-src"])
 			for _, u := range srcsetURLs(attrs["data-srcset"]) {
-				add(u)
+				addTo(&displayed, u)
 			}
-			add(attrs["src"])
+			addTo(&displayed, attrs["src"])
 			for _, u := range srcsetURLs(attrs["srcset"]) {
-				add(u)
+				addTo(&displayed, u)
 			}
 		case "source":
 			// <picture> alternatives. HTML requires <picture> to contain an
@@ -119,14 +129,14 @@ func harvestImageURLs(pageURL *url.URL, body []byte) []string {
 			// would not carry (e.g. avif/webp variants).
 			attrs := tokenAttrs(z)
 			for _, u := range srcsetURLs(attrs["srcset"]) {
-				add(u)
+				addTo(&displayed, u)
 			}
 			for _, u := range srcsetURLs(attrs["data-srcset"]) {
-				add(u)
+				addTo(&displayed, u)
 			}
 		case "a":
 			if href := tokenAttrs(z)["href"]; looksLikeImageURL(href) {
-				add(href)
+				addTo(&files, href)
 			}
 		case "base":
 			// Pages with <base href> resolve relative URLs against it, not
@@ -146,7 +156,7 @@ func harvestImageURLs(pageURL *url.URL, body []byte) []string {
 				key = attrs["name"]
 			}
 			if imageMetaNames[key] {
-				add(attrs["content"])
+				addTo(&metas, attrs["content"])
 			}
 		case "link":
 			attrs := tokenAttrs(z)
@@ -157,17 +167,18 @@ func harvestImageURLs(pageURL *url.URL, body []byte) []string {
 			// "as" is ASCII case-insensitive per spec, like rel.
 			if relTokens["preload"] && strings.EqualFold(attrs["as"], "image") {
 				for _, u := range srcsetURLs(attrs["imagesrcset"]) {
-					add(u)
+					addTo(&files, u)
 				}
-				add(attrs["imagesrc"])
+				addTo(&files, attrs["imagesrc"])
 			}
 			if relTokens["image_src"] {
-				add(attrs["href"])
+				addTo(&files, attrs["href"])
 			}
 		}
-		if capped {
-			break
-		}
+	}
+	out := append(append(files, displayed...), metas...)
+	if len(out) > maxHarvestedImages {
+		out = out[:maxHarvestedImages]
 	}
 	return out
 }

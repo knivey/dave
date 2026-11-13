@@ -399,25 +399,60 @@ func downloadImage(url string) ([]byte, string, error) {
 	return data, contentType, nil
 }
 
+// imageFileExtensions gates which <a href> values count as image links:
+// anchors that merely WRAP a thumbnail (gallery filmstrips) are page
+// links, not images — harvesting extension-less hrefs would flood the
+// candidate list with page URLs (same gate fetch-mcp's harvest uses).
+var imageFileExtensions = []string{
+	".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".bmp", ".svg",
+}
+
+// looksLikeImageFileURL reports whether raw looks like a direct image
+// file link: the URL's path (query and fragment ignored) ends in a known
+// image extension, case-insensitively.
+func looksLikeImageFileURL(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false
+	}
+	u, err := neturl.Parse(raw)
+	if err != nil {
+		return false
+	}
+	path := strings.ToLower(u.Path)
+	for _, ext := range imageFileExtensions {
+		if strings.HasSuffix(path, ext) {
+			return true
+		}
+	}
+	return false
+}
+
 // pageImageCandidateCap bounds how many harvested candidates view_image
 // will try when resolving an HTML page to its image.
 const pageImageCandidateCap = 5
 
-// harvestPageImageURLs extracts candidate image URLs from an HTML page, in
-// priority order: og:image / twitter:image meta tags (EXACT property/name
-// matches only — og:image:width and friends carry non-URLs, the same lesson
-// fetch-mcp's harvest learned), then <img> tags with data-src before src
-// (the lazy-load convention keeps the real image in data-src). Relative
-// URLs resolve against the page URL; data: and non-http(s) candidates are
-// skipped; deduped, capped. It is a best-effort harvest over a truncated
-// buffer: no error return, just fewer candidates.
+// harvestPageImageURLs extracts candidate image URLs from an HTML page in
+// PRIORITY CLASSES, not document order. Owner correction (Nov 2026,
+// production-confirmed): og:image is preview-sized BY WEB CONVENTITION
+// (imgsite sets it to the display thumb; every social-scraped page uses
+// it for cards) — a page that links its full-size file must hand the
+// model THAT. Classes: image-extension ANCHORS first (the "open file" /
+// original link), then <img> tags with data-src before src (the
+// lazy-load convention keeps the real image in data-src), og:image and
+// twitter:image metas LAST as the fallback when nothing else exists
+// (EXACT property/name matches only — og:image:width and friends carry
+// non-URLs). Relative URLs resolve against the page URL; data: and
+// non-http(s) candidates are skipped; deduped, capped. It is a
+// best-effort harvest over a truncated buffer: no error return, just
+// fewer candidates.
 func harvestPageImageURLs(body []byte, baseURL string) []string {
 	base, err := neturl.Parse(baseURL)
 	if err != nil || !base.IsAbs() {
 		return nil
 	}
 
-	var og, tw, imgs []string
+	var anchors, imgs, og, tw []string
 	tk := html.NewTokenizer(bytes.NewReader(body))
 	for {
 		tt := tk.Next()
@@ -429,7 +464,7 @@ func harvestPageImageURLs(body []byte, baseURL string) []string {
 		}
 		tagBytes, _ := tk.TagName()
 		tag := string(tagBytes)
-		if tag != "meta" && tag != "img" {
+		if tag != "meta" && tag != "img" && tag != "a" {
 			continue
 		}
 		var attrs map[string]string
@@ -444,6 +479,10 @@ func harvestPageImageURLs(body []byte, baseURL string) []string {
 			}
 		}
 		switch tag {
+		case "a":
+			if looksLikeImageFileURL(attrs["href"]) {
+				anchors = append(anchors, attrs["href"])
+			}
 		case "meta":
 			if attrs["property"] == "og:image" && attrs["content"] != "" {
 				og = append(og, attrs["content"])
@@ -487,14 +526,17 @@ func harvestPageImageURLs(body []byte, baseURL string) []string {
 			out = append(out, resolved)
 		}
 	}
+	for _, a := range anchors {
+		add(a)
+	}
+	for _, i := range imgs {
+		add(i)
+	}
 	for _, m := range og {
 		add(m)
 	}
 	for _, m := range tw {
 		add(m)
-	}
-	for _, i := range imgs {
-		add(i)
 	}
 	return out
 }
@@ -913,7 +955,7 @@ func (cr *chatRunner) handleViewImage(turn *turnContext, call ToolCall) bool {
 	}
 	if fromPage != "" {
 		turn.Add(toolResultMsg(call.ID, fmt.Sprintf(
-			"URL was an HTML page, not an image. Extracted its primary preview image and attached it in the next message — ref: %s. Source: %s (%dx%d). Requested page: %s. NOTE: this is the page's preview image, not necessarily the page's content — use fetch for the page's text.",
+			"URL was an HTML page, not an image. Extracted the page's primary image and attached it in the next message — ref: %s. Source: %s (%dx%d). Requested page: %s. NOTE: the attached image may be a preview or thumbnail rather than the full-size original — use fetch for the page's text.",
 			ref, srcURL, fi.Width, fi.Height, fromPage)))
 	} else {
 		turn.Add(toolResultMsg(call.ID, fmt.Sprintf(

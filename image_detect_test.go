@@ -19,6 +19,7 @@ import (
 	neturl "net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/image/bmp"
+	"golang.org/x/image/tiff"
 )
 
 // newHTMLPageImageServer serves /pic.jpg (real JPEG) and every other path
@@ -1779,6 +1781,22 @@ func TestProbeImageConfig(t *testing.T) {
 		assert.Equal(t, 4000, w)
 		assert.Equal(t, 3000, h)
 	})
+	t.Run("bmp", func(t *testing.T) {
+		var buf bytes.Buffer
+		require.NoError(t, bmp.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 640, 480))))
+		w, h, ok := probeImageConfig(buf.Bytes())
+		assert.True(t, ok)
+		assert.Equal(t, 640, w)
+		assert.Equal(t, 480, h)
+	})
+	t.Run("tiff", func(t *testing.T) {
+		var buf bytes.Buffer
+		require.NoError(t, tiff.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 1024, 768)), nil))
+		w, h, ok := probeImageConfig(buf.Bytes())
+		assert.True(t, ok)
+		assert.Equal(t, 1024, w)
+		assert.Equal(t, 768, h)
+	})
 	t.Run("ico dir entry dims", func(t *testing.T) {
 		// ICONDIR (6 bytes) + one 16-byte entry: width, height bytes 0
 		// meaning 256.
@@ -1891,8 +1909,10 @@ func TestHandleViewImageFilmstripPicksOwnImage(t *testing.T) {
 		return buf.Bytes()
 	}()
 
+	var imgHits atomic.Int32
 	mu := sync.Mutex{}
 	imgSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		imgHits.Add(1)
 		mu.Lock()
 		defer mu.Unlock()
 		if strings.HasPrefix(r.URL.Path, "/6A5/") {
@@ -1931,4 +1951,23 @@ func TestHandleViewImageFilmstripPicksOwnImage(t *testing.T) {
 	label := injected.MultiContent[0].Text
 	assert.Contains(t, label, "/6A5/full/256.png", "the page's OWN viewer image must win")
 	assert.NotContains(t, label, "/691/", "a filmstrip neighbor must never be picked")
+
+	// Declared dims were present, so the probe must NOT have run: the
+	// only image request is the winner's own fetch.
+	assert.Equal(t, int32(1), imgHits.Load(),
+		"declared dims must skip the header probe entirely (one winner fetch, zero probes)")
+}
+
+// TestHarvestPageImageURLsSrcsetDataURIGuard is the review-2 regression:
+// srcset terminates URLs at commas, and a data: URI's base64 payload
+// splits into fragments that parse as relative URLs — after a data:
+// candidate, only fresh-looking URLs with an image extension count.
+func TestHarvestPageImageURLsSrcsetDataURIGuard(t *testing.T) {
+	html := `<img srcset="data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ 1x, /real-after.jpg 2x">`
+	got, _ := harvestPageImageURLs([]byte(html), "https://img.example.com/p")
+	assert.Equal(t, []string{"https://img.example.com/real-after.jpg"}, got)
+
+	html2 := `<img srcset="data:image/png;base64,iVBORw0KGgoAAA 1x">`
+	got2, _ := harvestPageImageURLs([]byte(html2), "https://img.example.com/p")
+	assert.Empty(t, got2, "a lone data: srcset yields no candidates")
 }

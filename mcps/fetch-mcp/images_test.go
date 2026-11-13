@@ -269,6 +269,21 @@ func TestHarvestImageURLsClassRanking(t *testing.T) {
 		}, got)
 	})
 
+	t.Run("link and anchor count together as the file-link batch", func(t *testing.T) {
+		html := `<html><head>` +
+			`<link rel="image_src" href="/legacy-full.png">` +
+			`</head><body>` +
+			`<img src="/display.webp">` +
+			`<a href="/AAA1/orig.jpg">open file</a>` +
+			`</body></html>`
+		got := harvestImageURLs(base, []byte(html))
+		assert.Equal(t, []string{
+			"https://img.example.com/display.webp",
+			"https://img.example.com/legacy-full.png",
+			"https://img.example.com/AAA1/orig.jpg",
+		}, got, "two distinct file links = a batch, below the displayed image")
+	})
+
 	t.Run("filmstrip batch demoted below the page's own viewer image", func(t *testing.T) {
 		html := `<html><head>` +
 			`<meta property="og:image" content="/thumb.jpg">` +
@@ -286,4 +301,20 @@ func TestHarvestImageURLsClassRanking(t *testing.T) {
 			"https://img.example.com/thumb.jpg",         // social preview, last
 		}, got)
 	})
+}
+
+// TestHarvestImageURLsAttrAreaBeatsSrcsetDescriptor is the review-1
+// regression: when a URL appears both as src (with width/height attrs —
+// a pixel AREA) and inside srcset (a width DESCRIPTOR), the larger score
+// must win; first-wins dedupe froze it at the descriptor and let a
+// small attr-scored neighbor thumb outrank the page's own viewer image.
+func TestHarvestImageURLsAttrAreaBeatsSrcsetDescriptor(t *testing.T) {
+	base := mustURL(t, "https://img.example.com/AAA1/_DSC1234")
+	html := `<img src="/AAA1/full/256.jpg" srcset="/AAA1/full/256.jpg 2294w" width="2294" height="4080">` +
+		`<img src="/n1/small.webp" width="120" height="90">`
+	got := harvestImageURLs(base, []byte(html))
+	assert.Equal(t, []string{
+		"https://img.example.com/AAA1/full/256.jpg", // 2294*4080 area wins
+		"https://img.example.com/n1/small.webp",     // 120*90 loses
+	}, got)
 }

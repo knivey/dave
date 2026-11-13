@@ -505,7 +505,7 @@ func parseISOBMFFDims(data []byte) (w, h int, ok bool) {
 						return pw, ph, true
 					}
 				}
-			case "meta", "iprp", "ipco", "ipma", "moov", "trak", "mdia", "minf", "stbl":
+			case "meta", "iprp", "ipco":
 				// meta is a FullBox (4 flag bytes); iprp/ipco are plain.
 				start := 0
 				if typ == "meta" {
@@ -712,6 +712,11 @@ func harvestPageImageURLs(body []byte, baseURL string) (out []string, anyDeclare
 	sort.SliceStable(imgs, func(i, j int) bool {
 		return imgs[i].declared > imgs[j].declared
 	})
+	// anyDeclared is computed over ALL harvested img candidates, not
+	// just the emitted ones: a data:-src placeholder carrying dims, or an
+	// img past the cap, still proves the page DECLARES sizes — the probe
+	// is for pages whose markup is blind, and a page that annotates its
+	// images (even its placeholders) is not that.
 	for _, c := range imgs {
 		if c.declared > 0 {
 			anyDeclared = true
@@ -805,16 +810,27 @@ func atoiStrict(s string) (int64, bool) {
 
 // srcsetCandidates splits a srcset attribute into (url, descriptor-score)
 // pairs; the pixel-width descriptor doubles as the declared-size score.
+// The data-URI continuation guard mirrors fetch-mcp's srcsetURLs (keep
+// the twins in sync): srcset terminates URLs at commas, so a data: URI's
+// base64 payload lands in the NEXT candidate — and base64 payloads often
+// start with "/" (every base64 JPEG is "/9j/…"), which would otherwise
+// resolve as a page-relative URL. After a data: candidate, only
+// fresh-shaped URLs carrying an image extension count.
 func srcsetCandidates(s string) []pageImageCand {
 	if strings.TrimSpace(s) == "" {
 		return nil
 	}
 	var out []pageImageCand
+	prevWasData := false
 	for _, cand := range strings.Split(s, ",") {
 		fields := strings.Fields(strings.TrimSpace(cand))
 		if len(fields) == 0 {
 			continue
 		}
+		if prevWasData && (!freshSrcsetURL(fields[0]) || !looksLikeImageFileURL(fields[0])) {
+			continue
+		}
+		prevWasData = strings.HasPrefix(strings.ToLower(fields[0]), "data:")
 		var score int64
 		if len(fields) > 1 && strings.HasSuffix(fields[1], "w") {
 			if n, ok := atoiStrict(strings.TrimSuffix(fields[1], "w")); ok {
@@ -824,6 +840,15 @@ func srcsetCandidates(s string) []pageImageCand {
 		out = append(out, pageImageCand{url: fields[0], declared: score})
 	}
 	return out
+}
+
+// freshSrcsetURL reports whether a srcset candidate starts like a
+// standalone URL rather than a data-URI continuation (twin of
+// fetch-mcp's freshSrcsetURL).
+func freshSrcsetURL(u string) bool {
+	return strings.HasPrefix(u, "/") ||
+		strings.Contains(u, "://") ||
+		strings.HasPrefix(u, "//")
 }
 
 // convertToFetched is the shared download→convert dressing: bytes of any

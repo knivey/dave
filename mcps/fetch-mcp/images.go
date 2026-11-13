@@ -81,44 +81,50 @@ func harvestImageURLs(pageURL *url.URL, body []byte) []string {
 	var metas []string
 	base := pageURL
 
-	addTo := func(bucket *[]string, raw string) {
+	// resolveValid trims, rejects data:/non-http(s), and resolves against
+	// the current base. Shared by both add paths so they cannot drift.
+	resolveValid := func(raw string) (string, bool) {
 		raw = strings.TrimSpace(raw)
 		if raw == "" || strings.HasPrefix(strings.ToLower(raw), "data:") {
-			return
+			return "", false
 		}
 		u, err := url.Parse(raw)
 		if err != nil {
-			return
+			return "", false
 		}
 		resolved := base.ResolveReference(u)
 		if resolved.Scheme != "http" && resolved.Scheme != "https" {
-			return
+			return "", false
 		}
-		s := resolved.String()
-		if seen[s] {
+		return resolved.String(), true
+	}
+	addTo := func(bucket *[]string, raw string) {
+		s, ok := resolveValid(raw)
+		if !ok || seen[s] {
 			return
 		}
 		seen[s] = true
 		*bucket = append(*bucket, s)
 	}
+	scoreIndex := make(map[string]int)
 	addScored := func(raw string, declared int64) {
-		raw = strings.TrimSpace(raw)
-		if raw == "" || strings.HasPrefix(strings.ToLower(raw), "data:") {
+		s, ok := resolveValid(raw)
+		if !ok {
 			return
 		}
-		u, err := url.Parse(raw)
-		if err != nil {
-			return
-		}
-		resolved := base.ResolveReference(u)
-		if resolved.Scheme != "http" && resolved.Scheme != "https" {
-			return
-		}
-		s := resolved.String()
-		if seen[s] {
+		if i, dup := scoreIndex[s]; dup {
+			// MAX-WINS: a URL may appear as src (carrying the element's
+			// width/height AREA) and inside srcset (carrying a width
+			// DESCRIPTOR) — the larger claim must win, or a small
+			// attr-scored neighbor outranks the page's own viewer image
+			// (review finding 1).
+			if declared > displayedScored[i].declared {
+				displayedScored[i].declared = declared
+			}
 			return
 		}
 		seen[s] = true
+		scoreIndex[s] = len(displayedScored)
 		displayedScored = append(displayedScored, scoredURL{url: s, declared: declared})
 	}
 

@@ -50,12 +50,14 @@ func TestHarvestImageURLs(t *testing.T) {
 			want: []string{"https://img.example.com/lazy/1.png", "https://img.example.com/placeholder.gif"},
 		},
 		{
+			// Class-ranked since the Nov 2026 og:image correction: anchors
+			// (files) before displayed imgs, document order within a class.
 			name: "anchor with image extension harvested with and without wrapped img",
 			html: `<a href="/AAA1/orig.jpg"><img src="/AAA1/full/256.jpg"></a><a href="/files/original.jpeg">download</a>`,
 			want: []string{
 				"https://img.example.com/AAA1/orig.jpg",
-				"https://img.example.com/AAA1/full/256.jpg",
 				"https://img.example.com/files/original.jpeg",
+				"https://img.example.com/AAA1/full/256.jpg",
 			},
 		},
 		{
@@ -239,4 +241,31 @@ func TestElideDataURIs(t *testing.T) {
 			assert.Equal(t, tt.want, elideDataURIs(tt.in))
 		})
 	}
+}
+
+// TestHarvestImageURLsClassRanking pins the owner correction (Nov 2026):
+// og:image is preview-sized BY WEB CONVENTITION (production-confirmed
+// against imgsite: og:image = display thumb), and the images field's
+// FIRST entry is what the model treats as "the image behind the page".
+// Full-size FILE links (extension-gated anchors, preload/image_src
+// links) outrank displayed <img>s; social-preview metas are the LAST
+// resort — even though they sit in <head> and win every document-order
+// race. Within a class, document order is preserved.
+func TestHarvestImageURLsClassRanking(t *testing.T) {
+	base := mustURL(t, "https://img.example.com/AAA1/_DSC1234")
+	html := `<html><head>` +
+		`<meta property="og:image" content="/thumb.jpg">` +
+		`<link rel="image_src" href="/legacy-full.png">` +
+		`</head><body>` +
+		`<img src="/display.webp">` +
+		`<a href="/AAA1/orig.jpg">open file</a>` +
+		`</body></html>`
+	want := []string{
+		"https://img.example.com/legacy-full.png", // link: a real file resource
+		"https://img.example.com/AAA1/orig.jpg",   // anchor: the file itself
+		"https://img.example.com/display.webp",    // displayed image
+		"https://img.example.com/thumb.jpg",       // social preview, last resort
+	}
+	got := harvestImageURLs(base, []byte(html))
+	assert.Equal(t, want, got)
 }

@@ -24,6 +24,17 @@ var loggerImgRef = newLogger("imageref")
 // refs. The store must outlive live history because compaction strips image
 // parts to [image] placeholders — the ref label text survives, the data URI
 // does not.
+// imageRefVariant is one fidelity tier of a conversation image: the view
+// variant (what the LLM saw in context, capped by maximagesize) and the edit
+// variant (what edit tools receive, independently capped by editimagesize —
+// typically larger, verbatim original bytes when the original fits the cap).
+type imageRefVariant struct {
+	MIME   string
+	Width  int
+	Height int
+	Data   []byte
+}
+
 type ImageRef struct {
 	ID        uint64 `gorm:"primaryKey"`
 	Ref       string `gorm:"uniqueIndex;size:64"`
@@ -34,7 +45,14 @@ type ImageRef struct {
 	FilePath  string `gorm:"type:text"`
 	Width     int
 	Height    int
-	CreatedAt time.Time
+	// Edit variant columns: empty EditFilePath = no edit variant (legacy
+	// rows minted before the knob, or a degraded registration) — consumers
+	// fall back to the view variant.
+	EditFilePath string `gorm:"type:text"`
+	EditMIME     string `gorm:"size:64"`
+	EditWidth    int
+	EditHeight   int
+	CreatedAt    time.Time
 }
 
 // imageRefRandLen: 6 random bytes -> 12 hex chars. 48 bits of randomness with
@@ -78,19 +96,21 @@ func imageExtForMIME(mime string) string {
 	}
 }
 
-// registerImageRef stores data at <images_dir>/<ref>.<ext> and inserts the
-// row. BEST-EFFORT CONTRACT: callers label the ref in the conversation
-// REGARDLESS of the returned error — seeing the image is the point, and an
-// unresolvable ref degrades to a readable error in the future edit tool,
-// never a broken turn. When minting succeeded, the ref is returned non-empty
-// even alongside an error so callers can keep the label shape stable.
-func registerImageRef(sessionID int64, origin, sourceURL, mime string, width, height int, data []byte) (string, error) {
+// registerImageRef stores each variant at <images_dir>/<ref>.<ext> (view)
+// and <images_dir>/<ref>.edit.<ext> (edit) and inserts the row.
+// BEST-EFFORT CONTRACT: callers label the ref in the conversation REGARDLESS
+// of the returned error — seeing the image is the point, and an unresolvable
+// ref degrades to a readable error in the future edit tool, never a broken
+// turn. When minting succeeded, the ref is returned non-empty even alongside
+// an error so callers can keep the label shape stable. An edit variant whose
+// file write fails degrades to a view-only ref (WARN) — never a failed turn.
+func registerImageRef(sessionID int64, origin, sourceURL string, view, edit imageRefVariant) (string, error) {
 	prefix := imageRefPrefix(origin)
 	ref, err := mintImageRef(prefix)
 	if err != nil {
 		return "", err
 	}
-	if len(data) == 0 {
+	if len(view.Data) == 0 {
 		return ref, errors.New("image ref store: no image data")
 	}
 
@@ -104,15 +124,30 @@ func registerImageRef(sessionID int64, origin, sourceURL, mime string, width, he
 		return ref, fmt.Errorf("image ref store: %w", err)
 	}
 
-	writeFile := func(r string) (string, error) {
+	writeFile := func(r string, mime string, data []byte) (string, error) {
 		p := filepath.Join(dir, r+"."+imageExtForMIME(mime))
 		return p, os.WriteFile(p, data, 0o644)
 	}
 
-	row := ImageRef{SessionID: sessionID, Origin: origin, SourceURL: sourceURL, MIME: mime, Width: width, Height: height, CreatedAt: time.Now()}
+	row := ImageRef{SessionID: sessionID, Origin: origin, SourceURL: sourceURL,
+		MIME: view.MIME, Width: view.Width, Height: view.Height, CreatedAt: time.Now()}
+
+	// Edit-variant write is best-effort INSIDE registration too: a failure
+	// here must not kill the ref (viewing still works, edits fall back to
+	// the view variant).
+	var editPath string
+	if len(edit.Data) > 0 {
+		p, werr := writeFile(ref+".edit", edit.MIME, edit.Data)
+		if werr != nil {
+			loggerImgRef.Warn("image ref store: edit variant write failed (edit falls back to view variant)", "ref", ref, "error", werr.Error())
+		} else {
+			editPath = p
+			row.EditFilePath, row.EditMIME, row.EditWidth, row.EditHeight = p, edit.MIME, edit.Width, edit.Height
+		}
+	}
 
 	if theDB == nil {
-		path, werr := writeFile(ref)
+		path, werr := writeFile(ref, view.MIME, view.Data)
 		if werr != nil {
 			loggerImgRef.Warn("image ref store: write failed (ref stays labeled, unresolvable)", "ref", ref, "error", werr.Error())
 			return ref, fmt.Errorf("image ref store: %w", werr)
@@ -122,25 +157,48 @@ func registerImageRef(sessionID int64, origin, sourceURL, mime string, width, he
 		return ref, errors.New("image ref store: database not initialized")
 	}
 
-	path, werr := writeFile(ref)
+	path, werr := writeFile(ref, view.MIME, view.Data)
 	if werr != nil {
 		loggerImgRef.Warn("image ref store: write failed (ref stays labeled, unresolvable)", "ref", ref, "error", werr.Error())
+		if editPath != "" {
+			os.Remove(editPath)
+		}
 		return ref, fmt.Errorf("image ref store: %w", werr)
 	}
-	row.Ref, row.FilePath = ref, path
+	row.FilePath = path
+	row.Ref = ref
 	if err := theDB.Create(&row).Error; err != nil {
 		// One collision retry (see imageRefRandLen note), then give up —
-		// the orphaned file is removed so the sweep never sees it.
+		// the orphaned files are removed so the sweep never sees them.
 		os.Remove(path)
+		if editPath != "" {
+			os.Remove(editPath)
+		}
 		if ref2, e2 := mintImageRef(prefix); e2 == nil {
-			if path2, w2 := writeFile(ref2); w2 == nil {
+			var path2, editPath2 string
+			if p2, w2 := writeFile(ref2, view.MIME, view.Data); w2 == nil {
+				path2 = p2
+				if len(edit.Data) > 0 {
+					if ep2, ew2 := writeFile(ref2+".edit", edit.MIME, edit.Data); ew2 == nil {
+						editPath2 = ep2
+					} else {
+						loggerImgRef.Warn("image ref store: edit variant write failed on retry (edit falls back to view variant)", "ref", ref2, "error", ew2.Error())
+					}
+				}
 				row.Ref, row.FilePath = ref2, path2
+				row.EditFilePath, row.EditMIME, row.EditWidth, row.EditHeight = "", "", 0, 0
+				if editPath2 != "" {
+					row.EditFilePath, row.EditMIME, row.EditWidth, row.EditHeight = editPath2, edit.MIME, edit.Width, edit.Height
+				}
 				e3 := theDB.Create(&row).Error
 				if e3 == nil {
 					loggerImgRef.Debug("image ref registered (retry)", "ref", ref2, "origin", origin)
 					return ref2, nil
 				}
 				os.Remove(path2)
+				if editPath2 != "" {
+					os.Remove(editPath2)
+				}
 				ref = ref2
 				err = e3
 			}
@@ -148,7 +206,7 @@ func registerImageRef(sessionID int64, origin, sourceURL, mime string, width, he
 		loggerImgRef.Warn("image ref store: insert failed (ref stays labeled, unresolvable)", "ref", ref, "error", err.Error())
 		return ref, fmt.Errorf("image ref store: %w", err)
 	}
-	loggerImgRef.Debug("image ref registered", "ref", ref, "origin", origin, "session", sessionID)
+	loggerImgRef.Debug("image ref registered", "ref", ref, "origin", origin, "session", sessionID, "edit_variant", row.EditFilePath != "")
 	return ref, nil
 }
 
@@ -191,11 +249,22 @@ func resolveImageRefArgs(toolArgs map[string]any) error {
 		if err != nil {
 			return "", fmt.Errorf("image ref %q could not be resolved: %v", s, err)
 		}
-		data, err := os.ReadFile(row.FilePath)
+		// Prefer the edit variant (independently capped by editimagesize —
+		// usually larger than the LLM ever saw); fall back to the view
+		// variant for legacy rows or a missing/unreadable edit file.
+		path, mime := row.FilePath, row.MIME
+		if row.EditFilePath != "" {
+			if _, serr := os.Stat(row.EditFilePath); serr == nil {
+				path, mime = row.EditFilePath, row.EditMIME
+			} else {
+				loggerImgRef.Warn("image ref edit file unreadable, falling back to view variant", "ref", s, "error", serr.Error())
+			}
+		}
+		data, err := os.ReadFile(path)
 		if err != nil {
 			return "", fmt.Errorf("image ref %q could not be read: %v", s, err)
 		}
-		return "data:" + row.MIME + ";base64," + base64.StdEncoding.EncodeToString(data), nil
+		return "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(data), nil
 	}
 	switch entries := raw.(type) {
 	case []string:
@@ -238,8 +307,11 @@ func cleanupImageRefsByAge(maxAgeDays int) (int64, error) {
 		return 0, nil
 	}
 	for _, row := range rows {
-		if row.FilePath != "" {
-			if err := os.Remove(row.FilePath); err != nil && !os.IsNotExist(err) {
+		for _, p := range []string{row.FilePath, row.EditFilePath} {
+			if p == "" {
+				continue
+			}
+			if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 				loggerImgRef.Warn("image ref cleanup: unlink failed", "ref", row.Ref, "error", err.Error())
 			}
 		}
@@ -268,6 +340,9 @@ func sweepOrphanImageFiles(dir string, grace time.Duration) (int, error) {
 		for _, r := range rows {
 			if r.FilePath != "" {
 				known[filepath.Base(r.FilePath)] = true
+			}
+			if r.EditFilePath != "" {
+				known[filepath.Base(r.EditFilePath)] = true
 			}
 		}
 	}

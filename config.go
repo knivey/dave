@@ -37,6 +37,9 @@ type Config struct {
 	Notices              NoticesConfig       `toml:"-"`
 	HiddenTools          []string            `toml:"hidden_tools"`
 	MaxImagePixels       int                 `toml:"maximagepixels"`
+	EditImageSize        string              `toml:"editimagesize"`
+	EditImageWidth       int                 `toml:"-"`
+	EditImageHeight      int                 `toml:"-"`
 	TrustedImageHosts    []string            `toml:"trusted_image_hosts"`
 	ImagesDir            string              `toml:"images_dir"`
 	DisabledBuiltins     []string            `toml:"disabled_builtins"`
@@ -768,6 +771,27 @@ func loadConfigDir(dir string) (Config, error) {
 	}
 	if config.MaxImagePixels <= 0 {
 		config.MaxImagePixels = defaultMaxImagePixels
+	}
+	// editimagesize is the independent cap for images resolved for EDITING
+	// (usr_/web_ refs expanded into input_images): unset means edit variants
+	// are minted at the same cap as the LLM view size (pre-knob behavior).
+	if config.EditImageSize != "" {
+		parts := strings.Split(config.EditImageSize, "x")
+		if len(parts) != 2 {
+			return config, fmt.Errorf("editimagesize must be in format WxH (e.g., 2048x2048)")
+		}
+		var w, h int
+		if _, err := fmt.Sscanf(parts[0], "%d", &w); err != nil {
+			return config, fmt.Errorf("invalid editimagesize width: %w", err)
+		}
+		if _, err := fmt.Sscanf(parts[1], "%d", &h); err != nil {
+			return config, fmt.Errorf("invalid editimagesize height: %w", err)
+		}
+		if w <= 0 || h <= 0 {
+			return config, fmt.Errorf("editimagesize dimensions must be positive (got %dx%d)", w, h)
+		}
+		config.EditImageWidth = w
+		config.EditImageHeight = h
 	}
 	if config.ImagesDir == "" {
 		config.ImagesDir = "data/images"

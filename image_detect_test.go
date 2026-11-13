@@ -17,6 +17,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	neturl "net/url"
+	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1094,13 +1096,14 @@ func TestFetchAndConvertImage(t *testing.T) {
 	config.TrustedImageHosts = []string{"127.0.0.1"}
 	t.Cleanup(func() { config.TrustedImageHosts = nil })
 
-	fi, err := fetchAndConvertImage(srv.URL+"/pic.jpg", "jpg", 75, 1024, 1024, 0)
+	view, edit, err := fetchAndConvertImageVariants(srv.URL+"/pic.jpg", "jpg", 75, 1024, 1024, 1024, 1024, 0)
 	require.NoError(t, err)
-	assert.Contains(t, fi.DataURI, "data:image/jpeg;base64,")
-	assert.NotEmpty(t, fi.Encoded)
-	assert.Equal(t, "image/jpeg", fi.MIME)
-	assert.Greater(t, fi.Width, 0)
-	assert.Greater(t, fi.Height, 0)
+	assert.Contains(t, view.DataURI, "data:image/jpeg;base64,")
+	assert.NotEmpty(t, view.Encoded)
+	assert.Equal(t, "image/jpeg", view.MIME)
+	assert.Greater(t, view.Width, 0)
+	assert.Greater(t, view.Height, 0)
+	assert.NotNil(t, edit, "small originals still produce an edit variant (verbatim)")
 }
 
 // patchPNGDimensions rewrites the IHDR width/height fields of a PNG and
@@ -1700,7 +1703,7 @@ func TestFetchViewImageSourceDirectLargeImage(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	fi, src, fromPage, err := fetchViewImageSource(srv.URL+"/big.jpg", "jpg", 75, 1024, 1024, rootMaxImagePixels())
+	fi, _, src, fromPage, err := fetchViewImageSource(srv.URL+"/big.jpg", "jpg", 75, 1024, 1024, rootMaxImagePixels())
 	require.NoError(t, err, "a direct image over 2MiB must still view (10MiB budget)")
 	assert.Equal(t, srv.URL+"/big.jpg", src)
 	assert.Empty(t, fromPage)
@@ -1970,4 +1973,202 @@ func TestHarvestPageImageURLsSrcsetDataURIGuard(t *testing.T) {
 	html2 := `<img srcset="data:image/png;base64,iVBORw0KGgoAAA 1x">`
 	got2, _ := harvestPageImageURLs([]byte(html2), "https://img.example.com/p")
 	assert.Empty(t, got2, "a lone data: srcset yields no candidates")
+}
+
+func TestEditImageCaps(t *testing.T) {
+	origW, origH := config.EditImageWidth, config.EditImageHeight
+	t.Cleanup(func() { config.EditImageWidth, config.EditImageHeight = origW, origH })
+
+	config.EditImageWidth, config.EditImageHeight = 0, 0
+	w, h := editImageCaps(1024, 768)
+	assert.Equal(t, 1024, w, "unset knob falls back to the LLM view width")
+	assert.Equal(t, 768, h, "unset knob falls back to the LLM view height")
+
+	config.EditImageWidth, config.EditImageHeight = 2048, 2048
+	w, h = editImageCaps(1024, 768)
+	assert.Equal(t, 2048, w, "set knob overrides the view size")
+	assert.Equal(t, 2048, h)
+}
+
+func TestConvertEditVariant(t *testing.T) {
+	// A real PNG larger than the cap: 400x300 with cap 100x100 -> resized.
+	var bigBuf bytes.Buffer
+	bigImg := image.NewRGBA(image.Rect(0, 0, 400, 300))
+	require.NoError(t, png.Encode(&bigBuf, bigImg), "encode 400x300 png")
+	bigPNG := bigBuf.Bytes()
+
+	// A real PNG within the cap: 50x40 with cap 100x100 -> verbatim.
+	var smallBuf bytes.Buffer
+	smallImg := image.NewRGBA(image.Rect(0, 0, 50, 40))
+	require.NoError(t, png.Encode(&smallBuf, smallImg), "encode 50x40 png")
+	smallPNG := smallBuf.Bytes()
+
+	t.Run("within cap keeps original bytes verbatim", func(t *testing.T) {
+		fi, err := convertEditVariant(smallPNG, "image/png", "jpg", 75, 100, 100, 0)
+		require.NoError(t, err)
+		assert.Equal(t, smallPNG, fi.Encoded, "no re-encode when the original fits the cap")
+		assert.Equal(t, "image/png", fi.MIME, "verbatim keeps the original mime")
+		assert.Equal(t, 50, fi.Width)
+		assert.Equal(t, 40, fi.Height)
+	})
+
+	t.Run("over cap resizes", func(t *testing.T) {
+		fi, err := convertEditVariant(bigPNG, "image/png", "jpg", 75, 100, 100, 0)
+		require.NoError(t, err)
+		assert.NotEqual(t, bigPNG, fi.Encoded, "oversized original is re-encoded")
+		assert.LessOrEqual(t, fi.Width, 100)
+		assert.LessOrEqual(t, fi.Height, 100)
+		assert.Equal(t, "image/jpeg", fi.MIME)
+		cfg, err := jpeg.DecodeConfig(bytes.NewReader(fi.Encoded))
+		require.NoError(t, err, "encoded bytes decodable as the requested format")
+		assert.Equal(t, fi.Width, cfg.Width)
+		assert.Equal(t, fi.Height, cfg.Height)
+	})
+
+	t.Run("undecodable input errors", func(t *testing.T) {
+		_, err := convertEditVariant([]byte("not an image"), "image/png", "jpg", 75, 100, 100, 0)
+		require.Error(t, err)
+	})
+}
+
+// bigJPEGServer serves a fresh 2048x1536 JPEG (deterministic noise so the
+// encode is not trivially compressible) and returns its bytes.
+func bigJPEGServer(t *testing.T, w, h int) (*httptest.Server, []byte) {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	rnd := rand.New(rand.NewSource(7))
+	for i := range img.Pix {
+		img.Pix[i] = byte(rnd.Intn(256))
+	}
+	var buf bytes.Buffer
+	require.NoError(t, jpeg.Encode(&buf, img, &jpeg.Options{Quality: 90}))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Write(buf.Bytes())
+	}))
+	t.Cleanup(srv.Close)
+	return srv, buf.Bytes()
+}
+
+func setEditImageSizeForTest(t *testing.T, w, h int) {
+	t.Helper()
+	origW, origH := config.EditImageWidth, config.EditImageHeight
+	config.EditImageWidth, config.EditImageHeight = w, h
+	t.Cleanup(func() { config.EditImageWidth, config.EditImageHeight = origW, origH })
+}
+
+func refFromLabel(t *testing.T, msg ChatMessage) string {
+	t.Helper()
+	re := regexp.MustCompile(`ref: ((?:usr|web)_[0-9a-f]{12})`)
+	for _, part := range msg.MultiContent {
+		if m := re.FindStringSubmatch(part.Text); m != nil {
+			return m[1]
+		}
+	}
+	require.FailNow(t, "no label part carries a ref", "message had %d parts", len(msg.MultiContent))
+	return ""
+}
+
+func TestBuildImageMessageRegistersEditVariant(t *testing.T) {
+	setupTestDB(t)
+	config.ImagesDir = t.TempDir()
+	t.Cleanup(func() { config.ImagesDir = "" })
+	config.TrustedImageHosts = []string{"127.0.0.1"}
+	t.Cleanup(func() { config.TrustedImageHosts = nil })
+	setEditImageSizeForTest(t, 2048, 2048)
+
+	srv, orig := bigJPEGServer(t, 2048, 1536)
+
+	msg, err := buildImageMessage("look at this "+srv.URL+"/big.jpg", []string{srv.URL + "/big.jpg"}, 5, "jpg", 75, 1024, 1024, 0, 1)
+	require.NoError(t, err)
+
+	ref := refFromLabel(t, msg)
+	row, err := resolveImageRef(ref)
+	require.NoError(t, err)
+	require.NotEmpty(t, row.EditFilePath, "paste intake registers an edit variant")
+
+	vd, err := os.ReadFile(row.FilePath)
+	require.NoError(t, err)
+	vcfg, err := jpeg.DecodeConfig(bytes.NewReader(vd))
+	require.NoError(t, err)
+	assert.LessOrEqual(t, vcfg.Width, 1024, "view variant respects the LLM view cap")
+	assert.LessOrEqual(t, vcfg.Height, 1024)
+
+	ed, err := os.ReadFile(row.EditFilePath)
+	require.NoError(t, err)
+	assert.Equal(t, orig, ed, "edit variant is the ORIGINAL bytes verbatim (2048x1536 fits the 2048 cap)")
+	ecfg, err := jpeg.DecodeConfig(bytes.NewReader(ed))
+	require.NoError(t, err)
+	assert.Equal(t, 2048, ecfg.Width)
+	assert.Equal(t, 1536, ecfg.Height)
+}
+
+func TestBuildImageMessageEditCapUnsetUsesViewSize(t *testing.T) {
+	setupTestDB(t)
+	config.ImagesDir = t.TempDir()
+	t.Cleanup(func() { config.ImagesDir = "" })
+	config.TrustedImageHosts = []string{"127.0.0.1"}
+	t.Cleanup(func() { config.TrustedImageHosts = nil })
+	setEditImageSizeForTest(t, 0, 0)
+
+	srv, _ := bigJPEGServer(t, 2048, 1536)
+
+	msg, err := buildImageMessage("look "+srv.URL+"/big.jpg", []string{srv.URL + "/big.jpg"}, 5, "jpg", 75, 1024, 1024, 0, 1)
+	require.NoError(t, err)
+
+	ref := refFromLabel(t, msg)
+	row, err := resolveImageRef(ref)
+	require.NoError(t, err)
+	require.NotEmpty(t, row.EditFilePath, "unset knob still registers an edit variant (at view size)")
+	assert.Equal(t, 1024, row.EditWidth, "unset knob caps the edit variant at the view width")
+	assert.Equal(t, 768, row.EditHeight)
+}
+
+func TestFetchViewImageSourceEditVariant(t *testing.T) {
+	config.TrustedImageHosts = []string{"127.0.0.1"}
+	t.Cleanup(func() { config.TrustedImageHosts = nil })
+	setEditImageSizeForTest(t, 2048, 2048)
+
+	srv, orig := bigJPEGServer(t, 2048, 1536)
+
+	fi, edit, src, fromPage, err := fetchViewImageSource(srv.URL+"/big.jpg", "jpg", 75, 1024, 1024, rootMaxImagePixels())
+	require.NoError(t, err)
+	assert.Equal(t, srv.URL+"/big.jpg", src)
+	assert.Empty(t, fromPage)
+	require.NotNil(t, edit, "view_image intake produces an edit variant")
+	assert.LessOrEqual(t, fi.Width, 1024, "view variant respects the view cap")
+	assert.Equal(t, orig, edit.Encoded, "edit variant keeps the original bytes verbatim within the edit cap")
+	assert.Equal(t, 2048, edit.Width)
+	assert.Equal(t, 1536, edit.Height)
+}
+
+func TestExecuteToolCallsViewImageRegistersEditVariant(t *testing.T) {
+	setupTestDB(t)
+	config.ImagesDir = t.TempDir()
+	t.Cleanup(func() { config.ImagesDir = "" })
+	config.TrustedImageHosts = []string{"127.0.0.1"}
+	t.Cleanup(func() { config.TrustedImageHosts = nil })
+	setEditImageSizeForTest(t, 2048, 2048)
+
+	srv, orig := bigJPEGServer(t, 2048, 1536)
+
+	cr := newImageViewTestRunner(t, AIConfig{DetectImages: true, MaxContextImages: 5, ImageFormat: "jpg", ImageQuality: 75, MaxImageWidth: 1024, MaxImageHeight: 1024}, 9)
+	turn := newTurnContext(9, nil)
+	args, _ := json.Marshal(map[string]string{"url": srv.URL + "/big.jpg"})
+	cr.executeToolCalls(turn, []ToolCall{{
+		ID: "call_1", Type: "function",
+		Function: FunctionCall{Name: viewImageToolName, Arguments: string(args)},
+	}})
+
+	var row ImageRef
+	require.NoError(t, theDB.Where("session_id = ? AND origin = ?", 9, "view").First(&row).Error)
+	require.NotEmpty(t, row.EditFilePath, "view_image registers an edit variant")
+
+	ed, err := os.ReadFile(row.EditFilePath)
+	require.NoError(t, err)
+	assert.Equal(t, orig, ed, "the edit variant carries the full-resolution original")
+	assert.Equal(t, "image/jpeg", row.EditMIME)
+	assert.Equal(t, 2048, row.EditWidth)
+	assert.Equal(t, 1536, row.EditHeight)
+	assert.LessOrEqual(t, row.Width, 1024, "the view variant stays view-capped")
 }

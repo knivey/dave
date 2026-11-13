@@ -5,6 +5,14 @@
 #   quitmsg             (string)              Default quit message
 #   max_queue_depth     (int, default: 5)     Max queued requests per network
 #   maximagepixels      (int, default: 50000000) Max total pixels (width*height*framecount) for downloaded images; larger claims are skipped before decode (decompression-bomb guard)
+#   editimagesize       (string, default: unset) Independent max dimensions for the EDIT variant
+#     of conversation images (format "WxH", e.g. "2048x2048"). Edit tools (edit_image/
+#     edit_image_async) receive this variant when expanding usr_/web_ image refs, so the edit
+#     model can get more pixels than the LLM ever sees in context (which stays capped by each
+#     chat command's maximagesize). Unset = edit variant is minted at the same cap as the LLM
+#     view size (pre-knob behavior). Originals already within the cap are stored verbatim
+#     (no re-encode); larger ones are resized to fit. Refs minted before a /reload keep the
+#     cap they were minted with.
 #   trusted_image_hosts (string list, default []) — exact hostnames (no wildcards,
 #     case-insensitive) whose image downloads bypass the SSRF private-IP block.
 #     Needed when imgsite resolves privately (LAN/localhost) so dave can fetch its
@@ -130,6 +138,7 @@
 # quitmsg = "goodbye"
 # max_queue_depth = 5
 # maximagepixels = 50000000
+# editimagesize = "2048x2048"
 # trusted_image_hosts = []
 # images_dir = "data/images"
 # sessions_display_limit = 10

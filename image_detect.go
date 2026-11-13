@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chai2010/webp"
@@ -884,23 +885,27 @@ func convertToFetched(imgData []byte, mimeType, format string, quality, maxW, ma
 // between the two caps (the review-caught regression). A page therefore
 // reads up to maxImageSize bytes too — bounded, just less tightly than a
 // dedicated page cap would be; harvest on a truncated page simply sees
-// fewer candidates. Returns the converted image, the RESOLVED source URL
-// (what the label and ref register — never the page), and the originating
-// page URL when extraction happened ("" for direct images).
-func fetchViewImageSource(url, format string, quality, maxW, maxH, maxPixels int) (*fetchedImage, string, string, error) {
+// fewer candidates. Returns the converted VIEW variant plus its EDIT
+// variant (nil when the edit conversion degraded), the RESOLVED source
+// URL (what the label and ref register — never the page), and the
+// originating page URL when extraction happened ("" for direct images).
+// "Converts" above means the VIEW variant succeeds; the edit variant
+// failing only degrades that candidate to a view-only ref, it still wins.
+func fetchViewImageSource(url, format string, quality, maxW, maxH, maxPixels int) (*fetchedImage, *fetchedImage, string, string, error) {
+	editW, editH := editImageCaps(maxW, maxH)
 	data, contentType, err := fetchURLBounded(url, int64(maxImageSize))
 	if err != nil {
-		return nil, "", "", err
+		return nil, nil, "", "", err
 	}
 	if strings.HasPrefix(contentType, "image/") {
-		fi, cerr := convertToFetched(data, contentType, format, quality, maxW, maxH, maxPixels)
+		fi, edit, cerr := convertImageVariants(data, contentType, format, quality, maxW, maxH, editW, editH, maxPixels)
 		if cerr != nil {
-			return nil, "", "", cerr
+			return nil, nil, "", "", cerr
 		}
-		return fi, url, "", nil
+		return fi, edit, url, "", nil
 	}
 	if !strings.HasPrefix(contentType, "text/html") {
-		return nil, "", "", fmt.Errorf("URL did not return an image (content-type: %s)", contentType)
+		return nil, nil, "", "", fmt.Errorf("URL did not return an image (content-type: %s)", contentType)
 	}
 	var lastCandErr error
 	cands, anyDeclared := harvestPageImageURLs(data, url)
@@ -920,19 +925,19 @@ func fetchViewImageSource(url, format string, quality, maxW, maxH, maxPixels int
 		if !strings.HasPrefix(ct, "image/") {
 			continue
 		}
-		fi, cerr := convertToFetched(b, ct, format, quality, maxW, maxH, maxPixels)
+		fi, edit, cerr := convertImageVariants(b, ct, format, quality, maxW, maxH, editW, editH, maxPixels)
 		if cerr != nil {
 			// Corrupt/bomb candidate: try the next one; remember why for
 			// the error tail below.
 			lastCandErr = cerr
 			continue
 		}
-		return fi, cand, url, nil
+		return fi, edit, cand, url, nil
 	}
 	if logger != nil && lastCandErr != nil {
 		logger.Debug("page image candidates all failed", "url", url, "last_error", lastCandErr.Error())
 	}
-	return nil, "", "", fmt.Errorf(
+	return nil, nil, "", "", fmt.Errorf(
 		"URL was an HTML page (content-type: %s) and no viewable image could be extracted from it — use fetch to read the page and locate a direct image URL",
 		contentType)
 }
@@ -1059,12 +1064,50 @@ type fetchedImage struct {
 	Height  int
 }
 
-func fetchAndConvertImage(url, format string, quality, maxW, maxH, maxPixels int) (*fetchedImage, error) {
+// convertImageVariants produces BOTH fidelity tiers of a downloaded image
+// concurrently: the view variant (LLM context, capped by the chat command's
+// maximagesize) and the edit variant (edit tools, independently capped by
+// editimagesize — see convertEditVariant). The two resize+encode passes are
+// independent, so they run as parallel goroutines and wall-clock cost is the
+// slower of the two, not the sum. Failure semantics: a VIEW failure fails
+// the whole conversion (the image is unusable to the model — same as the
+// pre-variant pipeline); an EDIT failure only degrades to a view-only ref
+// (nil edit), matching the ref store's best-effort contract.
+func convertImageVariants(imgData []byte, mimeType, format string, quality, viewW, viewH, editW, editH, maxPixels int) (*fetchedImage, *fetchedImage, error) {
+	var view, edit *fetchedImage
+	var viewErr, editErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		view, viewErr = convertToFetched(imgData, mimeType, format, quality, viewW, viewH, maxPixels)
+	}()
+	go func() {
+		defer wg.Done()
+		edit, editErr = convertEditVariant(imgData, mimeType, format, quality, editW, editH, maxPixels)
+	}()
+	wg.Wait()
+	if viewErr != nil {
+		return nil, nil, viewErr
+	}
+	if editErr != nil {
+		if logger != nil {
+			logger.Warn("edit variant conversion failed (edit tools fall back to the view variant)", "error", editErr.Error())
+		}
+		return view, nil, nil
+	}
+	return view, edit, nil
+}
+
+// fetchAndConvertImageVariants is the two-tier intake: download once (the
+// 10MiB bound and SSRF guard live in downloadImage), then produce both
+// variants in parallel.
+func fetchAndConvertImageVariants(url, format string, quality, viewW, viewH, editW, editH, maxPixels int) (*fetchedImage, *fetchedImage, error) {
 	imgData, mimeType, err := downloadImage(url)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return convertToFetched(imgData, mimeType, format, quality, maxW, maxH, maxPixels)
+	return convertImageVariants(imgData, mimeType, format, quality, viewW, viewH, editW, editH, maxPixels)
 }
 
 func decodeBMP(r io.Reader) (image.Image, error) {
@@ -1138,8 +1181,9 @@ func buildImageMessage(text string, imageUrls []string, maxImages int, format st
 	// pairing: the model visually maps the ref in the label to the image
 	// that follows it, so a future edit tool can resolve "usr_xxxx" back
 	// to the exact bytes in context.
+	editW, editH := editImageCaps(maxW, maxH)
 	for _, url := range imageUrls {
-		fi, err := fetchAndConvertImage(url, format, quality, maxW, maxH, maxPixels)
+		fi, edit, err := fetchAndConvertImageVariants(url, format, quality, maxW, maxH, editW, editH, maxPixels)
 		if err != nil {
 			if errors.Is(err, errImageTooManyPixels) {
 				// Decompression-bomb skip: observable but non-fatal.
@@ -1154,7 +1198,12 @@ func buildImageMessage(text string, imageUrls []string, maxImages int, format st
 			continue
 		}
 
-		ref, refErr := registerImageRef(sessionID, "user", url, fi.MIME, fi.Width, fi.Height, fi.Encoded)
+		viewVar := imageRefVariant{MIME: fi.MIME, Width: fi.Width, Height: fi.Height, Data: fi.Encoded}
+		editVar := imageRefVariant{}
+		if edit != nil {
+			editVar = imageRefVariant{MIME: edit.MIME, Width: edit.Width, Height: edit.Height, Data: edit.Encoded}
+		}
+		ref, refErr := registerImageRef(sessionID, "user", url, viewVar, editVar)
 		if refErr != nil {
 			if logger != nil {
 				logger.Warn("image ref registration failed (image still attached)", "url", url, "error", refErr.Error())
@@ -1208,6 +1257,43 @@ func rootMaxImagePixels() int {
 	return v
 }
 
+// editImageCaps resolves the cap for the EDIT variant of a conversation
+// image: the root editimagesize knob when set, otherwise the LLM view size
+// of the invoking command (pre-knob behavior — edits got exactly what the
+// model saw).
+func editImageCaps(viewW, viewH int) (int, int) {
+	var ew, eh int
+	readConfig(func() { ew, eh = config.EditImageWidth, config.EditImageHeight })
+	if ew > 0 && eh > 0 {
+		return ew, eh
+	}
+	return viewW, viewH
+}
+
+// convertEditVariant produces the edit-model variant of a downloaded image.
+// Fidelity rule: an original already within the cap is kept VERBATIM (no
+// re-encode — resize+encode can only lose quality), decided from the image
+// header's claimed dimensions without a decode; anything larger goes through
+// the same resize/encode pipeline the view variant uses. The verbatim path
+// trusting header dims is a fidelity decision only, not a safety one: the
+// view variant's decode re-checks real dimensions against the pixel cap on
+// the same bytes, so a lying header cannot smuggle a bomb past intake.
+func convertEditVariant(imgData []byte, mimeType, format string, quality, maxW, maxH, maxPixels int) (*fetchedImage, error) {
+	if w, h, _, ok := headerDimensions(imgData, mimeType); ok {
+		if w <= maxW && h <= maxH {
+			enc := base64.StdEncoding.EncodeToString(imgData)
+			return &fetchedImage{
+				Encoded: imgData,
+				DataURI: "data:" + mimeType + ";base64," + enc,
+				MIME:    mimeType,
+				Width:   w,
+				Height:  h,
+			}, nil
+		}
+	}
+	return convertToFetched(imgData, mimeType, format, quality, maxW, maxH, maxPixels)
+}
+
 // handleViewImage implements the view_image builtin: pull an image URL into
 // the conversation as vision input. The image rides a labeled RoleUser
 // message queued after the tool result (flushed by executeToolCalls after
@@ -1254,7 +1340,7 @@ func (cr *chatRunner) handleViewImage(turn *turnContext, call ToolCall) bool {
 			cr.cfg.MaxContextImages)))
 		return false
 	}
-	fi, srcURL, fromPage, err := fetchViewImageSource(args.URL, cr.cfg.ImageFormat, cr.cfg.ImageQuality, cr.cfg.MaxImageWidth, cr.cfg.MaxImageHeight, rootMaxImagePixels())
+	fi, edit, srcURL, fromPage, err := fetchViewImageSource(args.URL, cr.cfg.ImageFormat, cr.cfg.ImageQuality, cr.cfg.MaxImageWidth, cr.cfg.MaxImageHeight, rootMaxImagePixels())
 	if err != nil {
 		turn.Add(toolResultMsg(call.ID, "error: "+err.Error()))
 		return false
@@ -1264,7 +1350,12 @@ func (cr *chatRunner) handleViewImage(turn *turnContext, call ToolCall) bool {
 	// context, WHAT it is looking at: the page's preview image, not the
 	// page's content (owner ruling: no silent resolution — that would
 	// confirm the bias that every link is an image).
-	ref, refErr := registerImageRef(cr.sessionID, "view", srcURL, fi.MIME, fi.Width, fi.Height, fi.Encoded)
+	viewVar := imageRefVariant{MIME: fi.MIME, Width: fi.Width, Height: fi.Height, Data: fi.Encoded}
+	editVar := imageRefVariant{}
+	if edit != nil {
+		editVar = imageRefVariant{MIME: edit.MIME, Width: edit.Width, Height: edit.Height, Data: edit.Encoded}
+	}
+	ref, refErr := registerImageRef(cr.sessionID, "view", srcURL, viewVar, editVar)
 	if refErr != nil {
 		cr.logger.Warn("image ref registration failed (image still attached)", "url", srcURL, "error", refErr.Error())
 	}

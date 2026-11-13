@@ -22,7 +22,7 @@ func setupImageRefTest(t *testing.T) {
 
 func TestRegisterImageRefRoundTrip(t *testing.T) {
 	setupImageRefTest(t)
-	ref, err := registerImageRef(42, "view", "https://img.example.com/abc.png", "image/png", 640, 480, []byte("pngbytes"))
+	ref, err := registerImageRef(42, "view", "https://img.example.com/abc.png", imageRefVariant{MIME: "image/png", Width: 640, Height: 480, Data: []byte("pngbytes")}, imageRefVariant{})
 	require.NoError(t, err)
 	assert.Regexp(t, `^web_[0-9a-f]{12}$`, ref, "view origin mints web_ refs")
 
@@ -42,7 +42,7 @@ func TestRegisterImageRefRoundTrip(t *testing.T) {
 
 func TestRegisterImageRefUserOriginPrefix(t *testing.T) {
 	setupImageRefTest(t)
-	ref, err := registerImageRef(1, "user", "https://x/y.jpg", "image/jpeg", 10, 10, []byte("j"))
+	ref, err := registerImageRef(1, "user", "https://x/y.jpg", imageRefVariant{MIME: "image/jpeg", Width: 10, Height: 10, Data: []byte("j")}, imageRefVariant{})
 	require.NoError(t, err)
 	assert.Regexp(t, `^usr_[0-9a-f]{12}$`, ref)
 }
@@ -51,7 +51,7 @@ func TestRegisterImageRefRefsAreUnique(t *testing.T) {
 	setupImageRefTest(t)
 	seen := map[string]bool{}
 	for i := 0; i < 50; i++ {
-		ref, err := registerImageRef(1, "view", "u", "image/png", 1, 1, []byte("b"))
+		ref, err := registerImageRef(1, "view", "u", imageRefVariant{MIME: "image/png", Width: 1, Height: 1, Data: []byte("b")}, imageRefVariant{})
 		require.NoError(t, err)
 		require.False(t, seen[ref], "ref %s minted twice", ref)
 		seen[ref] = true
@@ -67,9 +67,9 @@ func TestResolveImageRefUnknown(t *testing.T) {
 
 func TestResolveImageRefArgsRewritesUsrWebPassesGen(t *testing.T) {
 	setupImageRefTest(t)
-	usrRef, err := registerImageRef(1, "user", "https://x/a.jpg", "image/jpeg", 10, 10, []byte("USRB"))
+	usrRef, err := registerImageRef(1, "user", "https://x/a.jpg", imageRefVariant{MIME: "image/jpeg", Width: 10, Height: 10, Data: []byte("USRB")}, imageRefVariant{})
 	require.NoError(t, err)
-	webRef, err := registerImageRef(1, "view", "https://x/b.png", "image/png", 10, 10, []byte("WEBB"))
+	webRef, err := registerImageRef(1, "view", "https://x/b.png", imageRefVariant{MIME: "image/png", Width: 10, Height: 10, Data: []byte("WEBB")}, imageRefVariant{})
 	require.NoError(t, err)
 
 	entries := []string{usrRef, "gen_abc_0", webRef, "data:image/png;base64,QQ=="}
@@ -110,9 +110,9 @@ func TestResolveImageRefArgsUnresolvableRef(t *testing.T) {
 
 func TestCleanupImageRefsByAge(t *testing.T) {
 	setupImageRefTest(t)
-	oldRef, err := registerImageRef(1, "view", "u", "image/png", 1, 1, []byte("old"))
+	oldRef, err := registerImageRef(1, "view", "u", imageRefVariant{MIME: "image/png", Width: 1, Height: 1, Data: []byte("old")}, imageRefVariant{})
 	require.NoError(t, err)
-	newRef, err := registerImageRef(1, "view", "u", "image/png", 1, 1, []byte("new"))
+	newRef, err := registerImageRef(1, "view", "u", imageRefVariant{MIME: "image/png", Width: 1, Height: 1, Data: []byte("new")}, imageRefVariant{})
 	require.NoError(t, err)
 
 	cutoff := time.Now().Add(-48 * time.Hour)
@@ -128,6 +128,121 @@ func TestCleanupImageRefsByAge(t *testing.T) {
 	require.NoError(t, err)
 	_, statErr := os.Stat(row.FilePath)
 	assert.NoError(t, statErr, "kept ref's file still exists")
+}
+
+func TestRegisterImageRefEditVariant(t *testing.T) {
+	setupImageRefTest(t)
+	ref, err := registerImageRef(42, "view", "https://img.example.com/abc.png",
+		imageRefVariant{MIME: "image/jpeg", Width: 100, Height: 80, Data: []byte("viewbytes")},
+		imageRefVariant{MIME: "image/png", Width: 640, Height: 480, Data: []byte("editbytes")})
+	require.NoError(t, err)
+
+	row, err := resolveImageRef(ref)
+	require.NoError(t, err)
+	assert.Equal(t, "image/png", row.EditMIME)
+	assert.Equal(t, 640, row.EditWidth)
+	assert.Equal(t, 480, row.EditHeight)
+
+	vd, err := os.ReadFile(row.FilePath)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("viewbytes"), vd, "view file holds the view variant bytes")
+	ed, err := os.ReadFile(row.EditFilePath)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("editbytes"), ed, "edit file holds the edit variant bytes")
+	assert.Equal(t, ".png", filepath.Ext(row.EditFilePath), "edit file ext follows the edit mime")
+}
+
+func TestRegisterImageRefWithoutEditVariant(t *testing.T) {
+	setupImageRefTest(t)
+	ref, err := registerImageRef(42, "view", "https://img.example.com/abc.png",
+		imageRefVariant{MIME: "image/jpeg", Width: 100, Height: 80, Data: []byte("viewbytes")},
+		imageRefVariant{})
+	require.NoError(t, err)
+
+	row, err := resolveImageRef(ref)
+	require.NoError(t, err)
+	assert.Empty(t, row.EditFilePath, "no edit variant -> no edit file recorded")
+	assert.NoFileExists(t, filepath.Join(config.ImagesDir, filepath.Base(row.FilePath)+".edit.jpg"))
+}
+
+func TestResolveImageRefArgsPrefersEditVariant(t *testing.T) {
+	setupImageRefTest(t)
+	ref, err := registerImageRef(1, "view", "https://x/b.png",
+		imageRefVariant{MIME: "image/jpeg", Width: 100, Height: 80, Data: []byte("VIEWB")},
+		imageRefVariant{MIME: "image/png", Width: 640, Height: 480, Data: []byte("EDITB")})
+	require.NoError(t, err)
+
+	args := map[string]any{"input_images": []string{ref}}
+	require.NoError(t, resolveImageRefArgs(args))
+	got := args["input_images"].([]string)
+	assert.Equal(t, "data:image/png;base64,RURJVEI=", got[0],
+		"the edit variant's bytes and mime ride the data URI, not the view variant's")
+}
+
+func TestResolveImageRefArgsFallsBackWhenEditFileMissing(t *testing.T) {
+	setupImageRefTest(t)
+	ref, err := registerImageRef(1, "view", "https://x/b.png",
+		imageRefVariant{MIME: "image/jpeg", Width: 100, Height: 80, Data: []byte("VIEWB")},
+		imageRefVariant{MIME: "image/png", Width: 640, Height: 480, Data: []byte("EDITB")})
+	require.NoError(t, err)
+	row, err := resolveImageRef(ref)
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(row.EditFilePath))
+
+	args := map[string]any{"input_images": []string{ref}}
+	require.NoError(t, resolveImageRefArgs(args))
+	got := args["input_images"].([]string)
+	assert.Equal(t, "data:image/jpeg;base64,VklFV0I=", got[0],
+		"a missing edit file degrades to the view variant instead of failing the edit")
+}
+
+func TestCleanupImageRefsByAgeRemovesEditFile(t *testing.T) {
+	setupImageRefTest(t)
+	oldRef, err := registerImageRef(1, "view", "u",
+		imageRefVariant{MIME: "image/png", Width: 1, Height: 1, Data: []byte("old")},
+		imageRefVariant{MIME: "image/png", Width: 2, Height: 2, Data: []byte("oldedit")})
+	require.NoError(t, err)
+	newRef, err := registerImageRef(1, "view", "u",
+		imageRefVariant{MIME: "image/png", Width: 1, Height: 1, Data: []byte("new")},
+		imageRefVariant{MIME: "image/png", Width: 2, Height: 2, Data: []byte("newedit")})
+	require.NoError(t, err)
+
+	var oldRow, newRow ImageRef
+	require.NoError(t, theDB.Where("ref = ?", oldRef).First(&oldRow).Error)
+	require.NoError(t, theDB.Where("ref = ?", newRef).First(&newRow).Error)
+
+	cutoff := time.Now().Add(-48 * time.Hour)
+	require.NoError(t, theDB.Model(&ImageRef{}).Where("ref = ?", oldRef).Update("created_at", cutoff).Error)
+
+	n, err := cleanupImageRefsByAge(1)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), n)
+
+	assert.NoFileExists(t, oldRow.FilePath, "old view file removed")
+	assert.NoFileExists(t, oldRow.EditFilePath, "old edit file removed")
+	assert.FileExists(t, newRow.FilePath, "kept ref's view file untouched")
+	assert.FileExists(t, newRow.EditFilePath, "kept ref's edit file untouched")
+}
+
+func TestSweepOrphanImageFilesKnowsEditPaths(t *testing.T) {
+	setupImageRefTest(t)
+	ref, err := registerImageRef(1, "view", "u",
+		imageRefVariant{MIME: "image/png", Width: 1, Height: 1, Data: []byte("kept")},
+		imageRefVariant{MIME: "image/jpeg", Width: 2, Height: 2, Data: []byte("keptedit")})
+	require.NoError(t, err)
+	var row ImageRef
+	require.NoError(t, theDB.Where("ref = ?", ref).First(&row).Error)
+
+	orphan := filepath.Join(config.ImagesDir, "web_orphanedfile.edit.png")
+	require.NoError(t, os.WriteFile(orphan, []byte("x"), 0o644))
+	past := time.Now().Add(-48 * time.Hour)
+	require.NoError(t, os.Chtimes(orphan, past, past))
+
+	n, err := sweepOrphanImageFiles(config.ImagesDir, 24*time.Hour)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+	assert.NoFileExists(t, orphan)
+	assert.FileExists(t, row.EditFilePath, "registered edit file untouched by the sweep")
 }
 
 func TestSanitizeToolArgsForLog(t *testing.T) {
@@ -209,7 +324,7 @@ func TestSanitizeToolArgsForLog(t *testing.T) {
 
 func TestSweepOrphanImageFiles(t *testing.T) {
 	setupImageRefTest(t)
-	ref, err := registerImageRef(1, "view", "u", "image/png", 1, 1, []byte("kept"))
+	ref, err := registerImageRef(1, "view", "u", imageRefVariant{MIME: "image/png", Width: 1, Height: 1, Data: []byte("kept")}, imageRefVariant{})
 	require.NoError(t, err)
 	var keptRow ImageRef
 	require.NoError(t, theDB.Where("ref = ?", ref).First(&keptRow).Error)

@@ -2105,6 +2105,57 @@ baseurl = "http://localhost:8001/v1"
 		"unset service context_window must default to 0 (fall back to [compaction])")
 }
 
+func TestLoadConfigDirEditImageSize(t *testing.T) {
+	mainTOML := func(knob string) string {
+		if knob != "" {
+			knob += "\n"
+		}
+		return knob + `
+[networks.testnet]
+nick = "bot"
+[[networks.testnet.servers]]
+host = "irc.example.com"
+`
+	}
+
+	t.Run("valid WxH parses into dims", func(t *testing.T) {
+		dir := createTestConfigDir(t, mainTOML("editimagesize = \"2048x2048\"\n"), nil)
+		cfg, err := loadConfigDir(dir)
+		require.NoError(t, err)
+		assert.Equal(t, 2048, cfg.EditImageWidth)
+		assert.Equal(t, 2048, cfg.EditImageHeight)
+	})
+
+	t.Run("unset stays zero", func(t *testing.T) {
+		dir := createTestConfigDir(t, mainTOML(""), nil)
+		cfg, err := loadConfigDir(dir)
+		require.NoError(t, err)
+		assert.Equal(t, 0, cfg.EditImageWidth)
+		assert.Equal(t, 0, cfg.EditImageHeight)
+	})
+
+	t.Run("missing x separator rejected", func(t *testing.T) {
+		dir := createTestConfigDir(t, mainTOML("editimagesize = \"2048\"\n"), nil)
+		_, err := loadConfigDir(dir)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "editimagesize")
+	})
+
+	t.Run("nonnumeric dims rejected", func(t *testing.T) {
+		dir := createTestConfigDir(t, mainTOML("editimagesize = \"axb\"\n"), nil)
+		_, err := loadConfigDir(dir)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "editimagesize")
+	})
+
+	t.Run("zero dim rejected", func(t *testing.T) {
+		dir := createTestConfigDir(t, mainTOML("editimagesize = \"0x1024\"\n"), nil)
+		_, err := loadConfigDir(dir)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "editimagesize")
+	})
+}
+
 func TestLoadConfigDirLoadNotice(t *testing.T) {
 	mainTOML := `
 [networks.testnet]

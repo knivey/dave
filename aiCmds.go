@@ -121,7 +121,7 @@ func completion(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx
 	text := resp.Choices[0].Text
 	logger.Info(text) // raw model output — logs show raw (translation is emission-only)
 	if bbcodeEnabled(cfg) {
-		text = TranslateBBCode(text, bbcodeWarnFn(logger), bbcodeStylesEnabled(cfg))
+		text = markdowntoirc.TranslateBBCode(text, bbcodeWarnFn(logger))
 	}
 	sendToOutput(text, output, ctx)
 }
@@ -728,13 +728,13 @@ func (cr *chatRunner) checkEmptyRetry(content string, parts reasoningParts, empt
 type streamOutput struct {
 	renderer *markdowntoirc.StreamingRenderer
 	buffer   string
-	// bb, when non-nil, translates BBCode tags to IRC codes BEFORE the
-	// renderer/buffer ever see the text — markdown stays the structural
-	// system, BBCode the color/span system, and the renderer must never
+	// bb, when non-nil, translates BBCode color tags to IRC codes BEFORE
+	// the renderer/buffer ever see the text — markdown stays the structural
+	// system, BBCode the color system, and the renderer must never
 	// be asked to route around tag syntax. Holds back only a trailing
 	// possibly-incomplete tag and (lazily) the one-char guard decision
 	// after a color emission.
-	bb *bbcodeTranslator
+	bb *markdowntoirc.BBCodeStream
 }
 
 func (so *streamOutput) HandleDelta(delta string, send func(string)) {
@@ -808,7 +808,7 @@ func (so *streamOutput) Flush(send func(string)) {
 // translated codes — the paste site parses them).
 func (cr *chatRunner) sendRendered(rawText string) {
 	if bbcodeEnabled(cr.cfg) {
-		rawText = TranslateBBCode(rawText, bbcodeWarnFn(cr.logger), bbcodeStylesEnabled(cr.cfg))
+		rawText = markdowntoirc.TranslateBBCode(rawText, bbcodeWarnFn(cr.logger))
 	}
 	text := rawText
 	if cr.cfg.RenderMarkdown {
@@ -843,7 +843,7 @@ func (cr *chatRunner) handleToolCallResponse(turn *turnContext, text string, too
 		// iteration).
 		t := ExtractFinalText(text)
 		if bbcodeEnabled(cr.cfg) {
-			t = TranslateBBCode(t, bbcodeWarnFn(cr.logger), bbcodeStylesEnabled(cr.cfg))
+			t = markdowntoirc.TranslateBBCode(t, bbcodeWarnFn(cr.logger))
 		}
 		if cr.cfg.RenderMarkdown {
 			t = markdowntoirc.MarkdownToIRC(t)
@@ -1049,7 +1049,7 @@ func (cr *chatRunner) runTurnStream(ctx context.Context, params openai.ChatCompl
 	// ephemeral turns never feed it deltas — their finals translate in
 	// sendRendered instead, so no double translation.
 	if bbcodeEnabled(cr.cfg) && !cr.ephemeral {
-		sOut.bb = newBBCodeTranslator(bbcodeWarnFn(cr.logger), bbcodeStylesEnabled(cr.cfg))
+		sOut.bb = markdowntoirc.NewBBCodeStream(bbcodeWarnFn(cr.logger))
 	}
 
 	var accumulatedToolCalls []ToolCall
@@ -2060,7 +2060,7 @@ func (cr *chatRunner) callResponsesStream(ctx context.Context, params responses.
 	// ephemeral turns never feed it deltas — their finals translate in
 	// sendRendered instead, so no double translation.
 	if bbcodeEnabled(cr.cfg) && !cr.ephemeral {
-		sOut.bb = newBBCodeTranslator(bbcodeWarnFn(cr.logger), bbcodeStylesEnabled(cr.cfg))
+		sOut.bb = markdowntoirc.NewBBCodeStream(bbcodeWarnFn(cr.logger))
 	}
 
 	idleTimer := time.NewTimer(cr.cfg.StreamTimeout)

@@ -123,6 +123,13 @@ func harvestImageURLs(pageURL *url.URL, body []byte) []string {
 			}
 			return
 		}
+		if seen[s] {
+			// Already emitted into another bucket (og:image meta, anchor,
+			// link preload/image_src): never duplicate across buckets — a
+			// duplicate would displace a distinct URL below the cap
+			// (re-review finding).
+			return
+		}
 		seen[s] = true
 		scoreIndex[s] = len(displayedScored)
 		displayedScored = append(displayedScored, scoredURL{url: s, declared: declared})
@@ -145,11 +152,12 @@ func harvestImageURLs(pageURL *url.URL, body []byte) []string {
 		switch string(nameB) {
 		case "img":
 			attrs := tokenAttrs(z)
-			// srcset descriptors first: when a URL appears both as src
-			// and inside srcset, the descriptor-carrying occurrence must
-			// win the dedupe or the candidate loses its declared size.
-			// data-* before plain attributes otherwise (lazy-load
-			// convention: the real image lives in data-src).
+			// srcset descriptors first: addScored merges duplicate URLs
+			// with max(existing, new), so processing the descriptor-
+			// carrying occurrences before the attr-scored ones is what
+			// makes a src+srcset duplicate keep BOTH claims. data-*
+			// before plain attributes otherwise (lazy-load convention:
+			// the real image lives in data-src).
 			score := imgDeclaredScore(attrs)
 			for _, pair := range srcsetScored(attrs["data-srcset"]) {
 				addScored(pair.url, pair.declared)

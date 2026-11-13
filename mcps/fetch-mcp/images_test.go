@@ -318,3 +318,15 @@ func TestHarvestImageURLsAttrAreaBeatsSrcsetDescriptor(t *testing.T) {
 		"https://img.example.com/n1/small.webp",     // 120*90 loses
 	}, got)
 }
+
+// TestHarvestImageURLsCrossBucketDedupe pins the re-review regression: a
+// URL first harvested via a non-img source (og:image meta, anchors, link
+// preload/image_src) and later seen as <img src>/srcset must appear ONCE.
+func TestHarvestImageURLsCrossBucketDedupe(t *testing.T) {
+	base := mustURL(t, "https://img.example.com/AAA1/_DSC1234")
+	html := `<html><head><meta property="og:image" content="/view.jpg"></head>` +
+		`<body><img src="/view.jpg"></body></html>`
+	got := harvestImageURLs(base, []byte(html))
+	assert.Equal(t, []string{"https://img.example.com/view.jpg"}, got,
+		"a URL must never be emitted twice across buckets")
+}

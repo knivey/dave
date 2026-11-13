@@ -36,10 +36,10 @@ func TestFetchHTMLPageImagesField(t *testing.T) {
 	res, err := f.Fetch(context.Background(), srv.URL+"/AAA1/_DSC1234", 0, 20000)
 	require.NoError(t, err)
 	assert.Equal(t, []string{
-		srv.URL + "/prev/full/256.jpg",
-		srv.URL + "/next/full/256.jpg",
 		srv.URL + "/AAA1/full/256.jpg",
 		srv.URL + "/thumb1/small.webp",
+		srv.URL + "/prev/full/256.jpg",
+		srv.URL + "/next/full/256.jpg",
 	}, res.Images)
 	// The page content itself is still the metadata the model always saw.
 	assert.Contains(t, res.Markdown, "JPG")
@@ -117,9 +117,9 @@ func TestHandleFetchOutputCarriesImages(t *testing.T) {
 	_, out, err := h.handleFetch(context.Background(), nil, FetchInput{URL: srv.URL + "/AAA1/_DSC1234"})
 	require.NoError(t, err)
 	assert.Equal(t, []string{
-		srv.URL + "/prev/full/256.jpg",
-		srv.URL + "/next/full/256.jpg",
 		srv.URL + "/AAA1/full/256.jpg",
 		srv.URL + "/thumb1/small.webp",
+		srv.URL + "/prev/full/256.jpg",
+		srv.URL + "/next/full/256.jpg",
 	}, out.Images)
 }

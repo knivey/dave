@@ -17,12 +17,15 @@ import (
 	"net/http"
 	neturl "net/url"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/chai2010/webp"
 	"golang.org/x/image/bmp"
 	"golang.org/x/image/draw"
+	_ "golang.org/x/image/tiff"
 	"golang.org/x/net/html"
 )
 
@@ -432,27 +435,205 @@ func looksLikeImageFileURL(raw string) bool {
 // will try when resolving an HTML page to its image.
 const pageImageCandidateCap = 5
 
-// harvestPageImageURLs extracts candidate image URLs from an HTML page in
-// PRIORITY CLASSES, not document order. Owner correction (Nov 2026,
-// production-confirmed): og:image is preview-sized BY WEB CONVENTITION
-// (imgsite sets it to the display thumb; every social-scraped page uses
-// it for cards) — a page that links its full-size file must hand the
-// model THAT. Classes: image-extension ANCHORS first (the "open file" /
-// original link), then <img> tags with data-src before src (the
-// lazy-load convention keeps the real image in data-src), og:image and
-// twitter:image metas LAST as the fallback when nothing else exists
-// (EXACT property/name matches only — og:image:width and friends carry
-// non-URLs). Relative URLs resolve against the page URL; data: and
-// non-http(s) candidates are skipped; deduped, capped. It is a
-// best-effort harvest over a truncated buffer: no error return, just
-// fewer candidates.
-func harvestPageImageURLs(body []byte, baseURL string) []string {
+// imageHeaderProbeBytes bounds the ranged GET used to read a candidate's
+// image header for dimension decoding: every common raster format's
+// dimensions live well within the first 4KiB.
+const imageHeaderProbeBytes = 4096
+
+// probeImageConfig decodes pixel dimensions from the HEAD BYTES of an
+// image (what a bounded ranged GET returns) across the common web image
+// formats — the owner directive is ALL of them, not just what production
+// has served so far:
+//   - JPEG / PNG / GIF: stdlib image.DecodeConfig
+//   - WebP / BMP / TIFF: x/image + chai2010/webp, which self-register
+//     into the global image registry on import
+//   - AVIF / HEIC / HEIF: hand-rolled ISOBMFF walk to the ispe box
+//     (no Go decoder needed — the container states its own dimensions)
+//   - ICO: directory entry bytes (0 means 256)
+//   - SVG / JPEG XL / anything else: unknown (0) — vectors have no
+//     intrinsic pixels and JXL has no decoder in the module graph
+func probeImageConfig(data []byte) (w, h int, ok bool) {
+	if len(data) > 0 {
+		if cfg, _, err := image.DecodeConfig(bytes.NewReader(data)); err == nil && cfg.Width > 0 && cfg.Height > 0 {
+			return cfg.Width, cfg.Height, true
+		}
+		if pw, ph, pok := parseISOBMFFDims(data); pok {
+			return pw, ph, true
+		}
+		if pw, ph, pok := parseICODims(data); pok {
+			return pw, ph, true
+		}
+	}
+	return 0, 0, false
+}
+
+// parseISOBMFFDims walks an ISO base media file format container (AVIF,
+// HEIC, HEIF) looking for an ispe box (image spatial extents: 4-byte
+// version/flags + big-endian width + height). Boxes are length-prefixed;
+// meta/hdlr carry full boxes (4 payload bytes before children), iprp and
+// ipco are plain boxes — the walk recurses into both shapes and skips
+// what it does not recognize rather than failing.
+func parseISOBMFFDims(data []byte) (w, h int, ok bool) {
+	// ftyp must lead the file (brand table after version/flags position).
+	if len(data) < 12 || string(data[4:8]) != "ftyp" {
+		return 0, 0, false
+	}
+	var walk func(b []byte, depth int) (int, int, bool)
+	walk = func(b []byte, depth int) (int, int, bool) {
+		if depth > 6 {
+			return 0, 0, false
+		}
+		for off := 0; off+8 <= len(b); {
+			size := int(uint32(b[off])<<24 | uint32(b[off+1])<<16 | uint32(b[off+2])<<8 | uint32(b[off+3]))
+			typ := string(b[off+4 : off+8])
+			header := 8
+			if size == 1 {
+				// 64-bit sizes exceed any probe buffer; skip rest.
+				return 0, 0, false
+			}
+			if size < header || off+size > len(b) {
+				// Truncated or oversized: recurse into what we have.
+				size = len(b) - off
+			}
+			payload := b[off+header : off+size]
+			switch typ {
+			case "ispe":
+				if len(payload) >= 12 {
+					pw := int(uint32(payload[4])<<24 | uint32(payload[5])<<16 | uint32(payload[6])<<8 | uint32(payload[7]))
+					ph := int(uint32(payload[8])<<24 | uint32(payload[9])<<16 | uint32(payload[10])<<8 | uint32(payload[11]))
+					if pw > 0 && ph > 0 {
+						return pw, ph, true
+					}
+				}
+			case "meta", "iprp", "ipco", "ipma", "moov", "trak", "mdia", "minf", "stbl":
+				// meta is a FullBox (4 flag bytes); iprp/ipco are plain.
+				start := 0
+				if typ == "meta" {
+					start = 4
+				}
+				if start < len(payload) {
+					if w, h, ok := walk(payload[start:], depth+1); ok {
+						return w, h, true
+					}
+				}
+			}
+			off += size
+		}
+		return 0, 0, false
+	}
+	return walk(data, 0)
+}
+
+// parseICODims reads the first directory entry of an ICO file: byte 6 is
+// width, byte 7 height, 0 meaning 256.
+func parseICODims(data []byte) (w, h int, ok bool) {
+	if len(data) < 8 || data[0] != 0 || data[1] != 0 || data[2] != 1 || data[3] != 0 || data[4] == 0 {
+		return 0, 0, false
+	}
+	pw, ph := int(data[6]), int(data[7])
+	if pw == 0 {
+		pw = 256
+	}
+	if ph == 0 {
+		ph = 256
+	}
+	return pw, ph, true
+}
+
+// fetchImageHeaderBytes performs the bounded ranged GET: the first
+// imageHeaderProbeBytes of the URL through the same SSRF-guarded client
+// selection every other image fetch uses. Servers that ignore Range
+// simply have their stream truncated at the cap.
+func fetchImageHeaderBytes(url string) ([]byte, error) {
+	client := imageHTTPClient
+	if u, perr := neturl.Parse(url); perr == nil && trustedImageHost(u.Hostname()) {
+		client = imageHTTPClientTrusted
+	}
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Range", fmt.Sprintf("bytes=0-%d", imageHeaderProbeBytes-1))
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		return nil, fmt.Errorf("probe returned status %d", resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, imageHeaderProbeBytes))
+}
+
+// rankCandidatesByProbedDims reorders candidates by the pixel area
+// decoded from each one's image header bytes (bounded ranged GETs) when
+// the markup declared nothing — session 3179's follow-up: markup
+// heuristics are blind on pages that omit width/height, and the header
+// bytes carry the real signal. Decoding failures keep relative order
+// after the knowns (stable sort); the whole thing is best-effort — probe
+// errors never remove a candidate, they just leave it unranked.
+func rankCandidatesByProbedDims(cands []string) []string {
+	type scored struct {
+		url  string
+		area int64
+	}
+	scoredCands := make([]scored, len(cands))
+	for i, u := range cands {
+		scoredCands[i] = scored{url: u}
+		data, err := fetchImageHeaderBytes(u)
+		if err != nil {
+			continue
+		}
+		if w, h, ok := probeImageConfig(data); ok {
+			scoredCands[i].area = int64(w) * int64(h)
+		}
+	}
+	sort.SliceStable(scoredCands, func(i, j int) bool {
+		return scoredCands[i].area > scoredCands[j].area
+	})
+	out := make([]string, len(scoredCands))
+	for i, c := range scoredCands {
+		out[i] = c.url
+	}
+	return out
+}
+
+// pageImageCand is one harvest candidate carrying the size the markup
+// DECLARED for it (pixel area when width/height attrs are present, else
+// the max srcset width descriptor; 0 = undeclared). Declared sizes rank
+// the displayed-image class; when nothing declares, the caller probes
+// real image headers instead (rankCandidatesByProbedDims).
+type pageImageCand struct {
+	url      string
+	declared int64
+}
+
+// harvestPageImageURLs extracts candidate image URLs from an HTML page,
+// ranked by IDENTITY (session 3179: extension'd filmstrip anchors — every
+// neighbor thumb wrapped in <a href="/NNN/full/256.jpg"> — outranked the
+// page's own viewer image and the model edited the wrong photo; an
+// extension'd anchor signals A file link, not THE page's file link).
+// Emission order: (1) a SINGLE unique extension'd anchor — the "open
+// file" details-page pattern; (2) displayed <img> candidates by declared
+// size desc (width/height attrs, srcset width descriptors), document
+// order for ties/unknowns, data-src before src within an img; (3) a BATCH
+// of distinct anchors — a gallery filmstrip, neighbors not "the" image —
+// demoted below the page's own imgs; (4) og:image, then twitter:image,
+// LAST (EXACT property/name matches only — og:image:width and friends
+// carry non-URLs; og is also preview-sized by web convention). Relative
+// URLs resolve against the page URL; data: and non-http(s) candidates
+// are skipped; deduped, capped. anyDeclared reports whether any
+// displayed candidate carried a declared size — false tells the caller
+// the markup ranking is blind and the image-header probe should run.
+func harvestPageImageURLs(body []byte, baseURL string) (out []string, anyDeclared bool) {
 	base, err := neturl.Parse(baseURL)
 	if err != nil || !base.IsAbs() {
-		return nil
+		return nil, false
 	}
 
-	var anchors, imgs, og, tw []string
+	var anchors []string
+	var imgs []pageImageCand
+	var og, tw []string
 	tk := html.NewTokenizer(bytes.NewReader(body))
 	for {
 		tt := tk.Next()
@@ -471,7 +652,7 @@ func harvestPageImageURLs(body []byte, baseURL string) []string {
 		for {
 			k, v, more := tk.TagAttr()
 			if attrs == nil {
-				attrs = make(map[string]string, 4)
+				attrs = make(map[string]string, 8)
 			}
 			attrs[strings.ToLower(string(k))] = string(v)
 			if !more {
@@ -491,11 +672,23 @@ func harvestPageImageURLs(body []byte, baseURL string) []string {
 				tw = append(tw, attrs["content"])
 			}
 		case "img":
+			// srcset descriptors first: when a URL appears both as src
+			// and inside srcset, the descriptor-carrying occurrence must
+			// win the dedupe or the candidate loses its declared size.
+			// data-* before plain attributes otherwise (lazy-load
+			// convention: the real image lives in data-src).
+			score := imgDeclaredScore(attrs)
+			for _, pair := range srcsetCandidates(attrs["data-srcset"]) {
+				imgs = append(imgs, pair)
+			}
+			for _, pair := range srcsetCandidates(attrs["srcset"]) {
+				imgs = append(imgs, pair)
+			}
 			if attrs["data-src"] != "" {
-				imgs = append(imgs, attrs["data-src"])
+				imgs = append(imgs, pageImageCand{url: attrs["data-src"], declared: score})
 			}
 			if attrs["src"] != "" {
-				imgs = append(imgs, attrs["src"])
+				imgs = append(imgs, pageImageCand{url: attrs["src"], declared: score})
 			}
 		}
 	}
@@ -515,7 +708,18 @@ func harvestPageImageURLs(body []byte, baseURL string) []string {
 		return abs.String(), true
 	}
 
-	var out []string
+	// Displayed imgs: declared size desc, document order stable.
+	sort.SliceStable(imgs, func(i, j int) bool {
+		return imgs[i].declared > imgs[j].declared
+	})
+	for _, c := range imgs {
+		if c.declared > 0 {
+			anyDeclared = true
+		}
+	}
+
+	// Anchor count is over UNIQUE resolved URLs (imgsite's orig anchor
+	// appears twice — download + open file — but is ONE file).
 	seen := make(map[string]bool)
 	add := func(raw string) {
 		if len(out) >= pageImageCandidateCap {
@@ -526,17 +730,98 @@ func harvestPageImageURLs(body []byte, baseURL string) []string {
 			out = append(out, resolved)
 		}
 	}
+
+	var anchorUniques []string
 	for _, a := range anchors {
-		add(a)
+		if r, ok := resolve(a); ok && !containsStr(anchorUniques, r) {
+			anchorUniques = append(anchorUniques, r)
+		}
 	}
-	for _, i := range imgs {
-		add(i)
+
+	switch len(anchorUniques) {
+	case 1:
+		// The open-file pattern: the page links exactly one image file.
+		add(anchorUniques[0])
+		for _, c := range imgs {
+			add(c.url)
+		}
+	default:
+		// No anchors, or a gallery filmstrip (many distinct files =
+		// neighbors): the page's own displayed images come first.
+		for _, c := range imgs {
+			add(c.url)
+		}
+		for _, a := range anchorUniques {
+			add(a)
+		}
 	}
 	for _, m := range og {
 		add(m)
 	}
 	for _, m := range tw {
 		add(m)
+	}
+	return out, anyDeclared
+}
+
+func containsStr(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// imgDeclaredScore derives a pixel-area score from an <img> tag's
+// width/height attributes (both required for area; a lone dim scores its
+// value — better than blind). Attributes can carry units or percentages;
+// only bare integers count.
+func imgDeclaredScore(attrs map[string]string) int64 {
+	w, wok := atoiStrict(attrs["width"])
+	h, hok := atoiStrict(attrs["height"])
+	switch {
+	case wok && hok:
+		return w * h
+	case wok:
+		return w
+	case hok:
+		return h
+	}
+	return 0
+}
+
+func atoiStrict(s string) (int64, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// srcsetCandidates splits a srcset attribute into (url, descriptor-score)
+// pairs; the pixel-width descriptor doubles as the declared-size score.
+func srcsetCandidates(s string) []pageImageCand {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	var out []pageImageCand
+	for _, cand := range strings.Split(s, ",") {
+		fields := strings.Fields(strings.TrimSpace(cand))
+		if len(fields) == 0 {
+			continue
+		}
+		var score int64
+		if len(fields) > 1 && strings.HasSuffix(fields[1], "w") {
+			if n, ok := atoiStrict(strings.TrimSuffix(fields[1], "w")); ok {
+				score = n
+			}
+		}
+		out = append(out, pageImageCand{url: fields[0], declared: score})
 	}
 	return out
 }
@@ -593,7 +878,15 @@ func fetchViewImageSource(url, format string, quality, maxW, maxH, maxPixels int
 		return nil, "", "", fmt.Errorf("URL did not return an image (content-type: %s)", contentType)
 	}
 	var lastCandErr error
-	for _, cand := range harvestPageImageURLs(data, url) {
+	cands, anyDeclared := harvestPageImageURLs(data, url)
+	if !anyDeclared && len(cands) > 1 {
+		// Markup ranking is blind (no width/height/srcset descriptors
+		// anywhere): probe the candidates' image header bytes and rank by
+		// real pixel area — a filmstrip's neighbor files must not win just
+		// because the page omits dimensions.
+		cands = rankCandidatesByProbedDims(cands)
+	}
+	for _, cand := range cands {
 		b, ct, ferr := fetchURLBounded(cand, int64(maxImageSize))
 		if ferr != nil {
 			lastCandErr = ferr

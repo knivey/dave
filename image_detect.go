@@ -332,11 +332,6 @@ func trustedImageHost(host string) bool {
 	return false
 }
 
-// maxPageHTMLSize bounds the HTML fetch when view_image resolves a page to
-// its preview image. Generous: pages can be large, and truncation only
-// risks missing late <img> tags (og:image lives in <head>, early).
-const maxPageHTMLSize = 2 << 20 // 2 MiB
-
 // fetchURLBounded is the shared fetch core of downloadImage and view_image's
 // page resolution: trusted-host client selection, status check, and a
 // bounded body read. It does NOT check the content type — callers decide
@@ -528,12 +523,20 @@ func convertToFetched(imgData []byte, mimeType, format string, quality, maxW, ma
 // fetchViewImageSource resolves what view_image should attach: a direct
 // image URL passes through; an HTML page is resolved to its primary image
 // (harvestPageImageURLs order) with the FIRST candidate that actually
-// fetches as an image winning — no recursion (a candidate that is itself
-// HTML does not chase further). Returns the converted image, the RESOLVED
-// source URL (what the label and ref register — never the page), and the
-// originating page URL when extraction happened ("" for direct images).
+// fetches AND converts as an image winning — no recursion (a candidate
+// that is itself HTML does not chase further), and a candidate that
+// fetches as an image but fails conversion (corrupt/bomb) falls through
+// to the next candidate, each being independently bomb-checked. The FIRST
+// fetch keeps the full maxImageSize budget: it is usually a direct image,
+// and a page-sized bound here would silently reject every direct image
+// between the two caps (the review-caught regression). A page therefore
+// reads up to maxImageSize bytes too — bounded, just less tightly than a
+// dedicated page cap would be; harvest on a truncated page simply sees
+// fewer candidates. Returns the converted image, the RESOLVED source URL
+// (what the label and ref register — never the page), and the originating
+// page URL when extraction happened ("" for direct images).
 func fetchViewImageSource(url, format string, quality, maxW, maxH, maxPixels int) (*fetchedImage, string, string, error) {
-	data, contentType, err := fetchURLBounded(url, maxPageHTMLSize)
+	data, contentType, err := fetchURLBounded(url, int64(maxImageSize))
 	if err != nil {
 		return nil, "", "", err
 	}
@@ -547,16 +550,27 @@ func fetchViewImageSource(url, format string, quality, maxW, maxH, maxPixels int
 	if !strings.HasPrefix(contentType, "text/html") {
 		return nil, "", "", fmt.Errorf("URL did not return an image (content-type: %s)", contentType)
 	}
+	var lastCandErr error
 	for _, cand := range harvestPageImageURLs(data, url) {
 		b, ct, ferr := fetchURLBounded(cand, int64(maxImageSize))
-		if ferr != nil || !strings.HasPrefix(ct, "image/") {
+		if ferr != nil {
+			lastCandErr = ferr
+			continue
+		}
+		if !strings.HasPrefix(ct, "image/") {
 			continue
 		}
 		fi, cerr := convertToFetched(b, ct, format, quality, maxW, maxH, maxPixels)
 		if cerr != nil {
-			return nil, "", "", cerr
+			// Corrupt/bomb candidate: try the next one; remember why for
+			// the error tail below.
+			lastCandErr = cerr
+			continue
 		}
 		return fi, cand, url, nil
+	}
+	if logger != nil && lastCandErr != nil {
+		logger.Debug("page image candidates all failed", "url", url, "last_error", lastCandErr.Error())
 	}
 	return nil, "", "", fmt.Errorf(
 		"URL was an HTML page (content-type: %s) and no viewable image could be extracted from it — use fetch to read the page and locate a direct image URL",

@@ -13,6 +13,7 @@ import (
 	"image/gif"
 	"image/jpeg"
 	"image/png"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	neturl "net/url"
@@ -1591,4 +1592,36 @@ func TestGetBuiltinToolDefsViewImageGatedOnDetectImages(t *testing.T) {
 			assert.NotEqual(t, viewImageToolName, tl.Function.Name, "disabled_builtin_tools opts out")
 		}
 	}
+}
+
+// TestFetchViewImageSourceDirectLargeImage: the FIRST fetch of
+// fetchViewImageSource must keep downloadImage's full maxImageSize budget —
+// a shared page-sized bound (2MiB) would silently reject every direct
+// image between 2 and 10 MiB (camera JPEGs, big /orig/ generations), the
+// exact regression the review caught.
+func TestFetchViewImageSourceDirectLargeImage(t *testing.T) {
+	config.TrustedImageHosts = []string{"127.0.0.1"}
+	t.Cleanup(func() { config.TrustedImageHosts = nil })
+
+	// Random noise compresses poorly: 2200x2200 at q95 lands well over 2MiB.
+	img := image.NewRGBA(image.Rect(0, 0, 2200, 2200))
+	rnd := rand.New(rand.NewSource(1))
+	for i := range img.Pix {
+		img.Pix[i] = byte(rnd.Intn(256))
+	}
+	var buf bytes.Buffer
+	require.NoError(t, jpeg.Encode(&buf, img, &jpeg.Options{Quality: 95}))
+	require.Greater(t, buf.Len(), 2<<20, "test image must exceed the old 2MiB page bound")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Write(buf.Bytes())
+	}))
+	defer srv.Close()
+
+	fi, src, fromPage, err := fetchViewImageSource(srv.URL+"/big.jpg", "jpg", 75, 1024, 1024, rootMaxImagePixels())
+	require.NoError(t, err, "a direct image over 2MiB must still view (10MiB budget)")
+	assert.Equal(t, srv.URL+"/big.jpg", src)
+	assert.Empty(t, fromPage)
+	assert.NotEmpty(t, fi.DataURI)
 }

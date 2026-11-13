@@ -140,6 +140,14 @@ type JobResult struct {
 type ImageData struct {
 	URL      string `json:"url,omitempty"`
 	MIMEType string `json:"mime_type"`
+	// ImageURL is the DIRECT asset URL (imgsite's /orig/ link). url is the
+	// human-facing PAGE link — correct for IRC, useless to view_image
+	// (HTML). The model views its own generations through ImageURL in one
+	// call instead of the fetch/view recovery dance the 2026-11-12
+	// incident showed (view_image(page) → content-type error → fetch page
+	// → view_image(orig)). omitempty: legacy rows predating the column
+	// rebuild without it, and the edit tool's input echo stays clean.
+	ImageURL string `json:"image_url,omitempty"`
 	// Ref is the re-edit handle: gen_<jobid>_<ordinal> (output order).
 	// The model passes it back in edit_image's input_images to chain a
 	// result into the next edit. omitempty keeps non-job contexts clean —
@@ -978,12 +986,13 @@ func (q *JobQueue) processJob(ctx context.Context, job *Job) {
 			comfyImgs = append(comfyImgs, comfyResult.ComfyImages[i])
 		}
 
-		url, err := uploadImage(cfg, img.Data, img.Filename, uploadMeta)
+		url, imageURL, err := uploadImage(cfg, img.Data, img.Filename, uploadMeta)
 		if err != nil {
 			q.failJob(job, fmt.Sprintf("upload failed: %v", err))
 			return
 		}
 		imgData.URL = url
+		imgData.ImageURL = imageURL
 
 		jobResult.Images = append(jobResult.Images, imgData)
 	}
@@ -1353,12 +1362,13 @@ func (q *JobQueue) recoverRunningJob(_ context.Context, job *Job, comfyPromptID 
 			comfyImgs = append(comfyImgs, comfyResult.ComfyImages[i])
 		}
 
-		url, err := uploadImage(cfg, img.Data, img.Filename, uploadMeta)
+		url, imageURL, err := uploadImage(cfg, img.Data, img.Filename, uploadMeta)
 		if err != nil {
 			q.failJob(job, fmt.Sprintf("upload failed during recovery: %v", err))
 			return
 		}
 		imgData.URL = url
+		imgData.ImageURL = imageURL
 
 		jobResult.Images = append(jobResult.Images, imgData)
 	}

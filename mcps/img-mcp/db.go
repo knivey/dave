@@ -78,6 +78,7 @@ type dbJobImage struct {
 	ID        int64  `db:"id"`
 	JobID     string `db:"job_id"`
 	URL       string `db:"url"`
+	ImageURL  string `db:"image_url"`
 	Filename  string `db:"filename"`
 	Subfolder string `db:"subfolder"`
 	ImgType   string `db:"img_type"`
@@ -260,9 +261,9 @@ func dbCompleteJob(db *sqlx.DB, jobID string, result *JobResult, comfyImages []C
 			comfyImgType = comfyImages[i].Type
 		}
 		_, err = tx.Exec(
-			`INSERT INTO job_images (job_id, url, filename, subfolder, img_type, mime_type, ordinal)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			jobID, img.URL, comfyFilename, comfySubfolder, comfyImgType, img.MIMEType, i,
+			`INSERT INTO job_images (job_id, url, image_url, filename, subfolder, img_type, mime_type, ordinal)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			jobID, img.URL, img.ImageURL, comfyFilename, comfySubfolder, comfyImgType, img.MIMEType, i,
 		)
 		if err != nil {
 			return err
@@ -450,6 +451,7 @@ func buildJobResultFromDB(db *sqlx.DB, jobID string) (*JobResult, []ComfyImage, 
 	for _, img := range images {
 		result.Images = append(result.Images, ImageData{
 			URL:      img.URL,
+			ImageURL: img.ImageURL,
 			MIMEType: img.MIMEType,
 			// Same gen_ handles the live path stamped: the DB-rebuilt
 			// result (restart recovery / TTL path) stays re-editable.

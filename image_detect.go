@@ -23,6 +23,7 @@ import (
 	"github.com/chai2010/webp"
 	"golang.org/x/image/bmp"
 	"golang.org/x/image/draw"
+	"golang.org/x/net/html"
 )
 
 const maxImageSize = 10 * 1024 * 1024 // 10MB
@@ -331,9 +332,18 @@ func trustedImageHost(host string) bool {
 	return false
 }
 
-func downloadImage(url string) ([]byte, string, error) {
+// maxPageHTMLSize bounds the HTML fetch when view_image resolves a page to
+// its preview image. Generous: pages can be large, and truncation only
+// risks missing late <img> tags (og:image lives in <head>, early).
+const maxPageHTMLSize = 2 << 20 // 2 MiB
+
+// fetchURLBounded is the shared fetch core of downloadImage and view_image's
+// page resolution: trusted-host client selection, status check, and a
+// bounded body read. It does NOT check the content type — callers decide
+// what they accept.
+func fetchURLBounded(url string, maxBytes int64) ([]byte, string, error) {
 	if logger != nil {
-		logger.Debug("downloading image", "url", url)
+		logger.Debug("fetching url", "url", url)
 	}
 	client := imageHTTPClient
 	if u, perr := neturl.Parse(url); perr == nil && trustedImageHost(u.Hostname()) {
@@ -354,34 +364,203 @@ func downloadImage(url string) ([]byte, string, error) {
 	}
 
 	contentType := resp.Header.Get("Content-Type")
-	if !strings.HasPrefix(contentType, "image/") {
-		return nil, "", fmt.Errorf("URL did not return an image (content-type: %s)", contentType)
-	}
-
 	contentLength := resp.ContentLength
-	if contentLength > maxImageSize {
-		return nil, "", fmt.Errorf("image too large (%d bytes, max %d)", contentLength, maxImageSize)
+	if contentLength > maxBytes {
+		return nil, "", fmt.Errorf("image too large (%d bytes, max %d)", contentLength, maxBytes)
 	}
 
 	// Always bound the body read: a missing/lying Content-Length (chunked
 	// transfer) must not turn into an unbounded read that buffers until the
-	// client timeout. Reading maxImageSize+1 lets the size check below
+	// client timeout. Reading maxBytes+1 lets the size check below
 	// distinguish "at the cap" from "over the cap".
-	bodyReader := io.LimitReader(resp.Body, maxImageSize+1)
+	bodyReader := io.LimitReader(resp.Body, maxBytes+1)
 
 	data, err := io.ReadAll(bodyReader)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to read image body: %w", err)
 	}
 
-	if len(data) > maxImageSize {
-		return nil, "", fmt.Errorf("image too large (%d bytes, max %d)", len(data), maxImageSize)
+	if int64(len(data)) > maxBytes {
+		return nil, "", fmt.Errorf("image too large (%d bytes, max %d)", len(data), maxBytes)
 	}
 
 	if logger != nil {
-		logger.Debug("image downloaded", "url", url, "size", formatSize(len(data)), "content_type", contentType)
+		logger.Debug("url fetched", "url", url, "size", formatSize(len(data)), "content_type", contentType)
 	}
 	return data, contentType, nil
+}
+
+func downloadImage(url string) ([]byte, string, error) {
+	if logger != nil {
+		logger.Debug("downloading image", "url", url)
+	}
+	data, contentType, err := fetchURLBounded(url, int64(maxImageSize))
+	if err != nil {
+		return nil, "", err
+	}
+	if !strings.HasPrefix(contentType, "image/") {
+		return nil, "", fmt.Errorf("URL did not return an image (content-type: %s)", contentType)
+	}
+	return data, contentType, nil
+}
+
+// pageImageCandidateCap bounds how many harvested candidates view_image
+// will try when resolving an HTML page to its image.
+const pageImageCandidateCap = 5
+
+// harvestPageImageURLs extracts candidate image URLs from an HTML page, in
+// priority order: og:image / twitter:image meta tags (EXACT property/name
+// matches only — og:image:width and friends carry non-URLs, the same lesson
+// fetch-mcp's harvest learned), then <img> tags with data-src before src
+// (the lazy-load convention keeps the real image in data-src). Relative
+// URLs resolve against the page URL; data: and non-http(s) candidates are
+// skipped; deduped, capped. It is a best-effort harvest over a truncated
+// buffer: no error return, just fewer candidates.
+func harvestPageImageURLs(body []byte, baseURL string) []string {
+	base, err := neturl.Parse(baseURL)
+	if err != nil || !base.IsAbs() {
+		return nil
+	}
+
+	var og, tw, imgs []string
+	tk := html.NewTokenizer(bytes.NewReader(body))
+	for {
+		tt := tk.Next()
+		if tt == html.ErrorToken {
+			break
+		}
+		if tt != html.StartTagToken && tt != html.SelfClosingTagToken {
+			continue
+		}
+		tagBytes, _ := tk.TagName()
+		tag := string(tagBytes)
+		if tag != "meta" && tag != "img" {
+			continue
+		}
+		var attrs map[string]string
+		for {
+			k, v, more := tk.TagAttr()
+			if attrs == nil {
+				attrs = make(map[string]string, 4)
+			}
+			attrs[strings.ToLower(string(k))] = string(v)
+			if !more {
+				break
+			}
+		}
+		switch tag {
+		case "meta":
+			if attrs["property"] == "og:image" && attrs["content"] != "" {
+				og = append(og, attrs["content"])
+			}
+			if attrs["name"] == "twitter:image" && attrs["content"] != "" {
+				tw = append(tw, attrs["content"])
+			}
+		case "img":
+			if attrs["data-src"] != "" {
+				imgs = append(imgs, attrs["data-src"])
+			}
+			if attrs["src"] != "" {
+				imgs = append(imgs, attrs["src"])
+			}
+		}
+	}
+
+	resolve := func(raw string) (string, bool) {
+		u, perr := neturl.Parse(raw)
+		if perr != nil {
+			return "", false
+		}
+		// Relative URLs (empty scheme) resolve against the page; only
+		// ABSOLUTE non-http(s) schemes (data:, javascript:, ftp:…) are
+		// rejected outright.
+		if u.Scheme != "" && u.Scheme != "http" && u.Scheme != "https" {
+			return "", false
+		}
+		abs := base.ResolveReference(u)
+		return abs.String(), true
+	}
+
+	var out []string
+	seen := make(map[string]bool)
+	add := func(raw string) {
+		if len(out) >= pageImageCandidateCap {
+			return
+		}
+		if resolved, ok := resolve(raw); ok && !seen[resolved] {
+			seen[resolved] = true
+			out = append(out, resolved)
+		}
+	}
+	for _, m := range og {
+		add(m)
+	}
+	for _, m := range tw {
+		add(m)
+	}
+	for _, i := range imgs {
+		add(i)
+	}
+	return out
+}
+
+// convertToFetched is the shared download→convert dressing: bytes of any
+// image content-type become a fetchedImage (Encoded + full DataURI + MIME
+// per requested format).
+func convertToFetched(imgData []byte, mimeType, format string, quality, maxW, maxH, maxPixels int) (*fetchedImage, error) {
+	encoded, dataURI, w, h, err := convertImage(imgData, mimeType, format, quality, maxW, maxH, maxPixels)
+	if err != nil {
+		return nil, err
+	}
+	mime := "image/jpeg"
+	if format == "webp" {
+		mime = "image/webp"
+	}
+	return &fetchedImage{
+		Encoded: encoded,
+		DataURI: dataURI + base64.StdEncoding.EncodeToString(encoded),
+		MIME:    mime,
+		Width:   w,
+		Height:  h,
+	}, nil
+}
+
+// fetchViewImageSource resolves what view_image should attach: a direct
+// image URL passes through; an HTML page is resolved to its primary image
+// (harvestPageImageURLs order) with the FIRST candidate that actually
+// fetches as an image winning — no recursion (a candidate that is itself
+// HTML does not chase further). Returns the converted image, the RESOLVED
+// source URL (what the label and ref register — never the page), and the
+// originating page URL when extraction happened ("" for direct images).
+func fetchViewImageSource(url, format string, quality, maxW, maxH, maxPixels int) (*fetchedImage, string, string, error) {
+	data, contentType, err := fetchURLBounded(url, maxPageHTMLSize)
+	if err != nil {
+		return nil, "", "", err
+	}
+	if strings.HasPrefix(contentType, "image/") {
+		fi, cerr := convertToFetched(data, contentType, format, quality, maxW, maxH, maxPixels)
+		if cerr != nil {
+			return nil, "", "", cerr
+		}
+		return fi, url, "", nil
+	}
+	if !strings.HasPrefix(contentType, "text/html") {
+		return nil, "", "", fmt.Errorf("URL did not return an image (content-type: %s)", contentType)
+	}
+	for _, cand := range harvestPageImageURLs(data, url) {
+		b, ct, ferr := fetchURLBounded(cand, int64(maxImageSize))
+		if ferr != nil || !strings.HasPrefix(ct, "image/") {
+			continue
+		}
+		fi, cerr := convertToFetched(b, ct, format, quality, maxW, maxH, maxPixels)
+		if cerr != nil {
+			return nil, "", "", cerr
+		}
+		return fi, cand, url, nil
+	}
+	return nil, "", "", fmt.Errorf(
+		"URL was an HTML page (content-type: %s) and no viewable image could be extracted from it — use fetch to read the page and locate a direct image URL",
+		contentType)
 }
 
 func convertImage(imgData []byte, mimeType, format string, quality, maxW, maxH, maxPixels int) (out []byte, dataURI string, width int, height int, err error) {
@@ -511,21 +690,7 @@ func fetchAndConvertImage(url, format string, quality, maxW, maxH, maxPixels int
 	if err != nil {
 		return nil, err
 	}
-	encoded, dataURI, w, h, err := convertImage(imgData, mimeType, format, quality, maxW, maxH, maxPixels)
-	if err != nil {
-		return nil, err
-	}
-	mime := "image/jpeg"
-	if format == "webp" {
-		mime = "image/webp"
-	}
-	return &fetchedImage{
-		Encoded: encoded,
-		DataURI: dataURI + base64.StdEncoding.EncodeToString(encoded),
-		MIME:    mime,
-		Width:   w,
-		Height:  h,
-	}, nil
+	return convertToFetched(imgData, mimeType, format, quality, maxW, maxH, maxPixels)
 }
 
 func decodeBMP(r io.Reader) (image.Image, error) {
@@ -715,27 +880,38 @@ func (cr *chatRunner) handleViewImage(turn *turnContext, call ToolCall) bool {
 			cr.cfg.MaxContextImages)))
 		return false
 	}
-	fi, err := fetchAndConvertImage(args.URL, cr.cfg.ImageFormat, cr.cfg.ImageQuality, cr.cfg.MaxImageWidth, cr.cfg.MaxImageHeight, rootMaxImagePixels())
+	fi, srcURL, fromPage, err := fetchViewImageSource(args.URL, cr.cfg.ImageFormat, cr.cfg.ImageQuality, cr.cfg.MaxImageWidth, cr.cfg.MaxImageHeight, rootMaxImagePixels())
 	if err != nil {
 		turn.Add(toolResultMsg(call.ID, "error: "+err.Error()))
 		return false
 	}
-	ref, refErr := registerImageRef(cr.sessionID, "view", args.URL, fi.MIME, fi.Width, fi.Height, fi.Encoded)
+	// The ref and the label carry the RESOLVED image URL — never the page.
+	// For page extractions the model must be able to see, permanently in
+	// context, WHAT it is looking at: the page's preview image, not the
+	// page's content (owner ruling: no silent resolution — that would
+	// confirm the bias that every link is an image).
+	ref, refErr := registerImageRef(cr.sessionID, "view", srcURL, fi.MIME, fi.Width, fi.Height, fi.Encoded)
 	if refErr != nil {
-		cr.logger.Warn("image ref registration failed (image still attached)", "url", args.URL, "error", refErr.Error())
+		cr.logger.Warn("image ref registration failed (image still attached)", "url", srcURL, "error", refErr.Error())
 	}
 	if ref == "" {
 		ref = "unregistered"
 	}
-	turn.Add(toolResultMsg(call.ID, fmt.Sprintf(
-		"Image loaded and attached in the next message — ref: %s. Source: %s (%dx%d).",
-		ref, args.URL, fi.Width, fi.Height)))
+	if fromPage != "" {
+		turn.Add(toolResultMsg(call.ID, fmt.Sprintf(
+			"URL was an HTML page, not an image. Extracted its primary preview image and attached it in the next message — ref: %s. Source: %s (%dx%d). Requested page: %s. NOTE: this is the page's preview image, not necessarily the page's content — use fetch for the page's text.",
+			ref, srcURL, fi.Width, fi.Height, fromPage)))
+	} else {
+		turn.Add(toolResultMsg(call.ID, fmt.Sprintf(
+			"Image loaded and attached in the next message — ref: %s. Source: %s (%dx%d).",
+			ref, srcURL, fi.Width, fi.Height)))
+	}
 	cr.pendingInjections = append(cr.pendingInjections, ChatMessage{
 		Role: RoleUser,
 		MultiContent: []MessagePart{
 			// Label PRECEDES the image — the ref-pairing contract: the model
 			// visually maps ref -> image (old image-editing plan).
-			{Type: PartTypeText, Text: fmt.Sprintf("[image — ref: %s — source: %s]", ref, args.URL)},
+			{Type: PartTypeText, Text: fmt.Sprintf("[image — ref: %s — source: %s]", ref, srcURL)},
 			{Type: PartTypeImageURL, ImageURL: &ImageURL{URL: fi.DataURI, Detail: ImageDetailAuto}},
 		},
 	})

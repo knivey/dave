@@ -748,7 +748,7 @@ func (h *ToolHandlers) handleUploadImage(ctx context.Context, req *mcp.CallToolR
 	// _dave_inject_* fields (nothing on this path knows the job's IRC
 	// provenance) and no enhancement happened, so the payload is empty and
 	// imgsite relies entirely on EXIF extraction.
-	url, err := uploadImage(h.getConfig(), data, input.Filename, UploadMeta{})
+	url, _, err := uploadImage(h.getConfig(), data, input.Filename, UploadMeta{})
 	if err != nil {
 		return nil, UploadImageOutput{}, err
 	}

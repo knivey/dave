@@ -347,7 +347,7 @@ func (s *session) logFailedAttempt(raw []byte, callErr error) error {
 // dave appends one RoleTool row per call.
 func (s *session) answerToolCalls(calls []wireToolCall) {
 	for _, tc := range calls {
-		result, jobID := fabricateToolResult(tc.Function.Name, s.rng)
+		result, jobID := fabricateToolResult(tc.Function.Name, tc.Function.Arguments, s.rng)
 		if jobID != "" {
 			s.jobSubmissions = append(s.jobSubmissions, jobID)
 		}

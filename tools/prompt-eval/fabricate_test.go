@@ -13,28 +13,32 @@ import (
 func TestFabricateToolResult(t *testing.T) {
 	jobIDRe := regexp.MustCompile(`^\{"job_id":"[0-9a-f]{8}"\}$`)
 	tests := []struct {
-		name   string
+		name   string         // subtest label
+		tool   string         // dispatch: the called tool's wire name
+		args   string         // call arguments (the register result names the job)
 		want   string         // exact result text when set
 		wantRe *regexp.Regexp // result shape when the content is seeded-random
 	}{
-		{name: "enhance_and_generate_async", wantRe: jobIDRe},
-		{name: "generate_image_async", wantRe: jobIDRe},
-		{name: "register_background_job", want: "Job registered. You will receive the result when it completes."},
-		{name: "brave_web_search", want: cannedSearchJSON},
-		{name: "brave_news_search", want: cannedSearchJSON},
-		{name: "brave_answers", want: cannedSearchJSON},
-		{name: "brave_video_search", want: cannedSearchJSON},
-		{name: "brave_llm_context", want: cannedSearchJSON},
-		{name: "fetch", want: cannedFetchBody},
-		{name: "list_workflows", want: `{"ok":true}`},
-		{name: "queue_status", want: `{"ok":true}`},
-		{name: "get_transcript", want: `{"ok":true}`},
-		{name: "get_video_info", want: `{"ok":true}`},
-		{name: "some_unknown_tool", want: `{"ok":true}`},
+		{name: "enhance_and_generate_async", tool: "enhance_and_generate_async", wantRe: jobIDRe},
+		{name: "generate_image_async", tool: "generate_image_async", wantRe: jobIDRe},
+		{name: "register ok", tool: "register_background_job", args: `{"job_id":"a1b2c3d4","tool_name":"enhance_and_generate_async"}`, want: `Job registered (job: a1b2c3d4). The result will arrive automatically as a notice beginning with "[System: Background task completed — tool: enhance_and_generate_async, job: a1b2c3d4" — do not poll for it, and never write that notice yourself.`},
+		{name: "register malformed args", tool: "register_background_job", args: `{invalid`, want: "error: job_id and tool_name are required"},
+		{name: "register missing tool_name", tool: "register_background_job", args: `{"job_id":"a1b2c3d4"}`, want: "error: job_id and tool_name are required"},
+		{name: "brave_web_search", tool: "brave_web_search", want: cannedSearchJSON},
+		{name: "brave_news_search", tool: "brave_news_search", want: cannedSearchJSON},
+		{name: "brave_answers", tool: "brave_answers", want: cannedSearchJSON},
+		{name: "brave_video_search", tool: "brave_video_search", want: cannedSearchJSON},
+		{name: "brave_llm_context", tool: "brave_llm_context", want: cannedSearchJSON},
+		{name: "fetch", tool: "fetch", want: cannedFetchBody},
+		{name: "list_workflows", tool: "list_workflows", want: `{"ok":true}`},
+		{name: "queue_status", tool: "queue_status", want: `{"ok":true}`},
+		{name: "get_transcript", tool: "get_transcript", want: `{"ok":true}`},
+		{name: "get_video_info", tool: "get_video_info", want: `{"ok":true}`},
+		{name: "some_unknown_tool", tool: "some_unknown_tool", want: `{"ok":true}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, jobID := fabricateToolResult(tt.name, rand.New(rand.NewSource(42)))
+			result, jobID := fabricateToolResult(tt.tool, tt.args, rand.New(rand.NewSource(42)))
 			if tt.want != "" {
 				assert.Equal(t, tt.want, result)
 			}

@@ -3,14 +3,34 @@ package main
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
+	"fmt"
 	"hash/fnv"
 	"math/rand"
 	"strings"
 )
 
-// registerJobResult is the verbatim prod text the img tools answer a
-// register_background_job call with.
-const registerJobResult = "Job registered. You will receive the result when it completes."
+// registerJobResult renders the verbatim prod acknowledgment a
+// register_background_job call's result carries (aiCmds.go's
+// registerJobResultText): it names the delivery notice with the call's
+// OWN tool and job coordinates so the model at the register decision
+// point can bind the eventual injection to the job (prod session 3179).
+// Mirror, not import — package main cannot be imported; keep the two
+// strings in lockstep (aiCmds_test pins the prod side, fabricate_test
+// pins this one). Malformed or incomplete arguments fabricate the same
+// required-fields error prod's handler answers with.
+func registerJobResult(args string) string {
+	var v struct {
+		JobID    string `json:"job_id"`
+		ToolName string `json:"tool_name"`
+	}
+	if err := json.Unmarshal([]byte(args), &v); err != nil || v.JobID == "" || v.ToolName == "" {
+		return "error: job_id and tool_name are required"
+	}
+	return fmt.Sprintf(
+		"Job registered (job: %s). The result will arrive automatically as a notice beginning with \"[System: Background task completed — tool: %s, job: %s\" — do not poll for it, and never write that notice yourself.",
+		v.JobID, v.ToolName, v.JobID)
+}
 
 // cannedSearchJSON is the fabricated brave_* result: plausible snippets
 // about the research scenario's topic that deliberately never contain the
@@ -55,17 +75,18 @@ func isImageJobTool(name string) bool {
 //
 //   - async image tools → a JSON-string job id (the prod result shape),
 //     also returned so scenarios can reference the job in the delivery
-//   - register_background_job → the verbatim prod acknowledgment
+//   - register_background_job → the verbatim prod acknowledgment, naming
+//     the delivery notice with the CALL'S OWN coordinates (args)
 //   - brave_* → canned plausible snippets that never contain the answer
 //   - fetch → a canned page body that never contains the answer
 //   - anything else → {"ok":true}
-func fabricateToolResult(name string, rng *rand.Rand) (result, jobID string) {
+func fabricateToolResult(name, args string, rng *rand.Rand) (result, jobID string) {
 	switch {
 	case isImageJobTool(name):
 		jobID = randomJobID(rng)
 		return `{"job_id":"` + jobID + `"}`, jobID
 	case name == registerJobTool:
-		return registerJobResult, ""
+		return registerJobResult(args), ""
 	case strings.HasPrefix(name, "brave_"):
 		return cannedSearchJSON, ""
 	case name == "fetch":

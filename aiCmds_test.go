@@ -1900,6 +1900,79 @@ func TestRegisterBackgroundJobReturnSignal(t *testing.T) {
 	}
 }
 
+// TestRegisterBackgroundJobResultNamesNotice pins the register result's
+// model-facing contract (prod session 3179: the result said only "Job
+// registered. You will receive the result when it completes." — at the
+// register decision point the model had no job id to match the eventual
+// injection against and no concrete shape of the incoming notice; the
+// waitinstr named the marker only in the tool DESCRIPTION, never in the
+// result): every terminal success branch names the delivery notice —
+// character-for-character against jobManager.go's marker, em dash
+// included, stopping before ". Result:" — with THIS job's tool name and
+// id interpolated. The duplicate branch is asserted here because it needs
+// no 500ms inline window; the fresh branch's text is the same builder and
+// is covered end-to-end by TestRunTurnEmptyAcceptedAfterDuplicateRegister
+// (the stalled-pending fixture walks the real fall-through).
+func TestRegisterBackgroundJobResultNamesNotice(t *testing.T) {
+	setupTestDB(t)
+	setupTestJobManager(t)
+	setupNoticesDefaults(t)
+
+	mcpServersMu.Lock()
+	origToolMap := mcpToolToServer
+	origServers := mcpServers
+	mcpToolToServer = map[string]string{
+		"enhance_and_generate_async": "img-mcp-async",
+	}
+	mcpServers = map[string]*MCPServer{"img-mcp-async": {}}
+	mcpServersMu.Unlock()
+	t.Cleanup(func() {
+		mcpServersMu.Lock()
+		mcpToolToServer = origToolMap
+		mcpServers = origServers
+		mcpServersMu.Unlock()
+	})
+
+	verbose := false
+	sid := createTestSession(t, "testnet", "#dup", "dupnick", "testcmd", "svc", "m")
+	cr := &chatRunner{
+		cfg:       AIConfig{ToolVerbose: &verbose},
+		network:   Network{Name: "testnet"},
+		channel:   "#dup",
+		nick:      "dupnick",
+		logger:    logxi.New("test"),
+		ctx:       context.Background(),
+		outputCh:  make(chan string, 8),
+		sessionID: sid,
+	}
+	cr.logger.SetLevel(logxi.LevelAll)
+
+	// Seed the job exactly the way a prior successful register would have
+	// so the handler takes the duplicate branch (fast — no inline window).
+	dupEntry := &jobEntry[asyncJobPayload]{
+		jobID:   "j-seeded",
+		payload: asyncJobPayload{sessionID: sid, inlineResultCh: make(chan string)},
+	}
+	require.True(t, asyncJobMgr.register(dupEntry, func(ctx context.Context, e *jobEntry[asyncJobPayload]) {
+		<-ctx.Done()
+	}))
+
+	turn := newTurnContext(sid, nil)
+	cr.handleRegisterBackgroundJob(turn, ToolCall{
+		ID:       "tc-dup",
+		Function: FunctionCall{Name: "register_background_job", Arguments: `{"job_id":"j-seeded","tool_name":"enhance_and_generate_async"}`},
+	})
+	require.Len(t, turn.Messages(), 1)
+	got := turn.Messages()[0].Content
+
+	assert.Contains(t, got, "Job already registered and being monitored")
+	// The marker must match jobManager.go's delivery prefix exactly, with
+	// the duplicate's OWN coordinates — the model can bind the eventual
+	// injection to this job and never mistake other input for it.
+	assert.Contains(t, got, "[System: Background task completed — tool: enhance_and_generate_async, job: j-seeded")
+	assert.Contains(t, got, "do not poll", "the result reiterates the no-poll instruction at the decision point")
+}
+
 func TestCheckEmptyRetry(t *testing.T) {
 	setupNoticesDefaults(t)
 
@@ -2590,9 +2663,14 @@ func TestRunTurnEmptyAcceptedAfterDuplicateRegister(t *testing.T) {
 	assert.True(t, cr.deliveryPending, "the duplicate register must still set deliveryPending")
 
 	// Both tool results reached the model: the real registration
-	// confirmation and the benign duplicate notice.
-	assert.Contains(t, requests[1], "Job registered. You will receive the result when it completes.")
-	assert.Contains(t, requests[1], "Job already registered and being monitored.")
+	// confirmation and the benign duplicate notice. Each names the
+	// delivery notice with its own coordinates — see
+	// TestRegisterBackgroundJobResultNamesNotice. (The two-fragment split
+	// sidesteps the request body's JSON escaping of the marker's quotes.)
+	assert.Contains(t, requests[1], `Job registered (job: j-dup). The result will arrive automatically as a notice beginning with`)
+	assert.Contains(t, requests[1], `[System: Background task completed — tool: enhance_and_generate_async, job: j-dup`)
+	assert.Contains(t, requests[1], `Job already registered and being monitored (job: j-dup). The result will arrive automatically as a notice beginning with`)
+	assert.Contains(t, requests[1], "do not poll for it, and never write that notice yourself.")
 
 	final, err := sessionMgr.GetMessages(sid)
 	require.NoError(t, err)

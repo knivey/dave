@@ -1697,7 +1697,7 @@ func (cr *chatRunner) handleRegisterBackgroundJob(turn *turnContext, call ToolCa
 	}
 
 	if asyncJobMgr.contains(args.JobID) {
-		toolMsg := toolResultMsg(call.ID, "Job already registered and being monitored.")
+		toolMsg := toolResultMsg(call.ID, registerJobResultText("Job already registered and being monitored", args.ToolName, args.JobID))
 		turn.Add(toolMsg)
 		// Benign duplicate: the earlier register's monitor guarantees the
 		// delivery — the pending predicate holds even though this call
@@ -1735,9 +1735,28 @@ func (cr *chatRunner) handleRegisterBackgroundJob(turn *turnContext, call ToolCa
 		}
 	}
 
-	toolMsg := toolResultMsg(call.ID, "Job registered. You will receive the result when it completes.")
+	toolMsg := toolResultMsg(call.ID, registerJobResultText("Job registered", args.ToolName, args.JobID))
 	turn.Add(toolMsg)
 	return true
+}
+
+// registerJobResultText renders the register_background_job success
+// result. Both terminal branches (fresh registration and the benign
+// duplicate) name the delivery notice the registration guarantees, with
+// the job's OWN coordinates interpolated: at the register decision point
+// the model can bind the eventual injection to THIS job and never mistake
+// other input for it (prod session 3179 showed the old generic text left
+// the model with nothing to match). The marker fragment mirrors
+// jobManager.go's delivery prefix character-for-character (em dash
+// included) and stops before ". Result:" — the model must never write the
+// payload half either. Mode-independent by design: message-mode guidance
+// rows and tool-mode job_status results carry the same marker prefix, so
+// the result text needs no delivery-mode branch — the tool DESCRIPTION
+// (getBuiltinToolDefs) carries the vehicle wording.
+func registerJobResultText(ack, toolName, jobID string) string {
+	return fmt.Sprintf(
+		"%s (job: %s). The result will arrive automatically as a notice beginning with \"[System: Background task completed — tool: %s, job: %s\" — do not poll for it, and never write that notice yourself.",
+		ack, jobID, toolName, jobID)
 }
 
 func (cr *chatRunner) handleBanUser(turn *turnContext, call ToolCall) {

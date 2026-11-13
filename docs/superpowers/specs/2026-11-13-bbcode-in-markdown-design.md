@@ -130,7 +130,7 @@ render-state threaded through the AST walk:
   suppressed when nothing visible followed the last newline. With toggles
   deleted, that is the entire auto-close.
 
-Accepted output divergences from today (benign, both noted for tests):
+Accepted output divergences from today (benign, all noted for tests):
 
 - **Soft-wrapped lines inside a colored paragraph**: today's translated text
   carries a re-emitted `\x0304` around the source `\n` that the renderer then
@@ -141,6 +141,12 @@ Accepted output divergences from today (benign, both noted for tests):
   `\x0309>` after the newline; the decorator's re-emit lands before it and the
   indent color wins that line (today the explicit code after the indent wins).
   Rare shape, accepted.
+- **Renderer-generated line breaks inside a colored span** (box-drawing table
+  rows are the concrete case): today the translator only re-emitted at the
+  *model's* newlines, so a color opened before a table colored only the rows
+  that happened to carry codes; the decorator re-emits at every output `\n`,
+  so all rows render colored. More consistent with the model's intent
+  (it asked for the span); accepted and pinned.
 
 Also accepted: a markdown link whose label *contains* a color tag
 (`[see [color=red]x[/color]](url)`) no longer parses as a link — the color tag

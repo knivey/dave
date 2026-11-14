@@ -1,7 +1,7 @@
 # BBCode In The Markdown Parser — Design
 
 Date: 2026-11-13
-Status: approved approach + approved design sections, spec stage
+Status: implemented (Nov 2026)
 Incident that motivated this: session 3178 — colored headings rendered with
 literal `**` (`**The Technical & Sharp…**` etc. all visible, colored but unbolded)
 

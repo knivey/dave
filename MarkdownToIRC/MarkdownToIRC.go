@@ -1147,6 +1147,27 @@ func htmlEndOpen(trimmed string) string {
 	return ""
 }
 
+// isSetextUnderline reports whether a trimmed line is a setext heading
+// underline: a run of one or more '=' or '-' (a single kind), nothing
+// else. Directly under a paragraph it consumes the paragraph into a
+// heading (ending it); setext underlines can never be LAZY continuation
+// lines, so the lazy path never consults this for real underlines.
+func isSetextUnderline(trimmed string) bool {
+	if trimmed == "" {
+		return false
+	}
+	c := trimmed[0]
+	if c != '=' && c != '-' {
+		return false
+	}
+	for i := 1; i < len(trimmed); i++ {
+		if trimmed[i] != c && trimmed[i] != ' ' && trimmed[i] != '\t' {
+			return false
+		}
+	}
+	return true
+}
+
 // isOnlyWS reports whether s is empty or entirely spaces/tabs.
 func isOnlyWS(s string) bool {
 	for i := 0; i < len(s); i++ {
@@ -1564,8 +1585,21 @@ func (s *StreamingRenderer) scan() {
 				// Document-level paragraph state, same rules (used by
 				// the type-7 gate; ATX headings end paragraphs like
 				// block openers — over-reporting an open paragraph only
-				// holds the stream, which is safe).
-				s.docParaOpen = !openedBlock && !marker && !isATXHeading(trimmed) && inner == 0 && (lw < 4 || s.docParaOpen)
+				// holds the stream, which is safe). FINAL-REVIEW FINDING:
+				// a THEMATIC BREAK ("- - -", "---") and a SETEXT UNDERLINE
+				// ("===" / "---" directly under a paragraph — setext
+				// beats the break there) also END the paragraph: after
+				// them the parser has none open, and a stale-open flag
+				// wrongly gated the next line's type-7 HTML open — the
+				// scanner then saw a phantom fence inside the parser's
+				// html block and fast-settled at its closer (the
+				// "- - -\n<br>\n```js…" breaker). A setext underline with
+				// NO paragraph above is plain text ("===" opens a
+				// paragraph) — hence the docParaOpen guard on that arm.
+				paraEnded := isThematicBreak(trimmed) ||
+					s.docParaOpen && !s.prevLineBlank && isSetextUnderline(trimmed)
+				s.docParaOpen = !paraEnded && !openedBlock && !marker && !isATXHeading(trimmed) &&
+					inner == 0 && (lw < 4 || s.docParaOpen)
 			}
 		}
 		s.scanEnd = lineEnd

@@ -352,3 +352,32 @@ func TestStreamingHTMLBlocks2to5SpanBlanks(t *testing.T) {
 		require.Equal(t, referenceStream(doc, false), streamCanonical(byteChunks(doc, 1), false), "terminated doc %q, byte deltas", doc)
 	}
 }
+
+// TestStreamingType7HTMLAfterParagraphEnders (final-review finding on
+// the settle scanner): a thematic break ("- - -", "---") and a setext
+// underline ("===" / "---" directly after a paragraph) both END the
+// paragraph for the parser — a following type-7 HTML line ("<br>") then
+// opens an HTML BLOCK (it only fails to interrupt when a paragraph is
+// open). The scanner kept docParaOpen true after the break, gated the
+// type-7 open, saw a phantom fence in what the parser parses as ONE html
+// block, and fast-settled at its closer — the tail then rendered as a
+// standalone fragment (emphasis live instead of literal html content).
+func TestStreamingType7HTMLAfterParagraphEnders(t *testing.T) {
+	byteChunks := func(doc string, n int) []string {
+		var cs []string
+		for i := 0; i < len(doc); i += n {
+			cs = append(cs, doc[i:min(i+n, len(doc))])
+		}
+		return cs
+	}
+	docs := []string{
+		"- - -\n<br>\n```js\n```\n1. dog_the ***qux***",     // thematic break
+		"---\n<br>\n```js\n```\n1. dog_the ***qux***",       // "---" with no paragraph: break
+		"para\n===\n<br>\n```js\n```\n1. dog_the ***qux***", // setext underline ("===")
+		"para\n---\n<br>\n```js\n```\n1. dog_the ***qux***", // setext underline ("---": setext beats break under a paragraph)
+	}
+	for _, doc := range docs {
+		require.Equal(t, referenceStream(doc, false), streamCanonical([]string{doc}, false), "doc %q", doc)
+		require.Equal(t, referenceStream(doc, false), streamCanonical(byteChunks(doc, 1), false), "doc %q, byte deltas", doc)
+	}
+}

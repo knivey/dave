@@ -1,0 +1,8 @@
+property: P2
+mode: bbcode
+tags: fence-info,list,html
+seed: 4229583255908802349
+
+got:  "----------------------------------------\n<br>\n```js\n```\n1. dog_the \x1d\x02qux\x02\x1d"
+want: "----------------------------------------\n<br>\n```js\n```\n1. dog_the ***qux***"
+doc:  "- - -\n<br>\n```js\n```\n1. dog_the ***qux***"

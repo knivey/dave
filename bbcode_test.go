@@ -59,17 +59,21 @@ func TestStreamOutputBBCode(t *testing.T) {
 	})
 	t.Run("renderer mode gets raw deltas, same codes", func(t *testing.T) {
 		// RAW deltas, NO bb field: the bbcode-aware renderer does the
-		// translation itself. The emphasis shape doubles as the 3178
-		// pin — bold AND color must both come out.
+		// translation itself. The emphasis span uses the session-3178
+		// incident shape — a PUNCT-PRECEDED closer (`)**`): under the
+		// old pre-translate pipeline the tag-derived \x03 after it
+		// failed right-flanking rule 2b and the span rendered
+		// literally; here bold AND color must both come out.
 		so := streamOutput{renderer: markdowntoirc.NewStreamingRendererOpts(markdowntoirc.BBRenderOptions{BBCode: true})}
 		var sent []string
 		send := func(s string) { sent = append(sent, s) }
-		so.HandleDelta("[color=red]red **bo", send)
-		so.HandleDelta("ld**[/color]\n\nplain para\n\n", send)
+		so.HandleDelta("[color=red]**(red b", send)
+		so.HandleDelta("old)**[/color]\n\nplain para\n\n", send)
 		so.Flush(send)
 		joined := strings.Join(sent, "\n")
 		assert.Contains(t, joined, "\x0304", "the color survives into the rendered markdown")
-		assert.Contains(t, joined, "\x02bold\x02", "emphasis renders through the tag (session 3178)")
+		assert.Contains(t, joined, "\x02(red bold)\x02", "punct-preceded emphasis renders through the tag (session 3178 shape)")
+		assert.NotContains(t, joined, "**", "no literal emphasis markers")
 		assert.NotContains(t, joined, "[color", "the renderer consumed every tag")
 	})
 	t.Run("renderer mode split tag across deltas", func(t *testing.T) {
@@ -160,16 +164,21 @@ func TestSendRenderedBBCode(t *testing.T) {
 		assert.NotContains(t, joined, "[color")
 	})
 	t.Run("3178 fixture renders bold via opts", func(t *testing.T) {
-		// The incident shape: a color-wrapped heading whose `**` closers
-		// sit next to tag-derived control bytes. The bbcode-aware
-		// renderer flanks against the tag brackets, so bold AND color
-		// both come out.
+		// The incident: color-wrapped headings rendered with literal
+		// `**`. The flanking failure is shape-specific: it needs the
+		// closing `**` BOTH preceded by punctuation (right-flanking
+		// rule 2b engages — it then demands whitespace/punctuation
+		// after) AND followed by the tag-derived \x03 (a Cc control
+		// char is neither, so 2b fails). Letter-preceded closers pass
+		// rule 2a and bold under the old pre-translate pipeline too —
+		// the punct-preceded production shape is the red-under-old
+		// pin; the letter row guards the common case alongside it.
 		cr, outputCh := newRunner(AIConfig{RenderMarkdown: true, BBCode: boolPtr(true)})
-		cr.sendRendered("[color=cyan]**A**\n**B**\n**C**[/color]")
+		cr.sendRendered("[color=cyan]**(For the aesthetic)**[/color]\n[color=cyan]**A**[/color]")
 		lines := drainOutput(t, outputCh, 4, time.Second)
 		joined := strings.Join(lines, "\n")
-		assert.Contains(t, joined, "\x02A\x02", "bold renders through the color tag")
-		assert.Contains(t, joined, "\x02C\x02", "every line's closer works")
+		assert.Contains(t, joined, "\x02(For the aesthetic)\x02", "punct-preceded closer bolds (the production incident shape)")
+		assert.Contains(t, joined, "\x02A\x02", "letter-preceded closers keep working")
 		assert.Contains(t, joined, "\x0310", "colored")
 		assert.NotContains(t, joined, "**", "no literal emphasis markers")
 	})
@@ -302,6 +311,11 @@ func TestRunTurnStreamBBCodeRendererMode(t *testing.T) {
 
 	bbStream := streamChunk(`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"[col"},"finish_reason":null}]}`) +
 		streamChunk(`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"or=cyan]**A**[/color]\n\n"},"finish_reason":null}]}`) +
+		// the production incident shape, split mid-span across deltas:
+		// punct-preceded closer + tag after it (literal ** under the
+		// old pre-translate pipeline, bold through the extension)
+		streamChunk(`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"[color=cyan]**(For the aest"},"finish_reason":null}]}`) +
+		streamChunk(`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"hetic)**[/color]\n\n"},"finish_reason":null}]}`) +
 		streamChunk("{\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"```\\nuse [color=red]here[/color]\\n```\\n\\n\"},\"finish_reason\":null}]}") +
 		streamChunk(`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"plain tail"},"finish_reason":null}]}`) +
 		streamChunk(`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`) +
@@ -331,10 +345,12 @@ func TestRunTurnStreamBBCodeRendererMode(t *testing.T) {
 	lines := drainOutput(t, outputCh, 32, time.Second)
 	joined := strings.Join(lines, "\n")
 	assert.Contains(t, joined, "\x0310", "the renderer translated the color")
-	assert.Contains(t, joined, "\x02A\x02", "bold renders through the tag (session 3178)")
+	assert.Contains(t, joined, "\x02A\x02", "letter-preceded bold renders through the tag")
+	assert.Contains(t, joined, "\x02(For the aesthetic)\x02", "punct-preceded closer bolds through the tag (the session-3178 incident shape)")
+	assert.NotContains(t, joined, "**(For", "the incident's literal closers stay gone")
 	assert.Contains(t, joined, "[color=red]here[/color]", "tags inside a fence render literally (structure awareness)")
 	assert.NotContains(t, joined, "\x0304here", "no codes injected into rendered code")
-	assert.NotContains(t, joined, "**A**", "no literal emphasis markers")
+	assert.NotContains(t, joined, "**A**", "no literal emphasis markers on the letter-preceded line either")
 }
 
 // TestRunTurnStreamBBCodeStylesOff: bbcode = true with bbcode_styles

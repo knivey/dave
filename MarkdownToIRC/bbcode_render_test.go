@@ -41,7 +41,14 @@ func TestBBRenderSemantics(t *testing.T) {
 	}
 }
 
-// The session-3178 fixture: bold AND color, every line (today: literal **).
+// Session-3178 flanking: bold AND color through color tags. The
+// letter-preceded closers below also bold under the OLD pre-translate
+// pipeline (right-flanking rule 2a passes regardless of what follows);
+// the production incident shape is the PUNCT-PRECEDED closer — `**`
+// preceded by punctuation engages rule 2b, which then demands
+// whitespace/punctuation after the run, and the tag-derived \x03 (a Cc
+// control char) is neither → the old pipeline rendered the span
+// literally. The extension flanks against the tag's brackets instead.
 func TestBBRenderFlanking(t *testing.T) {
 	in := "[color=cyan]**A**\n**B**\n**C**[/color]"
 	out := bb(in)
@@ -49,6 +56,12 @@ func TestBBRenderFlanking(t *testing.T) {
 	assert.Contains(t, out, "\x02C\x02")
 	assert.NotContains(t, out, "**")
 	assert.Contains(t, out, "\x0310", "colored")
+
+	incident := bb("[color=cyan]**(For the aesthetic)**[/color]")
+	assert.Contains(t, incident, "\x02(For the aesthetic)\x02",
+		"punct-preceded closer bolds (the production shape)")
+	assert.NotContains(t, incident, "**",
+		"the incident's literal emphasis markers stay gone")
 }
 
 func TestBBRenderGuards(t *testing.T) {

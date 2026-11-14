@@ -30,19 +30,6 @@ func bbcodeEnabled(cfg AIConfig) bool {
 	return cfg.BBCode != nil && *cfg.BBCode
 }
 
-// bbcodeStylesEnabled resolves the style-toggle half of the OLD
-// translator split ([b] [i] [u] [s] behind bbcode_styles). ORPHANED by
-// the toggle deletion: no production call site reads it anymore — the
-// translator is color-only regardless. Kept compiling only because the
-// config-field tests (TestAIConfigApplyDefaults_BBCodeStyles,
-// TestLoadConfigDirBBCodeStyles) still exercise the cascade; the
-// `bbcode_styles` CONFIG FIELD and this resolver are deleted together
-// with those tests in the follow-up change (spec §3,
-// docs/superpowers/specs/2026-11-13-bbcode-in-markdown-design.md).
-func bbcodeStylesEnabled(cfg AIConfig) bool {
-	return cfg.BBCodeStyles != nil && *cfg.BBCodeStyles
-}
-
 // bbcodeWarnFn adapts a logxi logger to the translator/renderer warn
 // callback; nil logger (and nil result) is silent.
 func bbcodeWarnFn(l logxi.Logger) func(string) {

@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"text/template"
 	"time"
 
+	markdowntoirc "github.com/knivey/dave/MarkdownToIRC"
 	"github.com/lrstanley/girc"
 	logxi "github.com/mgutz/logxi/v1"
 	"github.com/stretchr/testify/assert"
@@ -3586,36 +3588,18 @@ model = "m"
 	assert.True(t, bbcodeEnabled(inherit), "service-level bbcode inherited")
 }
 
-// TestAIConfigApplyDefaults_BBCodeStyles pins the bbcode_styles cascade
-// (command > service > default false) — the style-toggle half of the
-// BBCode translator is opt-in exactly like bbcode itself; bbcode = true
-// alone is COLOR-ONLY (toggle tags are bracket-ambiguous with prose).
-func TestAIConfigApplyDefaults_BBCodeStyles(t *testing.T) {
-	tests := []struct {
-		name string
-		cfg  AIConfig
-		svc  Service
-		want bool
-	}{
-		{name: "unset everywhere defaults to false", cfg: AIConfig{}, svc: Service{}, want: false},
-		{name: "service value inherited", cfg: AIConfig{}, svc: Service{BBCodeStyles: boolPtr(true)}, want: true},
-		{name: "command beats service", cfg: AIConfig{BBCodeStyles: boolPtr(false)}, svc: Service{BBCodeStyles: boolPtr(true)}, want: false},
-		{name: "command true beats service false", cfg: AIConfig{BBCodeStyles: boolPtr(true)}, svc: Service{BBCodeStyles: boolPtr(false)}, want: true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := tt.cfg
-			cfg.ApplyDefaults(tt.svc)
-			require.NotNil(t, cfg.BBCodeStyles, "ApplyDefaults materializes the default")
-			assert.Equal(t, tt.want, *cfg.BBCodeStyles)
-			assert.Equal(t, tt.want, bbcodeStylesEnabled(cfg), "resolver reads the materialized value")
-		})
-	}
-}
+// TestLoadConfigDirBBCodeStylesIgnored: the bbcode_styles knob is DELETED
+// (toggles dropped with it, Nov 2026) — old configs carrying the line must
+// still load (unknown TOML keys are ignored) and the command is an ordinary
+// bbcode = true command: permanently color-only, toggle tags verbatim. The
+// reflect assertions pin the deletion at the type level so a reintroduced
+// field fails loudly here rather than silently half-loading.
+func TestLoadConfigDirBBCodeStylesIgnored(t *testing.T) {
+	_, found := reflect.TypeOf(AIConfig{}).FieldByName("BBCodeStyles")
+	assert.False(t, found, "AIConfig.BBCodeStyles is deleted")
+	_, found = reflect.TypeOf(Service{}).FieldByName("BBCodeStyles")
+	assert.False(t, found, "Service.BBCodeStyles is deleted")
 
-// TestLoadConfigDirBBCodeStyles loads the flag from chats.toml and
-// services.toml; the cascade materializes at ApplyDefaults like bbcode.
-func TestLoadConfigDirBBCodeStyles(t *testing.T) {
 	dir := createTestConfigDir(t, `
 [networks.testnet]
 nick = "bot"
@@ -3624,48 +3608,30 @@ host = "irc.example.com"
 `, map[string]string{
 		"services.toml": `
 [localsvc]
-type = "llama"
 baseurl = "http://localhost:1"
-[styleSvc]
-baseurl = "http://localhost:2"
-bbcode_styles = true
 `,
 		"chats.toml": `
-[plain]
+[stylescmd]
+regex = "styles"
 service = "localsvc"
 model = "m"
-[styled]
-service = "localsvc"
-model = "m"
+bbcode = true
 bbcode_styles = true
-[inherit]
-service = "styleSvc"
-model = "m"
-[offExplicit]
-service = "styleSvc"
-model = "m"
-bbcode_styles = false
 `,
 	})
 
-	cfg, err := loadConfigDir(dir)
+	cfg, err := loadConfigDir(dir) // unknown key: loads fine
 	require.NoError(t, err)
 
-	plain := cfg.Commands.Chats["plain"]
-	plain.ApplyDefaults(cfg.Services["localsvc"])
-	assert.False(t, bbcodeStylesEnabled(plain), "unset command on plain service stays off (color-only default)")
+	cmd := cfg.Commands.Chats["stylescmd"]
+	require.NotNil(t, cmd)
+	cmd.ApplyDefaults(cfg.Services["localsvc"])
+	assert.True(t, bbcodeEnabled(cmd), "bbcode = true still materializes")
 
-	styled := cfg.Commands.Chats["styled"]
-	styled.ApplyDefaults(cfg.Services["localsvc"])
-	assert.True(t, bbcodeStylesEnabled(styled), "command-level bbcode_styles = true")
-
-	inherit := cfg.Commands.Chats["inherit"]
-	inherit.ApplyDefaults(cfg.Services["styleSvc"])
-	assert.True(t, bbcodeStylesEnabled(inherit), "service-level bbcode_styles inherited")
-
-	offExplicit := cfg.Commands.Chats["offExplicit"]
-	offExplicit.ApplyDefaults(cfg.Services["styleSvc"])
-	assert.False(t, bbcodeStylesEnabled(offExplicit), "command false beats service true")
+	// The pipeline is permanently color-only regardless of the stale
+	// bbcode_styles line: [b] stays verbatim, colors translate.
+	assert.Equal(t, "[b]x[/b] \x0304red\x03",
+		markdowntoirc.TranslateBBCode("[b]x[/b] [color=red]red[/color]", nil))
 }
 
 // TestLoadConfigDirRejectsBadModelsMax pins the service-level validation

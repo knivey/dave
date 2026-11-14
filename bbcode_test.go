@@ -13,9 +13,9 @@ package main
 // (byte-identical to the old pipeline). These tests pin the CALL SITES:
 // streamOutput, sendRendered, the tool-loop emission, the streaming
 // variants, and legacy completions. Style toggles were deleted (owner
-// ruling, Nov 2026): toggle tokens are verbatim everywhere, colors still
-// translate — the former *StylesOff variants now pin the one permanent
-// mode.
+// ruling, Nov 2026) along with the bbcode_styles config knob: toggle
+// tokens are verbatim everywhere, colors still translate — the one
+// permanent mode, pinned by the plain toggle-verbatim tests.
 
 import (
 	"context"
@@ -353,54 +353,6 @@ func TestRunTurnStreamBBCodeRendererMode(t *testing.T) {
 	assert.NotContains(t, joined, "**A**", "no literal emphasis markers on the letter-preceded line either")
 }
 
-// TestRunTurnStreamBBCodeStylesOff: bbcode = true with bbcode_styles
-// unset — the permanent color-only mode on the streaming path: colors
-// translate, toggle tags stay verbatim on the wire. (Named for the
-// pre-deletion styles split; kept until the bbcode_styles config field
-// and its test matrix are removed with it.)
-func TestRunTurnStreamBBCodeStylesOff(t *testing.T) {
-	setupTestDB(t)
-	setupNoticesDefaults(t)
-
-	sid := createTestSession(t, "testnet", "#st", "shrew", "testcmd", "svc", "m")
-	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "hi"}))
-	messages, err := sessionMgr.GetMessages(sid)
-	require.NoError(t, err)
-
-	bbStream := streamChunk(`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"[b]bo"},"finish_reason":null}]}`) +
-		streamChunk(`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"ld[/b] [color=red]line1\n"},"finish_reason":null}]}`) +
-		streamChunk(`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"line2[/color] tail"},"finish_reason":null}]}`) +
-		streamChunk(`{"id":"c1","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`) +
-		"data: [DONE]\n\n"
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, bbStream)
-	}))
-	defer server.Close()
-
-	outputCh := make(chan string, 64)
-	cr := newStreamTestRunner(t, server, AIConfig{
-		Model: "m", Timeout: 10 * time.Second, Streaming: true,
-		RenderMarkdown: false, StreamTimeout: 5 * time.Second,
-		BBCode: boolPtr(true), // bbcode_styles unset = color-only
-	}, sid, outputCh)
-
-	done := make(chan struct{})
-	go func() { cr.runTurn(newTurnContext(sid, messages)); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("runTurn did not finish")
-	}
-
-	lines := drainOutput(t, outputCh, 32, time.Second)
-	joined := strings.Join(lines, "\n")
-	assert.Contains(t, joined, "[b]bold[/b]", "toggle tags stay verbatim")
-	assert.Contains(t, joined, "\x0304line2\x03 tail", "colors still translate")
-	assert.NotContains(t, joined, "\x02", "no bold codes")
-}
-
 // TestRunTurnResponsesStreamBBCode: the Responses-API streaming path is
 // separately pinned so a refactor cannot drop one path.
 func TestRunTurnResponsesStreamBBCode(t *testing.T) {
@@ -456,66 +408,6 @@ func TestRunTurnResponsesStreamBBCode(t *testing.T) {
 	joined := strings.Join(lines, "\n")
 	assert.Contains(t, joined, "\x0304done\x03", "responses path translates")
 	assert.NotContains(t, joined, "[color")
-}
-
-// TestRunTurnResponsesStreamBBCodeStylesOff: the Responses-API streaming
-// path in the permanent color-only mode — colors translate, toggles
-// verbatim. (Named for the pre-deletion styles split; kept until the
-// bbcode_styles config field and its test matrix are removed with it.)
-func TestRunTurnResponsesStreamBBCodeStylesOff(t *testing.T) {
-	setupTestDB(t)
-	setupNoticesDefaults(t)
-
-	sid := createTestSession(t, "testnet", "#r", "shrew", "testcmd", "svc", "test-model")
-	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "hi"}))
-	messages, err := sessionMgr.GetMessages(sid)
-	require.NoError(t, err)
-
-	completedPayload := map[string]any{
-		"id": "resp-r", "object": "response", "model": "test-model",
-		"output": []any{
-			map[string]any{
-				"type": "message", "role": "assistant", "id": "msg_1", "status": "completed",
-				"content": []any{map[string]any{"type": "output_text", "text": "[b]bold[/b] [color=red]done"}},
-			},
-		},
-	}
-	completed, err := json.Marshal(map[string]any{"type": "response.completed", "response": completedPayload})
-	require.NoError(t, err)
-	stream := streamChunk(`{"type":"response.output_text.delta","sequence_number":1,"item_id":"msg_1","output_index":0,"content_index":0,"logprobs":[],"delta":"[b]bold[/b] [col"}`) +
-		streamChunk(`{"type":"response.output_text.delta","sequence_number":2,"item_id":"msg_1","output_index":0,"content_index":0,"logprobs":[],"delta":"or=red]done"}`) +
-		"data: " + string(completed) + "\n\n"
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(w, stream)
-	}))
-	defer server.Close()
-
-	outputCh := make(chan string, 16)
-	cr := newStreamTestRunner(t, server, AIConfig{
-		Model: "test-model", ResponsesAPI: true, Streaming: true,
-		Timeout: 10 * time.Second, StreamTimeout: 5 * time.Second,
-		RenderMarkdown: false, BBCode: boolPtr(true), // bbcode_styles unset = color-only
-	}, sid, outputCh)
-	cr.ctx = context.Background()
-
-	done := make(chan struct{})
-	go func() {
-		cr.runTurn(newTurnContext(sid, messages))
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("runTurn did not finish")
-	}
-
-	lines := drainOutput(t, outputCh, 32, time.Second)
-	joined := strings.Join(lines, "\n")
-	assert.Contains(t, joined, "[b]bold[/b]", "toggle tags stay verbatim")
-	assert.Contains(t, joined, "\x0304done\x03", "colors still translate")
-	assert.NotContains(t, joined, "\x02", "no bold codes")
 }
 
 // TestHandleToolCallResponseBBCode: intermediate tool-loop text renders
@@ -575,42 +467,6 @@ func TestHandleToolCallResponseBBCode(t *testing.T) {
 	})
 }
 
-// TestHandleToolCallResponseBBCodeStylesOff: the tool-loop emission hook
-// in the permanent color-only mode — colors translate, toggles verbatim.
-// (Named for the pre-deletion styles split; kept until the bbcode_styles
-// config field and its test matrix are removed with it.)
-func TestHandleToolCallResponseBBCodeStylesOff(t *testing.T) {
-	setupTestDB(t)
-	setupNoticesDefaults(t)
-
-	sid := createTestSession(t, "testnet", "#t", "shrew", "testcmd", "svc", "m")
-	messages, err := sessionMgr.GetMessages(sid)
-	require.NoError(t, err)
-
-	outputCh := make(chan string, 16)
-	cr := &chatRunner{
-		cfg:       AIConfig{BBCode: boolPtr(true)}, // bbcode_styles unset = color-only
-		network:   Network{Name: "testnet"},
-		channel:   "#t",
-		nick:      "shrew",
-		ctx:       context.Background(),
-		outputCh:  outputCh,
-		logger:    newTestLogger(),
-		sessionID: sid,
-	}
-
-	cr.handleToolCallResponse(newTurnContext(sid, messages),
-		"[b]x[/b] [color=red]red text",
-		[]ToolCall{{ID: "call_1", Type: "function", Function: FunctionCall{Name: "nonexistent_tool", Arguments: "{}"}}},
-		reasoningParts{})
-
-	lines := drainOutput(t, outputCh, 8, time.Second)
-	joined := strings.Join(lines, "\n")
-	assert.Contains(t, joined, "[b]x[/b]", "toggle tags stay verbatim")
-	assert.Contains(t, joined, "\x0304red text\x03", "colors still translate")
-	assert.NotContains(t, joined, "\x02", "no bold codes")
-}
-
 // TestCompletionBBCode: the legacy completions path translates too.
 func TestCompletionBBCode(t *testing.T) {
 	setupNoticesDefaults(t)
@@ -644,45 +500,6 @@ func TestCompletionBBCode(t *testing.T) {
 	joined := strings.Join(lines, "\n")
 	assert.Contains(t, joined, "\x0304\x02\x021. TILLANDSIA\x03")
 	assert.NotContains(t, joined, "[color")
-}
-
-// TestCompletionBBCodeStylesOff: the legacy completions hook in the
-// permanent color-only mode — colors translate, toggles verbatim. (Named
-// for the pre-deletion styles split; kept until the bbcode_styles config
-// field and its test matrix are removed with it.)
-func TestCompletionBBCodeStylesOff(t *testing.T) {
-	setupNoticesDefaults(t)
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/v1/completions":
-			_ = json.NewDecoder(r.Body).Decode(&map[string]any{})
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"id":"cmpl-1","object":"text_completion","created":1,"model":"m","choices":[{"text":"[b]bold[/b] [color=red]TILLANDSIA[/color]","index":0,"finish_reason":"stop"}]}`)
-		default:
-			t.Errorf("unexpected path %s", r.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer server.Close()
-
-	prevServices := config.Services
-	config.Services = map[string]Service{"localsvc": {BaseURL: server.URL + "/v1"}}
-	defer func() { config.Services = prevServices }()
-
-	cfg := AIConfig{Name: "c", Service: "localsvc", Model: "m", Timeout: 10 * time.Second, BBCode: boolPtr(true)}
-	cfg.ApplyDefaults(config.Services["localsvc"])
-
-	outputCh := make(chan string, 4)
-	e := girc.Event{Source: &girc.Source{Name: "shrew"}, Params: []string{"#101"}}
-
-	completion(Network{Name: "testnet"}, nil, e, cfg, context.Background(), outputCh, "hello")
-
-	lines := drainOutput(t, outputCh, 4, time.Second)
-	joined := strings.Join(lines, "\n")
-	assert.Contains(t, joined, "[b]bold[/b]", "toggle tags stay verbatim")
-	assert.Contains(t, joined, "\x0304TILLANDSIA\x03", "colors still translate")
-	assert.NotContains(t, joined, "\x02", "no bold codes")
 }
 
 // TestBBCodeNoCodesOnlyLine: a trailing newline with an open color must
@@ -821,23 +638,19 @@ func TestBBCodeInstructionNamesCovered(t *testing.T) {
 	}
 }
 
-// TestBBCodeStylesTemplateVars: the shipped instruction vars split the
-// vocabulary exactly (bbcode_styles, Oct 2026) — BBCodeFormatting teaches
+// TestBBCodeTemplateVarColorOnly: the shipped instruction var teaches
 // ONLY color tags (every tag-shaped token is [color=…], every taught
-// color value resolves in the translator's color table),
-// BBCodeStylesFormatting teaches ONLY toggle tags (every taught tag name
-// is one of the four canonical toggles), for admins who enable
-// bbcode_styles = true. Kept compiling until the bbcode_styles knob and
-// its templatevar are deleted (spec §3); bbToggleCode went with the
-// toggle deletion, so the four names are pinned literally.
-func TestBBCodeStylesTemplateVars(t *testing.T) {
+// color value resolves in the translator's color table) — the style
+// toggles and their instruction var are deleted, so no other tag shape
+// may appear in what the model is taught.
+func TestBBCodeTemplateVarColorOnly(t *testing.T) {
 	var vars map[string]string
 	_, err := toml.DecodeFile("config/templatevars.toml", &vars)
 	require.NoError(t, err, "shipped config/templatevars.toml must decode")
 	colorsVar := vars["BBCodeFormatting"]
-	stylesVar := vars["BBCodeStylesFormatting"]
 	require.NotEmpty(t, colorsVar, "BBCodeFormatting var must exist")
-	require.NotEmpty(t, stylesVar, "BBCodeStylesFormatting var must exist")
+	assert.NotContains(t, vars, "BBCodeStylesFormatting",
+		"the styles instruction var is deleted with the knob")
 
 	tagRe := regexp.MustCompile(`\[(/?)([a-zA-Z]+)(=[^\]\[]*)?\]`)
 
@@ -858,16 +671,4 @@ func TestBBCodeStylesTemplateVars(t *testing.T) {
 		assert.True(t, strings.HasPrefix(got, "\x03"),
 			"taught color %q must resolve in the color table, got %q", name, got)
 	}
-
-	toggleNames := map[byte]bool{'b': true, 'i': true, 'u': true, 's': true}
-	for _, m := range tagRe.FindAllStringSubmatch(stylesVar, -1) {
-		name := strings.ToLower(m[2])
-		require.Len(t, name, 1, "taught toggle tag %q must be a single letter", name)
-		assert.True(t, toggleNames[name[0]],
-			"taught toggle tag %q must be one of the four canonical toggles", name)
-	}
-	for _, tag := range []string{"[b]", "[i]", "[u]", "[s]"} {
-		assert.Contains(t, stylesVar, tag, "the four canonical toggles are taught")
-	}
-	assert.NotContains(t, stylesVar, "[color", "BBCodeStylesFormatting teaches only toggles")
 }

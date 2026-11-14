@@ -23,8 +23,7 @@ package markdowntoirc
 // unknown tokens, VERBATIM and silent, exactly like `[table]` citations.
 // Single-letter tags were always bracket-ambiguous with prose/math
 // (`a[i]` indexing) anyway; colors are unambiguous. The `bbcode_styles`
-// config knob outlives this file only temporarily (removed with its
-// tests in a later change); nothing here reads it.
+// config knob was deleted with the same ruling; nothing here reads it.
 //
 // Why BBCode and not the previous ANSI-recovery approach (reverted): the
 // production model does not emit well-formed ANSI, so that parser had to

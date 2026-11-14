@@ -381,3 +381,37 @@ func TestStreamingType7HTMLAfterParagraphEnders(t *testing.T) {
 		require.Equal(t, referenceStream(doc, false), streamCanonical(byteChunks(doc, 1), false), "doc %q, byte deltas", doc)
 	}
 }
+
+// TestStreamingParagraphContinuationIsNotAParagraphEnder (scoped re-review
+// of the docParaOpen fix): the paraEnded arms over-fired on
+// paragraph-CONTINUATION lines. A "---"/"===" line is a thematic break or
+// setext underline only at BLOCK-level indent (≤3 spaces) — at ≥4 under an
+// open paragraph it is continuation TEXT, and "= =" (internal space) is
+// never a setext underline. Over-firing cleared docParaOpen, so an
+// ordered≠1 marker ("2. item") — which cannot interrupt the parser's
+// still-open paragraph — was misread as a list item, producing a phantom
+// live item whose container-kill arm reprocessed the parser's valid
+// column-0 fence closer as a fresh opener and fast-settled inside the
+// parser's SECOND fence (the tail rendered standalone with live emphasis
+// instead of literal code content).
+func TestStreamingParagraphContinuationIsNotAParagraphEnder(t *testing.T) {
+	byteChunks := func(doc string, n int) []string {
+		var cs []string
+		for i := 0; i < len(doc); i += n {
+			cs = append(cs, doc[i:min(i+n, len(doc))])
+		}
+		return cs
+	}
+	shape := func(ender string) string {
+		return "para\n" + ender + "\n2. item\n   ```js\n```\ntail ***x***\n```\nafter ***y***\n"
+	}
+	docs := []string{
+		shape("    ---"), // indented ≥4: continuation text, not a break
+		shape("    ==="), // indented ≥4: continuation text, not setext
+		shape("= ="),     // internal space: never a setext underline
+	}
+	for _, doc := range docs {
+		require.Equal(t, referenceStream(doc, false), streamCanonical([]string{doc}, false), "doc %q", doc)
+		require.Equal(t, referenceStream(doc, false), streamCanonical(byteChunks(doc, 1), false), "doc %q, byte deltas", doc)
+	}
+}

@@ -1148,10 +1148,15 @@ func htmlEndOpen(trimmed string) string {
 }
 
 // isSetextUnderline reports whether a trimmed line is a setext heading
-// underline: a run of one or more '=' or '-' (a single kind), nothing
-// else. Directly under a paragraph it consumes the paragraph into a
-// heading (ending it); setext underlines can never be LAZY continuation
-// lines, so the lazy path never consults this for real underlines.
+// underline: a run of one or more '=' or '-' (a single kind) followed by
+// TRAILING whitespace only — internal spaces/tabs ("= =") are forbidden
+// (CommonMark; scoped re-review: the loose shape wrongly ended
+// paragraphs whose continuation lines happened to look like underlines).
+// Directly under a paragraph it consumes the paragraph into a heading
+// (ending it); setext underlines can never be LAZY continuation lines,
+// so the lazy path never consults this for real underlines. BLOCK-level
+// only: callers must also require leading width ≤ 3 (at ≥4 the line is
+// indented code or paragraph continuation, never an underline).
 func isSetextUnderline(trimmed string) bool {
 	if trimmed == "" {
 		return false
@@ -1160,8 +1165,12 @@ func isSetextUnderline(trimmed string) bool {
 	if c != '=' && c != '-' {
 		return false
 	}
-	for i := 1; i < len(trimmed); i++ {
-		if trimmed[i] != c && trimmed[i] != ' ' && trimmed[i] != '\t' {
+	i := 1
+	for i < len(trimmed) && trimmed[i] == c {
+		i++
+	}
+	for ; i < len(trimmed); i++ {
+		if trimmed[i] != ' ' && trimmed[i] != '\t' {
 			return false
 		}
 	}
@@ -1596,8 +1605,16 @@ func (s *StreamingRenderer) scan() {
 				// "- - -\n<br>\n```js…" breaker). A setext underline with
 				// NO paragraph above is plain text ("===" opens a
 				// paragraph) — hence the docParaOpen guard on that arm.
-				paraEnded := isThematicBreak(trimmed) ||
-					s.docParaOpen && !s.prevLineBlank && isSetextUnderline(trimmed)
+				// RE-REVIEW REGRESSION FIX: both arms are BLOCK-level
+				// only (leading width ≤ 3) — at ≥4 a "---"/"===" line
+				// under an open paragraph is continuation TEXT, and
+				// over-firing here cleared docParaOpen so an ordered≠1
+				// marker (which cannot interrupt the still-open
+				// paragraph) was misread as an item, cascading into a
+				// phantom container-kill of the parser's valid fence
+				// closer.
+				paraEnded := isThematicBreak(trimmed) && lw <= 3 ||
+					s.docParaOpen && !s.prevLineBlank && lw <= 3 && isSetextUnderline(trimmed)
 				s.docParaOpen = !paraEnded && !openedBlock && !marker && !isATXHeading(trimmed) &&
 					inner == 0 && (lw < 4 || s.docParaOpen)
 			}

@@ -542,6 +542,12 @@ func (g *docGen) doc() string {
 	for attempt := 0; ; attempt++ {
 		s := g.docOnce()
 		if !g.bbTags || attempt >= 10 {
+			// Re-roll cap: after 10 attempts the doc is returned AS IS —
+			// if an unclosed-span doc ever slips through despite the
+			// cap, the survey reads it as a false P2 breaker (the
+			// reference drops the autoClose tail the streaming flush
+			// emits). Investigate breakers here before blaming the
+			// renderer.
 			return s
 		}
 		st := &bbRenderState{}

@@ -73,7 +73,13 @@ func TestBBRenderGuards(t *testing.T) {
 	// P-1 correction: the brief's literal omitted the autoClose tail, but
 	// a real color (red, re-opened) is still open at end of render, so the
 	// one-shot entry point appends it.
-	assert.Equal(t, "\x0304a\x0304\x02\x025\x03", bb("[color=red]a[color=red]5"), "guard_after_close")
+	// Final-review fix: the brief's input "[color=red]a[color=red]5"
+	// contained NO close tag — it pinned a second OPEN, not the third
+	// guard position. This row closes the blue span (close re-emits the
+	// enclosing red \x0304, and the digit right after THAT emission gets
+	// the no-op guard); the trailing \x03 is the autoClose of the still
+	// open red.
+	assert.Equal(t, "\x0304a\x0302b\x0304\x02\x025\x03", bb("[color=red]a[color=blue]b[/color]5"), "guard_after_close")
 }
 
 func TestBBRenderSpanCrossingCodeBlock(t *testing.T) {
@@ -104,6 +110,11 @@ func TestBBRenderPinnedDivergences(t *testing.T) {
 	rows := strings.Split(strings.TrimSpace(out), "\n")
 	n := strings.Count(out, "\x0304")
 	assert.GreaterOrEqual(t, n, len(rows)-1, "each rendered row line re-emits")
+	// Blockquote crossing: the quote indent's \x0309 wins the line — the
+	// re-emit fires first (the \n armed it), then the indent paints over
+	// it (verified against the renderer before pinning; final-review
+	// missing-divergence pin).
+	assert.Equal(t, "\x0304a\n\x0304\x0309> b\x03", bb("[color=red]a\n\n> b[/color]"), "quote indent beats the re-emit")
 }
 
 // Idempotence at the pipeline level: re-rendering output adds no codes.

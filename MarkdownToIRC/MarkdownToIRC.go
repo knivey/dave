@@ -735,45 +735,115 @@ func bbGoldmark(r *Renderer, opts BBRenderOptions) goldmark.Markdown {
 // fuzz harness in streamfuzz_test.go that proved it).
 //
 // The rewrite never guesses markdown structure. It only decides WHERE the
-// stream is safe to cut, and lets goldmark render each settled prefix:
+// stream is safe to cut, and lets goldmark render each settled region:
 //
 //   - a prefix ending at a blank-line run is settled when the run is not
 //     interior to a block that can span blank lines — fenced code, an
 //     indented-code continuation, a list (items or 2+-space continuation
 //     content), or <pre>/<script>/<style>/<textarea> HTML spans;
-//   - settled prefixes are rendered with MarkdownToIRCStream and the
-//     not-yet-emitted complete lines are appended; rendering a longer
-//     settled prefix must extend the previous output (verified by the
-//     chunk-invariance and parity oracles), so nothing already sent ever
-//     changes;
-//   - flush renders the WHOLE buffer — an unclosed fence or trailing
+//   - the unrendered tail buf[rendered:settled] is rendered as a STANDALONE
+//     document (a fragment) and appended — every byte range parses exactly
+//     once (the BBCode parser warns per parse, so whole-prefix re-renders
+//     would double-fire warns), and a fragment's rendering is frozen the
+//     moment it is emitted, so nothing already sent ever changes;
+//   - flush renders the remaining tail — an unclosed fence or trailing
 //     partial line renders exactly like the non-streaming path would,
 //     instead of being dropped.
+//
+// Fragment boundaries are always block-aligned (settled only ever advances
+// to a blank-line end or a top-level closing fence — positions where the
+// next byte starts a fresh block), so a fragment parses standalone into the
+// same blocks it contributed to the whole document, and the concatenation
+// of fragment renders is byte-identical to the whole-document render with
+// each fragment's leading block newline trimmed (the entry boundary stands
+// for it — each entry is sent as its own IRC message). The
+// chunk-invariance and parity oracles in streamfuzz_test.go pin this.
+//
+// With BBRenderOptions.BBCode set (NewStreamingRendererOpts), ONE
+// bbRenderState is carried across fragment renders: a color span opened in
+// one fragment stays open (per-line re-emission, stack discipline) into the
+// next, and autoClose is spent exactly once per stream — at flush, never at
+// a fragment edge. BBCode tags cannot span lines (the value charset
+// excludes \n), so a settled complete line can never split a decidable tag
+// and the byte translator's trailing-partial-tag hold is not needed here:
+// the incomplete last line never settles.
 //
 // Settling is deliberately conservative: holding longer only delays output,
 // never corrupts it. Known (accepted) divergence: a link-reference
 // definition arriving after a paragraph that referenced it — goldmark
-// resolves references per document, and we render per prefix.
+// resolves references per document, and we render per fragment.
 type StreamingRenderer struct {
 	buf string
 
 	scanEnd  int // offset just past the last complete line scanned
 	settled  int // length of the render-final prefix (always <= scanEnd)
-	rendered int // settled length already rendered (emission bookkeeping)
+	rendered int // start offset of the next unrendered fragment (always <= settled)
 
 	fenceChar   byte // 0 = none, '`' or '~' — open fence state
 	fenceLen    int
-	fenceIndent int    // leading-column of the opener; 0 = top-level fence
-	htmlTag     string // open <pre>/<script>/<style>/<textarea> span, "" = none
-	mathOpen    bool   // inside an open $$ math block (block-parser rule: trimmed content starts with $$)
-	blankEnd    int    // offset past the last blank line of the current run; 0 = none
+	fenceIndent int // leading-column of the opener; 0 = top-level fence
+	// fenceContentIndent is the content column of the container a fence
+	// was opened in: 0 for document-level fences, the marker's content
+	// column for a fence opened ON a list-marker line. A fence's closer
+	// is only valid indented INTO its container (content indent .. +3).
+	fenceContentIndent int
+	htmlTag            string // open <pre>/<script>/<style>/<textarea> span, "" = none
+	// htmlSpanContent is the content column of the item a span HTML
+	// block was opened in (0 = document); htmlBlank and htmlBlankContent
+	// are the same pair for type-6/7 HTML blocks, and mathOpen /
+	// mathContent for $$ blocks. Every blank-spanning block the scanner
+	// tracks dies with its item when a shallower line arrives (see the
+	// fence branch's DESIGN NOTE).
+	htmlSpanContent  int
+	htmlBlank        bool
+	htmlBlankContent int
+	mathOpen         bool
+	mathContent      int
+	blankEnd         int // offset past the last blank line of the current run; 0 = none
+	// runListStack holds the content columns of the list items live in
+	// the stream (innermost last). A fence opened while items are live
+	// lives INSIDE the innermost one, so its closer is only valid
+	// indented into the item — and any line shallower than an item's
+	// content column kills that item and everything in it, UNLESS the
+	// line lazily continues the item's open paragraph (see the fence
+	// branch's and the default branch's DESIGN NOTEs). Blank lines do
+	// NOT clear the stack: a loose list's items survive blanks exactly
+	// like the parser keeps them alive (content indented into the item
+	// continues it); only a line too shallow to be item content ends an
+	// item.
+	runListStack []int
+	// itemParaOpen: the innermost live item's last block is a paragraph
+	// that shallow lines may lazily continue. Maintained from the same
+	// lines the parser sees: markers open items with a paragraph (unless
+	// the marker line itself opens a block), item content text and lazy
+	// continuations keep one open, block openers and blank lines close
+	// it. docParaOpen is the same state for the document level — its
+	// only reader is the type-7 HTML gate (htmlBlankOpen).
+	itemParaOpen bool
+	docParaOpen  bool
+	// prevLineBlank: the previous complete line was blank — lazy
+	// continuation is impossible across a blank (the paragraph ended).
+	prevLineBlank bool
 
-	emitted string // output prefix already returned to the caller
-	broken  bool   // monotonicity invariant broke; incremental emission stopped
+	// bbOpts configures fragment renders; the zero value is the plain
+	// legacy renderer (byte-identical output — BBCode off means no state,
+	// no extension, no auto-close). bbState is the ONE long-lived render
+	// state carried across fragments when bbOpts.BBCode is set.
+	bbOpts  BBRenderOptions
+	bbState *bbRenderState
 }
 
 func NewStreamingRenderer() *StreamingRenderer {
 	return &StreamingRenderer{}
+}
+
+// NewStreamingRendererOpts is NewStreamingRenderer with BBCode rendering:
+// opts.BBCode enables markdown-aware color-tag rendering with ONE render
+// state carried across fragments (a span opened in one fragment survives
+// into the next; auto-close fires only at flush). opts.Warn receives one
+// message per malformed tag occurrence across the whole stream.
+func NewStreamingRendererOpts(opts BBRenderOptions) *StreamingRenderer {
+	return &StreamingRenderer{bbOpts: opts}
 }
 
 // leadingWidth counts the display column of the leading whitespace of line
@@ -944,6 +1014,205 @@ func htmlSpanOpen(line string) (string, bool) {
 	return "", false
 }
 
+// htmlBlockTags is CommonMark's type-6 HTML block tag list: a line
+// starting with one of these tags opens an HTML block regardless of what
+// follows on the line.
+var htmlBlockTags = map[string]bool{
+	"address": true, "article": true, "aside": true, "base": true,
+	"basefont": true, "blockquote": true, "body": true, "caption": true,
+	"center": true, "col": true, "colgroup": true, "dd": true,
+	"details": true, "dialog": true, "dir": true, "div": true, "dl": true,
+	"dt": true, "fieldset": true, "figcaption": true, "figure": true,
+	"footer": true, "form": true, "frame": true, "frameset": true,
+	"h1": true, "h2": true, "h3": true, "h4": true, "h5": true, "h6": true,
+	"head": true, "header": true, "hr": true, "html": true,
+	"iframe": true, "legend": true, "li": true, "link": true, "main": true,
+	"menu": true, "menuitem": true, "nav": true, "noframes": true,
+	"ol": true, "optgroup": true, "option": true, "p": true, "param": true,
+	"section": true, "source": true, "summary": true, "table": true,
+	"tbody": true, "td": true, "tfoot": true, "th": true, "thead": true,
+	"title": true, "tr": true, "track": true, "ul": true,
+}
+
+// htmlBlankOpen reports whether a trimmed line opens a type-6/7 HTML
+// block — one that ends at the next BLANK line and swallows
+// fence/math/span-shaped lines as content. The scanner must know these
+// are open or it invents phantom fences and settles inside them
+// (fragment renders then diverge from the whole document; found by the
+// streaming survey). Parser-faithful shapes only (fixture class
+// "<br> <http…"): a type-6 tag from the list above may be followed by
+// anything; any other tag must be COMPLETE on the line with only
+// whitespace after (type 7) — and type 7 CANNOT interrupt a paragraph,
+// so under an open paragraph (paraOpen) only a type-6 tag qualifies.
+// "<https://…>" autolinks are neither (the ':' after the name fails the
+// tag shape), so they stay paragraph text a fence may interrupt.
+func htmlBlankOpen(trimmed string, paraOpen bool) bool {
+	if !strings.HasPrefix(trimmed, "<") {
+		return false
+	}
+	t := trimmed[1:]
+	if strings.HasPrefix(t, "/") {
+		t = t[1:]
+	}
+	i := 0
+	for i < len(t) && (t[i] >= 'a' && t[i] <= 'z' || t[i] >= 'A' && t[i] <= 'Z' || t[i] >= '0' && t[i] <= '9' || t[i] == '-') {
+		i++
+	}
+	if i == 0 {
+		return false // not a name: comment, PI, autolink-ish, raw '<'
+	}
+	rest := t[i:]
+	if rest != "" {
+		// A tag boundary must follow the name (':', as in
+		// "<https://…>", is an autolink scheme, not a tag).
+		if c0 := rest[0]; c0 != '>' && c0 != '/' && c0 != ' ' && c0 != '\t' {
+			return false
+		}
+	}
+	// Type 6: a block-list tag name (opening or closing form, bare or
+	// with anything after) ALWAYS opens a block and may interrupt a
+	// paragraph — goldmark checks the block list before the type-7
+	// shape, and its type-6 fallback regexp also matches "</div>" and
+	// bare "<div" forms.
+	if htmlBlockTags[strings.ToLower(t[:i])] {
+		return true
+	}
+	// Type 7: any other COMPLETE tag with only whitespace after it —
+	// cannot interrupt a paragraph.
+	if rest != "" {
+		if j := strings.IndexByte(rest, '>'); j >= 0 && isOnlyWS(rest[j+1:]) {
+			return !paraOpen
+		}
+	}
+	return false
+}
+
+// isOnlyWS reports whether s is empty or entirely spaces/tabs.
+func isOnlyWS(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] != ' ' && s[i] != '\t' {
+			return false
+		}
+	}
+	return true
+}
+
+// isATXHeading reports whether a trimmed line is an ATX heading opener
+// (1-6 '#' then a space or end of line) — a block start that interrupts
+// paragraphs.
+func isATXHeading(t string) bool {
+	if !strings.HasPrefix(t, "#") {
+		return false
+	}
+	i := 0
+	for i < len(t) && t[i] == '#' {
+		i++
+	}
+	return i <= 6 && (i == len(t) || t[i] == ' ' || t[i] == '\t')
+}
+
+// isThematicBreak reports whether a trimmed line is a thematic break:
+// 3+ of a single '-', '*' or '_' with optional internal spaces and
+// nothing else.
+func isThematicBreak(t string) bool {
+	var ch byte
+	n := 0
+	for i := 0; i < len(t); i++ {
+		switch c := t[i]; c {
+		case '-', '*', '_':
+			if ch == 0 {
+				ch = c
+			} else if c != ch {
+				return false
+			}
+			n++
+		case ' ', '\t':
+		default:
+			return false
+		}
+	}
+	return ch != 0 && n >= 3
+}
+
+// orderedStart returns the leading ordered-list number of a marker line
+// ("4. x", "2) y"), ok only for ordered markers.
+func orderedStart(line string) (int, bool) {
+	i := 0
+	for i < len(line) && line[i] == ' ' {
+		i++
+	}
+	if i > 3 {
+		return 0, false
+	}
+	d := 0
+	for d < len(line) && line[d+i] >= '0' && line[d+i] <= '9' {
+		d++
+	}
+	if d == 0 || d > 9 || d+i >= len(line) || (line[d+i] != '.' && line[d+i] != ')') {
+		return 0, false
+	}
+	n := 0
+	for _, c := range []byte(line[i : i+d]) {
+		n = n*10 + int(c-'0')
+	}
+	return n, true
+}
+
+// lazyShaped reports whether a line can extend the innermost item's open
+// PARAGRAPH by lazy continuation: anything except the constructs that
+// start a block and may interrupt a paragraph. Consulted only when a
+// paragraph is open, which is what makes the cases unambiguous:
+//
+//   - blockquotes, fence openers, ATX headings, $$ math openers, type-6
+//     HTML block tags and thematic breaks all interrupt; a setext
+//     underline ("---", "===") LOOKS continuable but the spec forbids
+//     setext underlines as lazy continuation lines — in the lazy
+//     position the line is a thematic break (or text), never a setext
+//     heading, so all thematic-break shapes interrupt here;
+//   - type-7 HTML ("<br>") and ordered markers with start != 1 cannot
+//     interrupt a paragraph, so they stay paragraph text.
+func lazyShaped(line, trimmed string) bool {
+	if trimmed == "" || strings.HasPrefix(trimmed, ">") {
+		return false
+	}
+	if _, _, ok := openingFence(line); ok {
+		return false
+	}
+	if isATXHeading(trimmed) {
+		return false
+	}
+	if isMathBlockOpener(trimmed) {
+		return false
+	}
+	if isThematicBreak(trimmed) {
+		return false
+	}
+	// Type-6 HTML block tags interrupt paragraphs (only type 7 cannot):
+	// htmlBlankOpen with paraOpen=true reports exactly the type-6 shape.
+	if htmlBlankOpen(trimmed, true) {
+		return false
+	}
+	if isListMarkerLine(line) {
+		return false // marker lines close the item (any number, any kind)
+	}
+	return true
+}
+
+// popListStackTo kills every live list item whose content column is
+// deeper than col (a line shallower than an item's content column cannot
+// be that item's content, and blocks have no lazy continuation — only
+// paragraphs do, handled before this is consulted) and returns the
+// content column of the innermost survivor (0 = none).
+func (s *StreamingRenderer) popListStackTo(col int) int {
+	for len(s.runListStack) > 0 && s.runListStack[len(s.runListStack)-1] > col {
+		s.runListStack = s.runListStack[:len(s.runListStack)-1]
+	}
+	if len(s.runListStack) == 0 {
+		return 0
+	}
+	return s.runListStack[len(s.runListStack)-1]
+}
+
 // scan advances the settle scanner over complete lines. See the struct
 // comment for the rules.
 func (s *StreamingRenderer) scan() {
@@ -956,143 +1225,316 @@ func (s *StreamingRenderer) scan() {
 		lineEnd := s.scanEnd + nl + 1
 		trimmed := strings.TrimSpace(line)
 
-		switch {
-		case s.fenceChar != 0:
-			if isClosingFence(trimmed, s.fenceChar, s.fenceLen) {
-				// Fast-settle top-level fences: a column-0 fence is never
-				// container content (an indent-0 fence interrupts a list
-				// or paragraph), so the block is complete at the closing
-				// fence's newline — no need to wait for the blank line
-				// after it. Indented openers may be list-item content;
-				// those keep waiting for the blank-line rule.
-				if s.fenceIndent == 0 {
-					s.settled = max(s.settled, lineEnd)
+		// A line that kills its container's open block is RE-DRIVEN
+		// through the switch with the old state dropped, so the killing
+		// line is classified exactly as the parser classifies it at the
+		// block start it creates (it may open a fence, a $$ block, an
+		// HTML block, or plain text). blankEnd is always 0 on entry to a
+		// kill — the state cases reset it every line — so the re-drive's
+		// default case cannot mis-settle.
+		for reprocess := true; reprocess; {
+			reprocess = false
+			switch {
+			case s.fenceChar != 0:
+				lw := leadingWidth(line)
+				if isClosingFence(trimmed, s.fenceChar, s.fenceLen) &&
+					lw >= s.fenceContentIndent && lw <= s.fenceContentIndent+3 {
+					// Fast-settle top-level fences: a column-0 fence is never
+					// container content (an indent-0 fence interrupts a list
+					// or paragraph), so the block is complete at the closing
+					// fence's newline — no need to wait for the blank line
+					// after it. Indented openers may be list-item content;
+					// those keep waiting for the blank-line rule. The indent
+					// range check is parser-faithful: a closer is only valid
+					// indented into the fence's own container (content indent
+					// .. +3) — a deeper line is fence CONTENT, not a closer.
+					if s.fenceIndent == 0 {
+						s.settled = max(s.settled, lineEnd)
+					}
+					s.fenceChar = 0
+					s.itemParaOpen = false
+				} else if trimmed != "" && s.fenceContentIndent > 0 && lw < s.fenceContentIndent {
+					// DESIGN NOTE — fragment-render fence fidelity (classes
+					// found by TestStreamingChunkInvariance's corpus and the
+					// streaming survey after the fragment rewrite): a fence
+					// opened inside a list item (on the marker line, or on a
+					// child line indented into the item) is part of the item,
+					// and a line indented SHALLOWER than the item's content
+					// column is not item content — blocks have no lazy
+					// continuation, so that line kills the item AND the
+					// fence, then starts a block of its own. Settling while
+					// misreading that line as fence content splits a fragment
+					// inside whatever the parser opened there ("2. ```py" +
+					// a shallow closer, or "- x\n  ```py" + shallow content,
+					// are the generator-reachable shapes) and the standalone
+					// tail mis-parses. The old whole-prefix re-render
+					// self-healed these disagreements; fragments cannot.
+					// Blank lines are exempt: inside an item's fence they
+					// are CONTENT the fence spans.
+					s.fenceChar = 0
+					s.popListStackTo(lw)
+					s.itemParaOpen = false
+					reprocess = true
+				} else {
+					s.blankEnd = 0
 				}
-				s.fenceChar = 0
-			}
-			s.blankEnd = 0
-		case s.htmlTag != "":
-			if strings.Contains(strings.ToLower(line), "</"+s.htmlTag) {
-				s.htmlTag = ""
-			}
-			s.blankEnd = 0
-		case s.mathOpen:
-			// A $$ math block spans blank lines, so every line that does not
-			// itself start a new trimmed $$ is expression content — blank
-			// lines included. Blank runs are suppressed exactly like an open
-			// fence's; the block can never be cut mid-expression.
-			if strings.HasPrefix(trimmed, "$$") {
-				s.mathOpen = false
-			}
-			s.blankEnd = 0
-		case trimmed == "":
-			s.blankEnd = lineEnd
-		default:
-			if s.blankEnd != 0 {
-				// Non-blank line after a blank run: the run was a block
-				// boundary unless the line continues a blank-spanning
-				// block (indented code, list item content, or any 2+
-				// space indented continuation).
-				if leadingWidth(line) < 2 && !isListMarkerLine(line) {
-					s.settled = max(s.settled, s.blankEnd)
+			case s.htmlTag != "":
+				lw := leadingWidth(line)
+				if trimmed != "" && s.htmlSpanContent > 0 && lw < s.htmlSpanContent {
+					// Same container-kill rule as the fence branch.
+					s.htmlTag = ""
+					s.popListStackTo(lw)
+					s.itemParaOpen = false
+					reprocess = true
+				} else {
+					if strings.Contains(strings.ToLower(line), "</"+s.htmlTag) {
+						s.htmlTag = ""
+						s.itemParaOpen = false
+					}
+					s.blankEnd = 0
 				}
-				s.blankEnd = 0
-			}
-			// Fence/span openers may be written on a list-marker line
-			// ("- ```py"): detect through the marker so the block's real
-			// closer is not misread as a new opener. Marker-line fences
-			// are container content — fenceIndent >= 1 disables the
-			// top-level closing-fence fast-settle for them.
-			detect := line
-			containerFence := false
-			if stripped, ok := afterListMarker(line); ok {
-				detect = stripped
-				containerFence = true
-			}
-			if isMathBlockOpener(trimmed) {
-				s.mathOpen = true
-			} else if ch, n, ok := openingFence(detect); ok {
-				s.fenceChar, s.fenceLen = ch, n
-				s.fenceIndent = leadingWidth(line)
-				if containerFence {
-					s.fenceIndent = max(1, s.fenceIndent)
+			case s.htmlBlank:
+				// A type-6/7 HTML block ends at the next blank line; every
+				// line before it is content — a fence or math opener on one
+				// of those lines never exists for the parser, so no other
+				// detection runs while this is open. The blank that closes
+				// it counts as a normal blank for the settle rule. A
+				// container-kill line (shallow, inside an item) kills the
+				// html block with its item, same rule as fences.
+				if trimmed == "" {
+					s.htmlBlank = false
+					s.blankEnd = lineEnd
+					s.itemParaOpen = false
+				} else if s.htmlBlankContent > 0 && leadingWidth(line) < s.htmlBlankContent {
+					s.htmlBlank = false
+					s.popListStackTo(leadingWidth(line))
+					s.itemParaOpen = false
+					reprocess = true
 				}
-			} else if tag, ok := htmlSpanOpen(detect); ok {
-				s.htmlTag = tag
+			case s.mathOpen:
+				// A $$ math block spans blank lines, so every line that does not
+				// itself start a new trimmed $$ is expression content — blank
+				// lines included. Blank runs are suppressed exactly like an open
+				// fence's; the block can never be cut mid-expression. A
+				// container-kill line kills it with its item, same as fences.
+				lw := leadingWidth(line)
+				if trimmed != "" && s.mathContent > 0 && lw < s.mathContent {
+					s.mathOpen = false
+					s.popListStackTo(lw)
+					s.itemParaOpen = false
+					reprocess = true
+				} else {
+					if strings.HasPrefix(trimmed, "$$") {
+						s.mathOpen = false
+						s.itemParaOpen = false
+					}
+					s.blankEnd = 0
+				}
+			case trimmed == "":
+				s.blankEnd = lineEnd
+				s.itemParaOpen = false
+				s.docParaOpen = false
+			default:
+				if s.blankEnd != 0 {
+					// Non-blank line after a blank run: the run was a block
+					// boundary unless the line continues a blank-spanning
+					// block (indented code, list item content, or any 2+
+					// space indented continuation).
+					if leadingWidth(line) < 2 && !isListMarkerLine(line) {
+						s.settled = max(s.settled, s.blankEnd)
+					}
+					s.blankEnd = 0
+				}
+				// Live-item bookkeeping. A line can only belong to items
+				// whose content column it meets. A marker line starts an
+				// item whose content column is leading spaces + marker +
+				// one space = len(line) - len(detect); deeper items die.
+				// Any other line shallower than the innermost item kills
+				// that item — UNLESS it lazily continues the item's open
+				// paragraph (DESIGN NOTE — the parser keeps the item alive
+				// across such lines, and both directions of getting this
+				// wrong misplace later fence closers: killing a live item
+				// widens the closer window the parser narrows, keeping a
+				// dead one narrows it; only the exact rule is safe. Blank
+				// lines never reach here, and lazy continuation is
+				// impossible directly after one — the paragraph ended).
+				lw := leadingWidth(line)
+				detect := line
+				containerFence := false
+				marker := false
+				lazyKept := false
+				// An ordered marker with start != 1 cannot interrupt a
+				// DOCUMENT-level paragraph: under one (directly above —
+				// no blank) the line is paragraph text, not an item
+				// marker. An open ITEM paragraph does NOT block a
+				// marker: a shallower marker line closes the item and
+				// continues the list, whatever its number.
+				paraCtx := !s.prevLineBlank && s.docParaOpen
+				markerOK := true
+				if n, ok := orderedStart(line); ok && n != 1 && paraCtx {
+					markerOK = false
+				}
+				if stripped, ok := afterListMarker(line); ok && markerOK && !isThematicBreak(trimmed) {
+					// (A thematic-break-shaped marker line like "- - -"
+					// is NOT a list item — CommonMark gives the break
+					// precedence.)
+					detect = stripped
+					containerFence = true
+					marker = true
+					// The marker line can only be content of items
+					// whose content column it meets, so shallower
+					// items die FIRST (pop to the line's own indent) —
+					// a top-level marker REPLACES a deeper list, it
+					// does not stack on it. The new item's content
+					// column is marker + following spaces (CommonMark:
+					// all of them when ≤ 4, else just one): afterListMarker
+					// strips exactly one space, so the rest of detect's
+					// leading width adds on top of marker + 1.
+					s.popListStackTo(lw)
+					c := len(line) - len(detect)
+					if k := leadingWidth(detect); k < 4 {
+						c += k
+					}
+					s.runListStack = append(s.runListStack, c)
+				} else if len(s.runListStack) > 0 && s.runListStack[len(s.runListStack)-1] > lw {
+					if s.itemParaOpen && !s.prevLineBlank && lazyShaped(line, trimmed) {
+						// Lazy paragraph continuation: the item survives,
+						// the paragraph stays open.
+						lazyKept = true
+					} else {
+						s.popListStackTo(lw)
+						s.itemParaOpen = false
+					}
+				}
+				inner := 0
+				if n := len(s.runListStack); n > 0 {
+					inner = s.runListStack[n-1]
+				}
+				// Inside an item, block openers live at the item's
+				// content column: dedent detect by inner so a fence
+				// written at a relative indent of 0-3 (absolute 4+ when
+				// the item is deep) is still recognized — the parser
+				// measures fence indentation relative to the container.
+				if inner > 0 && len(detect) >= inner && leadingWidth(detect) >= inner {
+					detect = detect[inner:]
+				}
+				openedBlock := false
+				if isMathBlockOpener(trimmed) {
+					s.mathOpen = true
+					s.mathContent = inner
+					openedBlock = true
+				} else if ch, n, ok := openingFence(detect); ok {
+					s.fenceChar, s.fenceLen = ch, n
+					s.fenceIndent = lw
+					if containerFence {
+						s.fenceIndent = max(1, s.fenceIndent)
+					}
+					// inner = innermost live item at the fence line: the
+					// fence lives inside it (closer must be indented into
+					// it; see the fence branch's DESIGN NOTE). 0 =
+					// document-level fence.
+					s.fenceContentIndent = inner
+					openedBlock = true
+				} else if tag, ok := htmlSpanOpen(detect); ok {
+					s.htmlTag = tag
+					s.htmlSpanContent = inner
+					openedBlock = true
+				} else if htmlBlankOpen(strings.TrimSpace(detect),
+					!marker && (s.docParaOpen || inner > 0 && s.itemParaOpen)) {
+					// Type-6/7 HTML block: holds until a blank line (see
+					// the s.htmlBlank case). Checked AFTER
+					// fence/math/span: those are stricter classifiers for
+					// specific line shapes. The paraOpen gate is
+					// parser-faithful: type 7 CANNOT interrupt a
+					// paragraph ("<br>" after paragraph text is inline
+					// HTML and the paragraph continues), so under an
+					// open paragraph — document-level or the innermost
+					// item's — only a type-6 tag still opens a block. A
+					// MARKER line's content is a fresh item context: the
+					// marker interrupts the enclosing paragraph itself,
+					// so no paragraph gate applies to it.
+					s.htmlBlank = true
+					s.htmlBlankContent = inner
+					openedBlock = true
+				}
+				// The innermost item's paragraph state: a marker line
+				// opens an item whose first block is a paragraph (unless
+				// the marker line itself opened a block); item content
+				// text and lazy continuations keep the paragraph open; a
+				// block opener closed it.
+				if openedBlock {
+					s.itemParaOpen = false
+				} else {
+					// Lines indented ≥ 4 RELATIVE to the item's content
+					// column PRESERVE the previous state instead of
+					// opening a paragraph — at a block start they are
+					// indented code inside the item, directly after
+					// paragraph text they are its continuation.
+					s.itemParaOpen = marker || (inner > 0 && (lazyKept || lw >= inner && (lw < inner+4 || s.itemParaOpen)))
+				}
+				// Document-level paragraph state, same rules (used by
+				// the type-7 gate; ATX headings end paragraphs like
+				// block openers — over-reporting an open paragraph only
+				// holds the stream, which is safe).
+				s.docParaOpen = !openedBlock && !marker && !isATXHeading(trimmed) && inner == 0 && (lw < 4 || s.docParaOpen)
 			}
 		}
 		s.scanEnd = lineEnd
+		s.prevLineBlank = trimmed == ""
 	}
 }
 
 // Process handles an incremental delta and returns newly settled output
 // (possibly multi-line). delta == "" is the FLUSH signal: everything still
-// held — unclosed fences, trailing partial lines — is rendered then.
+// held — unclosed fences, trailing partial lines — is rendered then, and
+// with BBCode on, the stream's single auto-close tail is appended.
 //
-// Cost note: each settle re-renders the whole settled prefix with goldmark,
-// so cumulative work is quadratic in the document size. Fine at IRC scale
-// (a 22KB/300-paragraph reply measured ~230ms total, spread across the
-// generation; pastebin wrapping kicks in long before this matters) — if the
-// renderer is ever reused for larger surfaces, cache the rendered prefix
-// and re-parse from the last block boundary instead.
+// Cost note: each new fragment renders only its own byte range (the old
+// whole-prefix re-render was quadratic in document size); total work is
+// linear — every byte parses exactly once.
 func (s *StreamingRenderer) Process(delta string) []string {
 	if delta == "" {
-		out := MarkdownToIRCStream(s.buf)
-		s.settled, s.rendered = len(s.buf), len(s.buf)
-		return s.emit(out, true)
+		return s.renderFragment(len(s.buf), true)
 	}
 	s.buf += delta
 	s.scan()
 	if s.settled <= s.rendered {
 		return nil
 	}
-	out := MarkdownToIRCStream(s.buf[:s.settled])
-	s.rendered = s.settled
-	return s.emit(out, false)
+	return s.renderFragment(s.settled, false)
 }
 
-// emit returns the portion of out beyond what was already sent. A settled
-// prefix's rendering is frozen, so the whole remainder is released at the
-// settle point — the completed block does NOT wait for a following newline.
-// This is safe because every block kind renders with a LEADING newline
-// (KindHTMLBlock included — see the note there), so the remainder always
-// begins at a clean block boundary; the boundary newline itself is trimmed
-// from the returned entry because the entry boundary already stands for it
-// (each entry is sent as its own IRC message). If a longer settled prefix
-// ever renders without the previous output as its prefix (an invariant
-// break the fuzz oracles watch for), incremental emission stops and the
-// flush emits the remainder raw — IRC lines cannot be unsent, but data
-// must not be dropped either.
-func (s *StreamingRenderer) emit(out string, flush bool) []string {
-	if s.emitted != "" && !strings.HasPrefix(out, s.emitted) {
-		s.broken = true
+// renderFragment renders buf[rendered:end] as a standalone document and
+// advances rendered to end. Fragment boundaries are block-aligned (see the
+// struct comment), so the fragment parses into the same blocks it
+// contributed to the whole document and its output appends cleanly: every
+// block kind renders with a LEADING newline, Render trims the fragment's
+// own first one, and the entry boundary stands for it (each entry is sent
+// as its own IRC message). The TrimPrefix here is a no-op safety for that
+// same contract.
+//
+// BBCode: the long-lived bbState is injected into the fragment render so
+// color-stack/pending-newline/guard state carries across fragments — a
+// fragment edge must NOT auto-close (a stream is not finished at a block
+// boundary); autoClose is appended at flush ONLY, before the trim and the
+// empty check, so a flush with no rendered remainder still emits the tail
+// as its own entry and the empty-entry skip can never swallow it.
+func (s *StreamingRenderer) renderFragment(end int, flush bool) []string {
+	opts := s.bbOpts
+	if opts.BBCode {
+		if s.bbState == nil {
+			s.bbState = &bbRenderState{}
+		}
+		opts.state = s.bbState
 	}
-	if s.broken {
-		if !flush {
-			return nil
-		}
-		n := min(len(s.emitted), len(out))
-		// Resync to a line boundary before emitting: slicing at an
-		// arbitrary byte offset can splice a token or an IRC color code
-		// mid-sequence. Bytes between the boundary and n may re-send a
-		// few already-delivered partial lines — degraded-mode duplication
-		// beats mangled bytes, and nothing is dropped.
-		if i := strings.LastIndexByte(out[:n], '\n'); i >= 0 {
-			n = i + 1
-		} else {
-			n = 0
-		}
-		s.emitted = out
-		if n < len(out) {
-			return []string{out[n:]}
-		}
+	out := MarkdownToIRCStreamOpts(opts, s.buf[s.rendered:end])
+	if flush && opts.BBCode {
+		out += s.bbState.autoClose()
+	}
+	s.rendered = end
+	out = strings.TrimPrefix(out, "\n") // block-leading \n: entry boundary stands for it
+	if out == "" {
 		return nil
 	}
-	rem := out[len(s.emitted):]
-	s.emitted = out
-	rem = strings.TrimPrefix(rem, "\n")
-	if rem != "" {
-		return []string{rem}
-	}
-	return nil
+	return []string{out}
 }

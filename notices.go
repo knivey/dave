@@ -183,7 +183,14 @@ type CompactionNotices struct {
 	// was spent.
 	NothingNew string `toml:"nothing_new"`
 	Disabled   string `toml:"disabled"`
-	AutoNotice string `toml:"auto_notice"`
+	// AutoStarted is sent when an AUTO-compaction actually begins — fired
+	// from CompactSessionInputs.OnStarted, after the cheap refusal guards
+	// pass, so it can never dangle without a follow-up outcome. Kept as a
+	// separate template from Started because the event is unbidden: the
+	// default wording explains WHY it is happening (same rationale as the
+	// Completed vs AutoNotice split).
+	AutoStarted string `toml:"auto_started"`
+	AutoNotice  string `toml:"auto_notice"`
 }
 
 type CloneNotices struct {
@@ -532,6 +539,11 @@ func setNoticesDefaults(n *NoticesConfig) {
 	}
 	if n.Compaction.Disabled == "" {
 		n.Compaction.Disabled = "Compaction is disabled in config."
+	}
+	if n.Compaction.AutoStarted == "" {
+		// Fires from OnStarted (post-guards, pre-summarizer) on the auto
+		// path only — the wording explains the unbidden event.
+		n.Compaction.AutoStarted = "\x0314🗜 Context is large — compacting session...\x0F"
 	}
 	if n.Compaction.AutoNotice == "" {
 		// Same number provenance as Completed above: the compaction's own

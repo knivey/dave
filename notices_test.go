@@ -204,10 +204,17 @@ func TestCompactionNoticeDefaultsUseOwnNumbers(t *testing.T) {
 	// Degenerate-refusal notice default.
 	assert.Equal(t, "No new messages to compact since the last compaction.", n.Compaction.NothingNew)
 
+	// Auto-compaction start notice default: explains WHY it is happening
+	// (the user did not ask for it) and matches the 🗜 compaction family.
+	assert.Equal(t,
+		"\x0314🗜 Context is large — compacting session...\x0F",
+		n.Compaction.AutoStarted)
+
 	// Custom values survive the defaults pass.
-	n2 := NoticesConfig{Compaction: CompactionNotices{NothingNew: "custom nothing new"}}
+	n2 := NoticesConfig{Compaction: CompactionNotices{NothingNew: "custom nothing new", AutoStarted: "custom auto started"}}
 	setNoticesDefaults(&n2)
 	assert.Equal(t, "custom nothing new", n2.Compaction.NothingNew)
+	assert.Equal(t, "custom auto started", n2.Compaction.AutoStarted)
 }
 
 func TestRatemsg(t *testing.T) {

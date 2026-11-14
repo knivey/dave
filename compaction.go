@@ -713,6 +713,22 @@ type CompactSessionInputs struct {
 	UserNick  string
 	Client    *girc.Client // may be nil (e.g. background trigger when client unavailable)
 	Trigger   string       // "manual" or "auto"
+	// OnStarted, when set, is invoked EXACTLY ONCE after every cheap
+	// refusal guard has passed (compaction lock, TooShort, NoSystemRow,
+	// NothingNew) and immediately BEFORE the summarizer call is spent —
+	// the caller's announcement ⟺ real API cost guarantee: whatever it
+	// announces is always followed by a terminal outcome (success,
+	// failure, or the silent session-changed abort). Skips fire nothing,
+	// so they can never dangle an announcement. Set by the auto path
+	// (maybeAutoCompact) to send the auto_started notice; the manual and
+	// TUI paths leave it nil (manual sends its own started notice up
+	// front and follows up on every branch, TUI prints to the log view).
+	// It runs synchronously inside CompactSession WHILE THE PER-SESSION
+	// COMPACTION LOCK IS HELD — keep it quick and never unbounded: a
+	// slow callback delays every other compaction attempt on the session
+	// (an IRC send's write is bounded by girc's tx queue and drops after
+	// its timeout, so the notice send is safe).
+	OnStarted func()
 }
 
 // CompactSession performs a single compaction event on the given session.
@@ -1061,6 +1077,14 @@ func (sm *SessionManager) CompactSession(ctx context.Context, inputs CompactSess
 			"last_reasoning_tokens", lastUsage.ReasoningTokens)
 	}
 	logger.Info("compaction triggered", triggerLogKV...)
+
+	// The point of no return: every refusal that costs nothing is behind
+	// us and the next step spends a summarizer call. Announce here (see
+	// CompactSessionInputs.OnStarted) so an announcement always has a
+	// real compaction behind it.
+	if inputs.OnStarted != nil {
+		inputs.OnStarted()
+	}
 
 	// Summarizer input: prior summary material FIRST, then the newly
 	// archived range. The summary rows are RoleSystem rows whose content
@@ -1482,11 +1506,49 @@ func compactionNoticeVars(res *CompactionResult, sessionID int64) map[string]str
 	return vars
 }
 
+// shouldRetryAutoCompaction reports whether an auto-compaction error
+// deserves the single immediate retry. Deterministic refusals (InProgress,
+// TooShort, NothingNew, NoSystemRow) never retry — an immediate re-run
+// would hit the same guard. Everything else does: summarizer/transaction/
+// load failures are often transient, and a session-changed abort will
+// succeed on a fresh snapshot (it includes the rows that raced the first
+// attempt).
+func shouldRetryAutoCompaction(err error) bool {
+	if err == nil {
+		return false
+	}
+	return !errors.Is(err, ErrCompactionInProgress) &&
+		!errors.Is(err, ErrCompactionTooShort) &&
+		!errors.Is(err, ErrCompactionNothingNew) &&
+		!errors.Is(err, ErrCompactionNoSystemRow)
+}
+
+// autoCompactionFailureNotice maps a FINAL auto-compaction error (after the
+// retry also failed) to the user-facing notice text, fully error-styled.
+// The wording mirrors the manual path's branch for the same error class —
+// only sent when the compaction had announced itself (see
+// CompactSessionInputs.OnStarted), so an announced compaction always
+// reaches a user-visible outcome.
+func autoCompactionFailureNotice(n NoticesConfig, err error) string {
+	switch {
+	case errors.Is(err, ErrCompactionSessionChanged):
+		return errorMsg(n.Compaction.Changed)
+	case errors.Is(err, ErrCompactionInProgress):
+		return errorMsg(n.Compaction.InProgress)
+	case errors.Is(err, ErrCompactionEmptyResult):
+		return errorNotice(n.Compaction.Failed, map[string]string{"error": "summarizer returned empty content"})
+	default:
+		return errorNotice(n.Compaction.Failed, map[string]string{"error": err.Error()})
+	}
+}
+
 // maybeAutoCompact is invoked at the end of a successful chat() turn. If the
 // most recent turn's prompt token count crossed the configured threshold,
-// it spawns a goroutine that compacts the session in the background using
-// the same chat command's config. Successful compactions emit a notice via
-// the IRC client; failures are logged only (we do not spam the channel).
+// it spawns runAutoCompaction in a goroutine using the same chat command's
+// config — the auto-compaction worker announces itself when it actually
+// begins (auto_started), retries once on real failures, and guarantees a
+// user-visible outcome on every announced path (see runAutoCompaction).
+// Unannounced skips stay log-only.
 //
 // Runs in its own goroutine so it never delays the user's reply. Best-effort
 // — if the bot disconnects, the session is closed, or another compaction is
@@ -1498,29 +1560,71 @@ func maybeAutoCompact(runner *chatRunner, cfg AIConfig, network Network, c *girc
 	if !sessionMgr.ShouldAutoCompact(runner.sessionID, cfg) {
 		return
 	}
-	sessionID := runner.sessionID
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
-		res, err := sessionMgr.CompactSession(ctx, CompactSessionInputs{
-			SessionID: sessionID,
-			Network:   network,
-			Channel:   channel,
-			UserNick:  userNick,
-			Client:    c,
-			Trigger:   "auto",
-		}, cfg)
-		logger := newLogger("compaction.auto")
-		if err != nil {
-			if errors.Is(err, ErrCompactionSessionChanged) {
-				// Expected under load: the user sent another message while
-				// the summarizer was in flight and the transaction guard
-				// aborted. Nothing is wrong — INFO, not WARN. The next
-				// threshold crossing (or a manual `compact`) retries.
-				logger.Info("auto-compaction aborted: session changed during compaction",
-					"session", sessionID)
-				return
-			}
+	go runAutoCompaction(runner.sessionID, network, channel, userNick, c, cfg)
+}
+
+// sendAutoCompactionNotice delivers one auto-compaction notice line to the
+// channel. A package var (not a plain func) so tests can capture sends
+// without a live IRC client — same pattern as connectMCPServerImpl.
+var sendAutoCompactionNotice = func(c *girc.Client, channel, msg string) {
+	if c == nil || !c.IsConnected() || msg == "" {
+		return
+	}
+	c.Cmd.Message(channel, msg)
+}
+
+// runAutoCompaction is the auto-compaction worker behind maybeAutoCompact:
+// announce-on-start (auto_started, fired via CompactSessionInputs.
+// OnStarted — after the refusal guards, so it can never dangle), ONE
+// immediate retry on real failures (no second announcement — the user
+// already knows), and a user-visible outcome on every announced path:
+// auto_notice on success, the failure notice when the retry also fails.
+// Unannounced skips (TooShort/NothingNew/InProgress) stay silent, exactly
+// as before this notice existed.
+func runAutoCompaction(sessionID int64, network Network, channel, userNick string, c *girc.Client, cfg AIConfig) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	logger := newLogger("compaction.auto")
+
+	announced := false
+	inputs := CompactSessionInputs{
+		SessionID: sessionID,
+		Network:   network,
+		Channel:   channel,
+		UserNick:  userNick,
+		Client:    c,
+		Trigger:   "auto",
+		OnStarted: func() {
+			announced = true
+			sendAutoCompactionNotice(c, channel,
+				expandNotice(getNotices().Compaction.AutoStarted, nil))
+		},
+	}
+
+	res, err := sessionMgr.CompactSession(ctx, inputs, cfg)
+	if err != nil && shouldRetryAutoCompaction(err) {
+		// One immediate retry, right away: transient summarizer failures
+		// often clear instantly, and a session-changed abort succeeds on
+		// the fresh snapshot (it includes the rows that raced us). No
+		// re-announcement — the user already saw the start notice for
+		// THIS compaction event.
+		logger.Info("auto-compaction retrying after error", "session", sessionID, "error", err)
+		inputs.OnStarted = nil
+		res, err = sessionMgr.CompactSession(ctx, inputs, cfg)
+	}
+
+	if err != nil {
+		if errors.Is(err, ErrCompactionSessionChanged) {
+			// Expected under load: the user sent another message while
+			// the summarizer was in flight and the transaction guard
+			// aborted. Nothing is wrong — INFO, not WARN. The next
+			// threshold crossing (or a manual `compact`) retries.
+			logger.Info("auto-compaction aborted: session changed during compaction",
+				"session", sessionID)
+			// If this was the announced first attempt, the retry above
+			// already ran; if the retry itself aborted, the notice below
+			// closes the loop for the user.
+		} else if !errors.Is(err, ErrCompactionInProgress) && !errors.Is(err, ErrCompactionTooShort) && !errors.Is(err, ErrCompactionNothingNew) {
 			// ErrCompactionNoSystemRow lands here on purpose: it signals an
 			// already-scrambled session, which IS unexpected and deserves a
 			// WARN in the admin log.
@@ -1529,18 +1633,18 @@ func maybeAutoCompact(runner *chatRunner, cfg AIConfig, network Network, c *girc
 			// threshold tripped on the chat turn's prompt tokens (which
 			// include the summary + tail), but no genuinely-new material
 			// exists to compact yet. The next crossing retries.
-			if !errors.Is(err, ErrCompactionInProgress) && !errors.Is(err, ErrCompactionTooShort) && !errors.Is(err, ErrCompactionNothingNew) {
-				logger.Warn("auto-compaction failed", "session", sessionID, "error", err)
-			}
-			return
+			logger.Warn("auto-compaction failed", "session", sessionID, "error", err)
 		}
-		if c == nil || !c.IsConnected() {
-			return
+		// Announced ⟹ the user was told a compaction is running, so a
+		// silent failure would dangle the start notice. Not announced
+		// (pre-guard skips and load errors) ⟹ log-only, as before.
+		if announced {
+			sendAutoCompactionNotice(c, channel,
+				autoCompactionFailureNotice(getNotices(), err))
 		}
-		n := getNotices()
-		msg := expandNotice(n.Compaction.AutoNotice, compactionNoticeVars(res, sessionID))
-		if msg != "" {
-			c.Cmd.Message(channel, msg)
-		}
-	}()
+		return
+	}
+
+	sendAutoCompactionNotice(c, channel,
+		expandNotice(getNotices().Compaction.AutoNotice, compactionNoticeVars(res, sessionID)))
 }

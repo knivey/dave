@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lrstanley/girc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -2131,5 +2132,370 @@ func TestCallSummarizerModelGateWaits(t *testing.T) {
 		assert.NoError(t, err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("waiting summarizer never ran after the holder finished")
+	}
+}
+
+// TestCompactSessionOnStartedFiresOnceAfterGuards pins the OnStarted
+// contract: the callback fires EXACTLY ONCE per compaction that actually
+// proceeds, after every cheap refusal guard and BEFORE the summarizer call
+// is spent — announcement ⟺ real API spend, so a start notice sent from
+// the callback is always followed by a terminal outcome.
+func TestCompactSessionOnStartedFiresOnceAfterGuards(t *testing.T) {
+	setupTestDB(t)
+
+	stub, getBodies := newRecordingSummarizerStubServer(t, "SUMMARY_CONTENT")
+	defer stub.Close()
+	prevServices := config.Services
+	config.Services = map[string]Service{
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second},
+	}
+	defer func() { config.Services = prevServices }()
+
+	sid := createTestSession(t, "net", "#c", "u1", "cmd", "stubsvc", "stubmodel")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+	for i := 0; i < 12; i++ {
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "u"}))
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleAssistant, Content: "a"}))
+	}
+
+	cfg := AIConfig{Service: "stubsvc", Model: "m", Timeout: 5 * time.Second, MaxTokens: 256}
+
+	var fired int
+	var firedBeforeSummarizer bool
+	_, err := sessionMgr.CompactSession(context.Background(), CompactSessionInputs{
+		SessionID: sid, Network: Network{Name: "net"}, Channel: "#c", UserNick: "u1", Trigger: "auto",
+		OnStarted: func() {
+			fired++
+			firedBeforeSummarizer = len(getBodies()) == 0
+		},
+	}, cfg)
+	require.NoError(t, err)
+	assert.Equal(t, 1, fired, "OnStarted must fire exactly once on a successful compaction")
+	assert.True(t, firedBeforeSummarizer,
+		"OnStarted must fire before the summarizer call is spent")
+	require.Len(t, getBodies(), 1)
+}
+
+// TestCompactSessionOnStartedNotFiredOnSkips pins the other half of the
+// OnStarted contract: refusals that happen BEFORE any API cost (TooShort,
+// NothingNew) must never announce — a start notice with no follow-up is a
+// dangling announcement.
+func TestCompactSessionOnStartedNotFiredOnSkips(t *testing.T) {
+	setupTestDB(t)
+
+	stub, getBodies := newRecordingSummarizerStubServer(t, "SUMMARY_CONTENT")
+	defer stub.Close()
+	prevServices := config.Services
+	config.Services = map[string]Service{
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second},
+	}
+	defer func() { config.Services = prevServices }()
+
+	sid := createTestSession(t, "net", "#c", "u1", "cmd", "stubsvc", "stubmodel")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+
+	cfg := AIConfig{Service: "stubsvc", Model: "m", Timeout: 5 * time.Second, MaxTokens: 256}
+
+	t.Run("too_short", func(t *testing.T) {
+		var fired int
+		_, err := sessionMgr.CompactSession(context.Background(), CompactSessionInputs{
+			SessionID: sid, Network: Network{Name: "net"}, Channel: "#c", UserNick: "u1", Trigger: "auto",
+			OnStarted: func() { fired++ },
+		}, cfg)
+		assert.ErrorIs(t, err, ErrCompactionTooShort)
+		assert.Zero(t, fired, "OnStarted must not fire on a TooShort refusal")
+		assert.Empty(t, getBodies())
+	})
+
+	t.Run("in_progress", func(t *testing.T) {
+		// Hold the per-session compaction lock directly — the same lock
+		// CompactSession TryLocks first — so the call below refuses with
+		// InProgress before any guard work runs.
+		mu := getCompactionLock(sid)
+		require.True(t, mu.TryLock(), "test must acquire the session's compaction lock")
+		defer mu.Unlock()
+
+		var fired int
+		_, err := sessionMgr.CompactSession(context.Background(), CompactSessionInputs{
+			SessionID: sid, Network: Network{Name: "net"}, Channel: "#c", UserNick: "u1", Trigger: "auto",
+			OnStarted: func() { fired++ },
+		}, cfg)
+		assert.ErrorIs(t, err, ErrCompactionInProgress)
+		assert.Zero(t, fired, "OnStarted must not fire on an InProgress refusal")
+	})
+
+	// Build a session whose SECOND compaction is pure churn (the 2/3 cut
+	// lands entirely on tail-copies from the first) — the NothingNew
+	// fixture from TestCompactSession_RefusesWhenNothingNew.
+	for i := 0; i < 12; i++ {
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "u"}))
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleAssistant, Content: "a"}))
+	}
+	_, err := sessionMgr.CompactSession(context.Background(), CompactSessionInputs{
+		SessionID: sid, Network: Network{Name: "net"}, Channel: "#c", UserNick: "u1", Trigger: "manual",
+	}, cfg)
+	require.NoError(t, err)
+	for i := 0; i < 2; i++ {
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "later"}))
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleAssistant, Content: "later-a"}))
+	}
+
+	t.Run("nothing_new", func(t *testing.T) {
+		var fired int
+		_, err := sessionMgr.CompactSession(context.Background(), CompactSessionInputs{
+			SessionID: sid, Network: Network{Name: "net"}, Channel: "#c", UserNick: "u1", Trigger: "auto",
+			OnStarted: func() { fired++ },
+		}, cfg)
+		assert.ErrorIs(t, err, ErrCompactionNothingNew)
+		assert.Zero(t, fired, "OnStarted must not fire on a NothingNew refusal")
+	})
+}
+
+// newFailingSummarizerStubServer returns a server that FAILS the first
+// `failures` chat-completions POSTs and then serves a valid reply (pass a
+// large number for fail-always). The accessor reports the number of calls
+// seen so far. It fails with HTTP 400 deliberately: the openai SDK does
+// not retry 4xx, so one request here means exactly one callSummarizer
+// attempt — the hit count then mirrors CompactSession calls 1:1 and the
+// tests can pin the COMPACTION-level retry without SDK-level retries
+// (WithMaxRetries(2)) blurring the count.
+func newFailingSummarizerStubServer(t *testing.T, failures int) (*httptest.Server, func() int) {
+	t.Helper()
+	var mu sync.Mutex
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&map[string]any{})
+		mu.Lock()
+		n := calls
+		calls++
+		mu.Unlock()
+		if n < failures {
+			http.Error(w, "stub summarizer failure", http.StatusBadRequest)
+			return
+		}
+		resp := map[string]any{
+			"id":      "stub-cmpl-fail",
+			"object":  "chat.completion",
+			"created": time.Now().Unix(),
+			"model":   "stub-model",
+			"choices": []map[string]any{
+				{
+					"index":         0,
+					"message":       map[string]any{"role": "assistant", "content": "RETRY_SUMMARY"},
+					"finish_reason": "stop",
+				},
+			},
+			"usage": map[string]any{"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	return server, func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return calls
+	}
+}
+
+// seedAutoCompactionTestNotices installs default notices into the global
+// config (save/restore) so runAutoCompaction resolves real templates, and
+// captures every notice send through the sendAutoCompactionNotice seam.
+func seedAutoCompactionTestNotices(t *testing.T) (sent *[]string, restore func()) {
+	t.Helper()
+	prevNotices := config.Notices
+	config.Notices = NoticesConfig{}
+	setNoticesDefaults(&config.Notices)
+	var got []string
+	prevSend := sendAutoCompactionNotice
+	sendAutoCompactionNotice = func(c *girc.Client, channel, msg string) {
+		got = append(got, msg)
+	}
+	return &got, func() {
+		sendAutoCompactionNotice = prevSend
+		config.Notices = prevNotices
+	}
+}
+
+// newAutoCompactionTestSession builds a session with a system row plus 12
+// user/assistant turns on the given summarizer service, ready to compact.
+func newAutoCompactionTestSession(t *testing.T, svc string) int64 {
+	t.Helper()
+	sid := createTestSession(t, "net", "#c", "u1", "cmd", svc, "stubmodel")
+	require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+	for i := 0; i < 12; i++ {
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "u"}))
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleAssistant, Content: "a"}))
+	}
+	return sid
+}
+
+// TestRunAutoCompactionSendsStartNoticeThenResultAfterRetry covers the
+// happy path WITH a transient failure: the auto_started notice fires once
+// (the fail-once server's 400 lands after OnStarted), the immediate retry
+// does NOT re-announce, the compaction commits, and auto_notice follows —
+// an announced compaction always reaches a user-visible outcome.
+func TestRunAutoCompactionSendsStartNoticeThenResultAfterRetry(t *testing.T) {
+	setupTestDB(t)
+
+	stub, hits := newFailingSummarizerStubServer(t, 1)
+	defer stub.Close()
+	prevServices := config.Services
+	config.Services = map[string]Service{
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second},
+	}
+	defer func() { config.Services = prevServices }()
+
+	sent, restore := seedAutoCompactionTestNotices(t)
+	defer restore()
+
+	sid := newAutoCompactionTestSession(t, "stubsvc")
+	cfg := AIConfig{Service: "stubsvc", Model: "m", Timeout: 5 * time.Second, MaxTokens: 256}
+
+	// c is nil: notice delivery rides the test seam, nothing may panic.
+	runAutoCompaction(sid, Network{Name: "net"}, "#c", "u1", nil, cfg)
+
+	assert.Equal(t, 2, hits(),
+		"fail-once server must be hit exactly twice: first attempt + immediate retry")
+	require.Len(t, *sent, 2, "exactly auto_started then auto_notice; the retry must not re-announce")
+	assert.Equal(t, config.Notices.Compaction.AutoStarted, (*sent)[0])
+	assert.Contains(t, (*sent)[1], "🗜 Compaction:",
+		"the final outcome notice must be the auto_notice")
+
+	comps, err := getCompactionsForSession(sid)
+	require.NoError(t, err)
+	assert.Len(t, comps, 1, "the retried compaction must have committed")
+}
+
+// TestRunAutoCompactionSendsFailureNoticeAfterFailedRetry covers the
+// double-failure path: one retry only (exactly two summarizer hits), then
+// the error-styled failure notice — never an announced-then-silent
+// compaction.
+func TestRunAutoCompactionSendsFailureNoticeAfterFailedRetry(t *testing.T) {
+	setupTestDB(t)
+
+	stub, hits := newFailingSummarizerStubServer(t, 1000) // always fails
+	defer stub.Close()
+	prevServices := config.Services
+	config.Services = map[string]Service{
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second},
+	}
+	defer func() { config.Services = prevServices }()
+
+	sent, restore := seedAutoCompactionTestNotices(t)
+	defer restore()
+
+	sid := newAutoCompactionTestSession(t, "stubsvc")
+	cfg := AIConfig{Service: "stubsvc", Model: "m", Timeout: 5 * time.Second, MaxTokens: 256}
+
+	runAutoCompaction(sid, Network{Name: "net"}, "#c", "u1", nil, cfg)
+
+	assert.Equal(t, 2, hits(), "exactly one retry — never a retry loop")
+	require.Len(t, *sent, 2)
+	assert.Equal(t, config.Notices.Compaction.AutoStarted, (*sent)[0])
+	assert.Contains(t, (*sent)[1], "Compaction failed:",
+		"a failed retry after the announcement must surface the failure notice")
+
+	comps, err := getCompactionsForSession(sid)
+	require.NoError(t, err)
+	assert.Empty(t, comps, "no compaction event may exist after a double failure")
+}
+
+// TestRunAutoCompactionUnannouncedSkipStaysSilent pins the silent half:
+// a refusal that happens before OnStarted (NothingNew here) sends NO
+// notice and does not retry — no user promise was made.
+func TestRunAutoCompactionUnannouncedSkipStaysSilent(t *testing.T) {
+	setupTestDB(t)
+
+	stub, hits := newFailingSummarizerStubServer(t, 0) // always succeeds
+	defer stub.Close()
+	prevServices := config.Services
+	config.Services = map[string]Service{
+		"stubsvc": {BaseURL: stub.URL, Timeout: 5 * time.Second},
+	}
+	defer func() { config.Services = prevServices }()
+
+	sent, restore := seedAutoCompactionTestNotices(t)
+	defer restore()
+
+	sid := newAutoCompactionTestSession(t, "stubsvc")
+	cfg := AIConfig{Service: "stubsvc", Model: "m", Timeout: 5 * time.Second, MaxTokens: 256}
+
+	// First run compacts normally: start notice + outcome.
+	runAutoCompaction(sid, Network{Name: "net"}, "#c", "u1", nil, cfg)
+	require.Len(t, *sent, 2)
+	require.Equal(t, 1, hits())
+
+	// Grow the session into the pure-churn NothingNew shape (2 turns).
+	for i := 0; i < 2; i++ {
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleUser, Content: "later"}))
+		require.NoError(t, sessionMgr.AddMessage(sid, ChatMessage{Role: RoleAssistant, Content: "later-a"}))
+	}
+	*sent = nil
+
+	runAutoCompaction(sid, Network{Name: "net"}, "#c", "u1", nil, cfg)
+
+	assert.Empty(t, *sent, "an unannounced skip must stay silent")
+	assert.Equal(t, 1, hits(), "a skip must not retry — no second summarizer call")
+}
+
+// TestShouldRetryAutoCompaction pins which auto-compaction errors get the
+// single immediate retry: real failures do (summarizer errors, empty
+// results, session-changed aborts — a fresh snapshot includes the rows
+// that raced the first attempt —, transaction/load errors); deterministic
+// refusals never do (retrying would hit the same guard).
+func TestShouldRetryAutoCompaction(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil never retries", nil, false},
+		{"summarizer failure retries", errors.New("summarizer: connection reset"), true},
+		{"empty result retries", ErrCompactionEmptyResult, true},
+		{"wrapped empty result retries", fmt.Errorf("callSummarizer: %w", ErrCompactionEmptyResult), true},
+		{"session changed retries", ErrCompactionSessionChanged, true},
+		{"load failure retries", fmt.Errorf("loading messages: %w", errors.New("db locked")), true},
+		{"in progress never retries", ErrCompactionInProgress, false},
+		{"too short never retries", ErrCompactionTooShort, false},
+		{"nothing new never retries", ErrCompactionNothingNew, false},
+		{"no system row never retries", ErrCompactionNoSystemRow, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, shouldRetryAutoCompaction(tc.err))
+		})
+	}
+}
+
+// TestAutoCompactionFailureNotice pins the error→notice mapping used when
+// a retried auto-compaction still fails after its start notice went out:
+// the wording mirrors the manual path's branch for the same error class,
+// error-styled like every failure notice.
+func TestAutoCompactionFailureNotice(t *testing.T) {
+	n := NoticesConfig{}
+	setNoticesDefaults(&n)
+
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"session changed", ErrCompactionSessionChanged, errorMsg(n.Compaction.Changed)},
+		{"in progress", ErrCompactionInProgress, errorMsg(n.Compaction.InProgress)},
+		{
+			"empty result",
+			ErrCompactionEmptyResult,
+			errorNotice(n.Compaction.Failed, map[string]string{"error": "summarizer returned empty content"}),
+		},
+		{
+			"generic failure",
+			errors.New("summarizer: connection refused"),
+			errorNotice(n.Compaction.Failed, map[string]string{"error": "summarizer: connection refused"}),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, autoCompactionFailureNotice(n, tc.err))
+		})
 	}
 }

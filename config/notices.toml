@@ -132,6 +132,7 @@
 #   changed      (string)  New messages arrived mid-compaction; the compaction aborted safely, retry advised.
 #   nothing_new  (string)  Repeat compaction found no new material since the last one; nothing was done.
 #   disabled     (string)  Compaction disabled in config.
+#   auto_started (string)  Auto-compaction start notice — sent only when the compaction actually begins (after the refusal guards), so it never dangles without a follow-up outcome.
 #   auto_notice  (string)  Auto-compaction notice. Placeholders: {count}, {tokens_in}, {tokens_out}, {summary_tokens}, {superseded}, {prior_summaries}, {live_messages}, {live_tokens_est}, {context_before}, {context_after}, {duration}, {prompt}, {completion}, {total}, {cached}, {reasoning}
 #
 #   Number provenance: {tokens_in}, {tokens_out}, {summary_tokens}, {superseded},
@@ -287,6 +288,7 @@
 # changed = "Session received new messages during compaction; try again."
 # nothing_new = "No new messages to compact since the last compaction."
 # disabled = "Compaction is disabled in config."
+# auto_started = "\x0314🗜 Context is large — compacting session...\x0F"
 # auto_notice = "\x0314🗜 Compaction: {count} messages summarized ({summary_tokens} tokens). Context: ~{context_before} → ~{context_after} tokens ({live_messages} messages).\x0F"
 #
 # [clone]

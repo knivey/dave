@@ -26,14 +26,12 @@ func TestLoadConfigRenderOptions(t *testing.T) {
 [render]
 hide_system_prompts = true
 bbcode = false
-bbcode_styles = true
 `), 0o644))
 	cfg, err := loadConfig(path)
 	require.NoError(t, err)
 	assert.True(t, cfg.Render.HideSystemPrompts)
 	require.NotNil(t, cfg.Render.BBCode)
 	assert.False(t, *cfg.Render.BBCode)
-	assert.True(t, cfg.Render.BBCodeStyles)
 	// nil-pointer default: bbcode resolves ON.
 	assert.True(t, (&RenderConfig{}).bbcodeOn())
 }
@@ -44,7 +42,6 @@ func TestRenderConfigBBCodeDefaults(t *testing.T) {
 	var rc RenderConfig
 	require.Nil(t, rc.BBCode)
 	assert.True(t, rc.bbcodeOn())
-	assert.False(t, rc.BBCodeStyles, "styles default off, mirroring dave")
 
 	f := false
 	rc.BBCode = &f

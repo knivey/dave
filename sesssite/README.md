@@ -77,13 +77,12 @@ survive through the divider because they summarize the conversation
 rather than instruct the model.
 
 `bbcode` (default on) makes assistant replies render the same styled
-spans IRC users saw: dave stores raw model output and translates
-BBCode at IRC emission, so the site re-runs the identical translation
-(the color vocabulary, styles gate, and unknown-tag-verbatim rules are
-a verbatim port of dave's translator). `[color=red]…[/color]` becomes
-a red span; user-typed brackets are never translated, matching IRC.
-`bbcode_styles` (default off) additionally translates `[b] [i] [u] [s]`
-toggles — set it to match your fleet's `bbcode_styles` commands.
+spans IRC users saw: dave stores raw model output and renders BBCode
+at IRC emission, so the site renders through the same shared parser
+(one parser, two renderers — the site maps the color-tag nodes to the
+same `irc-fg-N` span classes). `[color=red]…[/color]` becomes a red
+span; tags inside code blocks stay literal; user-typed brackets are
+never parsed, matching IRC.
 
 ## Deploying
 

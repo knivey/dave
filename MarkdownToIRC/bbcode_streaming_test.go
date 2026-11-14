@@ -113,6 +113,31 @@ func TestBBCodeStreamFlushAutoClose(t *testing.T) {
 	assert.Equal(t, "\x0304x\n\n", streamChunks(t, BBRenderOptions{BBCode: true}, "[color=red]x<br>\n", []string{"[color=red]x<br>\n"}))
 }
 
+// Flush with an EMPTY-rendering remainder must not mint a codes-only
+// entry for the auto-close tail (streamfuzz survey finding, Nov 2026): a
+// color left open across an early-settled block (closed fence + trailing
+// newline) leaves only newline bytes unrendered; the tail used to land
+// as its own entry — a codes-only PRIVMSG, the blank-message artifact
+// every other suppression rule in this package prevents. The stream
+// total now equals the whole-document streaming render exactly (the
+// color is simply left unreset; clients reset formatting per message).
+func TestBBCodeStreamFlushEmptyRemainderSuppressesTail(t *testing.T) {
+	docs := []string{
+		// the survey's minimal breaker: lone open line + settled fence
+		"[color=light green]\n```go\nnote the bar\n```\n",
+		// same shape with a paragraph before the fence
+		"[color=red]x\n\n```\ncode\n```\n",
+	}
+	for _, doc := range docs {
+		got := streamChunks(t, BBRenderOptions{BBCode: true}, doc, []string{doc})
+		want := MarkdownToIRCStreamOpts(BBRenderOptions{BBCode: true}, doc) + "\n"
+		assert.Equal(t, want, got, "doc %q", doc)
+		for _, line := range strings.Split(strings.TrimSuffix(got, "\n"), "\n") {
+			assert.NotEqual(t, "\x03", line, "codes-only entry in %q", doc)
+		}
+	}
+}
+
 // HTML block types 2-5 span blank lines (only their terminator line ends
 // them); a bbcode color span riding across the held region must carry
 // state and stay byte-identical to the one-shot streaming-mode render

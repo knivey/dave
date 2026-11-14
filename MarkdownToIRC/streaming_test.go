@@ -225,17 +225,7 @@ func TestStreamingHighlightedCodeBlockWidthCapping(t *testing.T) {
 }
 
 func streamingRender(input string) string {
-	r := NewStreamingRenderer()
-	var output strings.Builder
-	for _, line := range r.Process(input) {
-		output.WriteString(line)
-		output.WriteString("\n")
-	}
-	for _, line := range r.Process("") {
-		output.WriteString(line)
-		output.WriteString("\n")
-	}
-	return output.String()
+	return streamingRenderMode(input, false)
 }
 
 // TestStreamingTableParityWithNonStreaming: tables render identically in
@@ -293,7 +283,10 @@ func TestStreamingFromTestData(t *testing.T) {
 		}
 		input := string(mdData)
 
-		got := streamingRender(input)
+		// bug-bb-* goldens are promoted bbcode-mode fixtures: the .irc
+		// was rendered with the bbcode streaming renderer, so it must
+		// be re-rendered the same way (streamfuzz promote path).
+		got := streamingRenderMode(input, strings.HasPrefix(name, "bug-bb-"))
 
 		// DAVE_GOLDEN_UPDATE=1 rewrites .irc files from current output —
 		// use after a deliberate rendering change and REVIEW THE DIFF.
@@ -355,7 +348,7 @@ func TestStreamingHTMLBlocks2to5SpanBlanks(t *testing.T) {
 		"<![CDATA[\nx\n\n]]>\n\ntail\n",
 	}
 	for _, doc := range terminated {
-		require.Equal(t, referenceStream(doc), streamCanonical([]string{doc}), "terminated doc %q", doc)
-		require.Equal(t, referenceStream(doc), streamCanonical(byteChunks(doc, 1)), "terminated doc %q, byte deltas", doc)
+		require.Equal(t, referenceStream(doc, false), streamCanonical([]string{doc}, false), "terminated doc %q", doc)
+		require.Equal(t, referenceStream(doc, false), streamCanonical(byteChunks(doc, 1), false), "terminated doc %q, byte deltas", doc)
 	}
 }

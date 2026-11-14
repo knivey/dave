@@ -1606,8 +1606,16 @@ func (s *StreamingRenderer) Process(delta string) []string {
 // color-stack/pending-newline/guard state carries across fragments — a
 // fragment edge must NOT auto-close (a stream is not finished at a block
 // boundary); autoClose is appended at flush ONLY, before the trim and the
-// empty check, so a flush with no rendered remainder still emits the tail
-// as its own entry and the empty-entry skip can never swallow it.
+// empty check. ONE exception (survey finding, Nov 2026): when the flush
+// fragment's own render is EMPTY — every visible byte settled earlier and
+// the remainder is trailing newline(s) — the tail is SUPPRESSED. It could
+// only land as its own entry: a codes-only PRIVMSG, the blank-message
+// artifact every other suppression rule in this package prevents (the
+// byte translator's Flush makes the same call for the same reason). The
+// one-shot comparison stays exact: MarkdownToIRCStreamOpts renders these
+// bytes to nothing, so the stream total equals the whole-document render
+// with the color simply left unreset (clients reset formatting per
+// message anyway).
 func (s *StreamingRenderer) renderFragment(end int, flush bool) []string {
 	opts := s.bbOpts
 	if opts.BBCode {
@@ -1617,7 +1625,7 @@ func (s *StreamingRenderer) renderFragment(end int, flush bool) []string {
 		opts.state = s.bbState
 	}
 	out := MarkdownToIRCStreamOpts(opts, s.buf[s.rendered:end])
-	if flush && opts.BBCode {
+	if flush && opts.BBCode && out != "" {
 		// Single-flush assumption: autoClose is a PURE state read (it
 		// does not spend the open stack), so a second Process("") would
 		// re-emit the tail as its own codes-only entry — every

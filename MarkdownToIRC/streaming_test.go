@@ -309,3 +309,53 @@ func TestStreamingFromTestData(t *testing.T) {
 		assert.Equal(t, expected, got, "output mismatch for %s\ngot:\n%s\nwant:\n%s", name, humanize(got), humanize(expected))
 	}
 }
+
+// TestStreamingHTMLBlocks2to5SpanBlanks (review finding on 995d032):
+// CommonMark HTML block types 2-5 (<!-- … -->, <? … ?>, <!DECL … >,
+// <![CDATA[ … ]]>) span BLANK lines — only their terminator line ends
+// them — so the settle scanner must hold through interior blanks. It
+// used to settle at the blank and split the fragment inside the block;
+// the entry join then dropped the blank's bytes, regressing vs the
+// whole-prefix base. normalizeIRC erases empty lines, so the spanning
+// half compares EXACT joined bytes (docs that end inside the block
+// render as a single entry); the terminated half checks terminator
+// handling through the normalized IRC-visible oracle.
+func TestStreamingHTMLBlocks2to5SpanBlanks(t *testing.T) {
+	runExact := func(deltas []string) string {
+		s := NewStreamingRenderer()
+		var out []string
+		for _, d := range deltas {
+			out = append(out, s.Process(d)...)
+		}
+		out = append(out, s.Process("")...)
+		return strings.Join(out, "\n")
+	}
+	byteChunks := func(doc string, n int) []string {
+		var cs []string
+		for i := 0; i < len(doc); i += n {
+			cs = append(cs, doc[i:min(i+n, len(doc))])
+		}
+		return cs
+	}
+	spanning := []string{
+		"<!--\nfoo\n\nbar",       // type 2 (comment), unterminated
+		"<?pi\nx\n\ny",           // type 3 (processing instruction)
+		"<!DOCTYPE html\nx\n\ny", // type 4 (declaration), no ">" until EOF
+		"<![CDATA[\nx\n\ny",      // type 5 (CDATA)
+	}
+	for _, doc := range spanning {
+		want := MarkdownToIRCStream(doc)
+		require.Equal(t, want, runExact([]string{doc}), "spanning doc %q", doc)
+		require.Equal(t, want, runExact(byteChunks(doc, 1)), "spanning doc %q, byte deltas", doc)
+	}
+	terminated := []string{
+		"<!--\nfoo\n\n-->\n\ntail\n",
+		"<?pi\nx\n\n?>\n\ntail\n",
+		"<!D\nx\n\n>\n\ntail\n",
+		"<![CDATA[\nx\n\n]]>\n\ntail\n",
+	}
+	for _, doc := range terminated {
+		require.Equal(t, referenceStream(doc), streamCanonical([]string{doc}), "terminated doc %q", doc)
+		require.Equal(t, referenceStream(doc), streamCanonical(byteChunks(doc, 1)), "terminated doc %q, byte deltas", doc)
+	}
+}

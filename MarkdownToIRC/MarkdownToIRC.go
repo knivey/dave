@@ -799,7 +799,21 @@ type StreamingRenderer struct {
 	htmlBlankContent int
 	mathOpen         bool
 	mathContent      int
-	blankEnd         int // offset past the last blank line of the current run; 0 = none
+	// htmlEnd is the terminator of an open type-2..5 HTML block ("-->"
+	// for comments, "?>" for processing instructions, ">" for
+	// declarations, "]]>" for CDATA; "" = none) and htmlEndContent is
+	// the content column of the item it was opened in (0 = document).
+	// These blocks span BLANK lines — only their terminator line ends
+	// them (review finding on 995d032: settling at an interior blank
+	// split a fragment inside the block and the entry join dropped the
+	// blank's bytes) — and they die with their item on a shallower line,
+	// same rule as fences. htmlSpanContent above is the same container
+	// tracking for type-1 spans: NOT dead — a span opened inside an item
+	// and later "closed" by a shallower-line regime diverges in the
+	// RELEASE direction without it, exactly the class htmlEnd fixes.
+	htmlEnd        string
+	htmlEndContent int
+	blankEnd       int // offset past the last blank line of the current run; 0 = none
 	// runListStack holds the content columns of the list items live in
 	// the stream (innermost last). A fence opened while items are live
 	// lives INSIDE the innermost one, so its closer is only valid
@@ -1087,6 +1101,52 @@ func htmlBlankOpen(trimmed string, paraOpen bool) bool {
 	return false
 }
 
+// htmlEndOpen returns the terminator of an HTML block type 2-5 opened by
+// a trimmed line: "-->" for comments (<!--), "?>" for processing
+// instructions (<?), ">" for declarations (<! followed by UPPERCASE
+// letters, goldmark's type-4 shape), "]]>" for CDATA (<![CDATA[); ""
+// when the line opens none of them. Unlike types 6/7 these blocks span
+// BLANK lines — only a line containing the terminator ends them — so the
+// scanner must hold settles until it appears (review finding on 995d032:
+// goldmark parses "<!--\nfoo\n\nbar" as ONE HTMLBlock; settling at the
+// interior blank split the fragment inside it and the entry join dropped
+// the blank's bytes — a byte regression vs the whole-prefix base).
+// An opener that already contains its terminator is a single-line block
+// (goldmark closes it at the next line's Continue): no spanning state.
+// Types 1-6 may interrupt paragraphs, so no paragraph gate applies.
+func htmlEndOpen(trimmed string) string {
+	switch {
+	case strings.HasPrefix(trimmed, "<!--"):
+		if strings.Contains(trimmed, "-->") {
+			return ""
+		}
+		return "-->"
+	case strings.HasPrefix(trimmed, "<?"):
+		if strings.Contains(trimmed, "?>") {
+			return ""
+		}
+		return "?>"
+	case strings.HasPrefix(trimmed, "<![CDATA["):
+		if strings.Contains(trimmed, "]]>") {
+			return ""
+		}
+		return "]]>"
+	case len(trimmed) >= 3 && trimmed[0] == '<' && trimmed[1] == '!':
+		i := 2
+		for i < len(trimmed) && trimmed[i] >= 'A' && trimmed[i] <= 'Z' {
+			i++
+		}
+		if i == 2 {
+			return "" // <! must be followed by UPPERCASE letters
+		}
+		if strings.Contains(trimmed, ">") {
+			return ""
+		}
+		return ">"
+	}
+	return ""
+}
+
 // isOnlyWS reports whether s is empty or entirely spaces/tabs.
 func isOnlyWS(s string) bool {
 	for i := 0; i < len(s); i++ {
@@ -1189,7 +1249,8 @@ func lazyShaped(line, trimmed string) bool {
 	}
 	// Type-6 HTML block tags interrupt paragraphs (only type 7 cannot):
 	// htmlBlankOpen with paraOpen=true reports exactly the type-6 shape.
-	if htmlBlankOpen(trimmed, true) {
+	// Type-2..5 openers interrupt too (types 1-6 all may).
+	if htmlBlankOpen(trimmed, true) || htmlEndOpen(trimmed) != "" {
 		return false
 	}
 	if isListMarkerLine(line) {
@@ -1289,6 +1350,26 @@ func (s *StreamingRenderer) scan() {
 				} else {
 					if strings.Contains(strings.ToLower(line), "</"+s.htmlTag) {
 						s.htmlTag = ""
+						s.itemParaOpen = false
+					}
+					s.blankEnd = 0
+				}
+			case s.htmlEnd != "":
+				// Types 2-5 span blank lines: every line before the
+				// terminator is content — interior blanks never arm the
+				// settle rule. The terminator line itself closes the
+				// block (the parser consumes it as the closure line and
+				// drops it from the render). A container-kill line kills
+				// the block with its item, same rule as fences.
+				lw := leadingWidth(line)
+				if trimmed != "" && s.htmlEndContent > 0 && lw < s.htmlEndContent {
+					s.htmlEnd = ""
+					s.popListStackTo(lw)
+					s.itemParaOpen = false
+					reprocess = true
+				} else {
+					if strings.Contains(line, s.htmlEnd) {
+						s.htmlEnd = ""
 						s.itemParaOpen = false
 					}
 					s.blankEnd = 0
@@ -1439,6 +1520,14 @@ func (s *StreamingRenderer) scan() {
 					s.htmlTag = tag
 					s.htmlSpanContent = inner
 					openedBlock = true
+				} else if end := htmlEndOpen(strings.TrimSpace(detect)); end != "" {
+					// Type-2..5 HTML block: spans blanks until its
+					// terminator line (see the s.htmlEnd case). May
+					// interrupt paragraphs (types 1-6 all may; only
+					// type 7 cannot), so no paragraph gate applies.
+					s.htmlEnd = end
+					s.htmlEndContent = inner
+					openedBlock = true
 				} else if htmlBlankOpen(strings.TrimSpace(detect),
 					!marker && (s.docParaOpen || inner > 0 && s.itemParaOpen)) {
 					// Type-6/7 HTML block: holds until a blank line (see
@@ -1529,6 +1618,11 @@ func (s *StreamingRenderer) renderFragment(end int, flush bool) []string {
 	}
 	out := MarkdownToIRCStreamOpts(opts, s.buf[s.rendered:end])
 	if flush && opts.BBCode {
+		// Single-flush assumption: autoClose is a PURE state read (it
+		// does not spend the open stack), so a second Process("") would
+		// re-emit the tail as its own codes-only entry — every
+		// production call site is terminal (sOut is rebuilt per API
+		// round-trip, so a stream is flushed exactly once).
 		out += s.bbState.autoClose()
 	}
 	s.rendered = end

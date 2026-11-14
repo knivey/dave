@@ -112,3 +112,23 @@ func TestBBCodeStreamFlushAutoClose(t *testing.T) {
 	assert.Equal(t, "\x0304x\x03\n", streamChunks(t, BBRenderOptions{BBCode: true}, "[color=red]x\n", []string{"[color=red]x\n"}))
 	assert.Equal(t, "\x0304x\n\n", streamChunks(t, BBRenderOptions{BBCode: true}, "[color=red]x<br>\n", []string{"[color=red]x<br>\n"}))
 }
+
+// HTML block types 2-5 span blank lines (only their terminator line ends
+// them); a bbcode color span riding across the held region must carry
+// state and stay byte-identical to the one-shot streaming-mode render
+// (review finding on 995d032: the scanner settled at the interior blank
+// and the entry join dropped its bytes).
+func TestBBCodeStreamHTMLBlockSpan(t *testing.T) {
+	// ([/color] sits AFTER the terminator line, so the color really
+	// closes in both parses and the flush auto-close is empty — the
+	// oracle stays exact without guessing the one-shot's tail.)
+	doc := "[color=red]a\n\n<!--\nb\n\nc\n-->\n[/color]"
+	want := MarkdownToIRCStreamOpts(BBRenderOptions{BBCode: true}, doc) + "\n"
+	for size := 1; size <= len(doc); size++ {
+		var chunks []string
+		for i := 0; i < len(doc); i += size {
+			chunks = append(chunks, doc[i:min(i+size, len(doc))])
+		}
+		require.Equal(t, want, streamChunks(t, BBRenderOptions{BBCode: true}, doc, chunks), "size %d", size)
+	}
+}

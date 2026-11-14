@@ -62,6 +62,38 @@ func TestBBCodeNestedStackShadow(t *testing.T) {
 	assert.Contains(t, html, `<span class="irc-fg-4">a<span class="irc-fg-2">b</span>c</span>`)
 }
 
+// TestBBCodeNestedInvalidStaysEnclosed pins IRC placeholder semantics:
+// [color=bogus] is a TRANSPARENT placeholder — its [/color] pairs with
+// IT and emits nothing, so the enclosing real color keeps painting the
+// text after the inner span ("c" stays red, exactly like IRC).
+func TestBBCodeNestedInvalidStaysEnclosed(t *testing.T) {
+	html, err := RenderOpts("[color=red]a[color=bogus]b[/color]c[/color]", true)
+	require.NoError(t, err)
+	assert.Contains(t, html, `<span class="irc-fg-4">abc</span>`, "the placeholder's close must not end the enclosing color")
+	assert.Equal(t, 1, strings.Count(html, "<span"), strings.Count(html, "</span>"))
+}
+
+// TestBBCodeInvalidPairEmitsNothing: a balanced invalid-color pair
+// leaves no markup at all — neither side renders (IRC emits nothing for
+// either; the site must not leak a stray </span>).
+func TestBBCodeInvalidPairEmitsNothing(t *testing.T) {
+	html, err := RenderOpts("[color=bogus]x[/color]", true)
+	require.NoError(t, err)
+	assert.Contains(t, html, ">x<", "content survives")
+	assert.NotContains(t, html, "<span")
+	assert.NotContains(t, html, "</span>")
+}
+
+// TestBBCodeStrayCloseStripped: a close with no open is stripped — the
+// IRC renderer drops it with a WARN; the site has no warn channel, so
+// silently.
+func TestBBCodeStrayCloseStripped(t *testing.T) {
+	html, err := RenderOpts("a[/color]b", true)
+	require.NoError(t, err)
+	assert.NotContains(t, html, "</span>")
+	assert.Contains(t, html, ">ab<")
+}
+
 // TestBBCodePlainInstanceKeepsTagsLiteral: the plain instance (bbcode
 // off, user rows) never registers the parser — tags stay literal text.
 func TestBBCodePlainInstanceKeepsTagsLiteral(t *testing.T) {

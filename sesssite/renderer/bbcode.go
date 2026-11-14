@@ -13,22 +13,21 @@
 //     styles, and the stylesheet already defines irc-fg-0..98). CSS
 //     nesting IS the color stack: a real inner color shadows the
 //     enclosing span exactly as the IRC stack does, with no
-//     effective-color computation at render time. An INVALID color
-//     (Code == "") emits nothing — transparent; its content falls to
-//     the enclosing span, the same semantics for free.
+//     effective-color computation at render time.
 //
-//   - a balance transformer appending BBCodeColorClose nodes for
-//     unmatched opens (HTML validity is the sibling of the IRC
+//   - a pairing balance transformer (below) that enforces the byte/IRC
+//     translator's placeholder semantics document-wide BEFORE
+//     rendering: an invalid-color open (Code == "") is a TRANSPARENT
+//     placeholder whose eventual close pairs with IT and emits NOTHING
+//     on either side (the enclosing real color keeps painting the
+//     content — implemented by REMOVING both nodes), a stray close
+//     with no open is stripped (IRC strips + WARNs; the site has no
+//     warn channel), and an unmatched REAL open gains an appended
+//     BBCodeColorClose (HTML validity is the sibling of the IRC
 //     auto-close: an unclosed span inside a transcript page would
-//     color everything after it in the DOM). Counting is
-//     document-wide; the closes append to the LAST block that directly
-//     contains inline children (AppendChild on that block, after its
-//     last inline content). Blocks without inline children — fenced
-//     code, HTML blocks — never receive them: their renderers ignore
-//     children entirely, so a close appended there would be dropped
-//     bytes. Collect-then-mutate: appends happen only after the walk
-//     (mid-walk tree surgery breaks goldmark's sibling traversal — see
-//     ircTransformer).
+//     color everything after it in the DOM). With every surviving
+//     close paired to a real open, the close renderer's unconditional
+//     </span> is always correct.
 //
 // Tags inside fenced code, inline code spans, HTML blocks, and math
 // stay literal for free: those regions are never inline-parsed, so the
@@ -99,8 +98,10 @@ func (r *bbcodeHTMLRenderer) renderColorOpen(w util.BufWriter, source []byte, n 
 	if entering {
 		if open, ok := n.(*markdowntoirc.BBCodeColorOpen); ok && open.Code != "" {
 			// Code is exactly "00".."15" (bbColorValue, two-digit by
-			// construction); "" is the transparent placeholder — emit
-			// nothing and the eventual close still balances it.
+			// construction). A Code == "" transparent placeholder that
+			// reaches the renderer is an UNMATCHED one — its paired
+			// sibling is removed with it by the balance transformer;
+			// it emits nothing either way.
 			if num, err := strconv.Atoi(open.Code); err == nil {
 				w.WriteString(`<span class="`)
 				w.WriteString(ircFgClass(num))
@@ -111,6 +112,9 @@ func (r *bbcodeHTMLRenderer) renderColorOpen(w util.BufWriter, source []byte, n 
 	return ast.WalkContinue, nil
 }
 
+// renderColorClose is unconditionally correct BECAUSE the balance
+// transformer ran first: transparent pairs and stray closes never reach
+// the renderer, so every surviving close pairs with a real open's span.
 func (r *bbcodeHTMLRenderer) renderColorClose(w util.BufWriter, source []byte, n ast.Node, entering bool) (ast.WalkStatus, error) {
 	if entering {
 		w.WriteString("</span>")
@@ -118,22 +122,57 @@ func (r *bbcodeHTMLRenderer) renderColorClose(w util.BufWriter, source []byte, n
 	return ast.WalkContinue, nil
 }
 
-// bbcodeBalanceTransformer appends BBCodeColorClose nodes until the
-// document's open/close counts match.
+// bbcodeBalanceTransformer pairs opens and closes with the byte/IRC
+// translator's semantics (bbcode_render.go's openInto/closeInto are the
+// reference) and repairs the tree so the stateless node renderer is
+// always correct:
+//
+//   - a close pairing with a Code == "" open (transparent placeholder)
+//     REMOVES both nodes — IRC emits nothing for either, and the
+//     enclosing real color keeps painting the content;
+//   - a stray close (empty stack) is REMOVED — IRC strips + WARNs, the
+//     site has no warn channel;
+//   - an unmatched REAL open at document end gains an appended
+//     BBCodeColorClose — one per surviving open, placed after the
+//     document's last inline content in the LAST block that directly
+//     contains inline children. Blocks without inline children —
+//     fenced code, HTML blocks — never receive them: their renderers
+//     ignore children entirely, so a close appended there would be
+//     dropped bytes.
+//
+// Collect-then-mutate: pairing happens during the walk, every tree
+// mutation (removals, appends) only AFTER it (mid-walk tree surgery
+// breaks goldmark's sibling traversal — see ircTransformer).
 type bbcodeBalanceTransformer struct{}
 
 func (t *bbcodeBalanceTransformer) Transform(doc *ast.Document, reader text.Reader, pc parser.Context) {
-	opens, closes := 0, 0
+	type bbOpen struct {
+		node ast.Node
+		code string
+	}
+	var stack []bbOpen
+	var removals []ast.Node
 	var lastInlineBlock ast.Node
+
 	ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
 		if !entering {
 			return ast.WalkContinue, nil
 		}
 		switch n.Kind() {
 		case markdowntoirc.KindBBCodeColorOpen:
-			opens++
+			stack = append(stack, bbOpen{node: n, code: n.(*markdowntoirc.BBCodeColorOpen).Code})
 		case markdowntoirc.KindBBCodeColorClose:
-			closes++
+			if len(stack) == 0 {
+				removals = append(removals, n) // stray close: strip
+				break
+			}
+			top := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if top.code == "" {
+				// Transparent pair: neither side renders — the
+				// enclosing real color (if any) keeps painting.
+				removals = append(removals, top.node, n)
+			}
 		}
 		// Track the last BLOCK parent of an inline node: appending the
 		// balance closes there puts them after the document's last
@@ -148,10 +187,26 @@ func (t *bbcodeBalanceTransformer) Transform(doc *ast.Document, reader text.Read
 		}
 		return ast.WalkContinue, nil
 	})
-	if opens <= closes || lastInlineBlock == nil {
+
+	for _, n := range removals {
+		if p := n.Parent(); p != nil {
+			p.RemoveChild(p, n)
+		}
+	}
+
+	// Only REAL unmatched opens need a close — a leftover transparent
+	// open never emitted a span (renderColorOpen emits nothing for
+	// Code == ""), so its balance is already visual-neutral.
+	realOpens := 0
+	for _, o := range stack {
+		if o.code != "" {
+			realOpens++
+		}
+	}
+	if realOpens == 0 || lastInlineBlock == nil {
 		return
 	}
-	for i := 0; i < opens-closes; i++ {
+	for i := 0; i < realOpens; i++ {
 		lastInlineBlock.AppendChild(lastInlineBlock, &markdowntoirc.BBCodeColorClose{})
 	}
 }

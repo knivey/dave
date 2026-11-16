@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bufio"
+	"fmt"
+	"net"
 	"testing"
 	"time"
 
 	"github.com/lrstanley/girc"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestIsReplayedEvent(t *testing.T) {
@@ -115,4 +119,94 @@ func TestSendConnectCommands(t *testing.T) {
 	assert.NotPanics(t, func() {
 		sendConnectCommands(client, nil, testLogger())
 	})
+}
+
+func TestShouldSendConnectCommands(t *testing.T) {
+	on := true
+	tests := []struct {
+		name    string
+		network Network
+		want    bool
+	}{
+		{"direct (bouncer unset)", Network{}, true},
+		{"direct (explicit false)", Network{Bouncer: new(bool)}, true},
+		{"bouncer", Network{Bouncer: &on}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, shouldSendConnectCommands(tc.network))
+		})
+	}
+}
+
+// TestWelcomeConnectCommandsBouncerGate drives the REAL RPL_WELCOME closure
+// (registerIRCHandlers) through a live girc connection against a one-shot
+// fake IRC server and asserts on the wire: direct-mode networks send their
+// connect_commands downstream after registration; bouncer networks send
+// NOTHING — soju relays downstream PRIVMSGs upstream AND fires its own stored
+// copy on upstream registration, so a downstream send would double-execute
+// every non-idempotent command (AuthServ AUTH et al.) on coincident
+// registrations.
+func TestWelcomeConnectCommandsBouncerGate(t *testing.T) {
+	const authserv = "PRIVMSG AuthServ@Services.GameSurge.net :AUTH user pass"
+
+	t.Run("direct mode sends connect_commands downstream", func(t *testing.T) {
+		lines := welcomeWireLines(t, Network{Name: "direct", Nick: "dave", ConnectCommands: []string{authserv}})
+		assert.Contains(t, lines, authserv)
+	})
+
+	t.Run("bouncer mode sends nothing downstream", func(t *testing.T) {
+		on := true
+		lines := welcomeWireLines(t, Network{Name: "bounced", Nick: "dave", Bouncer: &on, ConnectCommands: []string{authserv}})
+		assert.NotContains(t, lines, authserv)
+	})
+}
+
+// welcomeWireLines registers dave's handlers on a fresh girc client, connects
+// it to a local one-shot IRC server that completes registration immediately
+// (001), and returns every line the client put on the wire until the read
+// deadline. girc dispatches each event's handlers concurrently, so the
+// RPL_WELCOME closure fires without waiting on the builtin handler's 2s
+// sleep; the writes land well inside the 1.2s collection window.
+func welcomeWireLines(t *testing.T, network Network) []string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+
+	done := make(chan []string, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			done <- nil
+			return
+		}
+		defer conn.Close()
+		_ = conn.SetReadDeadline(time.Now().Add(1200 * time.Millisecond))
+		_, _ = fmt.Fprintf(conn, ":srv 001 dave :Welcome test\r\n")
+		var lines []string
+		sc := bufio.NewScanner(conn)
+		for sc.Scan() {
+			lines = append(lines, sc.Text())
+		}
+		done <- lines
+	}()
+
+	client := girc.New(girc.Config{
+		Server: "127.0.0.1", Port: ln.Addr().(*net.TCPAddr).Port,
+		Nick: "dave", User: "dave", Name: "dave",
+		SSL: false, AllowFlood: true,
+	})
+	bot := &Bot{Network: network, quitCh: make(chan struct{})}
+	registerIRCHandlers(bot, client, network, testLogger())
+	go func() { _ = client.Connect() }()
+	t.Cleanup(func() { client.Close() })
+
+	select {
+	case lines := <-done:
+		return lines
+	case <-time.After(4 * time.Second):
+		t.Fatal("fake IRC server never finished collecting client lines")
+		return nil
+	}
 }

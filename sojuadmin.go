@@ -314,12 +314,13 @@ func parseNetworkStatus(lines []string) map[string]bool {
 }
 
 // reconcileNetworks aligns soju's network set with dave's TOML (the spec's
-// network-lifecycle steps): create missing bouncer networks (pushing their
-// SASL + connect-commands, since a fresh soju network has none), leave
-// existing ones untouched unless force, and delete orphans — soju networks
-// whose name matches no TOML network in any mode. Names present in TOML but
-// direct-mode/disabled are WARNed and deliberately preserved: a temporary
-// bouncer = false flip must never destroy stored credentials.
+// network-lifecycle steps): create missing bouncer networks (their
+// connect-commands ride the `network create` itself; SASL is pushed right
+// after), leave existing ones untouched unless force, and delete orphans —
+// soju networks whose name matches no TOML network in any mode. Names
+// present in TOML but direct-mode/disabled are WARNed and deliberately
+// preserved: a temporary bouncer = false flip must never destroy stored
+// credentials.
 //
 // Command grammar (verified against soju's service.go): `network update`
 // takes the network as a POSITIONAL argument (no -network flag — an unbound
@@ -337,7 +338,17 @@ func reconcileNetworks(run commandRunner, existing map[string]bool, plans []soju
 			continue
 		}
 		log.Info("soju: creating network", "network", p.Name, "addr", p.Addr)
-		runMutating(run, log, fmt.Sprintf("network create -addr %s -name %q -nick %q -realname %q", p.Addr, p.Name, p.Nick, p.RealName))
+		// `network create` accepts -connect-command natively: folding the
+		// flags into the create is atomic AND skips a second `network
+		// update` round-trip — whose updateNetwork would stop/reconnect
+		// the just-created upstream connection. ONE flag per TOML line
+		// (same append grammar `network update` uses).
+		var b strings.Builder
+		fmt.Fprintf(&b, "network create -addr %s -name %q -nick %q -realname %q", p.Addr, p.Name, p.Nick, p.RealName)
+		for _, cmd := range p.ConnectCommands {
+			fmt.Fprintf(&b, " -connect-command %q", cmd)
+		}
+		runMutating(run, log, b.String())
 		pushSojuCreds(run, log, p, false)
 	}
 	for name := range existing {
@@ -358,16 +369,23 @@ func reconcileNetworks(run commandRunner, existing map[string]bool, plans []soju
 // update forces an upstream reconnect, so unconditional pushes would make
 // every dave boot visible to the IRC networks.
 //
-// `existing` reports whether the soju network already exists (force path):
-// soju's `network update` REPLACES the entire stored connect-command list,
-// so a non-empty TOML list is one command with one -connect-command flag
-// per line (the append form; per-line pushes would truncate to the last
+// `existing` reports whether the soju network already exists. Freshly created
+// networks carry their connect-commands ON the `network create` itself
+// (reconcileNetworks folds the flags in — atomic, and no second round-trip
+// whose updateNetwork would stop/reconnect the just-created upstream), so
+// this function only pushes SASL for them. For EXISTING networks (the force
+// path): soju's `network update` REPLACES the entire stored connect-command
+// list, so a non-empty TOML list is one command with one -connect-command
+// flag per line (the append form; per-line pushes would truncate to the last
 // line — the reviewer-verified grammar), and an EMPTY TOML list sends the
-// explicit clear form (`-connect-command ""`) only when the network may
-// carry stale stored commands — a freshly created network has none.
+// explicit clear form (`-connect-command ""`) — the network may carry stale
+// stored commands.
 func pushSojuCreds(run commandRunner, log logxi.Logger, p sojuNetworkPlan, existing bool) {
 	if p.SASL != nil && p.SASL.User != "" {
 		runMutating(run, log, fmt.Sprintf("sasl set-plain -network %q %q %q", p.Name, p.SASL.User, p.SASL.Pass))
+	}
+	if !existing {
+		return
 	}
 	switch {
 	case len(p.ConnectCommands) > 0:
@@ -377,7 +395,7 @@ func pushSojuCreds(run commandRunner, log logxi.Logger, p sojuNetworkPlan, exist
 			fmt.Fprintf(&b, " -connect-command %q", cmd)
 		}
 		runMutating(run, log, b.String())
-	case existing:
+	default:
 		runMutating(run, log, fmt.Sprintf(`network update %q -connect-command ""`, p.Name))
 	}
 }
@@ -397,9 +415,27 @@ func reconcileSojuNetworks(a *SojuAdmin, log logxi.Logger) {
 	if soju == nil {
 		return
 	}
+	reconcileFromStatus(a, soju, networks, log)
+}
+
+// reconcileFromStatus queries soju's network projection and aligns it with
+// the plans. A NIL reply set means the query itself FAILED — Command returns
+// nil both when the session-down gate refuses AND when zero replies arrive
+// within the 5s collection window (dying socket) — and that must be read as
+// "management unavailable", NEVER as "soju has zero networks": proceeding on
+// nil would create-duplicate every network and, far worse, run pushSojuCreds
+// against EXISTING soju networks, whose `network update` stops and reconnects
+// every upstream at boot — exactly the visible boot the spec forbids. A
+// genuinely empty soju answers "No network configured" (a NON-nil slice), so
+// nil-vs-empty discriminates cleanly. The next admin (re)connect retries.
+func reconcileFromStatus(run commandRunner, soju *SojuConfig, networks map[string]Network, log logxi.Logger) {
 	plans, tomlNames := buildSojuPlans(networks)
-	existing := parseNetworkStatus(a.Command("network status"))
-	reconcileNetworks(a, existing, plans, tomlNames, soju.ForceReconcile, log)
+	replies := run.Command("network status")
+	if replies == nil {
+		log.Warn("soju: network status query failed — skipping reconciliation; will retry on next admin reconnect")
+		return
+	}
+	reconcileNetworks(run, parseNetworkStatus(replies), plans, tomlNames, soju.ForceReconcile, log)
 }
 
 // channelDiffGrace is how long after RPL_WELCOME a bouncer network waits

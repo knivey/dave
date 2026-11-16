@@ -130,7 +130,10 @@ const replaySkew = 30 * time.Second
 // depth: girc always sets Event.Timestamp (parse-time now() when the
 // server-time tag is absent), so a message materially older than this
 // session's registration cannot be live. On direct connections neither signal
-// ever fires — the guard is a structural no-op there.
+// ever fires — the guard is a structural no-op there. Nor can dave's own
+// sent lines loop back: girc never negotiates the echo-message capability,
+// so the server does not echo this session's PRIVMSGs — an echo could not
+// carry a batch tag and cannot double-log dave's own output via ALL_EVENTS.
 func isReplayedEvent(event girc.Event, connectedAt time.Time) bool {
 	if event.Tags["batch"] != "" {
 		return true
@@ -164,13 +167,27 @@ func dispatchChanMessage(bot *Bot, network Network, client *girc.Client, event g
 	handleChanMessageFn(network, client, event)
 }
 
+// shouldSendConnectCommands reports whether dave itself must send a
+// network's connect_commands after registration. Direct mode: yes. Bouncer
+// mode: no — the list is pushed into soju's stored per-network configuration
+// (see sojuadmin.go) and soju fires it on UPSTREAM registration; a downstream
+// send would be relayed upstream as well (soju forwards downstream PRIVMSGs)
+// and every non-idempotent command would execute twice on coincident
+// registrations.
+func shouldSendConnectCommands(network Network) bool {
+	return !network.IsBouncer()
+}
+
 // sendConnectCommands sends a network's connect_commands — raw IRC lines
 // fired after every registration (AuthServ/NickServ identification on
 // networks without SASL; same semantics soju uses for its per-network
-// connect-commands). Extracted from the RPL_WELCOME handler for testing:
-// one failing line must WARN and never abort the remaining lines (SendRaw
-// errors on unparseable input; a disconnected client silently drops valid
-// lines inside girc's write path — either way the loop runs to completion).
+// connect-commands). DIRECT-MODE ONLY — callers gate on
+// shouldSendConnectCommands; bouncer networks get theirs from soju's stored
+// list on upstream registration. Extracted from the RPL_WELCOME handler for
+// testing: one failing line must WARN and never abort the remaining lines
+// (SendRaw errors on unparseable input; a disconnected client silently drops
+// valid lines inside girc's write path — either way the loop runs to
+// completion).
 func sendConnectCommands(client *girc.Client, cmds []string, log logxi.Logger) {
 	for _, cmd := range cmds {
 		if err := client.Cmd.SendRaw(cmd); err != nil {
@@ -214,11 +231,18 @@ func registerIRCHandlers(bot *Bot, client *girc.Client, network Network, log log
 		}
 		// connect_commands: raw IRC lines sent after every registration —
 		// AuthServ/NickServ identification on networks without SASL. Same
-		// semantics soju uses for its per-network connect-commands.
-		bot.mu.Lock()
-		connectCmds := bot.Network.ConnectCommands
-		bot.mu.Unlock()
-		sendConnectCommands(client, connectCmds, log)
+		// semantics soju uses for its per-network connect-commands. DIRECT
+		// MODE ONLY: bouncer networks delegate to soju's stored list
+		// (pushed at reconcile), which fires on UPSTREAM registration —
+		// dave sending them downstream too would relay them upstream (soju
+		// forwards downstream PRIVMSGs) and double-execute every
+		// non-idempotent command on coincident registrations.
+		if shouldSendConnectCommands(network) {
+			bot.mu.Lock()
+			connectCmds := bot.Network.ConnectCommands
+			bot.mu.Unlock()
+			sendConnectCommands(client, connectCmds, log)
+		}
 		// soju channel reconciliation: after the join burst settles, PART the
 		// soju-side channels that no longer exist in TOML — the owner's
 		// removal must propagate, and a downstream PART makes soju leave the

@@ -142,17 +142,18 @@ func TestReconcileNetworks(t *testing.T) {
 		run := &fakeRunner{}
 		plans, toml := sojuTestPlans()
 		reconcileNetworks(run, map[string]bool{}, plans, toml, false, testLogger())
-		assert.Contains(t, run.lines, `network create -addr irc.libera.chat -name "libera" -nick "dave" -realname "dave"`)
+		// `network create` accepts -connect-command natively: a non-empty
+		// TOML list rides the create itself (atomic, and no second
+		// `network update` round-trip whose updateNetwork would
+		// stop/reconnect the just-created upstream). ONE flag per line —
+		// soju replaces the whole stored list, so repeated flags in one
+		// command are the append form.
+		assert.Contains(t, run.lines, `network create -addr irc.libera.chat -name "libera" -nick "dave" -realname "dave" -connect-command "PRIVMSG X :Y" -connect-command "PRIVMSG AuthServ :AUTH"`)
 		assert.Contains(t, run.lines, `sasl set-plain -network "libera" "dave" "libpw"`)
-		// ONE update command, one -connect-command flag per TOML line: soju's
-		// `network update` REPLACES the whole stored list, so repeated flags
-		// in one command are the append form; per-line pushes would truncate
-		// to the last line.
-		assert.Contains(t, run.lines, `network update "libera" -connect-command "PRIVMSG X :Y" -connect-command "PRIVMSG AuthServ :AUTH"`)
 		assert.Contains(t, run.lines, `network create -addr irc.gamesurge.net:6697 -name "gamesurge" -nick "dave" -realname "dave"`)
 		assert.NotContains(t, run.lines, "sasl set-plain -network gamesurge", "no SASL configured → no push")
 		for _, l := range run.lines {
-			assert.NotContains(t, l, `update "gamesurge"`, "fresh network carries no stored connect-commands — nothing to set or clear")
+			assert.NotContains(t, l, `network update "`, "fresh creation never updates: create carries the commands, and soju's update would reconnect the just-created upstream")
 		}
 	})
 
@@ -218,6 +219,65 @@ func TestReconcileNetworks(t *testing.T) {
 func testLogger() logxi.Logger {
 	l := newLogger("soju-admin-test")
 	return l
+}
+
+// statusRunner fakes the admin session for the query→reconcile wiring: the
+// `network status` query returns `status` (nil = Command's failure return —
+// the session-down gate refused, or zero replies arrived in the collection
+// window on a dying socket), everything else is recorded as a mutating
+// command.
+type statusRunner struct {
+	status []string
+	lines  []string
+}
+
+func (f *statusRunner) Command(line string) []string {
+	f.lines = append(f.lines, line)
+	if line == "network status" {
+		return f.status
+	}
+	return nil
+}
+
+// TestReconcileFromStatusNilQuerySkips pins the invisible-boot invariant: a
+// FAILED status query (nil) must be read as "management unavailable", never
+// as "soju has zero networks". Proceeding on nil would create-duplicate every
+// network and — far worse — run pushSojuCreds against the EXISTING soju
+// networks, whose `network update` stops and reconnects every upstream
+// connection at boot, exactly what the spec forbids.
+func TestReconcileFromStatusNilQuerySkips(t *testing.T) {
+	on := true
+	run := &statusRunner{status: nil}
+	networks := map[string]Network{
+		"libera": {
+			Nick: "dave", RealName: "dave", Bouncer: &on,
+			Servers:         []Server{{Host: "irc.libera.chat", Ssl: true}},
+			SASL:            &SASLConfig{User: "dave", Pass: "pw"},
+			ConnectCommands: []string{"PRIVMSG X :Y"},
+		},
+	}
+	// force_reconcile = true is the adversarial setting: even force must not
+	// push when the projection could not be read.
+	reconcileFromStatus(run, &SojuConfig{ForceReconcile: true}, networks, testLogger())
+	assert.Equal(t, []string{"network status"}, run.lines,
+		"only the failed query went out — no creates, no pushes, no deletes")
+}
+
+// TestReconcileFromStatusEmptyReplyReconciles pins the other side of the
+// nil-vs-empty discrimination: a genuinely EMPTY soju answers "No network
+// configured" (a NON-nil slice), and that DOES reconcile — the missing
+// network is created.
+func TestReconcileFromStatusEmptyReplyReconciles(t *testing.T) {
+	on := true
+	run := &statusRunner{status: []string{"No network configured"}}
+	networks := map[string]Network{
+		"libera": {
+			Nick: "dave", RealName: "dave", Bouncer: &on,
+			Servers: []Server{{Host: "irc.libera.chat", Ssl: true}},
+		},
+	}
+	reconcileFromStatus(run, &SojuConfig{}, networks, testLogger())
+	assert.Contains(t, run.lines, `network create -addr irc.libera.chat -name "libera" -nick "dave" -realname "dave"`)
 }
 
 func TestBuildSojuPlans(t *testing.T) {

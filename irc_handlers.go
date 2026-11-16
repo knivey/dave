@@ -116,6 +116,54 @@ func handleSelfKick(bot *Bot, log logxi.Logger, networkName, channel string) {
 	})
 }
 
+// replaySkew is how far past a session's connect instant a message timestamp
+// may lag and still count as live. Generous on purpose: the batch tag is the
+// exact replay signal (soju backlog always carries one); the timestamp
+// fallback only matters if tags are ever absent, and there tolerating clock
+// skew beats precision. See docs/superpowers/specs/2026-11-16-soju-bouncer-support-design.md.
+const replaySkew = 30 * time.Second
+
+// isReplayedEvent reports whether an inbound PRIVMSG is soju backlog replay
+// rather than live traffic. soju delivers its backlog on reconnect inside an
+// IRCv3 "batch chathistory", tagging every replayed message with the batch
+// ref; live traffic never carries one. The timestamp fallback is defense in
+// depth: girc always sets Event.Timestamp (parse-time now() when the
+// server-time tag is absent), so a message materially older than this
+// session's registration cannot be live. On direct connections neither signal
+// ever fires — the guard is a structural no-op there.
+func isReplayedEvent(event girc.Event, connectedAt time.Time) bool {
+	if event.Tags["batch"] != "" {
+		return true
+	}
+	if connectedAt.IsZero() {
+		return false
+	}
+	return event.Timestamp.Before(connectedAt.Add(-replaySkew))
+}
+
+// handleChanMessageFn is an injectable seam (the claimNickForFn pattern) so
+// tests can observe dispatch without a live IRC environment.
+var handleChanMessageFn = handleChanMessage
+
+// dispatchChanMessage is the ONLY entry from the PRIVMSG handler into command
+// dispatch. soju backlog replay is logged by the ALL_EVENTS handler (with its
+// original @time, closing deploy-window log gaps) and must never dispatch:
+// an old mention re-firing an LLM turn is the exact failure this guards.
+// Per-message cost is one map lookup + one time comparison — the burst-rate
+// constraint in the spec leaves no room for anything heavier.
+func dispatchChanMessage(bot *Bot, network Network, client *girc.Client, event girc.Event) {
+	if !event.IsFromChannel() {
+		return
+	}
+	bot.mu.Lock()
+	connectedAt := bot.connectedAt
+	bot.mu.Unlock()
+	if isReplayedEvent(event, connectedAt) {
+		return
+	}
+	handleChanMessageFn(network, client, event)
+}
+
 func registerIRCHandlers(bot *Bot, client *girc.Client, network Network, log logxi.Logger) {
 	client.Handlers.Add(girc.ALL_EVENTS, func(client *girc.Client, event girc.Event) {
 		if str, ok := event.Pretty(); ok {
@@ -152,10 +200,7 @@ func registerIRCHandlers(bot *Bot, client *girc.Client, network Network, log log
 	})
 
 	client.Handlers.AddBg(girc.PRIVMSG, func(client *girc.Client, event girc.Event) {
-		if !event.IsFromChannel() {
-			return
-		}
-		handleChanMessage(network, client, event)
+		dispatchChanMessage(bot, network, client, event)
 	})
 
 	client.Handlers.Add(girc.NICK, func(client *girc.Client, event girc.Event) {

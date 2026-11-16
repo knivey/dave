@@ -219,10 +219,14 @@ Channel lifecycle — no parsing at all:
 - Removed channels: after each bouncer session's `RPL_WELCOME` (join burst
   settled — a fixed grace timer, default 15s, re-armed per reconnect), dave
   diffs girc's channel state (which mirrors soju's stored channel list) against
-  `bot.Network.Channels` and sends `channel delete <chan>` for extras via the
-  admin session, WARN-logged. Note `channel delete` leaves-and-forgets upstream,
-  which is exactly the TOML-removal semantic. TUI `/part` already propagates
-  naturally (a downstream PART makes soju forget the channel).
+  `bot.Network.Channels` and **PARTs the extras downstream**, WARN-logged.
+  soju's documented behavior makes this the removal mechanism: a downstream
+  PART makes soju leave the channel upstream AND forget it from the stored
+  list (only a PART with reason "detach" detaches instead — dave sends plain
+  PART). This rides normal IRC semantics instead of a BouncerServ command
+  (`channel delete` has no documented `-network` flag, and the admin-session
+  indirection would add a dependency for no gain). TUI `/part` already
+  propagates the same way.
 - Channel keys: dave's keyed joins carry the key downstream; soju stores it
   with the channel. Covered by the same paths.
 
@@ -335,7 +339,7 @@ accepted; IRC has no broadcast mechanism.
   force_reconcile pushes everything); admin-session-down queueing flushes in
   order on reconnect.
 - **Channel diff**: fake girc state (channels in soju, subset in TOML) →
-  exactly the extra channels deleted, keyed channels handled, nothing sent when
+  exactly the extra channels parted, keyed channels handled, nothing sent when
   equal.
 - **connect_commands direct mode**: after RPL_WELCOME the lines are sent in
   order, once per registration, through the throttle path.

@@ -3777,3 +3777,33 @@ func TestWebsiteURLEmptyByDefault(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "", cfg.Website.URL)
 }
+
+func TestNetworkConnectCommands(t *testing.T) {
+	t.Run("parses and survives ApplyDefaults", func(t *testing.T) {
+		dir := createTestConfigDir(t, `
+trigger = "."
+[[networks.gamesurge.servers]]
+host = "irc.gamesurge.net"
+ssl = true
+[networks.gamesurge]
+nick = "dave"
+connect_commands = ["PRIVMSG AuthServ@Services.GameSurge.net :AUTH user pass"]
+`, nil)
+		cfg, err := loadConfigDir(dir)
+		require.NoError(t, err)
+		net := cfg.Networks["gamesurge"]
+		assert.Equal(t, []string{"PRIVMSG AuthServ@Services.GameSurge.net :AUTH user pass"}, net.ConnectCommands)
+	})
+
+	t.Run("empty entry rejected", func(t *testing.T) {
+		dir := createTestConfigDir(t, `
+trigger = "."
+[networks.x]
+nick = "dave"
+connect_commands = ["PRIVMSG NickServ :IDENTIFY a", "  "]
+`, nil)
+		_, err := loadConfigDir(dir)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "connect_commands")
+	})
+}

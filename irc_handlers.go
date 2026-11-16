@@ -197,6 +197,17 @@ func registerIRCHandlers(bot *Bot, client *girc.Client, network Network, log log
 		if len(noKey) > 0 {
 			client.Cmd.Join(noKey...)
 		}
+		// connect_commands: raw IRC lines sent after every registration —
+		// AuthServ/NickServ identification on networks without SASL. Same
+		// semantics soju uses for its per-network connect-commands.
+		bot.mu.Lock()
+		connectCmds := bot.Network.ConnectCommands
+		bot.mu.Unlock()
+		for _, cmd := range connectCmds {
+			if err := client.Cmd.SendRaw(cmd); err != nil {
+				log.Warn("connect_command send failed", "line", cmd, "error", err.Error())
+			}
+		}
 	})
 
 	client.Handlers.AddBg(girc.PRIVMSG, func(client *girc.Client, event girc.Event) {

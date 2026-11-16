@@ -183,6 +183,7 @@ type Network struct {
 	ReconnectDelay   *time.Duration `toml:"reconnect_delay"`
 	Trigger          string
 	Quitmsg          string
+	ConnectCommands  []string       `toml:"connect_commands"`
 	SASL             *SASLConfig    `toml:"sasl"`
 	DisabledCommands []string       `toml:"disabled_commands"`
 	AutoRejoin       *bool          `toml:"auto_rejoin"`
@@ -850,6 +851,11 @@ func loadConfigDir(dir string) (Config, error) {
 		}
 		if network.Quitmsg == "" {
 			network.Quitmsg = config.Quitmsg
+		}
+		for _, cmd := range network.ConnectCommands {
+			if strings.TrimSpace(cmd) == "" {
+				return config, fmt.Errorf("networks.%s: connect_commands entries must be non-empty IRC lines", name)
+			}
 		}
 		config.Networks[name] = network
 	}

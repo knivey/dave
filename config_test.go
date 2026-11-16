@@ -3807,3 +3807,107 @@ connect_commands = ["PRIVMSG NickServ :IDENTIFY a", "  "]
 		assert.Contains(t, err.Error(), "connect_commands")
 	})
 }
+
+func TestLoadConfigDirSoju(t *testing.T) {
+	base := `
+trigger = "."
+[soju]
+host = "bouncer.example.com"
+user = "dave"
+pass = "secret"
+[networks.libera]
+nick = "dave"
+bouncer = true
+[[networks.libera.servers]]
+host = "irc.libera.chat"
+ssl = true
+[networks.direct]
+nick = "dave"
+[[networks.direct.servers]]
+host = "irc.other.net"
+ssl = true
+`
+	t.Run("valid parse + defaults", func(t *testing.T) {
+		dir := createTestConfigDir(t, base, nil)
+		cfg, err := loadConfigDir(dir)
+		require.NoError(t, err)
+		require.NotNil(t, cfg.Soju)
+		assert.Equal(t, "bouncer.example.com", cfg.Soju.Host)
+		assert.Equal(t, 6697, cfg.Soju.DialPort(), "port defaults to 6697")
+		assert.True(t, cfg.Soju.UseTLS(), "ssl defaults to true")
+		assert.True(t, cfg.Networks["libera"].IsBouncer())
+		assert.False(t, cfg.Networks["direct"].IsBouncer(), "default is direct")
+	})
+
+	t.Run("bouncer without soju section rejected", func(t *testing.T) {
+		dir := createTestConfigDir(t, `
+trigger = "."
+[networks.libera]
+nick = "dave"
+bouncer = true
+`, nil)
+		_, err := loadConfigDir(dir)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "libera")
+	})
+
+	t.Run("missing pass rejected", func(t *testing.T) {
+		dir := createTestConfigDir(t, `
+trigger = "."
+[soju]
+host = "bouncer.example.com"
+user = "dave"
+[networks.libera]
+nick = "dave"
+bouncer = true
+`, nil)
+		_, err := loadConfigDir(dir)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "[soju]")
+	})
+
+	t.Run("name with slash rejected", func(t *testing.T) {
+		dir := createTestConfigDir(t, `
+trigger = "."
+[soju]
+host = "bouncer.example.com"
+user = "dave"
+pass = "x"
+[networks."a/b"]
+nick = "dave"
+bouncer = true
+`, nil)
+		_, err := loadConfigDir(dir)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "a/b")
+	})
+
+	t.Run("disabled bouncer network is inert", func(t *testing.T) {
+		dir := createTestConfigDir(t, `
+trigger = "."
+[networks.libera]
+nick = "dave"
+bouncer = true
+enabled = false
+`, nil)
+		cfg, err := loadConfigDir(dir)
+		require.NoError(t, err)
+		require.Nil(t, cfg.Soju)
+		assert.True(t, cfg.Networks["libera"].IsBouncer())
+	})
+
+	t.Run("soju section without bouncer networks loads", func(t *testing.T) {
+		dir := createTestConfigDir(t, `
+trigger = "."
+[soju]
+host = "bouncer.example.com"
+user = "dave"
+pass = "secret"
+[networks.direct]
+nick = "dave"
+`, nil)
+		cfg, err := loadConfigDir(dir)
+		require.NoError(t, err)
+		require.NotNil(t, cfg.Soju)
+	})
+}

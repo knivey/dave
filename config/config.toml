@@ -102,6 +102,15 @@
 #   batch_size         (int, default: 500)       Rows per INSERT transaction
 #   flush_interval     (duration, default: "2s") Max time between flushes
 #
+# [soju] options (soju bouncer support; optional — networks opt in with bouncer = true):
+#   host               (string)                Bouncer address
+#   port               (int, default: 6697)    Bouncer port
+#   ssl                (bool, default: true)   Use TLS to the bouncer
+#   insecure_skip_verify (bool, default: false) Skip bouncer TLS certificate verification
+#   user               (string)                soju username
+#   pass               (string)                soju password
+#   force_reconcile    (bool, default: false)  One-shot: re-push SASL + connect-commands for all bouncer networks at startup (set, restart, unset)
+#
 # [networks.<name>] options:
 #   enabled            (bool, default: true)   Enable this network
 #   nick               (string)                Bot nickname
@@ -115,6 +124,7 @@
 #   auto_rejoin        (bool, default: true)   Automatically rejoin a channel after being kicked
 #   auto_rejoin_delay  (duration, default: "3s") Delay before auto-rejoining after a kick
 #   connect_commands   (list of strings)    Raw IRC lines sent after registration on every connect (e.g. AuthServ AUTH on networks without SASL)
+#   bouncer            (bool, default: false)  Connect via the [soju] bouncer instead of dialing servers directly (requires [soju])
 #
 # [networks.<name>.sasl] options:
 #   user               (string)                SASL username (enables SASL PLAIN authentication)
@@ -218,6 +228,14 @@
 # batch_size = 500
 # flush_interval = "2s"
 #
+# [soju]
+# host = "bouncer.example.com"
+# port = 6697
+# ssl = true
+# user = "dave"
+# pass = "soju-password"
+# force_reconcile = false
+#
 # [networks.example]
 # enabled = true
 # nick = "mybot"
@@ -231,6 +249,7 @@
 # auto_rejoin = true
 # auto_rejoin_delay = "3s"
 # connect_commands = ["PRIVMSG AuthServ@Services.GameSurge.net :AUTH user pass"]
+# bouncer = false
 #
 # [networks.example.sasl]
 # user = "mybot"

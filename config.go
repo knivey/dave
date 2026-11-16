@@ -22,6 +22,7 @@ type Config struct {
 	Trigger              string
 	Quitmsg              string
 	Networks             map[string]Network
+	Soju                 *SojuConfig `toml:"soju"`
 	Services             map[string]Service
 	Commands             Commands
 	MaxQueueDepth        int `toml:"max_queue_depth"`
@@ -183,6 +184,7 @@ type Network struct {
 	ReconnectDelay   *time.Duration `toml:"reconnect_delay"`
 	Trigger          string
 	Quitmsg          string
+	Bouncer          *bool          `toml:"bouncer"`
 	ConnectCommands  []string       `toml:"connect_commands"`
 	SASL             *SASLConfig    `toml:"sasl"`
 	DisabledCommands []string       `toml:"disabled_commands"`
@@ -218,6 +220,13 @@ func (n *Network) IsEnabled() bool {
 	return *n.Enabled
 }
 
+// IsBouncer reports whether this network dials the [soju] bouncer instead of
+// its own server list. Nil = false (direct). Value receiver so callers can
+// invoke it directly on map values (Networks is map[string]Network).
+func (n Network) IsBouncer() bool {
+	return n.Bouncer != nil && *n.Bouncer
+}
+
 // shouldAutoRejoin reports whether the bot should automatically rejoin a
 // channel after being kicked. A per-channel setting (ChannelConfig.AutoRejoin)
 // takes precedence, then the network-level setting, then the default (true).
@@ -238,6 +247,37 @@ func autoRejoinDelay(net *Network) time.Duration {
 		return *net.AutoRejoinDelay
 	}
 	return 3 * time.Second
+}
+
+// SojuConfig is the root-level soju bouncer connection block. Networks opt in
+// per-network with bouncer = true; with no opt-ins the section is inert
+// (byte-identical direct behavior). Spec:
+// docs/superpowers/specs/2026-11-16-soju-bouncer-support-design.md.
+type SojuConfig struct {
+	Host               string `toml:"host"`
+	Port               int    `toml:"port"`
+	Ssl                *bool  `toml:"ssl"`
+	InsecureSkipVerify bool   `toml:"insecure_skip_verify"`
+	User               string `toml:"user"`
+	Pass               string `toml:"pass"`
+	ForceReconcile     bool   `toml:"force_reconcile"`
+}
+
+// DialPort returns the bouncer IRC-over-TLS port, defaulting to 6697.
+func (s *SojuConfig) DialPort() int {
+	if s.Port == 0 {
+		return 6697
+	}
+	return s.Port
+}
+
+// UseTLS defaults to true — plain-text to a remote bouncer would leak the
+// SASL credentials dave sends it.
+func (s *SojuConfig) UseTLS() bool {
+	if s.Ssl == nil {
+		return true
+	}
+	return *s.Ssl
 }
 
 type Server struct {
@@ -857,6 +897,11 @@ func loadConfigDir(dir string) (Config, error) {
 				return config, fmt.Errorf("networks.%s: connect_commands entries must be non-empty IRC lines", name)
 			}
 		}
+		if network.IsBouncer() && network.IsEnabled() {
+			if err := validateBouncerNetwork(name, config.Soju); err != nil {
+				return config, err
+			}
+		}
 		config.Networks[name] = network
 	}
 
@@ -891,6 +936,28 @@ func loadConfigDir(dir string) (Config, error) {
 	}
 
 	return config, nil
+}
+
+// validateBouncerNetwork enforces the soju preconditions for one enabled
+// bouncer network. Disabled networks are inert (validated at startup when
+// they are actually dialed).
+func validateBouncerNetwork(name string, soju *SojuConfig) error {
+	if soju == nil {
+		return fmt.Errorf("networks.%s: bouncer = true requires a [soju] section", name)
+	}
+	if strings.TrimSpace(soju.Host) == "" {
+		return fmt.Errorf("[soju]: host is required when a network uses bouncer = true")
+	}
+	if soju.User == "" || soju.Pass == "" {
+		return fmt.Errorf("[soju]: user and pass are required when a network uses bouncer = true")
+	}
+	// The network name rides inside the downstream SASL username
+	// ("<user>/<name>@bot") and as the soju network name in BouncerServ
+	// commands; '/' and '@' are username-delimiters and would corrupt both.
+	if strings.ContainsAny(name, "/@") {
+		return fmt.Errorf("networks.%s: network names used with bouncer = true must not contain '/' or '@'", name)
+	}
+	return nil
 }
 
 func loadServicesFile(dir string, config *Config) error {

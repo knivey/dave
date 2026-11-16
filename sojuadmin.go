@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/tls"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -72,6 +73,8 @@ func startSojuAdmin(soju *SojuConfig) *SojuAdmin {
 		a.connected = true
 		a.mu.Unlock()
 		log.Info("admin session connected")
+		// Reconciliation re-runs on every (re)connect; it is idempotent.
+		go reconcileSojuNetworks(a, log)
 	})
 
 	client.Handlers.AddBg(girc.NOTICE, func(c *girc.Client, e girc.Event) {
@@ -222,4 +225,141 @@ var anyEnabledBouncerNetwork = func(networks map[string]Network) bool {
 		}
 	}
 	return false
+}
+
+// sojuNetworkPlan is one TOML bouncer network resolved against the soju
+// projection. Addr is the recorded upstream address for network create:
+// the first server's host, with :port appended when it is not the TLS
+// default (soju connects upstream with TLS by default).
+type sojuNetworkPlan struct {
+	Name            string
+	Addr            string
+	Nick            string
+	RealName        string
+	SASL            *SASLConfig
+	ConnectCommands []string
+}
+
+// buildSojuPlans snapshots the enabled bouncer networks (plan set) and every
+// TOML network name (the never-delete set, regardless of mode or enabled).
+func buildSojuPlans(networks map[string]Network) ([]sojuNetworkPlan, map[string]bool) {
+	var plans []sojuNetworkPlan
+	tomlNames := make(map[string]bool, len(networks))
+	for name, n := range networks {
+		tomlNames[name] = true
+		if !n.IsEnabled() || !n.IsBouncer() {
+			continue
+		}
+		p := sojuNetworkPlan{
+			Name:            name,
+			Nick:            n.Nick,
+			RealName:        n.RealName,
+			SASL:            n.SASL,
+			ConnectCommands: n.ConnectCommands,
+		}
+		if len(n.Servers) > 0 {
+			s := n.Servers[0]
+			if s.GetPort() != 6697 {
+				p.Addr = fmt.Sprintf("%s:%d", s.Host, s.GetPort())
+			} else {
+				p.Addr = s.Host
+			}
+		}
+		plans = append(plans, p)
+	}
+	return plans, tomlNames
+}
+
+// parseNetworkStatus extracts network names from BouncerServ `network status`
+// NOTICE lines. soju's service.go prints "<name> [<status>, ...][: details]"
+// and "<name> (<addr>) [<status>, ...]" — the name is everything before the
+// first " [", minus a trailing " (<addr>)". Anything unparseable is skipped;
+// this is the ONLY BouncerServ output dave parses (spec constraint), so if a
+// soju upgrade changes the shape, this function is the one file to fix.
+func parseNetworkStatus(lines []string) map[string]bool {
+	names := map[string]bool{}
+	for _, line := range lines {
+		idx := strings.Index(line, " [")
+		if idx <= 0 {
+			continue
+		}
+		name := line[:idx]
+		if i := strings.Index(name, " ("); i > 0 {
+			name = name[:i]
+		}
+		name = strings.TrimSpace(name)
+		if name != "" {
+			names[name] = true
+		}
+	}
+	return names
+}
+
+// reconcileNetworks aligns soju's network set with dave's TOML (the spec's
+// network-lifecycle steps): create missing bouncer networks (pushing their
+// SASL + connect-commands, since a fresh soju network has none), leave
+// existing ones untouched unless force, and delete orphans — soju networks
+// whose name matches no TOML network in any mode. Names present in TOML but
+// direct-mode/disabled are WARNed and deliberately preserved: a temporary
+// bouncer = false flip must never destroy stored credentials.
+func reconcileNetworks(run commandRunner, existing map[string]bool, plans []sojuNetworkPlan, tomlNames map[string]bool, force bool, log logxi.Logger) {
+	inPlans := make(map[string]bool, len(plans))
+	for _, p := range plans {
+		inPlans[p.Name] = true
+		if existing[p.Name] {
+			if force {
+				pushSojuCreds(run, p, log)
+			}
+			continue
+		}
+		log.Info("soju: creating network", "network", p.Name, "addr", p.Addr)
+		run.Command(fmt.Sprintf("network create -addr %s -name %s -nick %q -realname %q", p.Addr, p.Name, p.Nick, p.RealName))
+		pushSojuCreds(run, p, log)
+	}
+	for name := range existing {
+		switch {
+		case tomlNames[name] && !inPlans[name]:
+			log.Warn("soju: network present in TOML but not bouncer mode (or disabled) — leaving soju state as-is", "network", name)
+		case tomlNames[name]:
+			// bouncer-mode plan, already handled above
+		default:
+			log.Warn("soju: deleting orphaned network (absent from config.toml)", "network", name)
+			run.Command("network delete " + name)
+		}
+	}
+}
+
+// pushSojuCreds writes a plan's upstream credentials into soju. Only ever
+// called for freshly created networks or under force_reconcile — network
+// update forces an upstream reconnect, so unconditional pushes would make
+// every dave boot visible to the IRC networks.
+func pushSojuCreds(run commandRunner, p sojuNetworkPlan, log logxi.Logger) {
+	if p.SASL != nil && p.SASL.User != "" {
+		log.Info("soju: pushing SASL credentials", "network", p.Name)
+		run.Command(fmt.Sprintf("sasl set-plain -network %s %q %q", p.Name, p.SASL.User, p.SASL.Pass))
+	}
+	for _, cmd := range p.ConnectCommands {
+		log.Info("soju: pushing connect-command", "network", p.Name)
+		run.Command(fmt.Sprintf("network update -connect-command %q", cmd))
+	}
+}
+
+// reconcileSojuNetworks is the real wiring: snapshot config, query soju's
+// network list, reconcile. Runs on the admin session's RPL_WELCOME.
+func reconcileSojuNetworks(a *SojuAdmin, log logxi.Logger) {
+	var soju *SojuConfig
+	var networks map[string]Network
+	readConfig(func() {
+		soju = config.Soju
+		networks = make(map[string]Network, len(config.Networks))
+		for name, n := range config.Networks {
+			networks[name] = n
+		}
+	})
+	if soju == nil {
+		return
+	}
+	plans, tomlNames := buildSojuPlans(networks)
+	existing := parseNetworkStatus(a.Command("network status"))
+	reconcileNetworks(a, existing, plans, tomlNames, soju.ForceReconcile, log)
 }

@@ -232,6 +232,7 @@
 # host = "bouncer.example.com"
 # port = 6697
 # ssl = true
+# insecure_skip_verify = false
 # user = "dave"
 # pass = "soju-password"
 # force_reconcile = false

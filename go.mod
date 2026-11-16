@@ -17,7 +17,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/jmoiron/sqlx v1.4.0
-	github.com/lrstanley/girc v1.1.1
+	github.com/lrstanley/girc v1.1.3
 	github.com/mgutz/logxi v0.0.0-20161027140823-aebf8a7d67ab
 	github.com/modelcontextprotocol/go-sdk v1.5.0
 	github.com/openai/openai-go/v3 v3.33.0

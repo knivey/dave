@@ -233,6 +233,11 @@ func (bot *Bot) isReady(channel string) bool {
 var bots map[string]*Bot
 var botsMu sync.RWMutex
 
+// sojuAdmin is the process-wide soju admin session, nil unless at least one
+// enabled network dials the bouncer. Stopped in shutdown() (single-source
+// shutdown path — no parallel cleanup anywhere else).
+var sojuAdmin *SojuAdmin
+
 var theMentionTracker = newMentionTracker()
 
 func init() {
@@ -734,6 +739,14 @@ func main() {
 				startClient(network)
 			}
 		}
+
+		// soju admin session: exists only when at least one enabled network
+		// dials the bouncer (spec: soju support is optional per network).
+		var sojuCfg *SojuConfig
+		readConfig(func() { sojuCfg = config.Soju })
+		if sojuCfg != nil && anyEnabledBouncerNetwork(config.Networks) {
+			sojuAdmin = startSojuAdmin(sojuCfg)
+		}
 	}
 
 	sigs := make(chan os.Signal, 1)
@@ -786,6 +799,9 @@ func shutdown() {
 
 	for _, bot := range snapshotBots() {
 		bot.Quit()
+	}
+	if sojuAdmin != nil {
+		sojuAdmin.Stop()
 	}
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()

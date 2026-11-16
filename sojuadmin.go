@@ -363,3 +363,36 @@ func reconcileSojuNetworks(a *SojuAdmin, log logxi.Logger) {
 	existing := parseNetworkStatus(a.Command("network status"))
 	reconcileNetworks(a, existing, plans, tomlNames, soju.ForceReconcile, log)
 }
+
+// channelDiffGrace is how long after RPL_WELCOME a bouncer network waits
+// before diffing girc's channel state against the TOML channel list. soju
+// sends its stored-channel join burst right after registration; the diff
+// must observe the settled state. Re-armed naturally per reconnect (each
+// WELCOME schedules one diff; repeats are idempotent).
+const channelDiffGrace = 15 * time.Second
+
+// extraChannels returns channels girc shows joined that dave's TOML does not
+// configure — the soju-side leftovers a channel removal leaves behind.
+// Normalized compare, same rule as Network.GetChannelConfig (config keys stay
+// exactly as typed; normalization happens at lookup time).
+func extraChannels(joined []string, channels map[string]ChannelConfig, casemapping string) []string {
+	cm := casemapping
+	if cm == "" {
+		cm = "rfc1459"
+	}
+	var out []string
+	for _, ch := range joined {
+		norm := normalizeIRC(ch, cm)
+		found := false
+		for k := range channels {
+			if normalizeIRC(k, cm) == norm {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, ch)
+		}
+	}
+	return out
+}

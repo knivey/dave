@@ -255,3 +255,27 @@ func TestSojuAdminCommandSerializesConcurrent(t *testing.T) {
 	assert.Equal(t, []string{"a1 [connected]", "b1 [connected]"}, first)
 	assert.Empty(t, second)
 }
+
+func TestExtraChannels(t *testing.T) {
+	chans := map[string]ChannelConfig{
+		"#libera": {},
+		"#off-by": {},
+	}
+	t.Run("extras reported, configured kept, casemapping honored", func(t *testing.T) {
+		got := extraChannels(
+			[]string{"#libera", "#OFF-BY", "#ghostchan"},
+			chans,
+			"rfc1459",
+		)
+		assert.Equal(t, []string{"#ghostchan"}, got)
+	})
+
+	t.Run("empty config means everything is extra", func(t *testing.T) {
+		got := extraChannels([]string{"#a", "#b"}, map[string]ChannelConfig{}, "")
+		assert.Equal(t, []string{"#a", "#b"}, got)
+	})
+
+	t.Run("empty joined list", func(t *testing.T) {
+		assert.Nil(t, extraChannels(nil, chans, "ascii"))
+	})
+}

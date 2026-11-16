@@ -208,6 +208,23 @@ func registerIRCHandlers(bot *Bot, client *girc.Client, network Network, log log
 				log.Warn("connect_command send failed", "line", cmd, "error", err.Error())
 			}
 		}
+		// soju channel reconciliation: after the join burst settles, PART the
+		// soju-side channels that no longer exist in TOML — the owner's
+		// removal must propagate, and a downstream PART makes soju leave the
+		// channel upstream AND forget it from its stored list (plain PART
+		// only; "detach" would keep it). Spec channel-lifecycle section.
+		if network.IsBouncer() {
+			time.AfterFunc(channelDiffGrace, func() {
+				bot.mu.Lock()
+				cm := bot.casemapping
+				chs := bot.Network.Channels
+				bot.mu.Unlock()
+				for _, extra := range extraChannels(client.ChannelList(), chs, cm) {
+					log.Warn("soju: parting channel absent from config", "channel", extra, "network", network.Name)
+					client.Cmd.Part(extra)
+				}
+			})
+		}
 	})
 
 	client.Handlers.AddBg(girc.PRIVMSG, func(client *girc.Client, event girc.Event) {

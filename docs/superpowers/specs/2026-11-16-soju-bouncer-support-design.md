@@ -185,19 +185,21 @@ membership, each network session's `RPL_WELCOME`. Networks are not hot-reloaded,
 so there is no `/reload` trigger (restart applies TOML changes — unchanged dave
 behavior).
 
-Network lifecycle — blind, idempotent, parse-free:
+Network lifecycle — driven by the `network status` listing (the ONLY BouncerServ
+output dave parses — isolated in one function so format drift is a one-file
+fix). Existence detection comes from that listing rather than matching
+BouncerServ error texts, which are not a stable interface:
 
-1. For every enabled bouncer network: send `network create -addr <host[:port]>
-   -name <name> -nick <nick> -realname <real>`. If soju answers that the
-   network already exists, ignore the error and **do not** push SASL or
-   connect-commands (they persist in soju's DB from the first creation; this
-   keeps every dave boot invisible to the upstream — no forced reconnects).
-2. If the network was freshly created: push `sasl set-plain -network <name>
-   <user> <pass>` when the TOML has SASL credentials, and push
-   connect-commands (below) when set.
-3. Orphan deletion: once per admin-session connect, query `network status` and
-   parse the reply (the ONLY BouncerServ output dave parses — isolated in one
-   function so format drift is a one-file fix). A soju network whose name does
+1. Once per admin-session connect: query `network status` and parse the
+   network names into a set.
+2. For every enabled bouncer network whose name is NOT in the set: send
+   `network create -addr <host[:port]> -name <name> -nick <nick> -realname
+   <real>`, then push `sasl set-plain -network <name> <user> <pass>` when the
+   TOML has SASL credentials, and push connect-commands (below) when set.
+   Networks already in soju get NO pushes (they persist in soju's DB from the
+   first creation; this keeps every dave boot invisible to the upstream — no
+   forced reconnects).
+3. Orphan deletion from the same parsed listing: a soju network whose name does
    not correspond to ANY network in TOML (any mode, any enabled state) is an
    orphan and is deleted with `network delete <name>` — WARN-logged before the
    command is sent. Everything else is deliberately left alone so a temporary
@@ -247,10 +249,15 @@ not request `draft/chathistory`, so auto-backlog is ON.
   1. Primary: `event.Tags["batch"] != ""` — exact, spec-clean; only soju-style
      backlog sets it.
   2. Fallback (defense in depth, LOGGED when it trips): `event.Timestamp` is
-     set (server-time cap, negotiated by default) and predates the session's
-     connect instant by more than a small skew allowance (2s). Live messages
-     carry ~now timestamps; anything materially older than the session cannot
-     be live.
+     materially older than the session's connect instant. girc ALWAYS sets
+     `Timestamp` (parse-time `now()` when no `time` tag — event.go:67), so no
+     zero-check is needed; the skew allowance is **30s**, deliberately generous
+     because the batch tag is the primary exact signal and this fallback only
+     matters when tags are absent — tolerating clock skew beats precision
+     there. A live message cannot predate its session's registration by 30s;
+     backlog from any outage longer than 30s always does. (Backlog from an
+     outage shorter than 30s relies on the batch tag, which soju always
+     provides.)
   On direct connections neither condition ever fires (ircds don't batch; live
   @time ≈ now) — the guard is a structural no-op there.
 - Cost: one map lookup + one time comparison per PRIVMSG, inside the

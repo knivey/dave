@@ -953,18 +953,33 @@ func ircClient(network Network) {
 
 	log := newLogger(network.Name)
 
-	ircServer, err := network.getNextServer()
-	if err != nil {
-		log.Error(err.Error())
-		return
+	var soju *SojuConfig
+	readConfig(func() { soju = config.Soju })
+	dial := network.BouncerDial(soju)
+
+	var ircServer Server
+	if dial != nil {
+		ircServer = Server{
+			Host:               dial.Host,
+			Port:               dial.Port,
+			Ssl:                dial.Ssl,
+			InsecureSkipVerify: dial.InsecureSkipVerify,
+		}
+		log.Info("dialing bouncer", "host", dial.Host, "port", dial.Port, "network", network.Name)
+	} else {
+		var err error
+		ircServer, err = network.getNextServer()
+		if err != nil {
+			log.Error(err.Error())
+			return
+		}
+		log.Info("dialing server", "host", ircServer.Host, "port", ircServer.GetPort())
 	}
 
 	sslConfig := &tls.Config{
 		ServerName:         ircServer.Host,
 		InsecureSkipVerify: ircServer.InsecureSkipVerify,
 	}
-
-	log.Info("dialing server", "host", ircServer.Host, "port", ircServer.GetPort())
 
 	client := girc.New(girc.Config{
 		Server:     ircServer.Host,
@@ -978,7 +993,18 @@ func ircClient(network Network) {
 		AllowFlood: true,
 	})
 
-	if network.SASL != nil && network.SASL.User != "" {
+	if dial != nil {
+		// Downstream SASL authenticates to soju itself; the network's own
+		// [sasl] block (if any) is UPSTREAM credentials pushed into soju by
+		// the admin session, never sent here. ServerPass stays unset — the
+		// bouncer is not a server-password service.
+		client.Config.SASL = &girc.SASLPlain{
+			User: dial.SASLUser,
+			Pass: dial.SASLPass,
+		}
+		client.Config.ServerPass = ""
+		log.Info("SASL PLAIN configured", "user", dial.SASLUser)
+	} else if network.SASL != nil && network.SASL.User != "" {
 		client.Config.SASL = &girc.SASLPlain{
 			User: network.SASL.User,
 			Pass: network.SASL.Pass,
@@ -1033,6 +1059,11 @@ func ircClient(network Network) {
 		if !reconnect {
 			log.Info("Reconnect not requested")
 			break
+		}
+		if dial != nil {
+			// Bouncer mode has exactly one address; rotation is meaningless.
+			log.Info("reconnecting", "host", dial.Host, "port", dial.Port)
+			continue
 		}
 		ircServer, err := bot.Network.getNextServer()
 		if err != nil {

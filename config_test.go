@@ -3911,3 +3911,38 @@ nick = "dave"
 		require.NotNil(t, cfg.Soju)
 	})
 }
+
+func TestNetworkBouncerDial(t *testing.T) {
+	soju := &SojuConfig{Host: "bnc.example.com", User: "dave", Pass: "pw"}
+
+	t.Run("direct network returns nil", func(t *testing.T) {
+		n := Network{Name: "libera"}
+		assert.Nil(t, n.BouncerDial(soju))
+	})
+
+	t.Run("nil soju returns nil", func(t *testing.T) {
+		n := Network{Name: "libera", Bouncer: boolPtr(true)}
+		assert.Nil(t, n.BouncerDial(nil))
+	})
+
+	t.Run("bouncer network resolves with SASL username", func(t *testing.T) {
+		n := Network{Name: "libera", Bouncer: boolPtr(true)}
+		d := n.BouncerDial(soju)
+		require.NotNil(t, d)
+		assert.Equal(t, "bnc.example.com", d.Host)
+		assert.Equal(t, 6697, d.Port)
+		assert.True(t, d.Ssl)
+		assert.Equal(t, "dave/libera@bot", d.SASLUser)
+		assert.Equal(t, "pw", d.SASLPass)
+	})
+
+	t.Run("port and ssl overrides honored", func(t *testing.T) {
+		off := false
+		s := &SojuConfig{Host: "bnc.example.com", Port: 7000, Ssl: &off, User: "dave", Pass: "pw"}
+		n := Network{Name: "libera", Bouncer: boolPtr(true)}
+		d := n.BouncerDial(s)
+		require.NotNil(t, d)
+		assert.Equal(t, 7000, d.Port)
+		assert.False(t, d.Ssl)
+	})
+}

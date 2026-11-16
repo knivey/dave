@@ -280,6 +280,35 @@ func (s *SojuConfig) UseTLS() bool {
 	return *s.Ssl
 }
 
+// BouncerDial holds the resolved [soju] connection parameters for one
+// network. The downstream SASL username encodes the soju network (soju's
+// legacy per-network connection mode) and a per-client buffer name so dave's
+// backlog position is its own.
+type BouncerDial struct {
+	Host               string
+	Port               int
+	Ssl                bool
+	InsecureSkipVerify bool
+	SASLUser           string
+	SASLPass           string
+}
+
+// BouncerDial returns nil for direct-mode networks (or when soju is not
+// configured) — callers must treat nil as "dial the server list as today".
+func (n *Network) BouncerDial(soju *SojuConfig) *BouncerDial {
+	if !n.IsBouncer() || soju == nil {
+		return nil
+	}
+	return &BouncerDial{
+		Host:               soju.Host,
+		Port:               soju.DialPort(),
+		Ssl:                soju.UseTLS(),
+		InsecureSkipVerify: soju.InsecureSkipVerify,
+		SASLUser:           soju.User + "/" + n.Name + "@bot",
+		SASLPass:           soju.Pass,
+	}
+}
+
 type Server struct {
 	Host               string `toml:"host"`
 	Port               int    `toml:"port"`

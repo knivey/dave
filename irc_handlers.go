@@ -164,6 +164,21 @@ func dispatchChanMessage(bot *Bot, network Network, client *girc.Client, event g
 	handleChanMessageFn(network, client, event)
 }
 
+// sendConnectCommands sends a network's connect_commands — raw IRC lines
+// fired after every registration (AuthServ/NickServ identification on
+// networks without SASL; same semantics soju uses for its per-network
+// connect-commands). Extracted from the RPL_WELCOME handler for testing:
+// one failing line must WARN and never abort the remaining lines (SendRaw
+// errors on unparseable input; a disconnected client silently drops valid
+// lines inside girc's write path — either way the loop runs to completion).
+func sendConnectCommands(client *girc.Client, cmds []string, log logxi.Logger) {
+	for _, cmd := range cmds {
+		if err := client.Cmd.SendRaw(cmd); err != nil {
+			log.Warn("connect_command send failed", "line", cmd, "error", err.Error())
+		}
+	}
+}
+
 func registerIRCHandlers(bot *Bot, client *girc.Client, network Network, log logxi.Logger) {
 	client.Handlers.Add(girc.ALL_EVENTS, func(client *girc.Client, event girc.Event) {
 		if str, ok := event.Pretty(); ok {
@@ -203,11 +218,7 @@ func registerIRCHandlers(bot *Bot, client *girc.Client, network Network, log log
 		bot.mu.Lock()
 		connectCmds := bot.Network.ConnectCommands
 		bot.mu.Unlock()
-		for _, cmd := range connectCmds {
-			if err := client.Cmd.SendRaw(cmd); err != nil {
-				log.Warn("connect_command send failed", "line", cmd, "error", err.Error())
-			}
-		}
+		sendConnectCommands(client, connectCmds, log)
 		// soju channel reconciliation: after the join burst settles, PART the
 		// soju-side channels that no longer exist in TOML — the owner's
 		// removal must propagate, and a downstream PART makes soju leave the

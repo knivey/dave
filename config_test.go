@@ -3866,6 +3866,23 @@ bouncer = true
 		assert.Contains(t, err.Error(), "[soju]")
 	})
 
+	t.Run("bouncer network without servers rejected", func(t *testing.T) {
+		dir := createTestConfigDir(t, `
+trigger = "."
+[soju]
+host = "bouncer.example.com"
+user = "dave"
+pass = "secret"
+[networks.libera]
+nick = "dave"
+bouncer = true
+`, nil)
+		_, err := loadConfigDir(dir)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "libera", "error must name the network")
+		assert.Contains(t, err.Error(), "servers", "error must explain the servers[0] purpose")
+	})
+
 	t.Run("name with slash rejected", func(t *testing.T) {
 		dir := createTestConfigDir(t, `
 trigger = "."

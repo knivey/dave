@@ -96,3 +96,23 @@ func TestDispatchChanMessageSkipsReplay(t *testing.T) {
 	})
 	assert.True(t, called, "live message must reach handleChanMessage")
 }
+
+// TestSendConnectCommands pins the WARN-and-continue contract of the
+// RPL_WELCOME connect_commands sender: one failing line must never abort the
+// remaining lines. girc's SendRaw errors on unparseable input (the "X" line
+// below); on a never-connected client the valid lines are silently dropped by
+// girc's write path — either way every line is attempted and nothing panics.
+func TestSendConnectCommands(t *testing.T) {
+	client := girc.New(girc.Config{}) // disconnected
+	assert.NotPanics(t, func() {
+		sendConnectCommands(client, []string{
+			"PRIVMSG AuthServ@Services.GameSurge.net :AUTH user pass",
+			"X", // unparseable → SendRaw error → WARN, continue
+			"MODE dave +i",
+		}, testLogger())
+	})
+	// Empty list is a clean no-op.
+	assert.NotPanics(t, func() {
+		sendConnectCommands(client, nil, testLogger())
+	})
+}

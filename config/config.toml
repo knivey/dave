@@ -124,7 +124,7 @@
 #   auto_rejoin        (bool, default: true)   Automatically rejoin a channel after being kicked
 #   auto_rejoin_delay  (duration, default: "3s") Delay before auto-rejoining after a kick
 #   connect_commands   (list of strings)    Raw IRC lines sent after registration on every connect (e.g. AuthServ AUTH on networks without SASL)
-#   bouncer            (bool, default: false)  Connect via the [soju] bouncer instead of dialing servers directly (requires [soju])
+#   bouncer            (bool, default: false)  Connect via the [soju] bouncer instead of dialing servers directly (requires [soju]; servers[0] is recorded as the upstream address for the bouncer network — at least one server entry is required)
 #
 # [networks.<name>.sasl] options:
 #   user               (string)                SASL username (enables SASL PLAIN authentication)

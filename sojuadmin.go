@@ -47,7 +47,6 @@ type SojuAdmin struct {
 	Reconnect bool
 	quitCh    chan struct{}
 	stopOnce  sync.Once
-	soju      *SojuConfig
 }
 
 func startSojuAdmin(soju *SojuConfig) *SojuAdmin {
@@ -55,7 +54,6 @@ func startSojuAdmin(soju *SojuConfig) *SojuAdmin {
 	a := &SojuAdmin{
 		Reconnect: true,
 		quitCh:    make(chan struct{}),
-		soju:      soju,
 	}
 	client := girc.New(girc.Config{
 		Server:     soju.Host,
@@ -216,6 +214,26 @@ type commandRunner interface {
 	Command(line string) []string
 }
 
+// runMutating sends one MUTATING BouncerServ command (network create/update/
+// delete, sasl set-plain) and surfaces the reply. BouncerServ answers EVERY
+// command with NOTICEs — success confirmations ("added network ...") and
+// error text alike — and dave parses none of them, so any non-empty reply is
+// WARN-logged with its text: that is the spec's "unexpected failures are
+// WARN-logged with the reply text and never fatal" contract implemented as
+// warn-on-any-reply (the accepted no-parsing trade-off; mutating commands
+// are rare — create/force/delete only — so confirmation noise is negligible).
+// Failures never abort reconciliation: every call site proceeds to the next
+// command regardless. Read-only queries (network status) do NOT go through
+// this helper — their replies are parsed, not failures.
+func runMutating(run commandRunner, log logxi.Logger, line string) []string {
+	log.Info("soju: sending BouncerServ command", "line", line)
+	replies := run.Command(line)
+	if len(replies) > 0 {
+		log.Warn("soju: BouncerServ replied — verify success", "line", line, "replies", strings.Join(replies, " | "))
+	}
+	return replies
+}
+
 // anyEnabledBouncerNetwork reports whether any network in the map is enabled
 // AND in bouncer mode — the admin session only exists then.
 var anyEnabledBouncerNetwork = func(networks map[string]Network) bool {
@@ -302,19 +320,25 @@ func parseNetworkStatus(lines []string) map[string]bool {
 // whose name matches no TOML network in any mode. Names present in TOML but
 // direct-mode/disabled are WARNed and deliberately preserved: a temporary
 // bouncer = false flip must never destroy stored credentials.
+//
+// Command grammar (verified against soju's service.go): `network update`
+// takes the network as a POSITIONAL argument (no -network flag — an unbound
+// admin session without the name fails with "no network selected"), and
+// every name is %q-quoted because soju parses commands with POSIX-style
+// word splitting (spaces in names survive; deferred finding #8).
 func reconcileNetworks(run commandRunner, existing map[string]bool, plans []sojuNetworkPlan, tomlNames map[string]bool, force bool, log logxi.Logger) {
 	inPlans := make(map[string]bool, len(plans))
 	for _, p := range plans {
 		inPlans[p.Name] = true
 		if existing[p.Name] {
 			if force {
-				pushSojuCreds(run, p, log)
+				pushSojuCreds(run, log, p, true)
 			}
 			continue
 		}
 		log.Info("soju: creating network", "network", p.Name, "addr", p.Addr)
-		run.Command(fmt.Sprintf("network create -addr %s -name %s -nick %q -realname %q", p.Addr, p.Name, p.Nick, p.RealName))
-		pushSojuCreds(run, p, log)
+		runMutating(run, log, fmt.Sprintf("network create -addr %s -name %q -nick %q -realname %q", p.Addr, p.Name, p.Nick, p.RealName))
+		pushSojuCreds(run, log, p, false)
 	}
 	for name := range existing {
 		switch {
@@ -324,7 +348,7 @@ func reconcileNetworks(run commandRunner, existing map[string]bool, plans []soju
 			// bouncer-mode plan, already handled above
 		default:
 			log.Warn("soju: deleting orphaned network (absent from config.toml)", "network", name)
-			run.Command("network delete " + name)
+			runMutating(run, log, fmt.Sprintf("network delete %q", name))
 		}
 	}
 }
@@ -333,14 +357,28 @@ func reconcileNetworks(run commandRunner, existing map[string]bool, plans []soju
 // called for freshly created networks or under force_reconcile — network
 // update forces an upstream reconnect, so unconditional pushes would make
 // every dave boot visible to the IRC networks.
-func pushSojuCreds(run commandRunner, p sojuNetworkPlan, log logxi.Logger) {
+//
+// `existing` reports whether the soju network already exists (force path):
+// soju's `network update` REPLACES the entire stored connect-command list,
+// so a non-empty TOML list is one command with one -connect-command flag
+// per line (the append form; per-line pushes would truncate to the last
+// line — the reviewer-verified grammar), and an EMPTY TOML list sends the
+// explicit clear form (`-connect-command ""`) only when the network may
+// carry stale stored commands — a freshly created network has none.
+func pushSojuCreds(run commandRunner, log logxi.Logger, p sojuNetworkPlan, existing bool) {
 	if p.SASL != nil && p.SASL.User != "" {
-		log.Info("soju: pushing SASL credentials", "network", p.Name)
-		run.Command(fmt.Sprintf("sasl set-plain -network %s %q %q", p.Name, p.SASL.User, p.SASL.Pass))
+		runMutating(run, log, fmt.Sprintf("sasl set-plain -network %q %q %q", p.Name, p.SASL.User, p.SASL.Pass))
 	}
-	for _, cmd := range p.ConnectCommands {
-		log.Info("soju: pushing connect-command", "network", p.Name)
-		run.Command(fmt.Sprintf("network update -connect-command %q", cmd))
+	switch {
+	case len(p.ConnectCommands) > 0:
+		var b strings.Builder
+		fmt.Fprintf(&b, "network update %q", p.Name)
+		for _, cmd := range p.ConnectCommands {
+			fmt.Fprintf(&b, " -connect-command %q", cmd)
+		}
+		runMutating(run, log, b.String())
+	case existing:
+		runMutating(run, log, fmt.Sprintf(`network update %q -connect-command ""`, p.Name))
 	}
 }
 

@@ -117,11 +117,24 @@ func sojuTestPlans() ([]sojuNetworkPlan, map[string]bool) {
 	plans := []sojuNetworkPlan{
 		{Name: "libera", Addr: "irc.libera.chat", Nick: "dave", RealName: "dave",
 			SASL:            &SASLConfig{User: "dave", Pass: "libpw"},
-			ConnectCommands: []string{"PRIVMSG X :Y"}},
+			ConnectCommands: []string{"PRIVMSG X :Y", "PRIVMSG AuthServ :AUTH"}},
 		{Name: "gamesurge", Addr: "irc.gamesurge.net:6697", Nick: "dave", RealName: "dave"},
 	}
 	names := map[string]bool{"libera": true, "gamesurge": true, "directnet": true}
 	return plans, names
+}
+
+// replyRunner is a fakeRunner whose every command yields a canned reply —
+// BouncerServ answers EVERY command (success confirmations and errors alike)
+// with NOTICEs, so reconciliation must proceed through replies.
+type replyRunner struct {
+	lines   []string
+	replies []string
+}
+
+func (f *replyRunner) Command(line string) []string {
+	f.lines = append(f.lines, line)
+	return f.replies
 }
 
 func TestReconcileNetworks(t *testing.T) {
@@ -129,11 +142,18 @@ func TestReconcileNetworks(t *testing.T) {
 		run := &fakeRunner{}
 		plans, toml := sojuTestPlans()
 		reconcileNetworks(run, map[string]bool{}, plans, toml, false, testLogger())
-		assert.Contains(t, run.lines, `network create -addr irc.libera.chat -name libera -nick "dave" -realname "dave"`)
-		assert.Contains(t, run.lines, `sasl set-plain -network libera "dave" "libpw"`)
-		assert.Contains(t, run.lines, `network update -connect-command "PRIVMSG X :Y"`)
-		assert.Contains(t, run.lines, `network create -addr irc.gamesurge.net:6697 -name gamesurge -nick "dave" -realname "dave"`)
+		assert.Contains(t, run.lines, `network create -addr irc.libera.chat -name "libera" -nick "dave" -realname "dave"`)
+		assert.Contains(t, run.lines, `sasl set-plain -network "libera" "dave" "libpw"`)
+		// ONE update command, one -connect-command flag per TOML line: soju's
+		// `network update` REPLACES the whole stored list, so repeated flags
+		// in one command are the append form; per-line pushes would truncate
+		// to the last line.
+		assert.Contains(t, run.lines, `network update "libera" -connect-command "PRIVMSG X :Y" -connect-command "PRIVMSG AuthServ :AUTH"`)
+		assert.Contains(t, run.lines, `network create -addr irc.gamesurge.net:6697 -name "gamesurge" -nick "dave" -realname "dave"`)
 		assert.NotContains(t, run.lines, "sasl set-plain -network gamesurge", "no SASL configured → no push")
+		for _, l := range run.lines {
+			assert.NotContains(t, l, `update "gamesurge"`, "fresh network carries no stored connect-commands — nothing to set or clear")
+		}
 	})
 
 	t.Run("existing network untouched without force", func(t *testing.T) {
@@ -150,8 +170,20 @@ func TestReconcileNetworks(t *testing.T) {
 		plans, toml := sojuTestPlans()
 		reconcileNetworks(run, map[string]bool{"libera": true, "gamesurge": true}, plans, toml, true, testLogger())
 		assert.NotContains(t, run.lines, "network create")
-		assert.Contains(t, run.lines, `sasl set-plain -network libera "dave" "libpw"`)
-		assert.Contains(t, run.lines, `network update -connect-command "PRIVMSG X :Y"`)
+		assert.Contains(t, run.lines, `sasl set-plain -network "libera" "dave" "libpw"`)
+		assert.Contains(t, run.lines, `network update "libera" -connect-command "PRIVMSG X :Y" -connect-command "PRIVMSG AuthServ :AUTH"`)
+	})
+
+	t.Run("force with empty connect_commands clears stored list", func(t *testing.T) {
+		run := &fakeRunner{}
+		_, toml := sojuTestPlans()
+		// gamesurge alone: no SASL, no connect_commands — an existing soju
+		// network may still carry stale stored commands, so force sends the
+		// explicit clear form (-connect-command "" clears the list in soju)
+		// and nothing else.
+		plans := []sojuNetworkPlan{{Name: "gamesurge", Addr: "irc.gamesurge.net:6697", Nick: "dave", RealName: "dave"}}
+		reconcileNetworks(run, map[string]bool{"gamesurge": true}, plans, toml, true, testLogger())
+		assert.Equal(t, []string{`network update "gamesurge" -connect-command ""`}, run.lines)
 	})
 
 	t.Run("orphan deleted, toml-name kept", func(t *testing.T) {
@@ -161,7 +193,7 @@ func TestReconcileNetworks(t *testing.T) {
 		reconcileNetworks(run, existing, plans, toml, false, testLogger())
 		matches := 0
 		for _, l := range run.lines {
-			if l == "network delete ghostnet" {
+			if l == `network delete "ghostnet"` {
 				matches++
 			}
 		}
@@ -170,6 +202,16 @@ func TestReconcileNetworks(t *testing.T) {
 			assert.NotContains(t, l, "delete directnet", "TOML name must never be deleted")
 			assert.NotContains(t, l, "delete libera")
 		}
+	})
+
+	t.Run("replies from BouncerServ never abort reconciliation", func(t *testing.T) {
+		run := &replyRunner{replies: []string{"something went wrong upstream"}}
+		plans, toml := sojuTestPlans()
+		reconcileNetworks(run, map[string]bool{"libera": true, "ghostnet": true}, plans, toml, true, testLogger())
+		// Every mutating command still sent despite replies at each step:
+		assert.Contains(t, run.lines, `sasl set-plain -network "libera" "dave" "libpw"`)
+		assert.Contains(t, run.lines, `network update "libera" -connect-command "PRIVMSG X :Y" -connect-command "PRIVMSG AuthServ :AUTH"`)
+		assert.Contains(t, run.lines, `network delete "ghostnet"`)
 	})
 }
 

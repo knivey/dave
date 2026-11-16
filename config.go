@@ -927,7 +927,7 @@ func loadConfigDir(dir string) (Config, error) {
 			}
 		}
 		if network.IsBouncer() && network.IsEnabled() {
-			if err := validateBouncerNetwork(name, config.Soju); err != nil {
+			if err := validateBouncerNetwork(name, network, config.Soju); err != nil {
 				return config, err
 			}
 		}
@@ -970,7 +970,7 @@ func loadConfigDir(dir string) (Config, error) {
 // validateBouncerNetwork enforces the soju preconditions for one enabled
 // bouncer network. Disabled networks are inert (validated at startup when
 // they are actually dialed).
-func validateBouncerNetwork(name string, soju *SojuConfig) error {
+func validateBouncerNetwork(name string, network Network, soju *SojuConfig) error {
 	if soju == nil {
 		return fmt.Errorf("networks.%s: bouncer = true requires a [soju] section", name)
 	}
@@ -979,6 +979,9 @@ func validateBouncerNetwork(name string, soju *SojuConfig) error {
 	}
 	if soju.User == "" || soju.Pass == "" {
 		return fmt.Errorf("[soju]: user and pass are required when a network uses bouncer = true")
+	}
+	if len(network.Servers) == 0 {
+		return fmt.Errorf("networks.%s: bouncer = true requires at least one [[networks.<name>.servers]] entry — the first server entry is recorded as the upstream address for the bouncer network", name)
 	}
 	// The network name rides inside the downstream SASL username
 	// ("<user>/<name>@bot") and as the soju network name in BouncerServ

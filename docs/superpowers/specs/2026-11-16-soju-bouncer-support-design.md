@@ -380,6 +380,8 @@ accepted; IRC has no broadcast mechanism.
 
 ## Appendix: soju deployment runbook (server X, ops side)
 
+**Moved to its own operational document: [`docs/soju-bouncer-setup.md`](../../../docs/soju-bouncer-setup.md) — install, config, systemd, bootstrap, dave-side config, automatic reconciliation behavior, credential editing, staged migration checklist, failure-mode table.** The sketch below is retained for historical context only.
+
 ```
 # /etc/soju/config — the whole file
 hostname irc.example.com

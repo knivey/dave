@@ -14,6 +14,7 @@ Go IRC chatbot for OpenAI-compatible APIs, Stable Diffusion, ComfyUI image gen. 
 
 ## Design Docs
 - [Queue & Session System](docs/queue-and-sessions.md) — how queue delivery, parallel execution, sessions, and async background tasks are intended to work
+- [soju Bouncer Setup & Migration Runbook](docs/soju-bouncer-setup.md) — deploying soju on the IRC-facing server, dave's `[soju]` config, what dave reconciles automatically, and the staged migration checklist
 
 ## Commands
 ```bash

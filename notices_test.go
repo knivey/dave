@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -375,6 +376,23 @@ func TestQueueManagerWithNotices(t *testing.T) {
 	assert.Equal(t, n.Queue.Msg, qm.queueMsg)
 	assert.Equal(t, n.Queue.Started, qm.startedMsg)
 	assert.Equal(t, 3, qm.maxDepth)
+}
+
+// TestSetNoticesDefaultsCloneWaitNotices pins the clone gate-wait notices:
+// both must exist, carry their placeholders, and the waiting notice must
+// SAY WHY it waits (owner requirement — the source session's turn is still
+// running and the clone happens when it finishes).
+func TestSetNoticesDefaultsCloneWaitNotices(t *testing.T) {
+	n := NoticesConfig{}
+	setNoticesDefaults(&n)
+
+	assert.NotEmpty(t, n.Clone.Waiting)
+	assert.Contains(t, n.Clone.Waiting, "{id}", "waiting notice should name the source session")
+	assert.Contains(t, strings.ToLower(n.Clone.Waiting), "turn", "waiting notice should say why it is waiting")
+
+	assert.NotEmpty(t, n.Clone.TurnTimeout)
+	assert.Contains(t, n.Clone.TurnTimeout, "{id}")
+	assert.Contains(t, n.Clone.TurnTimeout, "{wait}")
 }
 
 func TestQueueManagerUpdateNotices(t *testing.T) {

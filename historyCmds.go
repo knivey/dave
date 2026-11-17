@@ -966,6 +966,54 @@ func historyClone(network Network, c *girc.Client, e girc.Event, ctx context.Con
 		sourceNick = displayNick(targetUser)
 	}
 
+	var cfg AIConfig
+	var cfgOk bool
+	cfg, cfgOk = getSessionConfig(sourceSession)
+	if !cfgOk {
+		sendOrDone(ctx, output, errorNotice(n.Clone.CommandGone, map[string]string{"command": sourceSession.ChatCommand}))
+		return
+	}
+
+	// Source-session turn gate: clone direct-dispatches (no queue item —
+	// a queued clone's DB work ran immediately anyway; only its output
+	// notice waited behind the channel's delivery FIFO, so the "Queued /
+	// Processing" choreography was theater while the snapshot could land
+	// mid-turn and MISS the in-flight turn's final reply). Waiting on the
+	// SOURCE session's gate here is what makes the snapshot consistent:
+	// chat() holds this gate for its whole turn, so the clone either runs
+	// instantly (idle session) or waits for the turn to settle and then
+	// copies the completed exchange. Lock ordering is gate → creationLock,
+	// matching chat() (which releases the creation lock before acquiring
+	// its gate) — no cycle. The wait is bounded by the session-gate
+	// liveness valve; unlike a queued waiter, this unqueued clone holds no
+	// delivery slot, so it cannot wedge the channel's delivery FIFO.
+	if sessionTurnBusy(sourceSession.ID) {
+		sendOrDone(ctx, output, expandNotice(n.Clone.Waiting, map[string]string{
+			"id": fmt.Sprintf("%d", sourceSession.ID),
+		}))
+	}
+	gateStart := time.Now()
+	releaseTurn, gateOK := acquireSessionTurn(ctx, sourceSession.ID, sessionGateWaitLimitFor(cfg.Timeout))
+	if !gateOK {
+		// Two abort causes, deliberately different UX (mirrors chat()):
+		// cancellation stays silent; the wait-limit valve tells the caller
+		// the clone did not happen and to retry. The cancel arm is
+		// currently unreachable in production (direct dispatch passes a
+		// Background-derived ctx) — kept as defensive mirroring, and for
+		// any future caller with a cancellable ctx.
+		if ctx.Err() != nil {
+			return
+		}
+		sendOrDone(ctx, output, errorNotice(n.Clone.TurnTimeout, map[string]string{
+			"id":   fmt.Sprintf("%d", sourceSession.ID),
+			"wait": time.Since(gateStart).Round(time.Second).String(),
+		}))
+		return
+	}
+	defer releaseTurn()
+
+	// With the gate held the source is settled, so this refusal now only
+	// fires for genuinely-broken sessions (a crash mid-tool-loop).
 	incomplete, icErr := sessionHasIncompleteToolCalls(sourceSession.ID)
 	if icErr != nil {
 		sendOrDone(ctx, output, errorNotice(n.DB.QuerySessions, map[string]string{"error": icErr.Error()}))
@@ -973,14 +1021,6 @@ func historyClone(network Network, c *girc.Client, e girc.Event, ctx context.Con
 	}
 	if incomplete {
 		sendOrDone(ctx, output, errorNotice(n.Clone.IncompleteCalls, map[string]string{"id": fmt.Sprintf("%d", sourceSession.ID)}))
-		return
-	}
-
-	var cfg AIConfig
-	var cfgOk bool
-	cfg, cfgOk = getSessionConfig(sourceSession)
-	if !cfgOk {
-		sendOrDone(ctx, output, errorNotice(n.Clone.CommandGone, map[string]string{"command": sourceSession.ChatCommand}))
 		return
 	}
 

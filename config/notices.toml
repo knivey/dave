@@ -153,6 +153,8 @@
 #   incomplete_calls  (string)  Session has incomplete tool calls. Placeholders: {id}
 #   command_gone      (string)  Chat command no longer exists. Placeholders: {command}
 #   usage             (string)  Usage hint. Placeholders: {trigger}
+#   waiting           (string)  Sent when the source session still has a turn running: the clone waits for it to settle (no queue item — clone direct-dispatches). Placeholders: {id}
+#   turn_timeout      (string)  Sent when the source session's turn gate wait exceeded the liveness valve — no clone was made. Placeholders: {id}, {wait}
 #
 # [users] options:
 #   resolve_transient  (string)  Sent (as warnMsg) when resolveUser exhausts its retries on transient DB errors. Placeholders: {nick}
@@ -298,6 +300,8 @@
 # incomplete_calls = "\x0304❗ Session #{id} has incomplete tool calls and cannot be cloned. Wait for the current turn to finish.\x0F"
 # command_gone = "\x0304❗ Command '{command}' no longer exists.\x0F"
 # usage = "\x0304❗ Usage: {trigger}clone <nick|id>\x0F"
+# waiting = "\x0307⏳ Session #{id} still has a turn running — cloning when it finishes.\x0F"
+# turn_timeout = "\x0304⚠️ Session #{id} still has a turn running after {wait} — clone cancelled, try again later.\x0F"
 #
 # [users]
 # resolve_transient = "internal hiccup tracking your identity, try again in a moment ({nick})"

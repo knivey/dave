@@ -195,6 +195,14 @@ type CloneNotices struct {
 	IncompleteCalls string `toml:"incomplete_calls"`
 	CommandGone     string `toml:"command_gone"`
 	Usage           string `toml:"usage"`
+	// Waiting tells the caller WHY the clone has not run yet: the source
+	// session still has a turn in flight, and the clone happens when it
+	// finishes. Placeholders: {id} (source session).
+	Waiting string `toml:"waiting"`
+	// TurnTimeout is the error when the source session's turn gate wait
+	// exceeded the liveness valve — no clone was made. Placeholders:
+	// {id} (source session), {wait} (elapsed wait).
+	TurnTimeout string `toml:"turn_timeout"`
 }
 
 // UsersNotices governs user-facing messages emitted when resolveUser fails.
@@ -561,6 +569,12 @@ func setNoticesDefaults(n *NoticesConfig) {
 	}
 	if n.Clone.Usage == "" {
 		n.Clone.Usage = "\x0304❗ Usage: {trigger}clone <nick|id>\x0F"
+	}
+	if n.Clone.Waiting == "" {
+		n.Clone.Waiting = "\x0307⏳ Session #{id} still has a turn running — cloning when it finishes.\x0F"
+	}
+	if n.Clone.TurnTimeout == "" {
+		n.Clone.TurnTimeout = "\x0304⚠️ Session #{id} still has a turn running after {wait} — clone cancelled, try again later.\x0F"
 	}
 	if n.Users.ResolveTransient == "" {
 		n.Users.ResolveTransient = "internal hiccup tracking your identity, try again in a moment ({nick})"

@@ -129,6 +129,14 @@ func setupBotTest(t *testing.T) *girc.Client {
 	setupTestJobManager(t)
 	setupCancelTestMCP(t)
 	setupNoticesDefaults(t)
+	// The process-global rate limiter's buckets (burst 2, refill 1/s) are
+	// never reset between tests — without this, a test whose network+channel
+	// key was burned by an earlier run (or by itself under -count>1) gets
+	// rate-refused and fails with symptoms far from the cause. Fresh map per
+	// bot test, like every other global swapped here.
+	rateMutex.Lock()
+	rateLimits = make(map[string]*rateEntry)
+	rateMutex.Unlock()
 
 	client := girc.New(girc.Config{
 		Server: "localhost",

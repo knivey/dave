@@ -269,6 +269,37 @@ func TestStaticServed(t *testing.T) {
 	}
 }
 
+// TestMsgBubbleStyles pins the chat-bubble contract (owner request,
+// Nov 2026): messages render as rounded, background-filled containers
+// instead of flat rows separated by border-bottom lines — the #343746
+// separator must be gone entirely — with role-tinted bubble
+// backgrounds for user and assistant rows. Source-level pin on the
+// served stylesheet, same pattern as the copy-btn pins.
+func TestMsgBubbleStyles(t *testing.T) {
+	_, ts := newPageServer(t)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/static/style.css")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, 200, resp.StatusCode)
+	css := readBody(t, resp)
+
+	// bubbles: one exact-rule pin — rounded, filled containers (exact
+	// text like the #msgs pre pin; a reorder inside the rule is a
+	// deliberate edit that should re-touch this pin consciously)
+	assert.Contains(t, css, ".msg { background: #2e3042; border: 1px solid #3d3f55; border-radius: 10px; padding: 0.55rem 0.9rem; margin: 0.45rem 0; }")
+	// the flat-separator era is over — the old bordered .msg rule must
+	// be gone (scoped: the user-page .session-row separator keeps the
+	// same color, that list is out of scope)
+	assert.NotContains(t, css, ".msg { padding: 0.55rem 0.4rem; border-bottom: 1px solid #343746; }")
+	// role tints: user leans green, assistant leans purple
+	assert.Contains(t, css, ".msg.role-user { background:")
+	assert.Contains(t, css, ".msg.role-assistant { background:")
+	// compaction dividers keep separating bubbles between messages
+	assert.Contains(t, css, ".compaction-divider {")
+}
+
 func TestSessionPageHeaderUsageByModel(t *testing.T) {
 	db := newTestDB(t)
 	srv := NewServer(db, &Config{})

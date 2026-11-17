@@ -35,8 +35,16 @@ a.badge.cloned:hover { background: #44475a; color: #f8f8f2; }
 .usage-by-model { margin-top: 0.5rem; font-size: 0.85rem; color: #bd93f9; }
 .usage-by-model ul { margin: 0.3rem 0 0 1.2rem; color: #bdc0d4; }
 
-/* transcript rows */
-.msg { padding: 0.55rem 0.4rem; border-bottom: 1px solid #343746; }
+/* transcript rows — chat bubbles (owner request, Nov 2026): each
+ * message sits in its own rounded, role-tinted container; the old
+ * flat rows separated by border-bottom lines are gone. Left-aligned
+ * by design — a transcript interleaves tool/system rows, so
+ * right-aligning user bubbles would fragment the flow. Tints follow
+ * the role colors (user #50fa7b green, assistant #bd93f9 purple,
+ * system/tool neutral) darkened to sit on the #282a36 page. */
+.msg { background: #2e3042; border: 1px solid #3d3f55; border-radius: 10px; padding: 0.55rem 0.9rem; margin: 0.45rem 0; }
+.msg.role-user { background: #26382f; border-color: #35523f; }
+.msg.role-assistant { background: #343048; border-color: #4b4370; }
 .msg .meta { display: flex; align-items: baseline; gap: 0.7rem; font-size: 0.78rem; color: #6272a4; margin-bottom: 0.2rem; }
 .msg .meta .role { font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
 .role-user .meta .role { color: #50fa7b; }
@@ -44,7 +52,7 @@ a.badge.cloned:hover { background: #44475a; color: #f8f8f2; }
 .role-system .meta .role { color: #6272a4; }
 .role-tool .meta .role { color: #ffb86c; }
 .msg .meta .rawlink { margin-left: auto; font-size: 0.72rem; }
-.msg:target { outline: 2px solid #bd93f9; outline-offset: 3px; border-radius: 3px; }
+.msg:target { outline: 2px solid #bd93f9; outline-offset: 3px; }
 .archived { opacity: .55; }
 .tag { background: #44475a; border-radius: 3px; padding: 0 0.35rem; font-size: 0.72rem; }
 .compaction-divider { border-top: 2px dashed #6272a4; margin: 0.6rem 0; padding: 0.35rem 0.1rem; color: #6272a4; font-size: 0.82rem; }

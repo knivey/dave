@@ -225,17 +225,7 @@ func TestStreamingHighlightedCodeBlockWidthCapping(t *testing.T) {
 }
 
 func streamingRender(input string) string {
-	r := NewStreamingRenderer()
-	var output strings.Builder
-	for _, line := range r.Process(input) {
-		output.WriteString(line)
-		output.WriteString("\n")
-	}
-	for _, line := range r.Process("") {
-		output.WriteString(line)
-		output.WriteString("\n")
-	}
-	return output.String()
+	return streamingRenderMode(input, false)
 }
 
 // TestStreamingTableParityWithNonStreaming: tables render identically in
@@ -293,7 +283,10 @@ func TestStreamingFromTestData(t *testing.T) {
 		}
 		input := string(mdData)
 
-		got := streamingRender(input)
+		// bug-bb-* goldens are promoted bbcode-mode fixtures: the .irc
+		// was rendered with the bbcode streaming renderer, so it must
+		// be re-rendered the same way (streamfuzz promote path).
+		got := streamingRenderMode(input, strings.HasPrefix(name, "bug-bb-"))
 
 		// DAVE_GOLDEN_UPDATE=1 rewrites .irc files from current output —
 		// use after a deliberate rendering change and REVIEW THE DIFF.
@@ -307,5 +300,118 @@ func TestStreamingFromTestData(t *testing.T) {
 		}
 
 		assert.Equal(t, expected, got, "output mismatch for %s\ngot:\n%s\nwant:\n%s", name, humanize(got), humanize(expected))
+	}
+}
+
+// TestStreamingHTMLBlocks2to5SpanBlanks (review finding on 995d032):
+// CommonMark HTML block types 2-5 (<!-- … -->, <? … ?>, <!DECL … >,
+// <![CDATA[ … ]]>) span BLANK lines — only their terminator line ends
+// them — so the settle scanner must hold through interior blanks. It
+// used to settle at the blank and split the fragment inside the block;
+// the entry join then dropped the blank's bytes, regressing vs the
+// whole-prefix base. normalizeIRC erases empty lines, so the spanning
+// half compares EXACT joined bytes (docs that end inside the block
+// render as a single entry); the terminated half checks terminator
+// handling through the normalized IRC-visible oracle.
+func TestStreamingHTMLBlocks2to5SpanBlanks(t *testing.T) {
+	runExact := func(deltas []string) string {
+		s := NewStreamingRenderer()
+		var out []string
+		for _, d := range deltas {
+			out = append(out, s.Process(d)...)
+		}
+		out = append(out, s.Process("")...)
+		return strings.Join(out, "\n")
+	}
+	byteChunks := func(doc string, n int) []string {
+		var cs []string
+		for i := 0; i < len(doc); i += n {
+			cs = append(cs, doc[i:min(i+n, len(doc))])
+		}
+		return cs
+	}
+	spanning := []string{
+		"<!--\nfoo\n\nbar",       // type 2 (comment), unterminated
+		"<?pi\nx\n\ny",           // type 3 (processing instruction)
+		"<!DOCTYPE html\nx\n\ny", // type 4 (declaration), no ">" until EOF
+		"<![CDATA[\nx\n\ny",      // type 5 (CDATA)
+	}
+	for _, doc := range spanning {
+		want := MarkdownToIRCStream(doc)
+		require.Equal(t, want, runExact([]string{doc}), "spanning doc %q", doc)
+		require.Equal(t, want, runExact(byteChunks(doc, 1)), "spanning doc %q, byte deltas", doc)
+	}
+	terminated := []string{
+		"<!--\nfoo\n\n-->\n\ntail\n",
+		"<?pi\nx\n\n?>\n\ntail\n",
+		"<!D\nx\n\n>\n\ntail\n",
+		"<![CDATA[\nx\n\n]]>\n\ntail\n",
+	}
+	for _, doc := range terminated {
+		require.Equal(t, referenceStream(doc, false), streamCanonical([]string{doc}, false), "terminated doc %q", doc)
+		require.Equal(t, referenceStream(doc, false), streamCanonical(byteChunks(doc, 1), false), "terminated doc %q, byte deltas", doc)
+	}
+}
+
+// TestStreamingType7HTMLAfterParagraphEnders (final-review finding on
+// the settle scanner): a thematic break ("- - -", "---") and a setext
+// underline ("===" / "---" directly after a paragraph) both END the
+// paragraph for the parser — a following type-7 HTML line ("<br>") then
+// opens an HTML BLOCK (it only fails to interrupt when a paragraph is
+// open). The scanner kept docParaOpen true after the break, gated the
+// type-7 open, saw a phantom fence in what the parser parses as ONE html
+// block, and fast-settled at its closer — the tail then rendered as a
+// standalone fragment (emphasis live instead of literal html content).
+func TestStreamingType7HTMLAfterParagraphEnders(t *testing.T) {
+	byteChunks := func(doc string, n int) []string {
+		var cs []string
+		for i := 0; i < len(doc); i += n {
+			cs = append(cs, doc[i:min(i+n, len(doc))])
+		}
+		return cs
+	}
+	docs := []string{
+		"- - -\n<br>\n```js\n```\n1. dog_the ***qux***",     // thematic break
+		"---\n<br>\n```js\n```\n1. dog_the ***qux***",       // "---" with no paragraph: break
+		"para\n===\n<br>\n```js\n```\n1. dog_the ***qux***", // setext underline ("===")
+		"para\n---\n<br>\n```js\n```\n1. dog_the ***qux***", // setext underline ("---": setext beats break under a paragraph)
+	}
+	for _, doc := range docs {
+		require.Equal(t, referenceStream(doc, false), streamCanonical([]string{doc}, false), "doc %q", doc)
+		require.Equal(t, referenceStream(doc, false), streamCanonical(byteChunks(doc, 1), false), "doc %q, byte deltas", doc)
+	}
+}
+
+// TestStreamingParagraphContinuationIsNotAParagraphEnder (scoped re-review
+// of the docParaOpen fix): the paraEnded arms over-fired on
+// paragraph-CONTINUATION lines. A "---"/"===" line is a thematic break or
+// setext underline only at BLOCK-level indent (≤3 spaces) — at ≥4 under an
+// open paragraph it is continuation TEXT, and "= =" (internal space) is
+// never a setext underline. Over-firing cleared docParaOpen, so an
+// ordered≠1 marker ("2. item") — which cannot interrupt the parser's
+// still-open paragraph — was misread as a list item, producing a phantom
+// live item whose container-kill arm reprocessed the parser's valid
+// column-0 fence closer as a fresh opener and fast-settled inside the
+// parser's SECOND fence (the tail rendered standalone with live emphasis
+// instead of literal code content).
+func TestStreamingParagraphContinuationIsNotAParagraphEnder(t *testing.T) {
+	byteChunks := func(doc string, n int) []string {
+		var cs []string
+		for i := 0; i < len(doc); i += n {
+			cs = append(cs, doc[i:min(i+n, len(doc))])
+		}
+		return cs
+	}
+	shape := func(ender string) string {
+		return "para\n" + ender + "\n2. item\n   ```js\n```\ntail ***x***\n```\nafter ***y***\n"
+	}
+	docs := []string{
+		shape("    ---"), // indented ≥4: continuation text, not a break
+		shape("    ==="), // indented ≥4: continuation text, not setext
+		shape("= ="),     // internal space: never a setext underline
+	}
+	for _, doc := range docs {
+		require.Equal(t, referenceStream(doc, false), streamCanonical([]string{doc}, false), "doc %q", doc)
+		require.Equal(t, referenceStream(doc, false), streamCanonical(byteChunks(doc, 1), false), "doc %q, byte deltas", doc)
 	}
 }

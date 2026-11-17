@@ -70,6 +70,12 @@ func fuzzRand() (*mrand.Rand, uint64) {
 
 type docGen struct {
 	r *mrand.Rand
+	// bbTags strews BBCode color tags through the generated document
+	// (the bbcode-mode corpus, Task 5). Every tag decision below is
+	// gated on this flag so the plain-mode corpus draws from the SAME
+	// random stream as before the flag existed — per-mode seeded runs
+	// stay reproducible and plain behavior is unchanged.
+	bbTags bool
 }
 
 var genWords = []string{
@@ -138,6 +144,67 @@ func (g *docGen) inline() string {
 	return sb.String()
 }
 
+// BBCode vocabulary for the bbTags generator mode: valid names (red,
+// blue, and "light green" — the spaced alias), a valid numeric, an
+// invalid name, and the EMPTY value. Invalid/empty opens parse as
+// transparent placeholder spans (bbcode_render.go) — exactly the stack
+// shapes that stress pairing and nesting.
+var genBBValues = []string{"red", "blue", "light green", "12", "bogus", ""}
+
+func (g *docGen) bbOpen() string {
+	v := g.pick(genBBValues)
+	if v == "" {
+		// both invalid-open shapes: no-value "[color]" and
+		// empty-value "[color=]" parse as known tags with an invalid
+		// value → transparent placeholder spans
+		if g.intn(2) == 0 {
+			return "[color]"
+		}
+		return "[color=]"
+	}
+	return "[color=" + v + "]"
+}
+
+// bbClose: mostly the plain close, occasionally the close-with-value
+// form (close-intent either way). Stray closes (no open) are dropped in
+// by the callers — stripped + warned on both paths, warn is nil here.
+func (g *docGen) bbClose() string {
+	if g.intn(4) == 0 {
+		return "[/color=red]"
+	}
+	return "[/color]"
+}
+
+// bbSpray wraps or strews tags through a paragraph's lines: a whole-para
+// span, a stray close (no open — stripped + warned on both paths), or a
+// mid-line open/close pair split at word boundaries so tags abut the
+// emphasis/link/code-span tokens inline() already generated. The delta
+// splitter cuts anywhere, so tags land mid-tag in some chunkings for
+// free. EVERY open is closed (see referenceStream for why the corpus
+// maintains that invariant).
+func (g *docGen) bbSpray(lines []string) []string {
+	switch g.intn(5) {
+	case 0, 1: // whole-para span
+		lines[0] = g.bbOpen() + lines[0]
+		lines[len(lines)-1] += g.bbClose()
+	case 2: // stray close with no open
+		k := g.intn(len(lines))
+		lines[k] = lines[k] + " " + g.bbClose()
+	case 3: // mid-line open/close pair around inline tokens
+		k := g.intn(len(lines))
+		words := strings.Split(lines[k], " ")
+		if len(words) >= 2 {
+			a := g.intn(len(words) - 1)
+			b := a + 1 + g.intn(len(words)-a-1)
+			words[a] = g.bbOpen() + words[a]
+			words[b] += g.bbClose()
+			lines[k] = strings.Join(words, " ")
+		}
+	default: // untouched
+	}
+	return lines
+}
+
 // block returns the LINES of a single block, unprefixed.
 func (g *docGen) block(depth int) []string {
 	kinds := []string{"para", "para", "para", "heading", "setext", "fence", "fence",
@@ -177,13 +244,21 @@ func (g *docGen) block(depth int) []string {
 	case "hr":
 		return []string{g.pick([]string{"---", "***", "___", "- - -", "********"})}
 	case "html":
-		switch g.intn(3) {
+		switch g.intn(7) {
 		case 0:
 			return []string{"<div>", g.words(2), "</div>"}
 		case 1:
 			return []string{"<p>" + g.words(2) + "</p>"}
-		default:
+		case 2:
 			return []string{"<br>", g.words(2)}
+		case 3:
+			return g.htmlEndBlock("<!--", "-->")
+		case 4:
+			return g.htmlEndBlock("<?php", "?>")
+		case 5:
+			return g.htmlEndBlock("<!DOCTYPE", ">")
+		default:
+			return g.htmlEndBlock("<![CDATA[", "]]>")
 		}
 	case "taskList":
 		n := 1 + g.intn(3)
@@ -200,6 +275,32 @@ func (g *docGen) block(depth int) []string {
 	return g.para()
 }
 
+// htmlEndBlock generates an HTML block type 2-5 (comment / processing
+// instruction / declaration / CDATA — the vocabulary task 4's settle
+// fix had to cover with hand-written tests): opener line, interior
+// lines possibly including a BLANK (these blocks span blank lines;
+// only their terminator line ends them), and a terminator that may be
+// OMITTED entirely (the block then runs to end of document — the
+// terminator must NOT appear on the opener line or it is a single-line
+// block, so <!DOCTYPE spans but <!DOCTYPE html> does not).
+func (g *docGen) htmlEndBlock(opener, term string) []string {
+	lines := []string{opener}
+	for i := 0; i < 1+g.intn(3); i++ {
+		if g.chance(0.5) {
+			lines = append(lines, "") // the blank-spanning shape
+		}
+		lines = append(lines, g.words(1+g.intn(3)))
+	}
+	if g.chance(0.75) {
+		if g.intn(2) == 0 {
+			lines = append(lines, term)
+		} else {
+			lines = append(lines, g.words(1)+" "+term) // terminator mid-line
+		}
+	} // else: unterminated — runs to EOF, never inline-parsed
+	return lines
+}
+
 func (g *docGen) para() []string {
 	n := 1 + g.intn(3)
 	var lines []string
@@ -209,6 +310,9 @@ func (g *docGen) para() []string {
 			txt += "  " // hard break
 		}
 		lines = append(lines, txt)
+	}
+	if g.bbTags {
+		lines = g.bbSpray(lines)
 	}
 	return lines
 }
@@ -236,6 +340,24 @@ func (g *docGen) fence() []string {
 			lines = append(lines, g.words(1+g.intn(3)))
 		}
 	}
+	if g.bbTags && g.chance(0.6) {
+		// tags inside fence content must stay LITERAL (code is never
+		// inline-parsed) in the reference and in every fragment alike.
+		// Blank content lines stay blank — a tagged line would no
+		// longer be the blank-in-fence shape this generator stresses.
+		for i := 1; i < len(lines); i++ {
+			if lines[i] != "" && g.chance(0.4) {
+				switch g.intn(3) {
+				case 0:
+					lines[i] = g.bbOpen() + lines[i]
+				case 1:
+					lines[i] += g.bbClose()
+				default:
+					lines[i] = g.bbOpen() + lines[i] + g.bbClose()
+				}
+			}
+		}
+	}
 	if g.chance(0.85) {
 		closeTick := tick
 		if g.chance(0.2) && strings.HasPrefix(tick, "`") {
@@ -261,7 +383,14 @@ func (g *docGen) list(depth int) []string {
 		} else {
 			marker = g.pick(genBullets)
 		}
-		lines = append(lines, marker+" "+g.inline())
+		txt := g.inline()
+		if g.bbTags && g.chance(0.4) {
+			// color on the item's text (inside the marker — inline
+			// content of the item's paragraph); always closed (see
+			// referenceStream)
+			txt = g.bbOpen() + txt + g.bbClose()
+		}
+		lines = append(lines, marker+" "+txt)
 		markerLineIdx := len(lines) - 1
 		// continuation paragraph (loose item)
 		if g.chance(0.25) {
@@ -341,18 +470,26 @@ func (g *docGen) table() []string {
 	cols := 2 + g.intn(3)
 	rows := 1 + g.intn(4)
 	cell := func() string {
+		var c string
 		switch g.intn(8) {
 		case 0:
-			return "`" + g.words(1) + "`"
+			c = "`" + g.words(1) + "`"
 		case 1:
-			return "*" + g.words(1) + "*"
+			c = "*" + g.words(1) + "*"
 		case 2:
-			return g.words(1) + ` \| ` + g.words(1) // escaped pipe
+			c = g.words(1) + ` \| ` + g.words(1) // escaped pipe
 		case 3:
-			return g.words(4 + g.intn(8)) // wide: triggers wrap/fit
+			c = g.words(4 + g.intn(8)) // wide: triggers wrap/fit
 		default:
-			return g.words(1 + g.intn(2))
+			c = g.words(1 + g.intn(2))
 		}
+		if g.bbTags && g.chance(0.3) {
+			// tags in table cells: cells render through renderNodeTo
+			// into the state's own cell buffer — a distinct emission
+			// path worth fuzzing; always closed (see referenceStream)
+			c = g.bbOpen() + c + g.bbClose()
+		}
+		return c
 	}
 	row := func(n int, pipes bool) string {
 		cells := make([]string, n)
@@ -391,11 +528,59 @@ func (g *docGen) table() []string {
 
 // doc composes blocks with random (sometimes zero!) blank-line separators —
 // adjacency is bug food (fences/lists interrupting paragraphs, setext...).
+//
+// bbcode docs re-roll until the stack invariant holds (see
+// referenceStream): every generated open must be closed ON THE WIRE — a
+// doc-span close appended after an unterminated fence or type-2..5 HTML
+// block lands INSIDE it as literal text and leaves the color open, and
+// the tail-less parity reference is exact only while no real color
+// survives the walk. The check is the oracle's own predicate
+// (bbRenderState.autoClose over a state-carrying render), so any future
+// generator path that swallows closes self-heals here instead of
+// seeding the corpus with ghost breakers.
 func (g *docGen) doc() string {
+	for attempt := 0; ; attempt++ {
+		s := g.docOnce()
+		if !g.bbTags || attempt >= 10 {
+			// Re-roll cap: after 10 attempts the doc is returned AS IS —
+			// if an unclosed-span doc ever slips through despite the
+			// cap, the survey reads it as a false P2 breaker (the
+			// reference drops the autoClose tail the streaming flush
+			// emits). Investigate breakers here before blaming the
+			// renderer.
+			return s
+		}
+		st := &bbRenderState{}
+		MarkdownToIRCStreamOpts(BBRenderOptions{BBCode: true, state: st}, s)
+		if st.autoClose() == "" {
+			return s
+		}
+	}
+}
+
+func (g *docGen) docOnce() string {
 	n := 2 + g.intn(5)
 	var parts []string
 	for i := 0; i < n; i++ {
 		parts = append(parts, strings.Join(g.block(0), "\n"))
+	}
+	if g.bbTags && g.chance(0.5) {
+		// document-level color span: the open rides its OWN line before
+		// a random part (a one-line paragraph — the following block,
+		// fence or html opener included, still opens normally), and the
+		// close rides its own line after a later part. The span then
+		// crosses blank-line separators and every block in between —
+		// fences (tag-literal content), blank-spanning type-2..5 HTML
+		// blocks (the cross-feature class: settle scanner vs parser
+		// disagreement territory), tables... Always closed (see
+		// referenceStream). If the wrapped part is an unterminated
+		// fence/html block the close lands inside it as literal text —
+		// still valid input, and the color pairing shifts exactly as
+		// the state machine dictates.
+		i := g.intn(len(parts))
+		j := i + g.intn(len(parts)-i)
+		parts[i] = g.bbOpen() + "\n" + parts[i]
+		parts[j] = parts[j] + "\n" + g.bbClose()
 	}
 	var sb strings.Builder
 	for i, p := range parts {
@@ -472,9 +657,16 @@ func chunkStrategies(r *mrand.Rand, doc string) []chunkStrategy {
 
 // streamCanonical runs the StreamingRenderer over the deltas and returns the
 // IRC-visible canonical form: entries joined with "\n", empty entries dropped
-// (sendIRC skips them), outer newlines trimmed.
-func streamCanonical(deltas []string) string {
-	s := NewStreamingRenderer()
+// (sendIRC skips them), outer newlines trimmed. bb selects the bbcode mode
+// (NewStreamingRendererOpts with BBCode on — one render state carried across
+// fragments, auto-close at flush).
+func streamCanonical(deltas []string, bb bool) string {
+	var s *StreamingRenderer
+	if bb {
+		s = NewStreamingRendererOpts(BBRenderOptions{BBCode: true})
+	} else {
+		s = NewStreamingRenderer()
+	}
 	var out []string
 	for _, d := range deltas {
 		out = append(out, s.Process(d)...)
@@ -495,29 +687,52 @@ func normalizeIRC(s string) string {
 }
 
 // referenceStream is the whole-document streaming-mode render — what the
-// incremental path is supposed to converge to.
-func referenceStream(doc string) string {
-	return normalizeIRC(MarkdownToIRCStream(doc))
+// incremental path is supposed to converge to. Plain mode is the legacy
+// one-shot; bbcode mode is its opts form. Neither appends the flush
+// auto-close tail, and the corpus maintains the invariant that makes
+// that exact: EVERY generated open is closed, so no real color survives
+// the walk and the tail is always "" (an unclosed placeholder-only
+// stack never fires it either — autoClose reads effective(), which
+// skips placeholders). Note "every open closed" must hold against the
+// STACK, not just per-span: an unmatched close pops the innermost open,
+// so a "sometimes unclosed" generator would let one span's close be
+// stolen by a nested placeholder, leaving a real color open at EOF.
+// Unclosed-at-EOF shapes (tail attaches when the flush fragment carries
+// content; tail suppressed when the remainder renders empty) are pinned
+// by hand tests instead: TestBBCodeStreamFlushAutoClose and
+// TestBBCodeStreamFlushEmptyRemainderSuppressesTail.
+func referenceStream(doc string, bb bool) string {
+	if !bb {
+		return normalizeIRC(MarkdownToIRCStream(doc))
+	}
+	return normalizeIRC(MarkdownToIRCStreamOpts(BBRenderOptions{BBCode: true}, doc))
+}
+
+func modeName(bb bool) string {
+	if bb {
+		return "bbcode"
+	}
+	return "plain"
 }
 
 // ---------------------------------------------------------------------------
 // oracles
 // ---------------------------------------------------------------------------
 
-func p1Violated(doc string, r *mrand.Rand) (bool, string) {
+func p1Violated(doc string, r *mrand.Rand, bb bool) (bool, string) {
 	strats := chunkStrategies(r, doc)
-	first := streamCanonical(strats[0].deltas)
+	first := streamCanonical(strats[0].deltas, bb)
 	for _, s := range strats[1:] {
-		if got := streamCanonical(s.deltas); got != first {
+		if got := streamCanonical(s.deltas, bb); got != first {
 			return true, fmt.Sprintf("strategy %q: %q != %q (%q)", s.name, preview(got), preview(first), preview(doc))
 		}
 	}
 	return false, ""
 }
 
-func p2Violated(doc string) (bool, string) {
-	got := streamCanonical([]string{doc})
-	want := referenceStream(doc)
+func p2Violated(doc string, bb bool) (bool, string) {
+	got := streamCanonical([]string{doc}, bb)
+	want := referenceStream(doc, bb)
 	if got != want {
 		return true, fmt.Sprintf("got:  %q\nwant: %q\ndoc:  %q", preview(got), preview(want), preview(doc))
 	}
@@ -610,6 +825,8 @@ var tagPatterns = []struct {
 	{"table", regexp.MustCompile(`(?:\|--|---\||:-)`)},
 	{"setext", regexp.MustCompile(`(?m)^[=-]+$`)},
 	{"html", regexp.MustCompile(`<`)},
+	{"html-blankspan", regexp.MustCompile(`<!--|<\?|<!DOCTYPE|<!\[CDATA\[`)},
+	{"bbcode", regexp.MustCompile(`\[(?:/color|color=)`)},
 }
 
 func bugTags(doc string) string {
@@ -658,15 +875,19 @@ var shapeWords = regexp.MustCompile(`[a-zA-Z0-9]+`)
 // ---------------------------------------------------------------------------
 
 // TestStreamingChunkInvariance: P1 must hold for ANY input regardless of
-// chunking. Always-on. A fixed-seed pass gives every run the same corpus
-// (deterministic CI); the random pass keeps exploring.
+// chunking, in BOTH modes (plain and bbcode). Always-on. Fixed-seed passes
+// give every run the same corpus per mode (deterministic CI); the random
+// passes keep exploring. The plain loop draws first from the shared stream,
+// so a given seed reproduces the plain corpus exactly, then the bbcode one.
 func TestStreamingChunkInvariance(t *testing.T) {
-	r2 := mrand.New(mrand.NewPCG(1, 1))
-	g2 := &docGen{r: r2}
-	for i := 0; i < 30; i++ {
-		if bad, detail := p1Violated(g2.doc(), r2); bad {
-			t.Errorf("chunk invariance violated (fixed-seed corpus, iter=%d): %s", i, detail)
-			return
+	for _, bb := range []bool{false, true} {
+		r2 := mrand.New(mrand.NewPCG(1, 1))
+		g2 := &docGen{r: r2, bbTags: bb}
+		for i := 0; i < 30; i++ {
+			if bad, detail := p1Violated(g2.doc(), r2, bb); bad {
+				t.Errorf("chunk invariance violated (fixed-seed corpus, mode=%s, iter=%d): %s", modeName(bb), i, detail)
+				return
+			}
 		}
 	}
 
@@ -677,19 +898,121 @@ func TestStreamingChunkInvariance(t *testing.T) {
 			iters = v
 		}
 	}
-	g := &docGen{r: r}
-	for i := 0; i < iters; i++ {
-		doc := g.doc()
-		if bad, detail := p1Violated(doc, r); bad {
-			t.Errorf("chunk invariance violated (seed=%d iter=%d): %s", seed, i, detail)
-			return
+	for _, bb := range []bool{false, true} {
+		g := &docGen{r: r, bbTags: bb}
+		for i := 0; i < iters; i++ {
+			doc := g.doc()
+			if bad, detail := p1Violated(doc, r, bb); bad {
+				t.Errorf("chunk invariance violated (mode=%s, seed=%d iter=%d): %s", modeName(bb), seed, i, detail)
+				return
+			}
 		}
 	}
 }
 
-// TestStreamingSurvey: env-gated bug hunt. Finds P1/P2 violations, shrinks
-// them to minimal reproducers, records distinct ones as fixtures under
-// testdata/streaming/known_bugs/.
+// TestStreamingParitySeeded: P2 over the fixed-seed corpus, both modes —
+// always-on parity (the survey checks it at scale; this keeps every plain
+// AND bbcode build honest between surveys, and would have caught a
+// reference/oracle drift the moment it appeared).
+func TestStreamingParitySeeded(t *testing.T) {
+	for _, bb := range []bool{false, true} {
+		r2 := mrand.New(mrand.NewPCG(1, 1))
+		g2 := &docGen{r: r2, bbTags: bb}
+		for i := 0; i < 30; i++ {
+			if bad, detail := p2Violated(g2.doc(), bb); bad {
+				t.Errorf("streaming parity violated (fixed-seed corpus, mode=%s, iter=%d): %s", modeName(bb), i, detail)
+				return
+			}
+		}
+	}
+}
+
+// TestStreamFuzzBBCodeCorpusGeneratesTags: structural guard that the
+// bbcode generator mode actually produces tag-bearing documents across
+// the vocabulary, and that the plain corpus stays tag-free (a silently
+// broken bbTags gate would shrink the bbcode corpus to plain docs and
+// the oracles above would keep passing on nothing). Also pins the
+// type-2..5 HTML opener vocabulary in both corpora.
+func TestStreamFuzzBBCodeCorpusGeneratesTags(t *testing.T) {
+	var haveBogus, haveEmpty, haveNumeric, haveSpaced, haveCloseVal bool
+	withTags := 0
+	r := mrand.New(mrand.NewPCG(7, 7))
+	g := &docGen{r: r, bbTags: true}
+	for i := 0; i < 400; i++ {
+		doc := g.doc()
+		if strings.Contains(doc, "[color=") || strings.Contains(doc, "[/color") {
+			withTags++
+		}
+		haveBogus = haveBogus || strings.Contains(doc, "[color=bogus]")
+		haveEmpty = haveEmpty || strings.Contains(doc, "[color]") || strings.Contains(doc, "[color=]")
+		haveNumeric = haveNumeric || strings.Contains(doc, "[color=12]")
+		haveSpaced = haveSpaced || strings.Contains(doc, "[color=light green]")
+		haveCloseVal = haveCloseVal || strings.Contains(doc, "[/color=red]")
+	}
+	require.Greater(t, withTags, 250, "bbcode corpus should be mostly tag-bearing")
+	require.True(t, haveBogus, "invalid-name opens never generated")
+	require.True(t, haveEmpty, "empty-value opens never generated")
+	require.True(t, haveNumeric, "numeric opens never generated")
+	require.True(t, haveSpaced, "spaced-alias opens never generated")
+	require.True(t, haveCloseVal, "close-with-value never generated")
+
+	// the gate holds the other way too: same seed, plain mode → no tags
+	rp := mrand.New(mrand.NewPCG(7, 7))
+	gp := &docGen{r: rp}
+	var seenComment, seenPI, seenDecl, seenCDATA bool
+	for i := 0; i < 400; i++ {
+		doc := gp.doc()
+		require.NotContains(t, doc, "[color=", "plain corpus must stay tag-free (bbTags gate)")
+		seenComment = seenComment || strings.Contains(doc, "<!--")
+		seenPI = seenPI || strings.Contains(doc, "<?php")
+		seenDecl = seenDecl || strings.Contains(doc, "<!DOCTYPE")
+		seenCDATA = seenCDATA || strings.Contains(doc, "<![CDATA[")
+	}
+	require.True(t, seenComment, "type-2 comment openers never generated")
+	require.True(t, seenPI, "type-3 PI openers never generated")
+	require.True(t, seenDecl, "type-4 declaration openers never generated")
+	require.True(t, seenCDATA, "type-5 CDATA openers never generated")
+}
+
+// TestStreamingBBCodeCrossFeatureSeeded: hand-built cross-feature
+// documents — color spans interacting with blank-spanning type-2..5 HTML
+// blocks, fences whose content must stay literal, table cells, stray
+// closes, placeholder pairing, and unclosed colors — each must satisfy
+// BOTH oracles in bbcode mode. These pin the interaction classes the
+// random corpus only samples.
+func TestStreamingBBCodeCrossFeatureSeeded(t *testing.T) {
+	docs := []string{
+		// span across a blank-spanning comment + fence with literal tags
+		"[color=red]a\n\n<!--\ncomment [color=blue] literal\n\nstill comment\n-->\n\n```\ncode [color=red] stays literal\n```\nafter[/color]",
+		// placeholder open before an UNTERMINATED comment: everything to
+		// EOF is html content, the close rides inside as literal text —
+		// an INVALID color so the unclosed-at-EOF stack stays
+		// placeholder-only (real colors are always closed in this
+		// corpus; see referenceStream)
+		"[color=bogus]before\n\n<!--\nnever closed\n[/color]\nliteral",
+		// declaration + PI + CDATA with a color spanning all three
+		"[color=12]x\n\n<!DOCTYPE\nfoo\n>\n\n<?php\npi ?>\n\n<![CDATA[\ncdata\n]]>\ntail[/color]",
+		// tags in table cells + emphasis + an invalid color left open at
+		// EOF (placeholder-only stack — no auto-close tail)
+		"| [color=red]a[/color] | *b* |\n|---|---|\n| `c` | [color=bogus]d[/color] |\n\n**bold** [color=bogus]unclosed",
+		// stray close + placeholder pairing across a fence
+		"[/color] stray\n\n[color=bogus]x\n\n```\n[/color] literal in fence\n```\ny[/color] after",
+	}
+	for i, doc := range docs {
+		if bad, detail := p1Violated(doc, mrand.New(mrand.NewPCG(1, 1)), true); bad {
+			t.Errorf("cross-feature doc %d: P1 violated in bbcode mode: %s", i, detail)
+		}
+		if bad, detail := p2Violated(doc, true); bad {
+			t.Errorf("cross-feature doc %d: P2 violated in bbcode mode: %s", i, detail)
+		}
+	}
+}
+
+// TestStreamingSurvey: env-gated bug hunt over BOTH modes (plain and
+// bbcode — one rand stream each, so a DAVE_STREAM_SEED run reproduces
+// each mode's corpus on its own). Finds P1/P2 violations, shrinks them
+// to minimal reproducers, records distinct ones as fixtures under
+// testdata/streaming/known_bugs/ (tagged with their mode).
 func TestStreamingSurvey(t *testing.T) {
 	if os.Getenv("DAVE_STREAM_SURVEY") == "" {
 		t.Skip("set DAVE_STREAM_SURVEY=1 to run the streaming bug survey")
@@ -706,28 +1029,35 @@ func TestStreamingSurvey(t *testing.T) {
 			maxBugs = n
 		}
 	}
-	r, seed := fuzzRand()
-	g := &docGen{r: r}
+	rp, seedP := fuzzRand()
+	rb, seedB := fuzzRand() // same env seed → same stream as plain; else fresh
+	gens := map[string]*docGen{
+		"plain":  {r: rp},
+		"bbcode": {r: rb, bbTags: true},
+	}
+	seeds := map[string]uint64{"plain": seedP, "bbcode": seedB}
 
 	type bug struct {
-		doc, detail, prop string
+		doc, detail, prop, mode string
 	}
 	found := map[string]bug{}
 	var order []string
 
-	record := func(doc, prop, detail string) {
+	record := func(doc, prop, mode, detail string) {
+		bb := mode == "bbcode"
+		r := gens[mode].r
 		mini := shrinkDoc(doc, func(d string) bool {
 			switch prop {
 			case "P1":
-				bad, _ := p1Violated(d, r)
+				bad, _ := p1Violated(d, r, bb)
 				return bad
 			default:
-				bad, _ := p2Violated(d)
+				bad, _ := p2Violated(d, bb)
 				return bad
 			}
 		})
 		hh := fnv.New64a()
-		hh.Write([]byte(prop + "\x00" + canonicalShape(mini)))
+		hh.Write([]byte(prop + "\x00" + mode + "\x00" + canonicalShape(mini)))
 		h := fmt.Sprintf("%x", hh.Sum64())
 		if _, dup := found[h]; dup {
 			return
@@ -738,37 +1068,43 @@ func TestStreamingSurvey(t *testing.T) {
 		// re-verify the shrunken form actually violates
 		ok := false
 		if prop == "P1" {
-			ok, _ = p1Violated(mini, r)
+			ok, _ = p1Violated(mini, r, bb)
 		} else {
-			ok, _ = p2Violated(mini)
+			ok, _ = p2Violated(mini, bb)
 		}
 		if !ok {
 			return
 		}
 		var d string
 		if prop == "P2" {
-			_, d = p2Violated(mini)
+			_, d = p2Violated(mini, bb)
 		} else {
-			_, d = p1Violated(mini, r)
+			_, d = p1Violated(mini, r, bb)
 		}
-		found[h] = bug{doc: mini, detail: d, prop: prop}
+		found[h] = bug{doc: mini, detail: d, prop: prop, mode: mode}
 		order = append(order, h)
 	}
 
 	p1Fails, p2Fails := 0, 0
-	for i := 0; i < iters; i++ {
-		doc := g.doc()
-		if bad, detail := p2Violated(doc); bad {
-			p2Fails++
-			record(doc, "P2", detail)
-		} else if bad, detail := p1Violated(doc, r); bad {
-			p1Fails++
-			record(doc, "P1", detail)
+	modeFails := map[string]int{"plain": 0, "bbcode": 0}
+	for mode, g := range gens {
+		bb := mode == "bbcode"
+		for i := 0; i < iters; i++ {
+			doc := g.doc()
+			if bad, detail := p2Violated(doc, bb); bad {
+				p2Fails++
+				modeFails[mode]++
+				record(doc, "P2", mode, detail)
+			} else if bad, detail := p1Violated(doc, g.r, bb); bad {
+				p1Fails++
+				modeFails[mode]++
+				record(doc, "P1", mode, detail)
+			}
 		}
 	}
 
-	t.Logf("survey: %d docs, %d P2 (parity) failures, %d P1 (invariance) failures, %d distinct recorded (seed=%d)",
-		iters, p2Fails, p1Fails, len(found), seed)
+	t.Logf("survey: %d docs x 2 modes (plain/bbcode), %d P2 (parity) failures, %d P1 (invariance) failures, %d distinct recorded; per-mode fails: plain=%d bbcode=%d (seeds: plain=%d bbcode=%d)",
+		iters, p2Fails, p1Fails, len(found), modeFails["plain"], modeFails["bbcode"], seedP, seedB)
 
 	dir := filepath.Join("testdata", "streaming", "known_bugs")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -782,11 +1118,11 @@ func TestStreamingSurvey(t *testing.T) {
 		if err := os.WriteFile(path, []byte(b.doc), 0o644); err != nil {
 			t.Fatalf("write fixture: %v", err)
 		}
-		info := fmt.Sprintf("property: %s\ntags: %s\nseed: %d\n\n%s\n", b.prop, bugTags(b.doc), seed, b.detail)
+		info := fmt.Sprintf("property: %s\nmode: %s\ntags: %s\nseed: %d\n\n%s\n", b.prop, b.mode, bugTags(b.doc), seeds[b.mode], b.detail)
 		if err := os.WriteFile(filepath.Join(dir, name+".info.txt"), []byte(info), 0o644); err != nil {
 			t.Fatalf("write fixture info: %v", err)
 		}
-		t.Logf("recorded %s [%s] %q", name, bugTags(b.doc), preview(b.doc))
+		t.Logf("recorded %s [%s/%s] %q", name, b.mode, bugTags(b.doc), preview(b.doc))
 	}
 	if len(found) > 0 {
 		t.Errorf("survey found %d distinct streaming markdown bugs; fixtures recorded in %s", len(found), dir)
@@ -794,10 +1130,12 @@ func TestStreamingSurvey(t *testing.T) {
 }
 
 // TestStreamingKnownBugs: pins every recorded fixture as a known failure.
-// Each fixture must still diverge from the streaming-mode reference. When a
-// renderer fix lands and fixtures start passing, run the test once with
-// DAVE_STREAM_PROMOTE=1: passing fixtures are converted into golden
-// regression pairs (testdata/streaming/bug-*.md + .irc, picked up by
+// Each fixture must still diverge from the streaming-mode reference IN ITS
+// OWN MODE (the survey records "mode:" in the .info.txt; pre-mode fixtures
+// default to plain). When a renderer fix lands and fixtures start passing,
+// run the test once with DAVE_STREAM_PROMOTE=1: passing fixtures are
+// converted into golden regression pairs (testdata/streaming/bug-*.md +
+// .irc — bug-bb-* for bbcode-mode fixtures, rendered in bbcode mode by
 // TestStreamingFromTestData) and removed from the known_bugs pool. Any
 // fixture still failing stays pinned until it renders correctly.
 func TestStreamingKnownBugs(t *testing.T) {
@@ -817,10 +1155,12 @@ func TestStreamingKnownBugs(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read fixture: %v", err)
 		}
+		mode := fixtureMode(dir, e.Name())
+		bb := mode == "bbcode"
 		checked++
-		bad, detail := p2Violated(string(doc))
+		bad, detail := p2Violated(string(doc), bb)
 		if !bad {
-			if b2, d2 := p1Violated(string(doc), mrand.New(mrand.NewPCG(1, 1))); b2 {
+			if b2, d2 := p1Violated(string(doc), mrand.New(mrand.NewPCG(1, 1)), bb); b2 {
 				t.Errorf("fixture %s: P1 now violated but P2 passes — re-survey (detail: %s)", e.Name(), d2)
 				continue
 			}
@@ -829,26 +1169,30 @@ func TestStreamingKnownBugs(t *testing.T) {
 				continue
 			}
 			name := strings.TrimSuffix(e.Name(), ".md")
-			goldenMd := filepath.Join("testdata", "streaming", "bug-"+name+".md")
-			goldenIrc := filepath.Join("testdata", "streaming", "bug-"+name+".irc")
+			goldenPrefix := "bug-"
+			if bb {
+				goldenPrefix = "bug-bb-"
+			}
+			goldenMd := filepath.Join("testdata", "streaming", goldenPrefix+name+".md")
+			goldenIrc := filepath.Join("testdata", "streaming", goldenPrefix+name+".irc")
 			if err := os.WriteFile(goldenMd, doc, 0o644); err != nil {
 				t.Fatalf("promote md: %v", err)
 			}
-			if err := os.WriteFile(goldenIrc, []byte(humanize(streamingRender(string(doc)))), 0o644); err != nil {
+			if err := os.WriteFile(goldenIrc, []byte(humanize(streamingRenderMode(string(doc), bb))), 0o644); err != nil {
 				t.Fatalf("promote irc: %v", err)
 			}
-			// keep the provenance (property/tags/seed) alongside the golden
+			// keep the provenance (property/mode/tags/seed) alongside the golden
 			if info, err := os.ReadFile(filepath.Join(dir, name+".info.txt")); err == nil {
-				_ = os.WriteFile(filepath.Join("testdata", "streaming", "bug-"+name+".info.txt"), info, 0o644)
+				_ = os.WriteFile(filepath.Join("testdata", "streaming", goldenPrefix+name+".info.txt"), info, 0o644)
 			}
 			_ = os.Remove(filepath.Join(dir, e.Name()))
 			_ = os.Remove(filepath.Join(dir, name+".info.txt"))
 			promoted++
-			t.Logf("promoted %s to golden regression fixture (bug-%s.md/.irc)", e.Name(), name)
+			t.Logf("promoted %s to golden regression fixture (%s%s.md/.irc)", e.Name(), goldenPrefix, name)
 			continue
 		}
 		brokeThrough = append(brokeThrough, e.Name())
-		t.Logf("known bug pinned: %s [%s]", e.Name(), bugTags(string(doc)))
+		t.Logf("known bug pinned: %s [%s/%s]", e.Name(), mode, bugTags(string(doc)))
 		_ = detail
 	}
 	if checked == 0 {
@@ -867,4 +1211,46 @@ func TestStreamingKnownBugs(t *testing.T) {
 		}
 		t.Logf("promoted %d/%d fixtures to golden regression pairs", promoted, checked)
 	}
+}
+
+// fixtureMode reads a recorded fixture's mode from its .info.txt
+// ("mode: bbcode"); anything missing or unrecognized is plain — every
+// fixture recorded before the bbcode corpus existed is plain by
+// construction.
+func fixtureMode(dir, mdName string) string {
+	info, err := os.ReadFile(filepath.Join(dir, strings.TrimSuffix(mdName, ".md")+".info.txt"))
+	if err != nil {
+		return "plain"
+	}
+	for _, l := range strings.Split(string(info), "\n") {
+		if m, ok := strings.CutPrefix(l, "mode: "); ok {
+			if m = strings.TrimSpace(m); m == "bbcode" {
+				return "bbcode"
+			}
+			return "plain"
+		}
+	}
+	return "plain"
+}
+
+// streamingRenderMode is streamingRender (streaming_test.go) with the
+// render mode selected — the promote path mints goldens in the fixture's
+// own mode.
+func streamingRenderMode(input string, bb bool) string {
+	var r *StreamingRenderer
+	if bb {
+		r = NewStreamingRendererOpts(BBRenderOptions{BBCode: true})
+	} else {
+		r = NewStreamingRenderer()
+	}
+	var output strings.Builder
+	for _, line := range r.Process(input) {
+		output.WriteString(line)
+		output.WriteString("\n")
+	}
+	for _, line := range r.Process("") {
+		output.WriteString(line)
+		output.WriteString("\n")
+	}
+	return output.String()
 }

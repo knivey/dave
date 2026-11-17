@@ -283,10 +283,10 @@ func TestStreamingMathChunkInvariance(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			r := mrand.New(mrand.NewPCG(7, 7))
 			strats := chunkStrategies(r, tt.doc)
-			first := streamCanonical(strats[0].deltas)
+			first := streamCanonical(strats[0].deltas, false)
 			require.NotEmpty(t, first)
 			for _, s := range strats[1:] {
-				assert.Equal(t, first, streamCanonical(s.deltas), "chunking strategy %q diverged", s.name)
+				assert.Equal(t, first, streamCanonical(s.deltas, false), "chunking strategy %q diverged", s.name)
 			}
 			for _, want := range tt.contain {
 				assert.Contains(t, first, want, "canonical output missing %q", want)

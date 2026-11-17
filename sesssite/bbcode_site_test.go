@@ -11,8 +11,8 @@ import (
 )
 
 // TestBBCodeAssistantContent: with bbcode on, assistant rows show the
-// same styled spans IRC users saw — the site's translator is a verbatim
-// port of dave's emission-layer one.
+// same styled spans IRC users saw — both sides share the
+// markdowntoirc parser; this package renders its nodes as HTML spans.
 func TestBBCodeAssistantContent(t *testing.T) {
 	db := newTestDB(t)
 	s := mkSession(t, db, "aaaaaaaa")
@@ -22,7 +22,7 @@ func TestBBCodeAssistantContent(t *testing.T) {
 	html := string(v.ContentHTML)
 	assert.Contains(t, html, `irc-fg-4`, "red maps to IRC 4 → styled span")
 	assert.Contains(t, html, ">RED</span>")
-	assert.Contains(t, html, "[b]bold[/b]", "styles off: toggles ride the unknown-token path verbatim")
+	assert.Contains(t, html, "[b]bold[/b]", "toggles are unknown tokens — verbatim (owner ruling 2026-11-13)")
 	assert.NotContains(t, html, "[color=red]")
 }
 
@@ -38,21 +38,6 @@ func TestBBCodeUserRowsNotTranslated(t *testing.T) {
 	assert.Contains(t, string(v.ContentHTML), "[b]")
 }
 
-// TestBBCodeStylesGate: with styles on, toggles translate; off, they
-// stay verbatim — mirroring dave's bbcode_styles knob.
-func TestBBCodeStylesGate(t *testing.T) {
-	db := newTestDB(t)
-	s := mkSession(t, db, "aaaaaaaa")
-	m := mkMessage(t, db, s.ID, "assistant", "[b]bold[/b]")
-
-	on := buildMessageView(m, s.Slug, viewOpts{BBCode: true, BBCodeStyles: true})
-	assert.Contains(t, string(on.ContentHTML), "irc-bold")
-	assert.NotContains(t, string(on.ContentHTML), "[b]")
-
-	off := buildMessageView(m, s.Slug, viewOpts{BBCode: true})
-	assert.Contains(t, string(off.ContentHTML), "[b]bold[/b]")
-}
-
 // TestBBCodeDisabledVerbatim: explicit bbcode = false renders tags
 // literally everywhere.
 func TestBBCodeDisabledVerbatim(t *testing.T) {
@@ -64,19 +49,19 @@ func TestBBCodeDisabledVerbatim(t *testing.T) {
 	assert.Contains(t, string(v.ContentHTML), "[color=red]")
 }
 
-// TestBBCodeInlineCodeStripped: BBCode inside an inline code span must
-// not leak the translated IRC control codes (the color digits would
-// render as text). The transformer strips codes in code spans.
-func TestBBCodeInlineCodeStripped(t *testing.T) {
+// TestBBCodeInlineCodeLiteral: BBCode inside an inline code span stays
+// literal — the shared parser never runs inside code spans (backtick
+// content is consumed raw), so no tags, no codes, no spans.
+func TestBBCodeInlineCodeLiteral(t *testing.T) {
 	db := newTestDB(t)
 	s := mkSession(t, db, "aaaaaaaa")
 	m := mkMessage(t, db, s.ID, "assistant", "write `[color=red]warn[/color]` for red")
 
 	v := buildMessageView(m, s.Slug, viewOpts{BBCode: true})
 	html := string(v.ContentHTML)
+	assert.Contains(t, html, "[color=red]warn[/color]", "tags literal inside the code span")
 	assert.NotContains(t, html, "\x03", "no control bytes reach the browser")
-	assert.Contains(t, html, "warn")
-	assert.NotContains(t, html, "04warn", "color digits must not leak into code text")
+	assert.NotContains(t, html, "irc-fg-", "no styled span inside the code span")
 }
 
 // TestBBCodeReasoningTranslated: reasoning is model output — translated
@@ -110,7 +95,10 @@ func TestBBCodePageRendering(t *testing.T) {
 	require.Equal(t, 200, rec.Code)
 	body := rec.Body.String()
 	assert.Contains(t, body, `irc-fg-4`, "red maps to a styled span")
-	assert.Contains(t, body, ">Peak</span>")
+	// One contiguous span — the shared parser owns the whole tag range
+	// (the old translator+IRC-transformer pipeline split it into two
+	// adjacent spans, one per underlying Text node).
+	assert.Contains(t, body, ">Peak shrew.</span>")
 	assert.Contains(t, body, "shrew.")
 	assert.False(t, strings.Contains(body, "[color=red]"), "the tag itself must not render")
 }

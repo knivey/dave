@@ -21,6 +21,24 @@ import (
 
 var responseChainMu sync.Map
 
+// bbcodeEnabled resolves whether BBCode is on for this config (cascade
+// command > service > false, materialized in ApplyDefaults; nil check is
+// defensive for hand-built configs). Gates the markdown renderer's
+// BBCode extension (renderer mode) and the plain-mode byte translator
+// (see MarkdownToIRC/bbcode.go).
+func bbcodeEnabled(cfg AIConfig) bool {
+	return cfg.BBCode != nil && *cfg.BBCode
+}
+
+// bbcodeWarnFn adapts a logxi logger to the translator/renderer warn
+// callback; nil logger (and nil result) is silent.
+func bbcodeWarnFn(l logxi.Logger) func(string) {
+	if l == nil {
+		return nil
+	}
+	return func(msg string) { l.Warn(msg) }
+}
+
 // defaultCompletionMaxTokens bounds a legacy completion when no config value
 // resolves. llama.cpp treats an absent (or effectively unset) max_tokens as
 // "generate until EOS or the full context window" — a base model asked to
@@ -121,7 +139,7 @@ func completion(network Network, c *girc.Client, e girc.Event, cfg AIConfig, ctx
 	text := resp.Choices[0].Text
 	logger.Info(text) // raw model output — logs show raw (translation is emission-only)
 	if bbcodeEnabled(cfg) {
-		text = TranslateBBCode(text, bbcodeWarnFn(logger), bbcodeStylesEnabled(cfg))
+		text = markdowntoirc.TranslateBBCode(text, bbcodeWarnFn(logger))
 	}
 	sendToOutput(text, output, ctx)
 }
@@ -728,13 +746,16 @@ func (cr *chatRunner) checkEmptyRetry(content string, parts reasoningParts, empt
 type streamOutput struct {
 	renderer *markdowntoirc.StreamingRenderer
 	buffer   string
-	// bb, when non-nil, translates BBCode tags to IRC codes BEFORE the
-	// renderer/buffer ever see the text — markdown stays the structural
-	// system, BBCode the color/span system, and the renderer must never
-	// be asked to route around tag syntax. Holds back only a trailing
-	// possibly-incomplete tag and (lazily) the one-char guard decision
-	// after a color emission.
-	bb *bbcodeTranslator
+	// bb, when non-nil, is the PLAIN-MODE (RenderMarkdown off) byte
+	// translator — no markdown structure exists in that mode, so
+	// translating color tags to IRC codes before the line buffer is the
+	// right tool (it holds partial tags across deltas). In renderer mode
+	// the markdown renderer owns BBCode (constructed with
+	// BBRenderOptions): deltas arrive RAW, and no byte translator may
+	// also run — pre-translated codes would reintroduce the structure
+	// blindness the parser extension exists to fix. Ephemeral turns get
+	// neither (finals translate in sendRendered).
+	bb *markdowntoirc.BBCodeStream
 }
 
 func (so *streamOutput) HandleDelta(delta string, send func(string)) {
@@ -803,18 +824,27 @@ func (so *streamOutput) Flush(send func(string)) {
 // sendRendered renders rawText for IRC (markdown when enabled) and sends
 // it through the pastebin-wrapping path — the send shape shared by final
 // replies and the empty-response reasoning fallback, extracted so the two
-// cannot drift. When bbcode is on, translation happens HERE, before the
-// markdown renderer and before the pastebin (the paste source carries the
-// translated codes — the paste site parses them).
+// cannot drift. BBCode rendering is MODE-SPLIT (spec §5, Nov 2026): with
+// RenderMarkdown the bbcode-aware markdown renderer owns the tags
+// (MarkdownToIRCOpts — structure-aware, no codes inside code blocks,
+// emphasis flanks against tag brackets); without it the one-shot byte
+// translator stays the emission path. The PASTE SOURCE is always the
+// one-shot translation when bbcode is on (codes, markdown syntax intact —
+// byte-identical to today; the paste site parses codes, never renderer
+// output). Session storage and logs keep raw model output.
 func (cr *chatRunner) sendRendered(rawText string) {
-	if bbcodeEnabled(cr.cfg) {
-		rawText = TranslateBBCode(rawText, bbcodeWarnFn(cr.logger), bbcodeStylesEnabled(cr.cfg))
-	}
+	pasteSrc := rawText
 	text := rawText
-	if cr.cfg.RenderMarkdown {
-		text = markdowntoirc.MarkdownToIRC(text)
+	bbOpts := markdowntoirc.BBRenderOptions{BBCode: bbcodeEnabled(cr.cfg), Warn: bbcodeWarnFn(cr.logger)}
+	if bbcodeEnabled(cr.cfg) {
+		pasteSrc = markdowntoirc.TranslateBBCode(rawText, bbcodeWarnFn(cr.logger))
 	}
-	cr.sendWithPastebin(text, rawText)
+	if cr.cfg.RenderMarkdown {
+		text = markdowntoirc.MarkdownToIRCOpts(bbOpts, text)
+	} else if bbcodeEnabled(cr.cfg) {
+		text = pasteSrc
+	}
+	cr.sendWithPastebin(text, pasteSrc)
 }
 
 func (cr *chatRunner) sendFinalText(content string) {
@@ -840,13 +870,15 @@ func (cr *chatRunner) handleToolCallResponse(turn *turnContext, text string, too
 		// text: it enters the turn history (the model sees its own
 		// words) and the logs, but never IRC — the channel only sees
 		// the curated answer (respond tool or the final no-tool-call
-		// iteration).
+		// iteration). BBCode rendering is mode-split exactly like
+		// sendRendered (see there).
 		t := ExtractFinalText(text)
-		if bbcodeEnabled(cr.cfg) {
-			t = TranslateBBCode(t, bbcodeWarnFn(cr.logger), bbcodeStylesEnabled(cr.cfg))
-		}
 		if cr.cfg.RenderMarkdown {
-			t = markdowntoirc.MarkdownToIRC(t)
+			t = markdowntoirc.MarkdownToIRCOpts(markdowntoirc.BBRenderOptions{
+				BBCode: bbcodeEnabled(cr.cfg), Warn: bbcodeWarnFn(cr.logger),
+			}, t)
+		} else if bbcodeEnabled(cr.cfg) {
+			t = markdowntoirc.TranslateBBCode(t, bbcodeWarnFn(cr.logger))
 		}
 		cr.sendIRC(t)
 	}
@@ -1042,14 +1074,19 @@ func (cr *chatRunner) runTurnStream(ctx context.Context, params openai.ChatCompl
 	// deferred to the iteration's classification (final text via
 	// sendFinalText, stream-death text via sendFinalText, intermediate
 	// text never). No renderer means no accidental live path.
+	//
+	// BBCode ownership is mode-split (spec §5): RenderMarkdown on means
+	// the bbcode-aware StreamingRenderer takes RAW deltas (it owns
+	// translation); plain mode keeps the byte translator, which holds
+	// partial tags across deltas.
 	if cr.cfg.RenderMarkdown && !cr.ephemeral {
-		sOut.renderer = markdowntoirc.NewStreamingRenderer()
-	}
-	// BBCode translation rides upstream of the renderer (see bbcode.go);
-	// ephemeral turns never feed it deltas — their finals translate in
-	// sendRendered instead, so no double translation.
-	if bbcodeEnabled(cr.cfg) && !cr.ephemeral {
-		sOut.bb = newBBCodeTranslator(bbcodeWarnFn(cr.logger), bbcodeStylesEnabled(cr.cfg))
+		sOut.renderer = markdowntoirc.NewStreamingRendererOpts(markdowntoirc.BBRenderOptions{
+			BBCode: bbcodeEnabled(cr.cfg), Warn: bbcodeWarnFn(cr.logger),
+		})
+	} else if bbcodeEnabled(cr.cfg) && !cr.ephemeral {
+		// Plain mode: no markdown structure exists, so the byte
+		// translator remains the right tool.
+		sOut.bb = markdowntoirc.NewBBCodeStream(bbcodeWarnFn(cr.logger))
 	}
 
 	var accumulatedToolCalls []ToolCall
@@ -2072,14 +2109,18 @@ func (cr *chatRunner) callResponsesStream(ctx context.Context, params responses.
 	// sendFinalText in runTurnResponsesStream; stream-death text via
 	// sendFinalText on the error/timeout branches below; intermediate
 	// text never).
+	//
+	// BBCode ownership is mode-split (spec §5), same as runTurnStream:
+	// RenderMarkdown on means the bbcode-aware StreamingRenderer takes
+	// RAW deltas; plain mode keeps the byte translator.
 	if cr.cfg.RenderMarkdown && !cr.ephemeral {
-		sOut.renderer = markdowntoirc.NewStreamingRenderer()
-	}
-	// BBCode translation rides upstream of the renderer (see bbcode.go);
-	// ephemeral turns never feed it deltas — their finals translate in
-	// sendRendered instead, so no double translation.
-	if bbcodeEnabled(cr.cfg) && !cr.ephemeral {
-		sOut.bb = newBBCodeTranslator(bbcodeWarnFn(cr.logger), bbcodeStylesEnabled(cr.cfg))
+		sOut.renderer = markdowntoirc.NewStreamingRendererOpts(markdowntoirc.BBRenderOptions{
+			BBCode: bbcodeEnabled(cr.cfg), Warn: bbcodeWarnFn(cr.logger),
+		})
+	} else if bbcodeEnabled(cr.cfg) && !cr.ephemeral {
+		// Plain mode: no markdown structure exists, so the byte
+		// translator remains the right tool.
+		sOut.bb = markdowntoirc.NewBBCodeStream(bbcodeWarnFn(cr.logger))
 	}
 
 	idleTimer := time.NewTimer(cr.cfg.StreamTimeout)

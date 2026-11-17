@@ -1,6 +1,6 @@
-package main
+package markdowntoirc
 
-// BBCode → IRC translator (Oct 2026) — the second formatting system.
+// BBCode → IRC byte translator, COLOR-ONLY (Nov 2026).
 //
 // Commands with `bbcode = true` run a model instructed (via its system
 // prompt, the admin's business) to emit BBCode tags; this translator
@@ -9,9 +9,21 @@ package main
 // invariant; logs show raw). Translation runs BEFORE the markdown renderer
 // on every path: the renderer is IRC-code aware (table widths, wrapping)
 // so converted codes are first-class, but goldmark must not be asked to
-// route around tag syntax. BBCode and markdown coexist — markdown remains
-// the structural system (the model is too deeply trained on it to stop),
-// BBCode is the color/span system markdown cannot express.
+// route around tag syntax.
+//
+// ROLE after the 2026-11-13 redesign (docs/superpowers/specs/
+// 2026-11-13-bbcode-in-markdown-design.md): this is the BYTE translator —
+// the paste one-shot, legacy completions, and (until the markdown-aware
+// path replaces it there) plain-mode streaming. The renderer paths move
+// to a goldmark inline-parser extension that turns color tags into AST
+// nodes; this file keeps the byte-level semantics those paths must match.
+//
+// Style toggles are DELETED (owner ruling 2026-11-13: models never used
+// them): `[b]`/`[i]`/`[u]`/`[s]` — open, close, valued, any case — are
+// unknown tokens, VERBATIM and silent, exactly like `[table]` citations.
+// Single-letter tags were always bracket-ambiguous with prose/math
+// (`a[i]` indexing) anyway; colors are unambiguous. The `bbcode_styles`
+// config knob was deleted with the same ruling; nothing here reads it.
 //
 // Why BBCode and not the previous ANSI-recovery approach (reverted): the
 // production model does not emit well-formed ANSI, so that parser had to
@@ -20,17 +32,6 @@ package main
 // means — so translation is deterministic.
 //
 // Semantics (design-agreed, pinned in bbcode_test.go):
-//   - b/i/u/s map to flat INDEPENDENT toggles exactly like IRC itself:
-//     every open/close tag emits its toggle code; no document nesting
-//     semantics, no hidden suppression ([b][b] honestly toggles off).
-//     A close with no matching open is dropped and WARNed (emitting it
-//     would inject the formatting instead of removing it). The toggle
-//     half is behind its own knob, `bbcode_styles` (cascade command >
-//     service > false, resolver bbcodeStylesEnabled; effective toggles
-//     = bbcode && bbcode_styles): single-letter tags are bracket-
-//     ambiguous with prose/math (`a[i]` indexing), so bbcode = true is
-//     COLOR-ONLY by default and disabled toggles ride the unknown-token
-//     path below — verbatim, no warn.
 //   - color is a STACK (the one thing IRC can't do natively): [/color]
 //     re-emits the enclosing color, or a bare \x03 at top level. A bare
 //     \x03 is the color-only reset (irc-formatting-reference.md) —
@@ -40,24 +41,22 @@ package main
 //     gets a \x02\x02 no-op guard — the reference's own workaround for
 //     "Mistaken Eating of Text"; the pair is self-restoring in any bold
 //     state, so it is invisible even mid-markdown-bold.
-//   - open styles re-emit after every newline while any style is open:
-//     each output line is its own PRIVMSG and clients reset formatting per
-//     message, but the model expects spans to persist across lines — so
-//     the translator makes that real. When markdown joins soft-wrapped
-//     lines the re-emitted codes are invisible no-ops.
+//   - an open color re-emits after every newline while a real color is
+//     open: each output line is its own PRIVMSG and clients reset
+//     formatting per message, but the model expects spans to persist
+//     across lines — so the translator makes that real. When markdown
+//     joins soft-wrapped lines the re-emitted codes are invisible no-ops.
 //   - known tag with unusable form (missing/bogus value, stray close) →
 //     token stripped, text kept, WARN logged — never silent.
 //   - unknown tag-shaped tokens stay VERBATIM: they are prose/markdown
-//     jurisdiction ([1] citations, [label](url) link labels), not BBCode
-//     failures. Stripping bracketed text was the text-mangling mistake of
-//     the ANSI detour; it is not repeated here.
+//     jurisdiction ([1] citations, [label](url) link labels, toggle
+//     tokens), not BBCode failures. Stripping bracketed text was the
+//     text-mangling mistake of the ANSI detour; it is not repeated here.
 
 import (
 	"fmt"
 	"strconv"
 	"strings"
-
-	logxi "github.com/mgutz/logxi/v1"
 )
 
 // bbMaxTagLen bounds the held partial-tag region: a longer unterminated
@@ -82,78 +81,37 @@ var bbColorNames = map[string]string{
 	"silver": "15",
 }
 
-var bbToggleCode = map[byte]byte{'b': 0x02, 'i': 0x1D, 'u': 0x1F, 's': 0x1E}
-
-// bbCanonicalOrder is the fixed order styles re-emit and auto-close in.
-const bbCanonicalOrder = "bius"
-
-// bbcodeEnabled resolves whether BBCode translation is on for this
-// config. ApplyDefaults materializes the cascade (command > service >
-// false); the nil check is defensive for hand-built configs (tests,
-// internal callers) that skipped it.
-func bbcodeEnabled(cfg AIConfig) bool {
-	return cfg.BBCode != nil && *cfg.BBCode
-}
-
-// bbcodeStylesEnabled resolves whether the style-toggle half
-// ([b] [i] [u] [s]) of the translator is on. Effective toggles =
-// bbcodeEnabled && bbcodeStylesEnabled — bbcode = true alone is
-// COLOR-ONLY, because single-letter toggle tags are bracket-ambiguous
-// with real prose/math content (`a[i]` indexing, [1] citations); colors
-// are unambiguous and translate on bbcodeEnabled alone. Same defensive
-// nil style as bbcodeEnabled.
-func bbcodeStylesEnabled(cfg AIConfig) bool {
-	return cfg.BBCodeStyles != nil && *cfg.BBCodeStyles
-}
-
-// bbcodeWarnFn adapts a logxi logger to the translator's warn callback;
-// nil logger (and nil result) is silent.
-func bbcodeWarnFn(l logxi.Logger) func(string) {
-	if l == nil {
-		return nil
-	}
-	return func(msg string) { l.Warn(msg) }
-}
-
 // TranslateBBCode is the stateless one-shot form for complete responses
-// (final replies, tool-loop text, legacy completions). warn receives one
-// message per dropped malformed tag; nil is silent. styles reports
-// whether the style-toggle half is enabled (bbcodeEnabled &&
-// bbcodeStylesEnabled at the call site): with it off, toggle tags ride
-// the unknown-token path — verbatim, no warn — while colors translate.
-func TranslateBBCode(text string, warn func(string), styles bool) string {
-	tr := newBBCodeTranslator(warn, styles)
+// (paste source, final replies, tool-loop text, legacy completions). warn
+// receives one message per dropped malformed tag; nil is silent. Color
+// tags translate; every other tag-shaped token — style toggles included
+// — is verbatim (unknown-token path).
+func TranslateBBCode(text string, warn func(string)) string {
+	tr := NewBBCodeStream(warn)
 	return tr.Process(text) + tr.Flush()
 }
 
-// bbcodeTranslator is the streaming form: Process feeds deltas and returns
+// BBCodeStream is the streaming form: Process feeds deltas and returns
 // every decidable byte, holding back only a trailing possibly-incomplete
 // tag (`[`, `[name`, `[name=value` without its `]`) and — lazily — the
 // one-character guard decision after a color emission. Flush resolves the
 // tail (an unterminated tag candidate releases verbatim — it never became
-// a tag), auto-closes open styles, and spends the instance (callers build
-// a fresh one per API round-trip; continuations never Process again).
-type bbcodeTranslator struct {
-	colorStack             []string // two-digit codes, innermost last
-	bold, ital, under, str bool
-	pending                string // held tag candidate
-	justColor              bool   // a \x03 emission awaits its guard decision
-	pendingNL              bool   // a \n awaits style re-emission before visible text
-	// styles gates the style-toggle half ([b] [i] [u] [s]): when false,
-	// toggle tags are prose jurisdiction and ride the unknown-token
-	// path (verbatim, no warn) exactly like [table] citations. Colors
-	// are never gated here — only the caller's bbcodeEnabled does that.
-	// With styles off no toggle can ever open, so Flush's bius
-	// auto-close loop and emitRun's toggle re-emits naturally no-op.
-	styles bool
-	warn   func(string)
+// a tag), auto-closes an open color, and spends the instance (callers
+// build a fresh one per API round-trip; continuations never Process
+// again).
+type BBCodeStream struct {
+	colorStack []string // two-digit codes, innermost last ("" = transparent placeholder)
+	pending    string   // held tag candidate
+	justColor  bool     // a \x03 emission awaits its guard decision
+	pendingNL  bool     // a \n awaits color re-emission before visible text
+	warn       func(string)
 }
 
-func newBBCodeTranslator(warn func(string), styles bool) *bbcodeTranslator {
-	return &bbcodeTranslator{warn: warn, styles: styles}
+func NewBBCodeStream(warn func(string)) *BBCodeStream {
+	return &BBCodeStream{warn: warn}
 }
 
-func (t *bbcodeTranslator) warnf(format string, args ...any) {
+func (t *BBCodeStream) warnf(format string, args ...any) {
 	if t.warn != nil {
 		t.warn("bbcode: " + fmt.Sprintf(format, args...))
 	}
@@ -162,7 +120,7 @@ func (t *bbcodeTranslator) warnf(format string, args ...any) {
 // bbEffectiveColor returns the nearest REAL color in the stack, skipping
 // transparent placeholders ("" entries) — the color visually active right
 // now. "" means nothing is colored.
-func (t *bbcodeTranslator) bbEffectiveColor() string {
+func (t *BBCodeStream) bbEffectiveColor() string {
 	for i := len(t.colorStack) - 1; i >= 0; i-- {
 		if t.colorStack[i] != "" {
 			return t.colorStack[i]
@@ -171,41 +129,10 @@ func (t *bbcodeTranslator) bbEffectiveColor() string {
 	return ""
 }
 
-func (t *bbcodeTranslator) anyOpen() bool {
-	return len(t.colorStack) > 0 || t.bold || t.ital || t.under || t.str
-}
-
-func (t *bbcodeTranslator) toggleOpen(name byte) bool {
-	switch name {
-	case 'b':
-		return t.bold
-	case 'i':
-		return t.ital
-	case 'u':
-		return t.under
-	case 's':
-		return t.str
-	}
-	return false
-}
-
-func (t *bbcodeTranslator) setToggle(name byte, v bool) {
-	switch name {
-	case 'b':
-		t.bold = v
-	case 'i':
-		t.ital = v
-	case 'u':
-		t.under = v
-	case 's':
-		t.str = v
-	}
-}
-
 // Process translates delta plus any held bytes, returning what is
 // decidable now. Empty in does not mean end of stream (wire-noise chunks
 // carry content:""), so it returns "" for "".
-func (t *bbcodeTranslator) Process(delta string) string {
+func (t *BBCodeStream) Process(delta string) string {
 	if delta == "" {
 		return ""
 	}
@@ -233,11 +160,11 @@ func (t *bbcodeTranslator) Process(delta string) string {
 	return out.String()
 }
 
-// Flush resolves the held tail and auto-closes open styles. Auto-close
-// emits one bare \x03 regardless of color-nesting depth (a re-emit chain
-// ending in a reset is a no-op sandwich) plus the toggles in canonical
-// order. The instance is spent afterwards.
-func (t *bbcodeTranslator) Flush() string {
+// Flush resolves the held tail and auto-closes an open color.
+// Auto-close emits one bare \x03 regardless of color-nesting depth (a
+// re-emit chain ending in a reset is a no-op sandwich). The instance is
+// spent afterwards.
+func (t *BBCodeStream) Flush() string {
 	var out strings.Builder
 	if t.pending != "" {
 		// Never completed its ']': it never became a tag — release
@@ -252,19 +179,11 @@ func (t *bbcodeTranslator) Flush() string {
 		// (a blank bot message). The instance is spent and IRC
 		// clients reset formatting at every message boundary anyway,
 		// so the codes are pure artifact — clear state, emit nothing.
-		t.bold, t.ital, t.under, t.str = false, false, false, false
 		t.colorStack = nil
 		t.justColor = false
 		return out.String()
 	}
 	t.pendingNL = false
-	for i := 0; i < len(bbCanonicalOrder); i++ {
-		name := bbCanonicalOrder[i]
-		if t.toggleOpen(name) {
-			out.WriteByte(bbToggleCode[name])
-			t.setToggle(name, false)
-		}
-	}
 	if t.bbEffectiveColor() != "" {
 		out.WriteByte(0x03) // a real color is still open; placeholders need no reset
 	}
@@ -274,17 +193,17 @@ func (t *bbcodeTranslator) Flush() string {
 }
 
 // emitRun writes a text run, resolving the lazy newline/guard state at
-// each VISIBLE character: newlines arm the re-emit flag (styles open) but
-// never trigger it themselves — an empty line must not produce a
-// codes-only PRIVMSG — and code emissions between a \x03 and the next
+// each VISIBLE character: newlines arm the re-emit flag (a real color
+// open) but never trigger it themselves — an empty line must not produce
+// a codes-only PRIVMSG — and code emissions between a \x03 and the next
 // visible char clear color adjacency naturally (a guard is only needed
 // when text directly follows the \x03).
-func (t *bbcodeTranslator) emitRun(out *strings.Builder, s string) {
+func (t *BBCodeStream) emitRun(out *strings.Builder, s string) {
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		if c == '\n' {
 			out.WriteByte('\n')
-			if t.anyOpen() {
+			if t.bbEffectiveColor() != "" {
 				t.pendingNL = true
 			}
 			t.justColor = false
@@ -295,13 +214,6 @@ func (t *bbcodeTranslator) emitRun(out *strings.Builder, s string) {
 			if eff := t.bbEffectiveColor(); eff != "" {
 				out.WriteString("\x03" + eff)
 				t.justColor = true
-			}
-			for j := 0; j < len(bbCanonicalOrder); j++ {
-				name := bbCanonicalOrder[j]
-				if t.toggleOpen(name) {
-					out.WriteByte(bbToggleCode[name])
-					t.justColor = false
-				}
 			}
 		}
 		if t.justColor && (c >= '0' && c <= '9' || c == ',') {
@@ -317,9 +229,9 @@ type bbTag struct {
 	consumed int
 	closing  bool
 	name     string // lowercased
-	value    string // raw (only for opens; closes with values are invalid)
+	value    string // raw (only for opens; closes with values are accepted as plain closes)
 	// kind
-	known    bool // name is in the vocabulary
+	known    bool // name is in the vocabulary ("color")
 	complete bool // had its ']' — always true when parseBBTag returns ok
 }
 
@@ -327,7 +239,8 @@ type bbTag struct {
 // candidate is incomplete (hold). A candidate that stops matching tag
 // shape returns ok with known=false and consumed=1 — "not a tag, the '['
 // is text" — so the caller re-scans from the following bytes. Unknown
-// NAMES return the full token consumed (verbatim passthrough).
+// NAMES (every name but "color" — style toggles included since their
+// deletion) return the full token consumed (verbatim passthrough).
 func parseBBTag(s string) (bbTag, bool) {
 	i := 1
 	closing := false
@@ -354,8 +267,7 @@ func parseBBTag(s string) (bbTag, bool) {
 			// whole; the value is redundant, the intent is a close.
 			// Known-ness uses the SAME expression as the plain-close
 			// branch below: an unknown name ([/underline=x]) is
-			// verbatim text, never a close whose first letter matches
-			// a real toggle.
+			// verbatim text, never treated as a close of anything.
 			vs := i + 1
 			j := vs
 			for j < len(s) && (isASCIILetter(s[j]) || isASCIIDigit(s[j]) || s[j] == ' ') {
@@ -373,7 +285,7 @@ func parseBBTag(s string) (bbTag, bool) {
 				return bbTag{consumed: 1}, true
 			}
 			return bbTag{consumed: j + 1, closing: true, name: name,
-				known: name == "color" || len(name) == 1 && bbToggleCode[name[0]] != 0, complete: true}, true
+				known: name == "color", complete: true}, true
 		}
 		i++
 		vs := i
@@ -389,16 +301,16 @@ func parseBBTag(s string) (bbTag, bool) {
 	}
 	if i < len(s) && s[i] == ']' {
 		return bbTag{consumed: i + 1, closing: closing, name: name, value: value,
-			known: name == "color" || bbToggleCode[name[0]] != 0 && len(name) == 1, complete: true}, true
+			known: name == "color", complete: true}, true
 	}
 	if i == len(s) {
 		if len(s) > bbMaxTagLen {
 			// SAFE here, unlike the value-growth branches above: any
 			// 65+ char name is unknown, and unknown tokens are verbatim
-			// in BOTH modes — releasing at the cap yields the same bytes
-			// one-shot would. Value caps cannot make that claim (the
-			// complete tag classifies as known), which is why the value
-			// holds are unbounded.
+			// — releasing at the cap yields the same bytes one-shot
+			// would. Value caps cannot make that claim (the complete
+			// tag classifies as known), which is why the value holds
+			// are unbounded.
 			return bbTag{consumed: 1}, true // runaway partial — not a tag
 		}
 		return bbTag{}, false // name still growing
@@ -421,85 +333,57 @@ func isASCIIDigit(c byte) bool {
 // line — a codes-only PRIVMSG. The re-emit at the next visible character
 // reconstructs the exact post-tag state; if nothing visible ever follows,
 // the codes are pure artifact (clients reset formatting per message).
-func (t *bbcodeTranslator) applyTag(out *strings.Builder, tag bbTag) {
+func (t *BBCodeStream) applyTag(out *strings.Builder, tag bbTag) {
 	raw := "<tag>"
 	if tag.consumed <= len(t.pending) {
 		raw = t.pending[:tag.consumed]
 	}
-	if !tag.known || (!t.styles && tag.name != "color") {
-		// Unknown name — or a style-toggle tag while toggles are off
-		// (bbcode_styles = false: bracket-ambiguous with prose, the
-		// owner-ruled color-only default): prose/markdown jurisdiction,
-		// verbatim.
+	if !tag.known {
+		// Unknown name — style toggles included: prose/markdown
+		// jurisdiction, verbatim, no warn.
 		t.emitRun(out, raw)
 		return
 	}
-	if tag.name == "color" {
-		if tag.closing {
-			// Any [/color…] form is close-intent (a close-with-value
-			// pairs with its open just the same); dropping it would
-			// strand the open color until auto-close.
-			if len(t.colorStack) == 0 {
-				t.warnf("stray close %q with no open color stripped", raw)
-				return
-			}
-			popped := t.colorStack[len(t.colorStack)-1]
-			t.colorStack = t.colorStack[:len(t.colorStack)-1]
-			if popped == "" {
-				// Transparent placeholder: no code was ever emitted
-				// for its span, so the visual state is unchanged —
-				// popping it emits nothing.
-				return
-			}
-			if !t.pendingNL {
-				out.WriteByte(0x03)
-				if eff := t.bbEffectiveColor(); eff != "" {
-					out.WriteString(eff)
-				}
-				t.justColor = true
-			}
+	if tag.closing {
+		// Any [/color…] form is close-intent (a close-with-value
+		// pairs with its open just the same); dropping it would
+		// strand the open color until auto-close.
+		if len(t.colorStack) == 0 {
+			t.warnf("stray close %q with no open color stripped", raw)
 			return
 		}
-		code, ok := bbColorValue(tag.value)
-		if !ok {
-			// Track the span as a transparent placeholder so its
-			// eventual [/color] pairs with IT instead of popping some
-			// innocent enclosing color (an untracked invalid open
-			// desyncs every later close). Warn once, here.
-			t.colorStack = append(t.colorStack, "")
-			t.warnf("invalid tag %q: unknown color, span tracked transparent", raw)
+		popped := t.colorStack[len(t.colorStack)-1]
+		t.colorStack = t.colorStack[:len(t.colorStack)-1]
+		if popped == "" {
+			// Transparent placeholder: no code was ever emitted
+			// for its span, so the visual state is unchanged —
+			// popping it emits nothing.
 			return
 		}
-		t.colorStack = append(t.colorStack, code)
 		if !t.pendingNL {
-			out.WriteString("\x03" + code)
+			out.WriteByte(0x03)
+			if eff := t.bbEffectiveColor(); eff != "" {
+				out.WriteString(eff)
+			}
 			t.justColor = true
 		}
 		return
 	}
-	// b/i/u/s
-	c := tag.name[0]
-	if tag.closing {
-		if !t.toggleOpen(c) {
-			t.warnf("stray close %q with no open tag stripped", raw)
-			return
-		}
-		t.setToggle(c, false)
-		if !t.pendingNL {
-			out.WriteByte(bbToggleCode[c])
-		}
-		t.justColor = false
+	code, ok := bbColorValue(tag.value)
+	if !ok {
+		// Track the span as a transparent placeholder so its
+		// eventual [/color] pairs with IT instead of popping some
+		// innocent enclosing color (an untracked invalid open
+		// desyncs every later close). Warn once, here.
+		t.colorStack = append(t.colorStack, "")
+		t.warnf("invalid tag %q: unknown color, span tracked transparent", raw)
 		return
 	}
-	if tag.value != "" {
-		t.warnf("invalid tag %q stripped (value on valueless tag)", raw)
-		return
-	}
-	t.setToggle(c, true)
+	t.colorStack = append(t.colorStack, code)
 	if !t.pendingNL {
-		out.WriteByte(bbToggleCode[c])
+		out.WriteString("\x03" + code)
+		t.justColor = true
 	}
-	t.justColor = false
 }
 
 // bbColorValue resolves a color tag value: a name/alias from the table or

@@ -119,13 +119,10 @@ func buildMessageView(m Message, sessionSlug string, opts viewOpts) MessageView 
 	if m.ReasoningContent != nil && *m.ReasoningContent != "" {
 		v.HasReasoning = true
 		v.ReasoningContent = *m.ReasoningContent
-		// Reasoning is model output — BBCode translation applies here
+		// Reasoning is model output — BBCode rendering applies here
 		// exactly like assistant content.
 		r := *m.ReasoningContent
-		if opts.BBCode {
-			r = TranslateBBCode(r, nil, opts.BBCodeStyles)
-		}
-		if html, err := renderer.Render(r); err == nil {
+		if html, err := renderer.RenderOpts(r, opts.BBCode); err == nil {
 			v.ReasoningHTML = template.HTML(html)
 		} else {
 			// Degradation equals ContentHTML's: escaped plain text —
@@ -169,13 +166,11 @@ func buildMessageView(m Message, sessionSlug string, opts viewOpts) MessageView 
 		content = strings.Join(textParts, "\n\n")
 	}
 	if content != "" && (m.Role == "user" || m.Role == "assistant") {
-		// BBCode translation is ASSISTANT-ONLY: dave translates model
-		// output at IRC emission and stores everything raw, so user
-		// rows keep their literal brackets — parity with IRC.
-		if m.Role == "assistant" && opts.BBCode {
-			content = TranslateBBCode(content, nil, opts.BBCodeStyles)
-		}
-		if html, err := renderer.Render(content); err == nil {
+		// BBCode rendering is ASSISTANT-ONLY: dave renders model output
+		// through the bbcode-aware pipeline at IRC emission and stores
+		// everything raw, so user rows keep their literal brackets —
+		// parity with IRC.
+		if html, err := renderer.RenderOpts(content, m.Role == "assistant" && opts.BBCode); err == nil {
 			v.ContentHTML = template.HTML(html)
 		} else {
 			// Degradation: escaped plain text — content is never lost.
@@ -186,13 +181,13 @@ func buildMessageView(m Message, sessionSlug string, opts viewOpts) MessageView 
 }
 
 // viewOpts carries the site's [render] toggles into view construction.
-// BBCode translation applies to ASSISTANT-side content only (message
-// content + reasoning) — dave translates model output at IRC emission
-// and stores user rows raw, so literal brackets in user text stay
-// literal here too, matching what IRC saw.
+// BBCode rendering applies to ASSISTANT-side content only (message
+// content + reasoning) — dave renders model output through the
+// bbcode-aware pipeline at IRC emission and stores user rows raw, so
+// literal brackets in user text stay literal here too, matching what
+// IRC saw.
 type viewOpts struct {
-	BBCode       bool
-	BBCodeStyles bool
+	BBCode bool
 }
 
 // buildMessageViews builds a view per message (1:1, index-parallel).

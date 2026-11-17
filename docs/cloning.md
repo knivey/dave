@@ -208,22 +208,7 @@ Add to `builtInNames`:
 clone_re: "clone",
 ```
 
-**Queue integration**: `clone` goes through the queue (like `compact_re`) — it does heavy DB work in a transaction. Add to the dispatch section alongside `compact_re`:
-
-```go
-if match.re == clone_re {
-    position := queueMgr.Enqueue(network.Name, channel, userID, event.Source.Name, "", msg,
-        func(cx context.Context, output chan<- string) {
-            match.cmd(network, client, event, ctxWithResolvedUser(cx, resolvedUser), output, match.args...)
-        })
-    if position > 0 {
-        var queueMsg string
-        readConfig(func() { queueMsg = config.Notices.QueueMsg(position, 0) })
-        client.Cmd.Reply(event, queueMsg)
-    }
-    return
-}
-```
+**Dispatch integration**: `clone` direct-dispatches through the generic builtin branch (own output channel + `drainToChannel`, like `help_re`) — it does NOT go through the queue. (Historical note: it used to queue like `compact_re`, but clone enqueued with service `""`, which has no exec slot, so the DB work ran immediately anyway — only the output notice waited behind the delivery FIFO. The queue choreography bought nothing and was removed Nov 2026.) Consistency with a source session's in-flight turn is handled inside `historyClone` itself, which acquires the SOURCE session's turn gate (`acquireSessionTurn` + `sessionGateWaitLimitFor(cfg.Timeout)`) before copying: an idle source clones instantly; a mid-turn source makes the caller wait (with a `clone.waiting` notice) so the snapshot captures the completed exchange. No special dispatch branch is needed — the generic branch's `safeCmdExecute` provides the panic boundary the queue's `runJob` used to.
 
 The `sessions_re` update changes the capture group count. Verify dispatch submatch extraction still works — the existing loop `for i, m := range r.FindSubmatch(...)` already handles variable groups, so it's fine.
 
@@ -396,7 +381,7 @@ clone <nick|id> — Clone another user's session (or your own, to fork it).
 
 5. **Tool call ID reuse in cloned history**: The cloned session copies `tool_call_id` values from the original (e.g., `call_abc123`). These are stored as historical data. When the cloned session sends its first API call, the entire history is sent fresh (no `previous_response_id`), so the API processes them as historical context. This is correct — the IDs don't need to be unique across sessions.
 
-6. **Clone + queue**: The clone command goes through the queue like `compact`. This serializes clones per channel slot and prevents DB contention. The actual clone transaction is fast, but queueing avoids concurrent clones from different users colliding on the same source session.
+6. **Clone + source-session gate**: The clone command direct-dispatches (no queue item). `historyClone` acquires the source session's turn gate before copying — concurrent clones from different users are each their own DB transaction (safe), and a clone of a mid-turn source waits for the turn to settle rather than snapshotting half an exchange (the gate also keeps new turns off the source for the copy's duration). The session-creation lock still serializes against `chat()` session creation for the same caller.
 
 7. **System prompt re-render edge case**: If the source session's chat command was deleted from config (`command_gone`), the clone is refused. If the command still exists but the template changed since the source session was created, the clone gets the *current* template. This is intentional — the clone is a fresh session with the current config, not a time machine.
 

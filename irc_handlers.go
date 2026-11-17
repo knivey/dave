@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strings"
 	"sync"
@@ -702,19 +703,13 @@ func handleTrigger(network Network, client *girc.Client, event girc.Event, chann
 			return
 		}
 
-		// Clone is queued (not direct-dispatch) because cloneDBSession
-		// runs a multi-step DB transaction and acquires sessionCreationMu.
-		// Queueing serializes clones per channel slot, preventing concurrent
-		// clones from colliding on the same source session or racing with
-		// chat() session creation.
-		if match.re == clone_re {
-			position := queueMgr.Enqueue(network.Name, channel, userID, event.Source.Name, "", msg,
-				func(cx context.Context, output chan<- string) {
-					match.cmd(network, client, event, ctxWithResolvedUser(cx, resolvedUser), output, match.args...)
-				})
-			replyIfQueued(client, event, position)
-			return
-		}
+		// Clone direct-dispatches through the generic builtin branch below
+		// (own output channel + drainToChannel): a queued clone's DB work
+		// ran immediately anyway — service "" has no exec slot, so only its
+		// output notice waited behind the channel's delivery FIFO. The
+		// queue choreography bought nothing. Consistency with a source
+		// session's in-flight turn is handled by historyClone itself via the
+		// source session's turn gate (see historyCmds.go).
 
 		if match.re == stats_re || match.re == delete_re || match.re == resume_re || match.re == support_re {
 			match.cmd(network, client, event, ctxWithResolvedUser(context.Background(), resolvedUser), nil, match.args...)
@@ -724,7 +719,7 @@ func handleTrigger(network Network, client *girc.Client, event girc.Event, chann
 		outCh := make(chan string, outputChannelSize)
 		go func() {
 			defer close(outCh)
-			match.cmd(network, client, event, ctxWithResolvedUser(context.Background(), resolvedUser), outCh, match.args...)
+			safeCmdExecute(network, client, event, ctxWithResolvedUser(context.Background(), resolvedUser), outCh, match.cmd, match.args)
 		}()
 		go drainToChannel(client, channel, time.Millisecond*network.Throttle, outCh, nil, network.Name)
 		return
@@ -770,6 +765,27 @@ func handleTrigger(network Network, client *girc.Client, event girc.Event, chann
 	if wait := executionWaitNotice(event.Source.Name, svc, model, position, started); wait != "" {
 		client.Cmd.Reply(event, wait)
 	}
+}
+
+var loggerIH = newLogger("irc")
+
+// safeCmdExecute runs one direct-dispatched builtin command with the same
+// panic boundary the queue gives runJob items (log + one error notice; a
+// panic must never kill the whole bot). Clone used to get this for free
+// from runJob while it queue-dispatched — moving it (and every other
+// generic-branch builtin) to direct dispatch requires the boundary here.
+func safeCmdExecute(network Network, client *girc.Client, event girc.Event, ctx context.Context, outCh chan<- string, cmd CmdFunc, args []string) {
+	defer func() {
+		if r := recover(); r != nil {
+			loggerIH.Error("builtin command panicked", "error", r)
+			n := getNotices()
+			select {
+			case outCh <- errorNotice(n.DB.InternalError, map[string]string{"error": fmt.Sprintf("%v", r)}):
+			default:
+			}
+		}
+	}()
+	cmd(network, client, event, ctx, outCh, args...)
 }
 
 // getModelForConfigCmd resolves the model a trigger's command will

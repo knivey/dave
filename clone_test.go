@@ -9,6 +9,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/lrstanley/girc"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -535,6 +536,293 @@ func TestHistoryClone_ByNick(t *testing.T) {
 	assert.Contains(t, newMsgs[0].Content, "tgtuser", "system prompt should reference the cloning user's nick")
 }
 
+// --- Direct dispatch + source-session turn gate (Nov 2026) ---
+//
+// historyClone no longer rides the channel queue (a queued clone's DB work
+// executed immediately anyway — only its output notice waited — and the
+// snapshot could land mid-turn, missing the final reply). It now
+// direct-dispatches and waits on the SOURCE session's turn gate so the
+// cloned snapshot is of a settled session. These tests pin that contract.
+
+// setCloneWaitNoticeMarker installs wording-independent marker notices so
+// the gate tests assert on presence/absence, never on default phrasing.
+func setCloneWaitNoticeMarker(t *testing.T) {
+	t.Helper()
+	configMu.Lock()
+	prevWaiting := config.Notices.Clone.Waiting
+	prevTimeout := config.Notices.Clone.TurnTimeout
+	config.Notices.Clone.Waiting = "MARKERWAIT #{id}"
+	config.Notices.Clone.TurnTimeout = "MARKERTIMEOUT #{id} {wait}"
+	configMu.Unlock()
+	t.Cleanup(func() {
+		configMu.Lock()
+		config.Notices.Clone.Waiting = prevWaiting
+		config.Notices.Clone.TurnTimeout = prevTimeout
+		configMu.Unlock()
+	})
+}
+
+// readOutputLine reads one line from the clone's output channel with a
+// deadline, failing the test with the given message on timeout.
+func readOutputLine(t *testing.T, ch <-chan string, wait time.Duration, msg string) string {
+	t.Helper()
+	select {
+	case line, ok := <-ch:
+		require.True(t, ok, msg)
+		return line
+	case <-time.After(wait):
+		t.Fatal("timed out waiting for output line: " + msg)
+		return ""
+	}
+}
+
+func TestHistoryClone_WaitsForSourceSessionTurn(t *testing.T) {
+	setupBotTest(t)
+	setCloneWaitNoticeMarker(t)
+
+	network := Network{Name: "testnet", Trigger: "!"}
+	channel := "#test"
+
+	tmpl := template.Must(template.New("system").Parse("you are {{.Nick}}'s helper"))
+	prevChats := config.Commands.Chats
+	config.Commands.Chats = map[string]AIConfig{
+		"testchat": {Name: "testchat", Service: "svc", Model: "m", System: "you are a helper", SystemTmpl: tmpl},
+	}
+	defer func() { config.Commands.Chats = prevChats }()
+
+	srcUserID := ensureTestUser(t, network.Name, "srcuser")
+	srcSid, err := sessionMgr.CreateSession(network.Name, channel, srcUserID, "testchat", "svc", "m")
+	require.NoError(t, err)
+	require.NoError(t, sessionMgr.AddMessage(srcSid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+	require.NoError(t, sessionMgr.AddMessage(srcSid, ChatMessage{Role: RoleUser, Content: "hello"}))
+	require.NoError(t, sessionMgr.AddMessage(srcSid, ChatMessage{Role: RoleAssistant, Content: "hi"}))
+
+	tgtUserID := ensureTestUser(t, network.Name, "tgtuser")
+
+	client := bots["testnet"].Client
+	e := makeHistoryEvent(channel, "tgtuser")
+
+	// Simulate the source session's in-flight turn: hold its session gate
+	// exactly the way chat() does for the whole turn.
+	release, ok := acquireSessionTurn(context.Background(), srcSid, sessionTurnWaitLimit)
+	require.True(t, ok, "test must acquire the source session gate")
+	defer release()
+
+	output := make(chan string, 32)
+	done := make(chan struct{})
+	go func() {
+		historyClone(network, client, e, context.Background(), output, "srcuser")
+		close(output)
+		close(done)
+	}()
+
+	// While the turn is in flight the clone must say WHY it is waiting...
+	line := readOutputLine(t, output, 2*time.Second, "waiting notice while the source turn runs")
+	assert.Contains(t, line, fmt.Sprintf("MARKERWAIT #%d", srcSid), "waiting notice should name the session it waits on")
+
+	// ...and must not clone until the turn settles.
+	time.Sleep(200 * time.Millisecond)
+	sess, err := sessionMgr.GetActiveSession(network.Name, channel, tgtUserID)
+	require.NoError(t, err)
+	assert.Nil(t, sess, "clone must not run while the source session's turn is in flight")
+
+	// The in-flight turn lands its final reply, then releases the gate.
+	require.NoError(t, sessionMgr.AddMessage(srcSid, ChatMessage{Role: RoleAssistant, Content: "final reply"}))
+	release()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("clone did not finish after the source turn released the gate")
+	}
+	var lines []string
+	for l := range output {
+		lines = append(lines, l)
+	}
+	joined := strings.Join(lines, "\n")
+	assert.Contains(t, joined, "Cloned session", "clone should complete after the turn settles")
+
+	newSess, err := sessionMgr.GetActiveSession(network.Name, channel, tgtUserID)
+	require.NoError(t, err)
+	require.NotNil(t, newSess, "cloned session should be active for the caller")
+
+	newMsgs, err := loadDBSessionMessages(newSess.ID)
+	require.NoError(t, err)
+	var sawFinal bool
+	for _, m := range newMsgs {
+		if m.Content == "final reply" {
+			sawFinal = true
+		}
+	}
+	assert.True(t, sawFinal, "clone must capture rows the in-flight turn wrote before releasing the gate")
+}
+
+func TestHistoryClone_TurnGateTimeoutAborts(t *testing.T) {
+	setupBotTest(t)
+	setCloneWaitNoticeMarker(t)
+
+	network := Network{Name: "testnet", Trigger: "!"}
+	channel := "#test"
+
+	tmpl := template.Must(template.New("system").Parse("sys"))
+	prevChats := config.Commands.Chats
+	config.Commands.Chats = map[string]AIConfig{
+		"testchat": {Name: "testchat", Service: "svc", Model: "m", System: "sys", SystemTmpl: tmpl},
+	}
+	defer func() { config.Commands.Chats = prevChats }()
+
+	srcUserID := ensureTestUser(t, network.Name, "srcuser")
+	srcSid, err := sessionMgr.CreateSession(network.Name, channel, srcUserID, "testchat", "svc", "m")
+	require.NoError(t, err)
+	require.NoError(t, sessionMgr.AddMessage(srcSid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+
+	tgtUserID := ensureTestUser(t, network.Name, "tgtuser")
+
+	// Shrink the wait-limit floor so the valve fires quickly (cfg.Timeout
+	// is zero, so the floor is the effective limit).
+	origLimit := sessionTurnWaitLimit
+	sessionTurnWaitLimit = 100 * time.Millisecond
+	t.Cleanup(func() { sessionTurnWaitLimit = origLimit })
+
+	release, ok := acquireSessionTurn(context.Background(), srcSid, sessionTurnWaitLimit)
+	require.True(t, ok, "test must acquire the source session gate")
+	defer release()
+
+	client := bots["testnet"].Client
+	e := makeHistoryEvent(channel, "tgtuser")
+
+	output := make(chan string, 32)
+	go func() {
+		historyClone(network, client, e, context.Background(), output, "srcuser")
+		close(output)
+	}()
+
+	lines := drainOutput(t, output, 32, 3*time.Second)
+	joined := strings.Join(lines, "\n")
+	assert.Contains(t, joined, fmt.Sprintf("MARKERTIMEOUT #%d", srcSid), "gate wait-limit expiry should error naming the source session")
+
+	sess, err := sessionMgr.GetActiveSession(network.Name, channel, tgtUserID)
+	require.NoError(t, err)
+	assert.Nil(t, sess, "no clone may be created when the gate wait aborts")
+}
+
+func TestHistoryClone_IdleSourceNoWaitingNotice(t *testing.T) {
+	setupBotTest(t)
+	setCloneWaitNoticeMarker(t)
+
+	network := Network{Name: "testnet", Trigger: "!"}
+	channel := "#test"
+
+	tmpl := template.Must(template.New("system").Parse("sys"))
+	prevChats := config.Commands.Chats
+	config.Commands.Chats = map[string]AIConfig{
+		"testchat": {Name: "testchat", Service: "svc", Model: "m", System: "sys", SystemTmpl: tmpl},
+	}
+	defer func() { config.Commands.Chats = prevChats }()
+
+	srcUserID := ensureTestUser(t, network.Name, "srcuser")
+	srcSid, err := sessionMgr.CreateSession(network.Name, channel, srcUserID, "testchat", "svc", "m")
+	require.NoError(t, err)
+	require.NoError(t, sessionMgr.AddMessage(srcSid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+	require.NoError(t, sessionMgr.AddMessage(srcSid, ChatMessage{Role: RoleUser, Content: "hi"}))
+
+	_ = ensureTestUser(t, network.Name, "tgtuser")
+
+	client := bots["testnet"].Client
+	e := makeHistoryEvent(channel, "tgtuser")
+
+	output := make(chan string, 32)
+	go func() {
+		historyClone(network, client, e, context.Background(), output, "srcuser")
+		close(output)
+	}()
+
+	lines := drainOutput(t, output, 32, 3*time.Second)
+	joined := strings.Join(lines, "\n")
+	assert.Contains(t, joined, "Cloned session", "idle source should clone immediately")
+	assert.NotContains(t, joined, "MARKERWAIT", "no waiting notice when the source session has no in-flight turn")
+}
+
+// TestHandleTrigger_CloneBypassesQueue pins the dispatch change: clone no
+// longer rides the channel queue. The queue manager here is never started —
+// any enqueue is dropped (position -1) — so the clone completing at all
+// proves it direct-dispatched.
+func TestHandleTrigger_CloneBypassesQueue(t *testing.T) {
+	setupBotTest(t)
+
+	// Swap in a dead (never-started) queue manager; restore before the
+	// outer cleanup stops the original.
+	origQM := queueMgr
+	queueMgr = NewQueueManager(NoticesConfig{}, 5)
+	t.Cleanup(func() { queueMgr = origQM })
+
+	// Distinct network name: the global rate limiter keys on network+channel
+	// with a 1s refill, and sibling handleTrigger tests must not eat our burst.
+	network := Network{Name: "clqnet", Trigger: "!"}
+	channel := "#c"
+
+	tmpl := template.Must(template.New("system").Parse("sys"))
+	prevChats := config.Commands.Chats
+	config.Commands.Chats = map[string]AIConfig{
+		"testchat": {Name: "testchat", Service: "svc", Model: "m", System: "sys", SystemTmpl: tmpl},
+	}
+	defer func() { config.Commands.Chats = prevChats }()
+
+	srcUserID := ensureTestUser(t, network.Name, "srcuser")
+	srcSid, err := sessionMgr.CreateSession(network.Name, channel, srcUserID, "testchat", "svc", "m")
+	require.NoError(t, err)
+	require.NoError(t, sessionMgr.AddMessage(srcSid, ChatMessage{Role: RoleSystem, Content: "sys"}))
+	require.NoError(t, sessionMgr.AddMessage(srcSid, ChatMessage{Role: RoleUser, Content: "hi"}))
+
+	tgtUserID := ensureTestUser(t, network.Name, "tgtuser")
+
+	client := bots["testnet"].Client
+	e := makeHistoryEvent(channel, "tgtuser")
+
+	handleTrigger(network, client, e, channel, "!clone srcuser", "clone srcuser")
+
+	var cloned *Session
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		s, err := sessionMgr.GetActiveSession(network.Name, channel, tgtUserID)
+		require.NoError(t, err)
+		if s != nil {
+			cloned = s
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	require.NotNil(t, cloned, "clone must complete without the queue manager running")
+
+	newMsgs, err := loadDBSessionMessages(cloned.ID)
+	require.NoError(t, err)
+	assert.NotEmpty(t, newMsgs, "cloned session should carry the source messages")
+}
+
+// TestSafeCmdExecutePanicBoundary: a panicking direct-dispatched builtin
+// must not kill the process — the panic becomes one error notice, exactly
+// like the queue's runJob boundary (queue.go). Clone had that boundary for
+// free while it queue-dispatched; moving it to the generic builtin branch
+// required giving that branch its own.
+func TestSafeCmdExecutePanicBoundary(t *testing.T) {
+	setupNoticesDefaults(t)
+
+	outCh := make(chan string, 8)
+	panicky := func(n Network, c *girc.Client, e girc.Event, ctx context.Context, output chan<- string, s ...string) {
+		output <- "before panic"
+		panic("boom")
+	}
+
+	assert.NotPanics(t, func() {
+		safeCmdExecute(Network{Name: "t"}, nil, girc.Event{}, context.Background(), outCh, panicky, nil)
+	}, "panic in a direct-dispatched builtin must be recovered")
+
+	first := readOutputLine(t, outCh, time.Second, "command output before the panic")
+	assert.Equal(t, "before panic", first)
+	second := readOutputLine(t, outCh, time.Second, "panic boundary should emit an error notice")
+	assert.Contains(t, second, "boom", "error notice should carry the panic value")
+}
+
 func TestHistoryClone_ByNick_TargetNotFound(t *testing.T) {
 	setupBotTest(t)
 
@@ -672,6 +960,15 @@ func TestHistoryClone_IncompleteToolCalls(t *testing.T) {
 
 	network := Network{Name: "testnet", Trigger: "!"}
 	channel := "#test"
+
+	// The session's chat command must resolve: historyClone looks it up for
+	// the gate wait limit before it can reject on incomplete tool calls.
+	tmpl := template.Must(template.New("system").Parse("sys"))
+	prevChats := config.Commands.Chats
+	config.Commands.Chats = map[string]AIConfig{
+		"testchat": {Name: "testchat", Service: "svc", Model: "m", System: "sys", SystemTmpl: tmpl},
+	}
+	defer func() { config.Commands.Chats = prevChats }()
 
 	srcUserID := ensureTestUser(t, network.Name, "srcuser")
 	srcSid, err := sessionMgr.CreateSession(network.Name, channel, srcUserID, "testchat", "svc", "m")

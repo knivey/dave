@@ -77,13 +77,53 @@ func (n *BBCodeColorClose) Dump(source []byte, level int) {
 // jurisdiction. That ordering IS the "colors win over links" ruling:
 // [color=red](url) is a color tag followed by literal "(url)", while
 // [b](url) (unknown name) declines and parses as a markdown link.
+//
+// It ALSO triggers on '!', and that trigger is load-bearing: goldmark's
+// link parser triggers on '!' too and, at "![", consumes BOTH bytes as
+// an image-label opener at the '!' byte (verified v1.8.2 parser/link.go)
+// — the walk never reaches that '[' independently, so a '['-only trigger
+// can never fire there no matter its priority. Without the '!' trigger,
+// a bang immediately before a tag hides the bracket from BBCode
+// jurisdiction entirely (prod incident 2026-11-18 session 1842:
+// "honor![/color]" left the close literal on the wire, the open white
+// leaked \x0300 onto every later line, and the leaked prefix on a
+// following "/me …" line broke action detection in drainToChannel).
 type bbcodeParser struct{ warn func(string) }
 
-func (p *bbcodeParser) Trigger() []byte { return []byte{'['} }
+func (p *bbcodeParser) Trigger() []byte { return []byte{'[', '!'} }
+
+// bbTagAccepted is the ONE acceptance predicate for a parsed tag token,
+// shared by the '[' path and the '!' path so `![X]` and `[X]` can never
+// classify differently (a future edit to one branch's condition without
+// the other would silently split the two surfaces — review finding on
+// the 2026-11-18 incident fix).
+func bbTagAccepted(tag bbTag, ok bool) bool {
+	return ok && tag.known && tag.consumed > 1
+}
 
 func (p *bbcodeParser) Parse(parent ast.Node, block text.Reader, pc parser.Context) ast.Node {
-	line, _ := block.PeekLine()
-	if len(line) == 0 || line[0] != '[' {
+	line, segment := block.PeekLine()
+	if len(line) == 0 {
+		return nil
+	}
+	if line[0] == '!' {
+		// Claim the '!' as plain text only when a KNOWN color tag
+		// immediately follows: the walk then resumes at the '[', where
+		// this parser wins by priority — colors beat images exactly as
+		// they beat links (an image with a tag-shaped alt, e.g.
+		// ![color=red](url), renders as '!' + a color span + literal
+		// "(url)", mirroring the [color=red](url) link ruling). Any
+		// other '!' declines: real image syntax and literal unmatched
+		// "![" stay link-parser jurisdiction, unchanged.
+		if len(line) > 1 && line[1] == '[' {
+			if tag, ok := parseBBTag(string(line[1:])); bbTagAccepted(tag, ok) {
+				block.Advance(1)
+				return ast.NewTextSegment(text.NewSegment(segment.Start, segment.Start+1))
+			}
+		}
+		return nil
+	}
+	if line[0] != '[' {
 		return nil
 	}
 	// PeekLine includes the trailing newline, so a tag can never consume
@@ -92,7 +132,7 @@ func (p *bbcodeParser) Parse(parent ast.Node, block text.Reader, pc parser.Conte
 	// before ']'). Settles are whole lines (StreamingRenderer), so a
 	// decided line can never split a decidable tag.
 	tag, ok := parseBBTag(string(line))
-	if !ok || tag.consumed <= 1 || !tag.known {
+	if !bbTagAccepted(tag, ok) {
 		return nil // incomplete at final-line end, not tag-shaped, or unknown name
 	}
 	raw := string(line[:tag.consumed])

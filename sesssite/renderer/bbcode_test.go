@@ -53,6 +53,20 @@ func TestBBCodeColorsBeatLinks(t *testing.T) {
 	assert.NotContains(t, html, "<a href", "colors win over links")
 }
 
+// TestBBCodeExclamationBeforeTag: goldmark's link parser consumes "![" as
+// an image opener at the '!' byte, hiding the bracket from the shared
+// parser's '[' trigger (incident 2026-11-18 — a "![/color]" close rode to
+// IRC literally). The parser also triggers on '!', so a bang before a
+// known color tag costs nothing here either: the tag renders as a span.
+func TestBBCodeExclamationBeforeTag(t *testing.T) {
+	html, err := RenderOpts("[color=red]Look![/color] and ![color=blue]y", true)
+	require.NoError(t, err)
+	assert.Contains(t, html, `class="irc-fg-4"`, "close after '!' still pairs with its open")
+	assert.Contains(t, html, `class="irc-fg-2"`, "open after '!' still parses")
+	assert.Contains(t, html, ">Look!</span>")
+	assert.NotContains(t, html, "[/color]", "no literal tag text survives")
+}
+
 // TestBBCodeNestedStackShadow: CSS nesting IS the color stack — a real
 // inner color shadows the enclosing span exactly as the IRC stack does,
 // with no effective-color computation at render time.

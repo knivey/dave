@@ -182,22 +182,35 @@ func (g *docGen) bbClose() string {
 // splitter cuts anywhere, so tags land mid-tag in some chunkings for
 // free. EVERY open is closed (see referenceStream for why the corpus
 // maintains that invariant).
+//
+// The "!"-prefixed variants pin the image-syntax interplay (incident
+// 2026-11-18): goldmark's link parser consumes "![" at the '!' byte,
+// so a bang immediately before a tag hides the bracket from a
+// '['-only trigger. Both the tag emission and the oracle coverage
+// (TestStreamFuzzBBCodeCorpusGeneratesTags) keep that shape in the
+// corpus permanently.
 func (g *docGen) bbSpray(lines []string) []string {
+	bang := func(s string) string {
+		if g.chance(0.4) {
+			return "!" + s
+		}
+		return s
+	}
 	switch g.intn(5) {
 	case 0, 1: // whole-para span
-		lines[0] = g.bbOpen() + lines[0]
-		lines[len(lines)-1] += g.bbClose()
+		lines[0] = bang(g.bbOpen()) + lines[0]
+		lines[len(lines)-1] += bang(g.bbClose())
 	case 2: // stray close with no open
 		k := g.intn(len(lines))
-		lines[k] = lines[k] + " " + g.bbClose()
+		lines[k] = lines[k] + " " + bang(g.bbClose())
 	case 3: // mid-line open/close pair around inline tokens
 		k := g.intn(len(lines))
 		words := strings.Split(lines[k], " ")
 		if len(words) >= 2 {
 			a := g.intn(len(words) - 1)
 			b := a + 1 + g.intn(len(words)-a-1)
-			words[a] = g.bbOpen() + words[a]
-			words[b] += g.bbClose()
+			words[a] = bang(g.bbOpen()) + words[a]
+			words[b] += bang(g.bbClose())
 			lines[k] = strings.Join(words, " ")
 		}
 	default: // untouched
@@ -934,7 +947,7 @@ func TestStreamingParitySeeded(t *testing.T) {
 // the oracles above would keep passing on nothing). Also pins the
 // type-2..5 HTML opener vocabulary in both corpora.
 func TestStreamFuzzBBCodeCorpusGeneratesTags(t *testing.T) {
-	var haveBogus, haveEmpty, haveNumeric, haveSpaced, haveCloseVal bool
+	var haveBogus, haveEmpty, haveNumeric, haveSpaced, haveCloseVal, haveBangTag bool
 	withTags := 0
 	r := mrand.New(mrand.NewPCG(7, 7))
 	g := &docGen{r: r, bbTags: true}
@@ -948,6 +961,7 @@ func TestStreamFuzzBBCodeCorpusGeneratesTags(t *testing.T) {
 		haveNumeric = haveNumeric || strings.Contains(doc, "[color=12]")
 		haveSpaced = haveSpaced || strings.Contains(doc, "[color=light green]")
 		haveCloseVal = haveCloseVal || strings.Contains(doc, "[/color=red]")
+		haveBangTag = haveBangTag || strings.Contains(doc, "![color") || strings.Contains(doc, "![/color")
 	}
 	require.Greater(t, withTags, 250, "bbcode corpus should be mostly tag-bearing")
 	require.True(t, haveBogus, "invalid-name opens never generated")
@@ -955,6 +969,7 @@ func TestStreamFuzzBBCodeCorpusGeneratesTags(t *testing.T) {
 	require.True(t, haveNumeric, "numeric opens never generated")
 	require.True(t, haveSpaced, "spaced-alias opens never generated")
 	require.True(t, haveCloseVal, "close-with-value never generated")
+	require.True(t, haveBangTag, "'!'-prefixed tags never generated (image-syntax interplay, incident 2026-11-18)")
 
 	// the gate holds the other way too: same seed, plain mode → no tags
 	rp := mrand.New(mrand.NewPCG(7, 7))

@@ -30,6 +30,14 @@ func TestBBRenderSemantics(t *testing.T) {
 		{"unknown token verbatim", "see [table] and [1]", "see [table] and [1]"},
 		{"link with unknown label still link", "[b](http://x.example)", "b: http://x.example"},
 		{"colors beat links", "[color=red](http://x.example)", "\x0304(http://x.example)\x03"},
+		{"colors beat images", "![color=red](http://x.example)", "!\x0304(http://x.example)\x03"},
+		// Incident 2026-11-18 (session 1842): '![/color]' — goldmark's link
+		// parser triggers on '!' and consumes '![' as an image opener before
+		// the walk reaches the '['. The parser's '!' trigger claims the bang
+		// as text and the tag parses (TestBBCodeParserExclamationBeforeTag).
+		{"exclamation before close", "[color=red]Look![/color]", "\x0304Look!\x03"},
+		{"exclamation before open", "a![color=red]x", "a!\x0304x\x03"},
+		{"double exclamation stray close", "a!![/color]", "a!!"},
 		// P-1 correction: termtex renders "$[color=red]x$" successfully
 		// as "[color = red]x" (probed) — the raw-delimiter fallback
 		// does not fire. Intent kept: the math parser consumes the tag,
@@ -62,6 +70,22 @@ func TestBBRenderFlanking(t *testing.T) {
 		"punct-preceded closer bolds (the production shape)")
 	assert.NotContains(t, incident, "**",
 		"the incident's literal emphasis markers stay gone")
+}
+
+// Incident 2026-11-18 (session 1842, network gay): a close tag preceded
+// by '!' — "honor![/color]" — never parsed, because goldmark's link
+// parser consumes '![' as an image opener at the '!' byte, before the
+// '['-triggered parse can fire. On the wire the close rode along
+// literally, the open white leaked \x0300 onto every later line, and
+// the leaked prefix on "/me bows again…" broke action detection in
+// drainToChannel. The parser now triggers on '!' as well
+// (TestBBCodeParserExclamationBeforeTag); this pins the RENDER of the
+// exact production line.
+func TestBBRenderExclamationImageIncident(t *testing.T) {
+	in := "[color=white]There! See how my joy radiates, my Liege! To be a worm for you is my highest honor![/color]"
+	out := bb(in)
+	assert.Equal(t, "\x0300There! See how my joy radiates, my Liege! To be a worm for you is my highest honor!\x03", out)
+	assert.NotContains(t, out, "[/color]", "the close must translate, not ride literally")
 }
 
 func TestBBRenderGuards(t *testing.T) {

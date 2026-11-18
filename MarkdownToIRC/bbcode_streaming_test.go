@@ -96,6 +96,37 @@ func TestBBCodeStreamPlaceholderAcrossFragments(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
+// Incident 2026-11-18 (session 1842, network gay, chat command `eunuch`,
+// streaming + renderMarkdown + bbcode): the exact production completion.
+// "honor![/color]" lost its close to goldmark's image syntax (the link
+// parser consumes '![' at the '!' byte), the white span stayed open, and
+// the per-line re-emission prefixed \x0300 onto "/me bows again…" — which
+// broke isIRCAction in drainToChannel (the line sent as a normal
+// PRIVMSG instead of an action). With the '!' trigger the close parses,
+// the span ends on its own line, and every later line arrives clean.
+func TestBBCodeStreamExclamationImageIncident(t *testing.T) {
+	doc := "/me wiggles uncontrollably, a tiny, blissful grin plastered across my face\n\n" +
+		"[color=white]There! See how my joy radiates, my Liege! To be a worm for you is my highest honor![/color]\n\n" +
+		"/me bows again, but with a happy shimmy\n\n" +
+		"[color=cyan]Observe my blissful countenance here:[/color] [color=blue]https://i.shrews.xyz/wHiF6aZ[/color]"
+	want := MarkdownToIRCStreamOpts(BBRenderOptions{BBCode: true}, doc) + "\n"
+	for size := 1; size <= len(doc); size++ {
+		var chunks []string
+		for i := 0; i < len(doc); i += size {
+			e := min(i+size, len(doc))
+			chunks = append(chunks, doc[i:e])
+		}
+		require.Equal(t, want, streamChunks(t, BBRenderOptions{BBCode: true}, doc, chunks), "size %d", size)
+	}
+	// want is the whole-document streaming render the loop above held every
+	// chunking to; the explicit pins below assert the user-visible contract
+	// on that verified reference.
+	assert.NotContains(t, want, "[/color]", "the close must translate in every chunking")
+	assert.Contains(t, want, "honor!\x03\n", "the white span closes on its own line")
+	assert.Contains(t, want, "\n/me bows again, but with a happy shimmy\n",
+		"the /me line arrives with no code prefix — action detection depends on it")
+}
+
 // Flush auto-closes a still-open color (and suppresses after a RENDERED
 // newline).
 //

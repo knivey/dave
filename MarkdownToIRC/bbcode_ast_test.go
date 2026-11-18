@@ -90,6 +90,51 @@ func TestBBCodeParserDeclines(t *testing.T) {
 // tracks the span so its [/color] pairs with IT, never an innocent
 // enclosing color) — and the open warns once with the byte translator's
 // exact text (strconv.Quote == fmt's %q for these ASCII tags).
+// TestBBCodeParserExclamationBeforeTag pins the '!' interplay with
+// goldmark's image syntax. The link parser triggers on '!' (not just
+// '[') and at "![ consumes BOTH bytes as an image-label opener before
+// the walk reaches the '[' (verified goldmark v1.8.2 parser/link.go) —
+// a '['-only trigger can never see that bracket, priority
+// notwithstanding. Prod incident 2026-11-18 session 1842: "honor![/color]"
+// left the close literal, the open white leaked \x0300 onto every later
+// line, and the leaked prefix broke /me action detection downstream.
+// The parser therefore also triggers on '!': when a KNOWN color tag
+// immediately follows, the '!' is claimed as text and the walk resumes
+// at the '[' where this parser wins by priority (colors win over
+// images exactly as they win over links); every other '!' declines and
+// image jurisdiction is untouched.
+func TestBBCodeParserExclamationBeforeTag(t *testing.T) {
+	// Known tags after '!' parse; the '!' itself stays text.
+	for _, in := range []string{
+		"a![color=red]x", "[color=red]x![/color]", "a!![/color]",
+		"y![/color=red]", "word![color=12]mid[/color]",
+	} {
+		_, doc := parseDoc(t, in)
+		assert.True(t, containsKind(doc, KindBBCodeColorOpen) || containsKind(doc, KindBBCodeColorClose), in)
+	}
+
+	// Unknown names, incomplete tags, and non-tag shapes after '!['
+	// decline — real image syntax and literal unmatched '![' are
+	// untouched by this parser. (A '! NOT followed by '[' is not this
+	// parser's business at all; any later '[' parses via the normal
+	// trigger.)
+	for _, in := range []string{
+		"![b](http://x.example)", "a![table]", "a![", "a![color=red", "a![color\n=red]x",
+	} {
+		_, doc := parseDoc(t, in)
+		assert.False(t, containsKind(doc, KindBBCodeColorOpen), in)
+		assert.False(t, containsKind(doc, KindBBCodeColorClose), in)
+	}
+
+	// Colors beat images — the link ruling extended to the image member
+	// of the link family: '![color=red](url)' is '!' + color open +
+	// literal "(url)", never an image node with a tag-shaped alt.
+	_, doc := parseDoc(t, "![color=red](http://x.example)")
+	opener, ok := findKind(doc, KindBBCodeColorOpen).(*BBCodeColorOpen)
+	require.True(t, ok, "color open after '!'")
+	assert.Equal(t, "[color=red]", opener.Raw, "the node covers the tag, not the '!'")
+}
+
 func TestBBCodeParserInvalidOpenIsTransparent(t *testing.T) {
 	for _, tc := range []struct{ in, raw string }{
 		{"[color]", "[color]"},

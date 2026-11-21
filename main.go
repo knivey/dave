@@ -830,12 +830,54 @@ func wrapForIRC(out string) []string {
 	return lines
 }
 
-func isIRCAction(line string) (string, bool) {
-	if strings.HasPrefix(line, "/me ") {
-		return strings.TrimPrefix(line, "/me "), true
+// skipIRCFormatCodes returns the length of line's leading run of IRC
+// formatting bytes: \x03 color codes (1-2 fg digits, then a ,bg group
+// only after at least one fg digit and only when a digit follows the
+// comma — the same grammar as parseColorCode in MarkdownToIRC/irc,
+// which reads \x03,digit as a bare reset plus literal text) and the
+// standalone formatting bytes \x02 \x1D \x1F \x16 \x0F (covering the
+// renderer's \x02\x02 no-op digit guard).
+func skipIRCFormatCodes(line string) int {
+	isDigit := func(c byte) bool { return c >= '0' && c <= '9' }
+	digits := func(i int) int {
+		n := 0
+		for n < 2 && i+n < len(line) && isDigit(line[i+n]) {
+			n++
+		}
+		return n
 	}
-	if strings.HasPrefix(line, "/ me ") {
-		return strings.TrimPrefix(line, "/ me "), true
+	i := 0
+	for i < len(line) {
+		switch line[i] {
+		case 0x03:
+			i++
+			fg := digits(i)
+			i += fg
+			if fg > 0 && i+1 < len(line) && line[i] == ',' && isDigit(line[i+1]) {
+				i++
+				i += digits(i)
+			}
+		case 0x02, 0x1D, 0x1F, 0x16, 0x0F:
+			i++
+		default:
+			return i
+		}
+	}
+	return i
+}
+
+func isIRCAction(line string) (string, bool) {
+	// A leaked color span (2026-11 incidents, sessions 1842 and 3399)
+	// prefixes \x03NN onto a /me line and used to defeat this check —
+	// detection skips leading formatting codes. The codes are KEPT in
+	// the action text: a color span legitimately wrapping a /me line is
+	// the model's intent and clients render codes inside CTCP ACTION.
+	n := skipIRCFormatCodes(line)
+	if strings.HasPrefix(line[n:], "/me ") {
+		return line[:n] + line[n+len("/me "):], true
+	}
+	if strings.HasPrefix(line[n:], "/ me ") {
+		return line[:n] + line[n+len("/ me "):], true
 	}
 	return line, false
 }

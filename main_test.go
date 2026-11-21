@@ -225,3 +225,49 @@ func TestDispatchOptionalArgsGenerator(t *testing.T) {
 	assert.True(t, match(false), "bare ^summary dispatches")
 	assert.True(t, match(true), "^summary 6h dispatches")
 }
+
+// TestIsIRCAction pins the /me detection used by drainToChannel. Since
+// the 2026-11 incidents (sessions 1842 and 3399: a leaked color span
+// prefixing "\x03NN" onto a /me line made the action render as a plain
+// message), detection skips a leading run of IRC formatting codes —
+// \x03 color payloads (1-2 fg digits, optional ,1-2 bg digits) and the
+// standalone formatting bytes \x02 \x1D \x1F \x16 \x0F (which covers
+// the renderer's \x02\x02 no-op guard). The codes are KEPT in the
+// returned action text: a color span legitimately wrapping a /me line
+// is the model's intent and clients render codes inside CTCP ACTION.
+func TestIsIRCAction(t *testing.T) {
+	cases := []struct {
+		name    string
+		line    string
+		wantTxt string
+		wantAct bool
+	}{
+		{name: "plain", line: "/me wiggles", wantTxt: "wiggles", wantAct: true},
+		{name: "spaced", line: "/ me wiggles", wantTxt: "wiggles", wantAct: true},
+		{name: "notAction", line: "wiggles /me around", wantTxt: "wiggles /me around", wantAct: false},
+		{name: "colorPrefix", line: "\x0300/me bows again", wantTxt: "\x0300bows again", wantAct: true},
+		{name: "colorPrefixBg", line: "\x0308,02/me bows", wantTxt: "\x0308,02bows", wantAct: true},
+		{name: "unpaddedFg", line: "\x034/me wiggles", wantTxt: "\x034wiggles", wantAct: true},
+		{name: "unpaddedFgBg", line: "\x038,2/me wiggles", wantTxt: "\x038,2wiggles", wantAct: true},
+		{name: "codeBlockShape", line: "\x030,90/me wiggles", wantTxt: "\x030,90wiggles", wantAct: true},
+		{name: "digitsCappedAtTwo", line: "\x03123/me x", wantTxt: "\x03123/me x", wantAct: false},
+		{name: "commaFirstBgIsText", line: "\x03,90/me x", wantTxt: "\x03,90/me x", wantAct: false},
+		{name: "bareColor", line: "\x03/me bows", wantTxt: "\x03bows", wantAct: true},
+		{name: "guardThenColor", line: "\x02\x02\x0304/me bows", wantTxt: "\x02\x02\x0304bows", wantAct: true},
+		{name: "boldPrefix", line: "\x02/me bows", wantTxt: "\x02bows", wantAct: true},
+		{name: "mixedCodes", line: "\x1D\x0F\x1F\x16\x0301/me b", wantTxt: "\x1D\x0F\x1F\x16\x0301b", wantAct: true},
+		{name: "codesNotAction", line: "\x0304just colored text", wantTxt: "\x0304just colored text", wantAct: false},
+		{name: "codesThenSpaced", line: "\x0300/ me bows", wantTxt: "\x0300bows", wantAct: true},
+		{name: "midLineMeStaysLiteral", line: "\x0304text then /me no", wantTxt: "\x0304text then /me no", wantAct: false},
+		{name: "onlyCodes", line: "\x0304", wantTxt: "\x0304", wantAct: false},
+		{name: "commaWithoutBgDigitIsText", line: "\x0304,hello", wantTxt: "\x0304,hello", wantAct: false},
+		{name: "empty", line: "", wantTxt: "", wantAct: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			txt, ok := isIRCAction(tc.line)
+			assert.Equal(t, tc.wantAct, ok, "action verdict")
+			assert.Equal(t, tc.wantTxt, txt, "action text")
+		})
+	}
+}

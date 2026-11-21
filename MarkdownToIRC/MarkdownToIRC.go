@@ -18,6 +18,7 @@ import (
 	extast "github.com/yuin/goldmark/extension/ast"
 	"github.com/yuin/goldmark/renderer"
 	"github.com/yuin/goldmark/text"
+	"github.com/yuin/goldmark/util"
 )
 
 type Renderer struct {
@@ -77,6 +78,34 @@ func extractTableData(table ast.Node, r *Renderer) tables.TableData {
 
 func (r *Renderer) segmentText(seg text.Segment) string {
 	return string(seg.Value(r.source))
+}
+
+// unescapeMarkdownText implements the RENDERER's half of goldmark's text
+// contract. The parser keeps backslash-escape bytes in the Text segments
+// (parser.go only suppresses parser triggers on the escaped byte) and
+// leaves unescaping to the renderer — goldmark's html defaultWriter.Write
+// does it for HTML; dave's IRC renderer must do the same for IRC. Rule
+// (CommonMark): a backslash before ASCII punctuation is CONSUMED, before
+// anything else it stays literal; raw contexts (code spans/fences, HTML
+// blocks, link labels' nodeText predicate) never pass through here. Prod
+// incident 2026-11-21 (session 3399): the model escaped every dollar and
+// one BBCode close tag and the raw backslashes rode to the channel
+// verbatim. An escaped bracket also never triggers any bracket parser
+// (links or BBCode) — the tag renders as literal text, deliberately.
+func unescapeMarkdownText(s string) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '\\' && i+1 < len(s) && util.IsPunct(s[i+1]) {
+			continue // drop the backslash, keep the punct char
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
 }
 
 func (r *Renderer) nodeText(n ast.Node) string {
@@ -301,15 +330,25 @@ func (r *Renderer) renderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 		// that is itself an autolink — autolinks contribute no walked
 		// text, see KindAutoLink below) — collapse to the bare URL;
 		// the generic form would render "url: url" or a dangling ": ".
-		if trimmed := strings.TrimSpace(r.nodeText(node)); trimmed == "" || trimmed == string(link.Destination) {
+		//
+		// The destination is UNESCAPED here (2026-11-21): goldmark's
+		// html renderLink/renderImage run util.URLEscape(dest) whose
+		// first step is UnescapePunctuations — the href never carries
+		// the backslash, and neither may the IRC URL (a literal \_ or
+		// \) inside a pasted URL breaks the click). The collapse
+		// predicate compares like-for-like post-unescape (label vs
+		// destination), so a visually-self link collapses even when
+		// the label's backslash differs.
+		dest := unescapeMarkdownText(string(link.Destination))
+		if trimmed := strings.TrimSpace(r.nodeText(node)); trimmed == "" || unescapeMarkdownText(trimmed) == dest {
 			if entering {
-				writes(w, node, string(link.Destination))
+				writes(w, node, dest)
 				return ast.WalkSkipChildren
 			}
 			return ast.WalkContinue
 		}
 		if !entering {
-			writes(w, node, fmt.Sprintf(": %s", link.Destination))
+			writes(w, node, fmt.Sprintf(": %s", dest))
 		}
 	case ast.KindAutoLink:
 		// DESIGN NOTE — goldmark stores an autolink's URL in an
@@ -328,14 +367,16 @@ func (r *Renderer) renderNode(w io.Writer, node ast.Node, entering bool) ast.Wal
 		if entering {
 			writes(w, node, "[image: ")
 		} else {
-			writes(w, node, fmt.Sprintf("] %s", img.Destination))
+			// Destination unescaped like KindLink's (see the DESIGN
+			// NOTE there): the IRC URL must match the href's bytes.
+			writes(w, node, fmt.Sprintf("] %s", unescapeMarkdownText(string(img.Destination))))
 		}
 	case ast.KindText:
 		t := node.(*ast.Text)
 		if !entering || t.IsRaw() {
 			return ast.WalkContinue
 		}
-		txt := r.segmentText(t.Segment)
+		txt := unescapeMarkdownText(r.segmentText(t.Segment))
 		if t.HardLineBreak() {
 			writes(w, node, strings.TrimRight(txt, "\n")+"\n")
 		} else if t.SoftLineBreak() {
@@ -536,15 +577,17 @@ func (r *Renderer) renderNodeTo(buf *bytes.Buffer, node ast.Node) {
 		link := node.(*ast.Link)
 		// Same clickability contract as renderNode's KindLink (see the
 		// DESIGN NOTE there): paren-free "text: url", self-link and
-		// empty-label collapse to the bare URL.
-		if trimmed := strings.TrimSpace(r.nodeText(node)); trimmed == "" || trimmed == string(link.Destination) {
-			r.cellWrite(buf, string(link.Destination))
+		// empty-label collapse to the bare URL, destination unescaped,
+		// predicate compared like-for-like post-unescape.
+		dest := unescapeMarkdownText(string(link.Destination))
+		if trimmed := strings.TrimSpace(r.nodeText(node)); trimmed == "" || unescapeMarkdownText(trimmed) == dest {
+			r.cellWrite(buf, dest)
 			return
 		}
 		for c := node.FirstChild(); c != nil; c = c.NextSibling() {
 			r.renderNodeTo(buf, c)
 		}
-		r.cellWrite(buf, fmt.Sprintf(": %s", link.Destination))
+		r.cellWrite(buf, fmt.Sprintf(": %s", dest))
 	case ast.KindAutoLink:
 		// Same as renderNode's KindAutoLink: the URL is not walked
 		// children — without this case the cell renders empty.
@@ -555,11 +598,11 @@ func (r *Renderer) renderNodeTo(buf *bytes.Buffer, node ast.Node) {
 		for c := node.FirstChild(); c != nil; c = c.NextSibling() {
 			r.renderNodeTo(buf, c)
 		}
-		r.cellWrite(buf, fmt.Sprintf("] %s", img.Destination))
+		r.cellWrite(buf, fmt.Sprintf("] %s", unescapeMarkdownText(string(img.Destination))))
 	case ast.KindText:
 		t := node.(*ast.Text)
 		if !t.IsRaw() {
-			txt := r.segmentText(t.Segment)
+			txt := unescapeMarkdownText(r.segmentText(t.Segment))
 			if t.HardLineBreak() {
 				r.cellWrite(buf, strings.TrimRight(txt, "\n")+"\n")
 			} else if t.SoftLineBreak() {

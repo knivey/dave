@@ -634,6 +634,131 @@ func TestHorizontalRule(t *testing.T) {
 	})
 }
 
+// TestBackslashEscapes: goldmark keeps backslash-escape bytes in the
+// Text SEGMENTS — unescaping is the RENDERER's half of the contract
+// (goldmark's html defaultWriter.Write: "resolving references and
+// unescaping backslash escaped characters"). dave's IRC renderer
+// implemented only the raw-write half, so escapes rode to IRC verbatim
+// (prod incident 2026-11-21, session 3399: the model escaped every
+// dollar and one close tag — "\$20,000 – \$60,000+\[/color]" — and the
+// raw backslashes reached the channel). CommonMark semantics pinned
+// here: backslash before ASCII punctuation is CONSUMED, before anything
+// else it is literal; code spans/fences stay raw; an escaped bracket
+// never triggers ANY bracket parser (links or BBCode) — the tag text
+// renders literally and a hidden close leaves the span open.
+func TestBackslashEscapes(t *testing.T) {
+	runTests(t, []mdTest{
+		{
+			name:       "EscapedDollarConsumed",
+			input:      "price \\$20,000 each",
+			contain:    []string{"$20,000"},
+			notContain: []string{"\\$"},
+		},
+		{
+			name:       "EscapedEmphasisStaysLiteral",
+			input:      "a \\*not emphasis\\* b",
+			contain:    []string{"*not emphasis*"},
+			notContain: []string{"\\*"},
+		},
+		{
+			name:    "BackslashBeforeNonPunctIsLiteral",
+			input:   "path C:\\a and \\nand",
+			contain: []string{"C:\\a", "\\nand"},
+		},
+		{
+			name:       "EscapedBackslashConsumed",
+			input:      "a\\\\b",
+			contain:    []string{"a\\b"},
+			notContain: []string{"\\\\", "a\\\\b"},
+		},
+		{
+			name:    "CodeSpanStaysRaw",
+			input:   "pay `\\$5` now",
+			contain: []string{"\\$5"},
+		},
+		{
+			name:    "FenceStaysRaw",
+			input:   "```\n\\$5\n```",
+			contain: []string{"\\$5"},
+		},
+		{
+			name:       "EscapedBracketIsLiteralText",
+			input:      "x \\[y] z",
+			contain:    []string{"[y]"},
+			notContain: []string{"\\["},
+		},
+		{
+			name:    "TableCellUnescapes",
+			input:   "| plan | cost |\n| --- | --- |\n| proto | \\$3,500 |",
+			contain: []string{"$3,500"},
+		},
+		{
+			// Destinations are the other half of the writer contract:
+			// goldmark's renderLink/renderImage run util.URLEscape(dest)
+			// whose FIRST step is UnescapePunctuations — the href never
+			// carries the backslash, and neither may the IRC URL.
+			name:       "EscapedPunctInLinkDestination",
+			input:      "[x](https://x.example/a\\_b)",
+			contain:    []string{"https://x.example/a_b"},
+			notContain: []string{"\\_"},
+		},
+		{
+			name:       "EscapedTrailingParenInDestination",
+			input:      "[x](https://x.example/trailing\\))",
+			contain:    []string{"https://x.example/trailing)"},
+			notContain: []string{"\\)"},
+		},
+		{
+			name:       "EscapedWikiParensInDestination",
+			input:      "[wiki](https://en.wikipedia.org/wiki/Foo_\\(bar\\))",
+			contain:    []string{"wiki: https://en.wikipedia.org/wiki/Foo_(bar)"},
+			notContain: []string{"\\(", "\\)"},
+		},
+		{
+			name:       "ImageDestinationUnescapes",
+			input:      "![alt](https://x.example/a\\_b.png)",
+			contain:    []string{"https://x.example/a_b.png"},
+			notContain: []string{"\\_"},
+		},
+		{
+			name:       "TableLinkDestinationUnescapes",
+			input:      "| a | b |\n| --- | --- |\n| x | [x](https://x.example/a\\_b) |",
+			contain:    []string{"https://x.example/a_b"},
+			notContain: []string{"\\_"},
+		},
+		{
+			// The collapse predicate compares like-for-like POST-unescape
+			// (label vs destination): a visually-self link collapses even
+			// when the label's backslash differs from the destination's.
+			name:       "EscapedLabelSelfLinkCollapses",
+			input:      "[\\$url]($url)",
+			contain:    []string{"$url"},
+			notContain: []string{"$url: ", "\\$"},
+		},
+		{
+			// Parser/renderer boundary pins (verified against goldmark's
+			// writer behavior): multibyte lead byte is NOT ASCII punct —
+			// the backslash stays; a trailing backslash at EOF is a
+			// literal; a backslash before a newline is a HARD BREAK
+			// marker the parser strips before segment construction.
+			name:    "MultibyteLeadByteKeepsBackslash",
+			input:   "a \\– b",
+			contain: []string{"\\–"},
+		},
+		{
+			name:    "TrailingBackslashAtEOFIsLiteral",
+			input:   "ends with \\",
+			contain: []string{"ends with \\"},
+		},
+		{
+			name:       "BackslashHardBreakConsumesMarker",
+			input:      "a\\\nb",
+			contain:    []string{"a\nb"},
+			notContain: []string{"\\\n"},
+		},
+	})
+}
+
 func TestLinks(t *testing.T) {
 	runTests(t, []mdTest{
 		{

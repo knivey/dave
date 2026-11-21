@@ -127,6 +127,52 @@ func TestBBCodeStreamExclamationImageIncident(t *testing.T) {
 		"the /me line arrives with no code prefix — action detection depends on it")
 }
 
+// Incident 2026-11-21 (session 3399): the model escaped dollars and one
+// close tag ("\$20,000 – \$60,000+\[/color]"). Unescaping happens at
+// Text-node render time (the renderer's half of goldmark's Write
+// contract), so it must hold across every chunking: a `\` + punct pair
+// lives inside ONE line's Text segment and fragments are block-aligned,
+// so no delta split can strand a backslash at a fragment edge.
+func TestBBCodeStreamBackslashEscapes(t *testing.T) {
+	doc := "[color=yellow]\\$20,000 – \\$60,000+\\[/color]\n\nclean \\$5 line"
+	// The escaped close leaves the span OPEN, so the flush auto-close
+	// fires in streamed output — the right reference is therefore the
+	// ONE-SHOT render (auto-close appended), not MarkdownToIRCStreamOpts
+	// (which deliberately omits the tail; referenceStream's
+	// every-open-closed corpus invariant does not hold for this doc).
+	want := MarkdownToIRCOpts(BBRenderOptions{BBCode: true}, doc) + "\n"
+	for size := 1; size <= len(doc); size++ {
+		var chunks []string
+		for i := 0; i < len(doc); i += size {
+			e := min(i+size, len(doc))
+			chunks = append(chunks, doc[i:e])
+		}
+		require.Equal(t, want, streamChunks(t, BBRenderOptions{BBCode: true}, doc, chunks), "size %d", size)
+	}
+	assert.Contains(t, want, "$20,000", "escapes consumed")
+	assert.Contains(t, want, "[/color]", "escaped close stays literal tag text")
+	assert.NotContains(t, want, `\`, "no raw backslash survives outside code")
+}
+
+// Plain mode (no bbcode): the unescape must be chunk-invariant there too
+// — review finding on the 2026-11-21 fix (the bbcode sweep above was the
+// only streaming coverage).
+func TestBackslashEscapesPlainStream(t *testing.T) {
+	doc := "price \\$5 and \\*not bold\\*\n\nafter \\$6 [x](https://x.example/a\\_b)"
+	want := MarkdownToIRCStreamOpts(BBRenderOptions{}, doc) + "\n"
+	for size := 1; size <= len(doc); size++ {
+		var chunks []string
+		for i := 0; i < len(doc); i += size {
+			e := min(i+size, len(doc))
+			chunks = append(chunks, doc[i:e])
+		}
+		require.Equal(t, want, streamChunks(t, BBRenderOptions{}, doc, chunks), "size %d", size)
+	}
+	assert.Contains(t, want, "$5")
+	assert.Contains(t, want, "https://x.example/a_b")
+	assert.NotContains(t, want, `\$`, "no raw backslash survives")
+}
+
 // Flush auto-closes a still-open color (and suppresses after a RENDERED
 // newline).
 //

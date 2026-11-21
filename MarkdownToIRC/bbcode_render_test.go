@@ -38,6 +38,15 @@ func TestBBRenderSemantics(t *testing.T) {
 		{"exclamation before close", "[color=red]Look![/color]", "\x0304Look!\x03"},
 		{"exclamation before open", "a![color=red]x", "a!\x0304x\x03"},
 		{"double exclamation stray close", "a!![/color]", "a!!"},
+		// Incident 2026-11-21 (session 3399): the model escaped every
+		// dollar and one close tag. Unescaping is the renderer's half of
+		// goldmark's Write contract; the escaped bracket also hides the
+		// close from the parser (goldmark suppresses parser triggers on
+		// the escaped byte), so the span stays open and auto-closes at
+		// end of render — colors lose to escapes, deliberately.
+		{"escaped dollars in span", "[color=yellow]\\$3,500 – \\$7,500[/color]", "\x0308$3,500 – $7,500\x03"},
+		{"escaped close leaves span open", "[color=yellow]\\$20,000 – \\$60,000+\\[/color]", "\x0308$20,000 – $60,000+[/color]\x03"},
+		{"escaped open never parses", "a\\[color=red]b", "a[color=red]b"},
 		// P-1 correction: termtex renders "$[color=red]x$" successfully
 		// as "[color = red]x" (probed) — the raw-delimiter fallback
 		// does not fire. Intent kept: the math parser consumes the tag,

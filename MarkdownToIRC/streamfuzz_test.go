@@ -82,11 +82,16 @@ var genWords = []string{
 	"alpha", "beta", "gamma", "delta", "foo", "bar", "baz", "qux",
 	"the", "quick", "brown", "fox", "jumps", "over", "lazy", "dog",
 	"lorem", "ipsum", "dolor", "sit", "amet", "value", "item", "note",
+	// backslash-escape tokens (2026-11-21 incident): keep the always-on
+	// P1/P2 oracles exercising the renderer's unescape in TEXT and in
+	// link destinations — inert for the corpus invariants (no brackets,
+	// so no tag/link-shape hides behind them).
+	`\$5`, `a\_b`, `x\\y`,
 }
 
 var genFenceInfo = []string{"", "", "", "go", "python", "json", "text", "sh", "js", "rust", "toml"}
 var genBullets = []string{"-", "*", "+"}
-var genURLs = []string{"https://example.com", "https://example.com/a?b=c", "http://foo.bar/baz"}
+var genURLs = []string{"https://example.com", "https://example.com/a?b=c", "http://foo.bar/baz", `https://example.com/a\_b`}
 
 func (g *docGen) pick(sl []string) string { return sl[g.r.IntN(len(sl))] }
 func (g *docGen) chance(p float64) bool   { return g.r.Float64() < p }
